@@ -441,6 +441,7 @@ name = "gluon-core"
 version = "0.1.1"
 dependencies = [
  "fs2",
+ "gluon-config",
  "gluon-model",
  "hadris-fat",
  "rhai",

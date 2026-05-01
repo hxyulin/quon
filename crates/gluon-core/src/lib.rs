@@ -20,6 +20,7 @@ pub mod project_root;
 pub mod rule;
 pub mod run;
 pub mod scheduler;
+pub mod script_runner;
 pub mod sysroot;
 pub mod vendor;
 
