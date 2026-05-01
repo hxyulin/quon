@@ -341,40 +341,23 @@ pub(crate) fn build_rustc_command(
         builder.extern_crate(extern_name, artifact_path);
     }
 
-    // Artifact env vars (BTreeMap iteration = deterministic order, so the
-    // cache-key hash is stable across runs). Each entry names a sibling
-    // crate whose absolute, canonicalised output path gets injected as
-    // an env var at rustc spawn time. The calling source can then use
-    // `env!("KEY")` at compile time — e.g. `include_bytes!(env!("KERNEL_PATH"))`.
+    // Artifact env vars: deterministic, BTreeMap-ordered, canonicalised.
+    // Resolution is centralised in `compile::env::resolve_crate_env` so
+    // analyzer-time consumers (`rust-project.json` generation) and
+    // build-time consumers (this site) produce *identical* env-var
+    // pairs for the same crate. Symmetry between the two is what makes
+    // `env!("FOO")` resolve the same way under rustc and under
+    // rust-analyzer.
     //
-    // This function relies on the scheduler having built the referenced
-    // crate already; the DAG edge comes from `CrateDef::artifact_deps`,
-    // which the Rhai builder auto-populates alongside `artifact_env`.
-    // Missing artifacts here are a scheduler bug (same error shape as
-    // the `--extern` loop above).
-    for (env_key, dep_name) in &crate_def.artifact_env {
-        let dep_handle = model.crates.lookup(dep_name).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}' has artifact_env entry '{}={}', but no crate named '{}' \
-                 exists in the build model (validate pass should have caught this)",
-                crate_name, env_key, dep_name, dep_name,
-            ))
-        })?;
-        let artifact_path = artifacts.get(dep_handle).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}' artifact_env references '{}' but its artifact is not \
-                 available in ArtifactMap (scheduler bug — artifact_deps ordering \
-                 edge should have built it first)",
-                crate_name, dep_name,
-            ))
-        })?;
-        // Canonicalise so `env!` receives a stable absolute path regardless
-        // of where the build was invoked from. Fall back to the original
-        // path if canonicalisation fails — e.g. inside tests that don't
-        // actually write the artifact to disk.
-        let abs_path =
-            std::fs::canonicalize(artifact_path).unwrap_or_else(|_| artifact_path.to_path_buf());
-        builder.env(env_key.as_str(), abs_path.as_os_str());
+    // The closure here reads from the just-built ArtifactMap; missing
+    // entries indicate a scheduler bug (the `artifact_deps` ordering
+    // edge auto-added by the Rhai builder should have ensured the
+    // producer was built first).
+    let env_vars = crate::compile::env::resolve_crate_env(crate_def, model, |h| {
+        artifacts.get(h).map(std::path::Path::to_path_buf)
+    })?;
+    for (k, v) in &env_vars {
+        builder.env(k.as_str(), v.as_str());
     }
 
     // Profile-driven code-generation knobs.

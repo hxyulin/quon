@@ -12,7 +12,7 @@
 //! cache key, are identical across runs on any machine. This is mandatory
 //! per CLAUDE.md's determinism requirement.
 
-use gluon_model::{CrateDef, Handle, TargetDef};
+use gluon_model::{BuildModel, BuildStepDef, CrateDef, Handle, TargetDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -26,10 +26,17 @@ use std::path::{Path, PathBuf};
 /// the main arena — they are synthesised by the scheduler. One config crate
 /// is compiled per distinct cross target, so `compile_crate` can add the
 /// implicit `--extern <name>_config=<path>` for cross crates on any target.
+///
+/// `build_steps` is also kept separate because a build step's output is
+/// keyed by [`Handle<BuildStepDef>`], not [`Handle<CrateDef>`]. Both
+/// participate in the *unified artifact namespace* used by name-based
+/// consumers (image entries, qemu `disk_ref`, future `artifact_env`),
+/// resolved through [`resolve_artifact_by_name`] below.
 #[derive(Debug, Default, Clone)]
 pub struct ArtifactMap {
     crates: BTreeMap<Handle<CrateDef>, PathBuf>,
     config_crates: BTreeMap<Handle<TargetDef>, PathBuf>,
+    build_steps: BTreeMap<Handle<BuildStepDef>, PathBuf>,
 }
 
 impl ArtifactMap {
@@ -86,6 +93,70 @@ impl ArtifactMap {
     pub fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path> {
         self.config_crates.get(&target).map(PathBuf::as_path)
     }
+
+    /// Record a build step's output path under its handle. Called by
+    /// the scheduler after `execute_build_step` completes. The
+    /// build-step output participates in the unified artifact namespace
+    /// alongside crates — see [`resolve_artifact_by_name`].
+    pub fn set_build_step(&mut self, h: Handle<BuildStepDef>, path: PathBuf) {
+        self.build_steps.insert(h, path);
+    }
+
+    /// Look up a build step's output path by handle.
+    pub fn get_build_step(&self, h: Handle<BuildStepDef>) -> Option<&Path> {
+        self.build_steps.get(&h).map(PathBuf::as_path)
+    }
+
+    /// `true` when a build step's output has been recorded.
+    pub fn contains_build_step(&self, h: Handle<BuildStepDef>) -> bool {
+        self.build_steps.contains_key(&h)
+    }
+
+    /// Iterate over `(build_step_handle, path)` pairs in handle-index
+    /// order. Used by the scheduler to populate
+    /// [`crate::scheduler::BuildSummary::build_step_paths`] after the
+    /// pool has joined.
+    pub fn build_steps_iter(
+        &self,
+    ) -> impl Iterator<Item = (Handle<BuildStepDef>, &Path)> + '_ {
+        self.build_steps.iter().map(|(h, p)| (*h, p.as_path()))
+    }
+}
+
+/// Resolve an artifact name against the unified namespace formed by
+/// `model.crates` and `model.build_steps`, returning the path of the
+/// matching artifact in `artifacts` if it has been built.
+///
+/// Lookup order: crates first, then build steps. The two arenas are
+/// guaranteed not to share names — the validate pass rejects collisions.
+///
+/// Returns:
+/// - `Some(path)` when `name` resolves to either a built crate or a
+///   built build step.
+/// - `None` when `name` is unknown OR resolves to a producer that has
+///   not yet been recorded in `artifacts` (the scheduler hasn't run it
+///   yet, or the producer isn't part of this build).
+///
+/// Consumers (image entries, qemu `disk_ref`, future name-based
+/// consumers) should prefer this helper over calling `model.crates.lookup`
+/// + `artifacts.get` directly so the unified namespace stays consistent
+/// across the codebase.
+pub fn resolve_artifact_by_name<'a>(
+    model: &BuildModel,
+    artifacts: &'a ArtifactMap,
+    name: &str,
+) -> Option<&'a Path> {
+    if let Some(h) = model.crates.lookup(name) {
+        if let Some(p) = artifacts.get(h) {
+            return Some(p);
+        }
+    }
+    if let Some(h) = model.build_steps.lookup(name) {
+        if let Some(p) = artifacts.get_build_step(h) {
+            return Some(p);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

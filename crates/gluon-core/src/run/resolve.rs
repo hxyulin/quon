@@ -19,8 +19,8 @@
 
 use crate::error::{Error, Result};
 use gluon_model::{
-    BootMode, BuildModel, DiskSource, EspSource, Handle, ImageDef, QemuDef, ResolvedProfile,
-    SerialMode,
+    BootMode, BuildModel, BuildStepDef, DiskSource, DisplayMode, EspSource, Handle, ImageDef,
+    QemuDef, ResolvedProfile, SerialMode,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -34,6 +34,11 @@ pub struct ResolvedQemu {
     pub memory_mb: u32,
     pub cores: u32,
     pub serial: SerialMode,
+    /// Display policy. `None` means "user said nothing" — the runner
+    /// keeps its implicit `-display none` default to stay headless for
+    /// CI / test flows. A `Some(...)` value reflects an explicit
+    /// `qemu().display(...)` call from the user's gluon.rhai.
+    pub display: Option<DisplayMode>,
     pub extra_args: Vec<String>,
     pub boot_mode: BootMode,
     pub ovmf_code: Option<PathBuf>,
@@ -150,6 +155,7 @@ pub fn resolve_qemu(
             .or(qemu.cores)
             .unwrap_or(ResolvedQemu::DEFAULT_CORES),
         serial: qemu.serial.clone().unwrap_or(SerialMode::Stdio),
+        display: qemu.display.clone(),
         extra_args,
         boot_mode: boot_mode_override
             .or(profile.qemu_boot_mode)
@@ -195,28 +201,49 @@ pub fn resolve_disk_source(
     disk: &DiskSource,
     model: &BuildModel,
     image_paths: &BTreeMap<Handle<ImageDef>, PathBuf>,
+    build_step_paths: &BTreeMap<Handle<BuildStepDef>, PathBuf>,
 ) -> Result<PathBuf> {
     match disk {
         DiskSource::Image { path } => Ok(path.clone()),
         DiskSource::ImageRef { name } => {
-            let handle = model.images.lookup(name).ok_or_else(|| {
-                let available: Vec<&str> = model
-                    .images
-                    .iter()
-                    .map(|(_, i): (_, &ImageDef)| i.name.as_str())
-                    .collect();
-                Error::Compile(format!(
-                    "qemu.disk_ref(\"{name}\") references unknown image; available: [{}]",
-                    available.join(", ")
-                ))
-            })?;
-            image_paths.get(&handle).cloned().ok_or_else(|| {
-                Error::Compile(format!(
-                    "qemu.disk_ref(\"{name}\"): image is declared but the scheduler \
-                     produced no output path for it. (This typically means a build \
-                     ordering bug — the image node should run before qemu launch.)"
-                ))
-            })
+            // The unified artifact namespace lets `disk_ref(name)`
+            // resolve to either an `image()` block or a `build_step()`
+            // output. Validate has rejected name collisions, so at
+            // most one resolves. We try image first (the historical
+            // case) and fall back to build step.
+            if let Some(handle) = model.images.lookup(name) {
+                return image_paths.get(&handle).cloned().ok_or_else(|| {
+                    Error::Compile(format!(
+                        "qemu.disk_ref(\"{name}\"): image is declared but the scheduler \
+                         produced no output path for it. (This typically means a build \
+                         ordering bug — the image node should run before qemu launch.)"
+                    ))
+                });
+            }
+            if let Some(handle) = model.build_steps.lookup(name) {
+                return build_step_paths.get(&handle).cloned().ok_or_else(|| {
+                    Error::Compile(format!(
+                        "qemu.disk_ref(\"{name}\"): build step is declared but the scheduler \
+                         produced no output path for it. (This typically means a build \
+                         ordering bug — the BuildStep node should run before qemu launch.)"
+                    ))
+                });
+            }
+            // Neither namespace resolved.
+            let mut available: Vec<&str> = model
+                .images
+                .iter()
+                .map(|(_, i): (_, &ImageDef)| i.name.as_str())
+                .collect();
+            for (_, bs) in model.build_steps.iter() {
+                available.push(bs.name.as_str());
+            }
+            available.sort();
+            Err(Error::Compile(format!(
+                "qemu.disk_ref(\"{name}\") references unknown artifact (no image or \
+                 build step with that name); available: [{}]",
+                available.join(", ")
+            )))
         }
     }
 }
@@ -444,10 +471,11 @@ mod tests {
     fn resolve_disk_image_returns_path_unchanged() {
         let model = BuildModel::default();
         let map: BTreeMap<Handle<ImageDef>, PathBuf> = BTreeMap::new();
+        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
         let disk = DiskSource::Image {
             path: PathBuf::from("/tmp/my.img"),
         };
-        let p = resolve_disk_source(&disk, &model, &map).unwrap();
+        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/my.img"));
     }
 
@@ -463,12 +491,43 @@ mod tests {
         );
         let mut map = BTreeMap::new();
         map.insert(h, PathBuf::from("/build/images/boot-disk.img"));
+        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
 
         let disk = DiskSource::ImageRef {
             name: "boot-disk".into(),
         };
-        let p = resolve_disk_source(&disk, &model, &map).unwrap();
+        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
         assert_eq!(p, PathBuf::from("/build/images/boot-disk.img"));
+    }
+
+    #[test]
+    fn resolve_disk_ref_looks_up_build_step_path() {
+        // disk_ref to a build step's name resolves through the
+        // build_step_paths map. Uses the unified artifact namespace —
+        // user can boot directly from a build-step output without an
+        // intermediate image() wrapper.
+        let mut model = BuildModel::default();
+        let (h, _) = model.build_steps.insert(
+            "disk-image".into(),
+            BuildStepDef {
+                name: "disk-image".into(),
+                runner: "image-builder".into(),
+                output: "disk.img".into(),
+                ..Default::default()
+            },
+        );
+        let map: BTreeMap<Handle<ImageDef>, PathBuf> = BTreeMap::new();
+        let mut bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
+        bs_map.insert(h, PathBuf::from("/build/build-steps/disk-image/disk.img"));
+
+        let disk = DiskSource::ImageRef {
+            name: "disk-image".into(),
+        };
+        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/build/build-steps/disk-image/disk.img")
+        );
     }
 
     #[test]
@@ -489,11 +548,12 @@ mod tests {
             },
         );
         let map = BTreeMap::new();
+        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
 
         let disk = DiskSource::ImageRef {
             name: "gamma".into(),
         };
-        let err = resolve_disk_source(&disk, &model, &map).unwrap_err();
+        let err = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("gamma"));
         assert!(msg.contains("alpha") && msg.contains("beta"));

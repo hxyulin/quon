@@ -23,6 +23,8 @@
 //! (cross crates only), `env`, `is_workspace_member`, `is_proc_macro`,
 //! `source`).
 
+use crate::compile::artifact_path::expected_crate_artifact_path;
+use crate::compile::env::resolve_crate_env;
 use crate::compile::{BuildLayout, RustcInfo};
 use gluon_model::{BuildModel, CrateDef, CrateType, Handle, ResolvedConfig};
 use serde_json::{Value, json};
@@ -180,12 +182,38 @@ pub fn generate_rust_project_json(
             model.targets.get(cref.target).map(|t| t.spec.clone())
         };
 
+        // --- env ---
+        //
+        // Surface the same `artifact_env` mapping that rustc would see at
+        // build time (`compile::command_builder` calls
+        // `resolve_crate_env` against the ArtifactMap). At analyzer time
+        // there is no ArtifactMap yet, so we derive the deterministic
+        // future path of each upstream artifact from the build layout —
+        // identical to where rustc will eventually write it. This makes
+        // `env!("FOO")` resolve symmetrically under rust-analyzer and
+        // under rustc.
+        //
+        // If resolution fails (a missing crate name, an upstream not in
+        // the resolved set, etc.), fall back to an empty env map for
+        // this crate rather than failing the whole `rust-project.json`
+        // emit. The user will see other crates indexed correctly and
+        // can fix the offending declaration; failing the whole file
+        // would leave the IDE blind.
+        let env_map: BTreeMap<String, String> = resolve_crate_env(krate, model, |h| {
+            expected_crate_artifact_path(layout, model, resolved, h).ok()
+        })
+        .unwrap_or_default();
+        let env_json: serde_json::Map<String, Value> = env_map
+            .into_iter()
+            .map(|(k, v)| (k, Value::String(v)))
+            .collect();
+
         let mut entry = json!({
             "root_module": root_module.to_string_lossy(),
             "edition": edition,
             "deps": deps,
             "cfg": cfg,
-            "env": {},
+            "env": Value::Object(env_json),
             "is_workspace_member": true,
             "is_proc_macro": krate.crate_type == CrateType::ProcMacro,
             "source": {
@@ -695,6 +723,91 @@ mod tests {
             consumer["deps"].as_array().unwrap().is_empty(),
             "vendor dep must be silently skipped, got: {}",
             consumer["deps"]
+        );
+    }
+
+    #[test]
+    fn artifact_env_flows_into_rust_project_json() {
+        // A consumer crate with `artifact_env(KERNEL_PATH: kernel)` must
+        // appear in `rust-project.json` with `env.KERNEL_PATH` pointing
+        // at the layout-derived future path of the kernel artifact.
+        // Symmetry with `command_builder` is what makes `env!()` resolve
+        // identically under rust-analyzer and rustc.
+        let (mut model, th) = make_fixture();
+
+        let (kernel_h, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "crates/kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Lib,
+                target: "x86_64-unknown-none".into(),
+                target_handle: Some(th),
+                group: "g".into(),
+                ..Default::default()
+            },
+        );
+
+        let mut artifact_env = BTreeMap::new();
+        artifact_env.insert("KERNEL_PATH".to_string(), "kernel".to_string());
+        let (loader_h, _) = model.crates.insert(
+            "loader".into(),
+            CrateDef {
+                name: "loader".into(),
+                path: "crates/loader".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: "x86_64-unknown-none".into(),
+                target_handle: Some(th),
+                group: "g".into(),
+                artifact_env,
+                ..Default::default()
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![
+                ResolvedCrateRef {
+                    handle: kernel_h,
+                    target: th,
+                    host: false,
+                },
+                ResolvedCrateRef {
+                    handle: loader_h,
+                    target: th,
+                    host: false,
+                },
+            ],
+        );
+        let info = Arc::new(fake_rustc_info(None));
+        let json = generate_rust_project_json(&model, &resolved, &layout(), &info);
+
+        // Index 0 is the config crate; index 1 is `kernel`; index 2 is `loader`.
+        let loader = &json["crates"][2];
+        let env = loader["env"].as_object().expect("env must be a JSON object");
+        let kernel_path = env
+            .get("KERNEL_PATH")
+            .and_then(Value::as_str)
+            .expect("KERNEL_PATH must be present");
+        // The path must be the layout-derived future location of the
+        // kernel rlib. Cross lib → cross_artifact_dir, libname-gluon-name.rlib.
+        assert!(
+            kernel_path.contains("/cross/x86_64-unknown-none/dev/kernel/"),
+            "KERNEL_PATH should point at the layout-derived kernel dir, got: {kernel_path}"
+        );
+        assert!(
+            kernel_path.ends_with("/libkernel-gluon-kernel.rlib"),
+            "KERNEL_PATH should end at the deterministic rlib filename, got: {kernel_path}"
+        );
+
+        // The kernel crate itself has no artifact_env, so its env is empty.
+        let kernel_entry = &json["crates"][1];
+        assert!(
+            kernel_entry["env"].as_object().unwrap().is_empty(),
+            "kernel has no artifact_env so its env must be empty, got: {}",
+            kernel_entry["env"]
         );
     }
 }

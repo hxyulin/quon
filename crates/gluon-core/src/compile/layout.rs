@@ -209,6 +209,18 @@ impl BuildLayout {
             .join(format!("{image_name}.img"))
     }
 
+    /// Per-build-step output directory
+    /// (`<root>/build-steps/<name>/`).
+    ///
+    /// Build steps are profile-agnostic for the same reason images are:
+    /// a single `build_step("name")` block produces one canonical
+    /// output that downstream consumers reference by name. The runner
+    /// is spawned with `GLUON_OUTPUT_PATH` pointing at
+    /// `build_step_dir(name).join(<output_filename>)`.
+    pub fn build_step_dir(&self, step_name: &str) -> PathBuf {
+        self.user_crate_root().join("build-steps").join(step_name)
+    }
+
     /// Directory containing the generated config crate
     /// (`<root>/generated/<project>_config/`).
     ///

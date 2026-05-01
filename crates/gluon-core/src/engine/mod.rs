@@ -1466,4 +1466,213 @@ mod tests {
             other => panic!("expected Error::Diagnostics, got {other:?}"),
         }
     }
+
+    #[test]
+    fn evaluates_build_step_with_inputs_and_env() {
+        // The Rhai surface should accept a complete build_step
+        // declaration AND have the intern + validate passes populate
+        // sibling handles when all references resolve. Both the
+        // runner host bin and the input crate must exist.
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            target("x86_64-unknown-test", "targets/x.json");
+            let host_g = group("host-tools").target("host");
+            host_g.add("image-builder", "tools/image-builder").crate_type("bin");
+            let g = group("kernel").target("x86_64-unknown-test");
+            g.add("kernel", "crates/kernel");
+            build_step("disk-image")
+                .runner("image-builder")
+                .input("KERNEL_PATH", crate_in("kernel"))
+                .input("CONFIG_PATH", file_in("disk.toml"))
+                .env("TARGET_SIZE_MB", "64")
+                .output("disk.img");
+            "#,
+        );
+        let model = evaluate_script(f.path()).expect("script must evaluate");
+        assert_eq!(model.build_steps.len(), 1);
+        let h = model
+            .build_steps
+            .lookup("disk-image")
+            .expect("build step exists");
+        let bs = model.build_steps.get(h).unwrap();
+        assert_eq!(bs.runner, "image-builder");
+        assert!(bs.runner_handle.is_some(), "intern must populate runner_handle");
+        assert_eq!(bs.output, "disk.img");
+        // Inputs in BTreeMap iteration order: CONFIG_PATH < KERNEL_PATH.
+        let keys: Vec<&str> = bs.inputs.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["CONFIG_PATH", "KERNEL_PATH"]);
+        // The crate_in input must have its handle populated by intern.
+        match bs.inputs.get("KERNEL_PATH").unwrap() {
+            gluon_model::BuildStepInput::Crate { crate_handle, .. } => {
+                assert!(
+                    crate_handle.is_some(),
+                    "intern must populate crate_handle for crate_in inputs"
+                );
+            }
+            other => panic!("expected Crate variant, got: {other:?}"),
+        }
+        // Literal env entry passed through.
+        assert_eq!(bs.env.get("TARGET_SIZE_MB").map(String::as_str), Some("64"));
+    }
+
+    #[test]
+    fn build_step_runner_must_be_host_bin() {
+        // Runner is a cross lib — must error.
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            target("x86_64-unknown-test", "targets/x.json");
+            let g = group("k").target("x86_64-unknown-test");
+            g.add("not-a-bin", "crates/not-a-bin");
+            build_step("bs")
+                .runner("not-a-bin")
+                .output("out.bin");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("non-host non-bin runner should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                let host_diag = v.iter().any(|d| {
+                    d.message.contains("must be a `bin` crate")
+                        || d.message.contains("group whose target is \"host\"")
+                });
+                assert!(
+                    host_diag,
+                    "expected runner-must-be-host-bin diagnostic, got: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_step_name_collides_with_crate() {
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            target("x86_64-unknown-test", "targets/x.json");
+            let g = group("k").target("x86_64-unknown-test");
+            g.add("collide", "crates/collide");
+            let h = group("host-tools").target("host");
+            h.add("runner", "tools/runner").crate_type("bin");
+            build_step("collide")
+                .runner("runner")
+                .output("out.bin");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("name collision should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                assert!(
+                    v.iter()
+                        .any(|d| d.message.contains("collides with a crate")),
+                    "expected name-collision diagnostic, got: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_step_missing_output_is_diagnosed() {
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            let h = group("host-tools").target("host");
+            h.add("runner", "tools/runner").crate_type("bin");
+            build_step("no-output").runner("runner");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("missing output should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                assert!(
+                    v.iter()
+                        .any(|d| d.message.contains("no output declared")),
+                    "expected missing-output diagnostic, got: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_step_output_with_path_separator_is_diagnosed() {
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            build_step("bad")
+                .runner("r")
+                .output("sub/dir/out.bin");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("path separator should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                assert!(
+                    v.iter()
+                        .any(|d| d.message.contains("path separators")),
+                    "expected path-separator diagnostic, got: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_step_reserved_env_var_is_diagnosed() {
+        // Both .input(GLUON_OUTPUT_PATH, ...) and .env(GLUON_OUTPUT_PATH, ...)
+        // must be rejected — that name is owned by the runtime.
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            build_step("collide-input")
+                .runner("r")
+                .input("GLUON_OUTPUT_PATH", crate_in("k"))
+                .output("o.bin");
+            build_step("collide-env")
+                .runner("r")
+                .env("GLUON_OUTPUT_PATH", "/whatever")
+                .output("o.bin");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("reserved name should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                let reserved_count = v
+                    .iter()
+                    .filter(|d| d.message.contains("GLUON_OUTPUT_PATH"))
+                    .count();
+                assert!(
+                    reserved_count >= 2,
+                    "expected at least 2 reserved-name diagnostics, got {reserved_count}: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_build_step_is_diagnosed() {
+        let f = write_script(
+            r#"
+            project("test", "0.1.0");
+            build_step("dup").runner("r").output("o.bin");
+            build_step("dup").runner("r2").output("o2.bin");
+            "#,
+        );
+        let err = evaluate_script(f.path()).expect_err("duplicate should fail");
+        match err {
+            Error::Diagnostics(v) => {
+                assert!(
+                    v.iter()
+                        .any(|d| d.message.contains("more than once")
+                            && d.message.contains("dup")),
+                    "expected duplicate-name diagnostic, got: {v:?}"
+                );
+            }
+            other => panic!("expected Error::Diagnostics, got {other:?}"),
+        }
+    }
 }

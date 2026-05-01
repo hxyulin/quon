@@ -18,7 +18,7 @@
 use super::ovmf::ResolvedOvmf;
 use super::resolve::ResolvedQemu;
 use crate::error::{Error, Result};
-use gluon_model::{BootMode, EspSource, SerialMode};
+use gluon_model::{BootMode, DisplayMode, EspSource, SerialMode};
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
@@ -77,12 +77,34 @@ pub fn build_qemu_command(
     args.push("-smp".into());
     args.push(resolved.cores.to_string().into());
 
-    // 4. Default `-display none` unless the user set a `-display` flag
-    //    themselves. Dry-running tests assert this exact ordering, so
-    //    keep the override-check simple and well-commented.
+    // 4. Display policy.
+    //
+    // Precedence (highest first):
+    //   a. User passed `-display` via `extra_args` or CLI pass-through —
+    //      respect their literal flag and skip everything else here.
+    //   b. `qemu().display(...)` is set — emit the matching variant.
+    //      `Default` deliberately omits `-display` so QEMU picks its
+    //      compiled-in backend (cocoa on macOS, gtk/sdl on Linux). Use
+    //      this when the user wants a window without naming the backend.
+    //   c. Otherwise fall back to `-display none` so headless / CI
+    //      runs (the dominant case historically) keep working with no
+    //      config change.
     if !user_has_flag(&resolved.extra_args, extra_cli_args, "-display") {
-        args.push("-display".into());
-        args.push("none".into());
+        match &resolved.display {
+            Some(DisplayMode::Default) => { /* omit -display, QEMU picks */ }
+            Some(DisplayMode::None) => {
+                args.push("-display".into());
+                args.push("none".into());
+            }
+            Some(DisplayMode::Spec(spec)) => {
+                args.push("-display".into());
+                args.push(spec.clone().into());
+            }
+            None => {
+                args.push("-display".into());
+                args.push("none".into());
+            }
+        }
     }
 
     // 5. Serial policy. Skip if the user set an explicit `-serial`.
@@ -279,6 +301,7 @@ fn stub_resolved() -> ResolvedQemu {
         memory_mb: 256,
         cores: 1,
         serial: SerialMode::Stdio,
+        display: None,
         extra_args: Vec::new(),
         boot_mode: BootMode::Direct,
         ovmf_code: None,
@@ -535,6 +558,101 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(display_positions.len(), 1, "{a:?}");
+    }
+
+    #[test]
+    fn display_default_omits_flag_so_qemu_picks_backend() {
+        // `qemu().display("default")` → DisplayMode::Default → no
+        // `-display` flag at all. QEMU then uses its compiled-in
+        // default backend (cocoa on macOS, gtk/sdl on Linux).
+        let mut r = stub_resolved();
+        r.display = Some(DisplayMode::Default);
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/k"),
+            BootMode::Direct,
+            None,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        assert!(
+            !a.iter().any(|s| s == "-display"),
+            "DisplayMode::Default must not emit -display, got {a:?}"
+        );
+    }
+
+    #[test]
+    fn display_spec_passes_through_verbatim() {
+        let mut r = stub_resolved();
+        r.display = Some(DisplayMode::Spec("cocoa".into()));
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/k"),
+            BootMode::Direct,
+            None,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        let idx = a.iter().position(|s| s == "-display").expect("display flag");
+        assert_eq!(a[idx + 1], "cocoa");
+    }
+
+    #[test]
+    fn display_explicit_none_emits_display_none() {
+        // Same wire effect as the implicit default — but exercising the
+        // explicit branch prevents a future refactor from silently
+        // dropping -display none for the explicit case.
+        let mut r = stub_resolved();
+        r.display = Some(DisplayMode::None);
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/k"),
+            BootMode::Direct,
+            None,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        let idx = a.iter().position(|s| s == "-display").expect("display flag");
+        assert_eq!(a[idx + 1], "none");
+    }
+
+    #[test]
+    fn user_extra_args_display_override_wins_over_qemu_display() {
+        // Precedence (a) in qemu_cmd:84-comment: even when the user set
+        // qemu().display(...), an explicit -display in extra_args wins.
+        let mut r = stub_resolved();
+        r.display = Some(DisplayMode::Spec("cocoa".into()));
+        r.extra_args = vec!["-display".into(), "gtk".into()];
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/k"),
+            BootMode::Direct,
+            None,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        // Only one -display flag (the user's). Gluon must NOT also
+        // append -display cocoa for DisplayMode::Spec.
+        let positions: Vec<_> = a
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| *s == "-display")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(positions.len(), 1, "{a:?}");
+        assert_eq!(a[positions[0] + 1], "gtk");
     }
 
     #[test]

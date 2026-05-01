@@ -38,6 +38,14 @@ pub struct BuildModel {
     /// to assemble bootable disk images from build artifacts.
     #[serde(default)]
     pub images: Arena<ImageDef>,
+    /// Build-step declarations. Each entry binds a named build step to
+    /// a runner host-bin crate, a set of input env vars, literal env
+    /// vars, and a single output filename. Outputs land in
+    /// `ArtifactMap` under the build step's name and can be referenced
+    /// anywhere a crate name is accepted (image entries, qemu disks,
+    /// other build-step inputs).
+    #[serde(default)]
+    pub build_steps: Arena<BuildStepDef>,
     /// Stub QEMU configuration; details land in a later sub-project.
     #[serde(default)]
     pub qemu: QemuDef,
@@ -634,6 +642,12 @@ pub struct QemuDef {
     /// Serial policy. `Stdio` is the default applied at resolve time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serial: Option<SerialMode>,
+    /// Display policy. `None` here means "user didn't say" — the runner
+    /// keeps its implicit `-display none` default for headless / CI use.
+    /// To get a window, set this to [`DisplayMode::Default`] (let QEMU
+    /// pick its compiled-in default backend) or [`DisplayMode::Spec`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplayMode>,
     /// Extra QEMU arguments appended after every gluon-managed flag.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
@@ -714,6 +728,27 @@ pub enum SerialMode {
     File(PathBuf),
 }
 
+/// Display policy for QEMU.
+///
+/// Distinct from `Option::None` on the field that holds this: the field
+/// being absent means "user didn't say, keep the implicit headless
+/// default". This enum is for users who explicitly chose a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayMode {
+    /// Pass `-display none` — explicit headless. Same wire effect as the
+    /// implicit default, but documents the user's intent.
+    None,
+    /// Omit `-display` entirely so QEMU uses its compiled-in default
+    /// backend (cocoa on macOS, gtk/sdl on Linux, etc.). Use this when
+    /// you want a window without picking the backend yourself.
+    Default,
+    /// Pass `-display <spec>` verbatim. Examples: `"gtk"`, `"cocoa"`,
+    /// `"sdl"`, `"vnc=:0"`. Gluon doesn't validate the spec — that's
+    /// QEMU's vocabulary.
+    Spec(String),
+}
+
 /// Source for the EFI System Partition in UEFI boot mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -785,6 +820,90 @@ pub struct EspEntry {
     pub dest_path: String,
 }
 
+/// A custom build step: invoke a host binary (a "runner crate") with a
+/// curated environment, then register its output as a named artifact.
+///
+/// Unlike [`RuleDef`] (Rhai-scripted or Rust-builtin), a build step's
+/// logic lives in user-authored Rust code compiled by gluon as an
+/// ordinary host `bin` crate. The build step is the *invocation* of that
+/// runner with specific inputs/outputs/env. One runner can be reused
+/// across many invocations (e.g. a generic ELF stripper invoked once per
+/// kernel binary); one build step has exactly one runner.
+///
+/// ### Protocol
+///
+/// Inputs are passed via environment variables. Each `inputs` entry maps
+/// an env var name to a [`BuildStepInput`] source, and the runner reads
+/// it via `std::env::var()`. The output path is communicated via the
+/// reserved env var `GLUON_OUTPUT_PATH` — the runner is responsible for
+/// writing exactly one file to that path. The env vars in `env` are
+/// literal pass-through values and are merged after `inputs` in the
+/// child environment.
+///
+/// ### Determinism
+///
+/// `inputs` and `env` are [`BTreeMap`]s so iteration order is stable,
+/// which keeps the cache-key hash identical across runs. A build step's
+/// output filename is the only allowed structural variation that affects
+/// downstream paths; the build dir layout is otherwise pinned via the
+/// step's `name`.
+///
+/// ### Forward compatibility
+///
+/// `outputs` is intentionally a `BTreeMap<String, String>` with
+/// (currently) exactly one entry. The single-output convention is
+/// enforced by validation and surfaced to the runner via
+/// `GLUON_OUTPUT_PATH`. When multi-output runners become a real need,
+/// this field can be widened without a model break.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildStepDef {
+    pub name: String,
+    /// Name of the runner crate. Must resolve to a host `bin` crate in
+    /// the model. Populated as a string at parse time and resolved to
+    /// `runner_handle` during the intern pass.
+    pub runner: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_handle: Option<Handle<CrateDef>>,
+    /// Input env vars. Each entry maps an env-var name (e.g.
+    /// `"KERNEL_PATH"`) to a [`BuildStepInput`] source describing what
+    /// the value should be at invocation time.
+    #[serde(default)]
+    pub inputs: BTreeMap<String, BuildStepInput>,
+    /// Literal env vars passed verbatim to the runner. Merged after
+    /// `inputs` (literal entries cannot reference artifact paths).
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Output filename (no path separators). Gluon places the output
+    /// file under `build/build-steps/<name>/<output>` and sets
+    /// `GLUON_OUTPUT_PATH` accordingly.
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Source of a single environment-variable input to a [`BuildStepDef`].
+///
+/// `Crate` and `File` participate in the cache key by content hash;
+/// `Literal` participates as the literal string. The `CrateHandle`
+/// variant is populated during the intern pass alongside the unresolved
+/// `Crate` form, mirroring how [`DepDef`] tracks both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildStepInput {
+    /// Path to another crate's primary build artifact. Resolved at run
+    /// time from the [`Handle<CrateDef>`] populated during interning.
+    Crate {
+        crate_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crate_handle: Option<Handle<CrateDef>>,
+    },
+    /// Path to a file in the project tree, joined to `project_root` and
+    /// canonicalised at invocation time.
+    File { path: String },
+    /// A literal string value, passed through verbatim.
+    Literal { value: String },
+}
+
 impl Named for TargetDef {
     fn name(&self) -> &str {
         &self.name
@@ -828,6 +947,12 @@ impl Named for ExternalDepDef {
 }
 
 impl Named for EspDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Named for BuildStepDef {
     fn name(&self) -> &str {
         &self.name
     }

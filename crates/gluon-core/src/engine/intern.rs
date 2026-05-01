@@ -24,7 +24,8 @@
 
 use crate::error::Diagnostic;
 use gluon_model::{
-    BuildModel, CrateDef, EspDef, GroupDef, Handle, PipelineDef, ProfileDef, TargetDef,
+    BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, GroupDef, Handle, PipelineDef,
+    ProfileDef, TargetDef,
 };
 
 /// Outer per-pipeline, inner per-stage, innermost per-input resolved handle.
@@ -42,6 +43,7 @@ pub(crate) fn intern(model: &mut BuildModel) -> Vec<Diagnostic> {
     intern_crates(model, &mut diags);
     intern_pipelines(model, &mut diags);
     intern_esps(model, &mut diags);
+    intern_build_steps(model, &mut diags);
     diags
 }
 
@@ -317,6 +319,86 @@ fn intern_esps(model: &mut BuildModel, diags: &mut Vec<Diagnostic>) {
         if let Some(esp) = model.esps.get_mut(handle) {
             for (entry, handle) in esp.entries.iter_mut().zip(resolved) {
                 entry.source_crate_handle = handle;
+            }
+        }
+    }
+}
+
+/// Resolve [`BuildStepDef::runner`] (string crate name) and every
+/// [`BuildStepInput::Crate { crate_name, .. }`] into their corresponding
+/// [`Handle<CrateDef>`]. Dangling references push a diagnostic; the
+/// handle is left `None` and the validate pass surfaces structural
+/// issues (runner must be host bin, etc.) on the resolved handles.
+fn intern_build_steps(model: &mut BuildModel, diags: &mut Vec<Diagnostic>) {
+    /// One per build step: (handle, resolved_runner, resolved_inputs in
+    /// BTreeMap iteration order). The inputs vec parallels
+    /// `BuildStepDef::inputs.iter()` so we can apply the resolution
+    /// without re-keying.
+    type BuildStepResolution = (
+        Handle<BuildStepDef>,
+        Option<Handle<CrateDef>>,
+        Vec<Option<Handle<CrateDef>>>,
+    );
+    let mut updates: Vec<BuildStepResolution> = Vec::with_capacity(model.build_steps.len());
+
+    for (handle, step) in model.build_steps.iter() {
+        // Runner: empty string was already diagnosed at builder time.
+        // Skip the lookup for empty so we don't push a duplicate
+        // diagnostic that says "unknown runner ''".
+        let runner_handle = if step.runner.is_empty() {
+            None
+        } else {
+            let h = model.crates.lookup(&step.runner);
+            if h.is_none() {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "build_step(\"{}\").runner references unknown crate '{}'",
+                        step.name, step.runner
+                    ))
+                    .with_optional_span(step.span.clone()),
+                );
+            }
+            h
+        };
+
+        let mut input_handles = Vec::with_capacity(step.inputs.len());
+        for (env_key, input) in &step.inputs {
+            let resolved = match input {
+                BuildStepInput::Crate { crate_name, .. } => {
+                    let h = model.crates.lookup(crate_name);
+                    if h.is_none() {
+                        diags.push(
+                            Diagnostic::error(format!(
+                                "build_step(\"{}\").input(\"{}\") references unknown \
+                                 crate '{}'",
+                                step.name, env_key, crate_name
+                            ))
+                            .with_optional_span(step.span.clone()),
+                        );
+                    }
+                    h
+                }
+                // File and Literal inputs don't reference any sibling.
+                BuildStepInput::File { .. } | BuildStepInput::Literal { .. } => None,
+            };
+            input_handles.push(resolved);
+        }
+        updates.push((handle, runner_handle, input_handles));
+    }
+
+    for (handle, runner_handle, input_handles) in updates {
+        if let Some(step) = model.build_steps.get_mut(handle) {
+            step.runner_handle = runner_handle;
+            // Apply input handles in BTreeMap iteration order, matching
+            // the collection order above.
+            let mut iter = input_handles.into_iter();
+            for input in step.inputs.values_mut() {
+                if let BuildStepInput::Crate { crate_handle, .. } = input {
+                    *crate_handle = iter.next().flatten();
+                } else {
+                    // Advance past File/Literal placeholder.
+                    let _ = iter.next();
+                }
             }
         }
     }

@@ -298,6 +298,29 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 self.rules.dispatch(&rule_ctx, rule, stdout, stderr)?;
                 Ok(())
             }
+
+            // ------------------------------------------------------------------
+            // BuildStep — invoke a host-bin runner with curated env vars.
+            // ------------------------------------------------------------------
+            DagNode::BuildStep(handle) => {
+                // Snapshot the artifact map so the runner sees the
+                // runner crate's output and any crate_in inputs as
+                // already-produced paths. Same lock-and-clone pattern
+                // used by Crate / Rule / Image / Esp dispatch.
+                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                let (out_path, was_cached) = crate::compile::build_step::execute_build_step(
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    handle,
+                    &artifacts_snapshot,
+                    stdout,
+                    stderr,
+                )?;
+                lock_or_poison(self.artifacts, "artifacts")?.set_build_step(handle, out_path);
+                self.record(was_cached);
+                Ok(())
+            }
         }
     }
 }
@@ -363,21 +386,29 @@ pub fn execute_pipeline(
     let pool = WorkerPool::new(workers);
     pool.execute(&dag, &dispatcher, stdout, stderr)?;
 
-    // Drain the esps and images maps into the summary. The mutexes are
-    // uncontested at this point (the worker pool has joined), so
-    // `into_inner` is safe.
+    // Drain the esps, images, and build-step output maps into the
+    // summary. The mutexes are uncontested at this point (the worker
+    // pool has joined), so `into_inner` is safe.
     let esp_dirs = esps
         .into_inner()
         .map_err(|_| Error::Config("scheduler: esps mutex poisoned".into()))?;
     let image_paths = images
         .into_inner()
         .map_err(|_| Error::Config("scheduler: images mutex poisoned".into()))?;
+    let final_artifacts = artifacts
+        .into_inner()
+        .map_err(|_| Error::Config("scheduler: artifacts mutex poisoned".into()))?;
+    let build_step_paths: BTreeMap<_, _> = final_artifacts
+        .build_steps_iter()
+        .map(|(h, p)| (h, p.to_path_buf()))
+        .collect();
 
     Ok(BuildSummary {
         built: built.load(Ordering::Relaxed),
         cached: cached.load(Ordering::Relaxed),
         esp_dirs,
         image_paths,
+        build_step_paths,
     })
 }
 

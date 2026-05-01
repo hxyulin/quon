@@ -106,6 +106,14 @@ pub struct BuildSummary {
     /// Built disk-image paths keyed by [`gluon_model::ImageDef`] handle.
     pub image_paths:
         std::collections::BTreeMap<gluon_model::Handle<gluon_model::ImageDef>, std::path::PathBuf>,
+    /// Build-step output paths keyed by [`gluon_model::BuildStepDef`]
+    /// handle. Consumed by `run::entry` so `qemu().disk_ref("name")`
+    /// can boot directly from a build step's output without needing an
+    /// intermediate `image()` wrapper.
+    pub build_step_paths: std::collections::BTreeMap<
+        gluon_model::Handle<gluon_model::BuildStepDef>,
+        std::path::PathBuf,
+    >,
 }
 
 /// Per-node execution closure.

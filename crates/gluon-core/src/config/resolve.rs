@@ -3,8 +3,9 @@
 use crate::config::interpolate::interpolate;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    BuildModel, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, Expr, Handle, ProfileDef,
-    ResolvedConfig, ResolvedCrateRef, ResolvedProfile, ResolvedValue, TargetDef, TristateVal,
+    BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, Expr, Handle,
+    ImageSource, ProfileDef, RawSource, ResolvedConfig, ResolvedCrateRef, ResolvedProfile,
+    ResolvedValue, TargetDef, TristateVal,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
@@ -468,6 +469,72 @@ fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Hand
     let mut queue = VecDeque::new();
     visited.insert(root);
     queue.push_back(root);
+
+    // Build-step seed: every declared build step contributes its runner
+    // crate and every `crate_in` input as additional reachability roots.
+    // Build steps are model-scope declarations (like images and esps), so
+    // they're considered always-active for the purpose of crate selection
+    // — gluon needs to compile the runner before it can spawn it, and
+    // the input crates before it can pass their artifact paths in. Their
+    // transitive deps are then walked by the BFS below alongside the
+    // boot_binary closure. (A future refinement could restrict this to
+    // only build steps referenced by the active profile's images, but
+    // images are themselves not yet profile-filtered, so the per-profile
+    // distinction would buy nothing today.)
+    for (_h, step) in model.build_steps.iter() {
+        if let Some(rh) = step.runner_handle {
+            if visited.insert(rh) {
+                queue.push_back(rh);
+            }
+        }
+        for input in step.inputs.values() {
+            if let BuildStepInput::Crate {
+                crate_handle: Some(ih),
+                ..
+            } = input
+            {
+                if visited.insert(*ih) {
+                    queue.push_back(*ih);
+                }
+            }
+        }
+    }
+
+    // Image seed: an image is an atomic unit (like an esp), so every
+    // crate referenced by any of its top-level entries, partition
+    // entries, or raw_writes is pulled in. Without this, a hybrid
+    // BIOS/UEFI image referenced by a profile whose boot_binary only
+    // closes over one half would silently drop the other half's source
+    // crates — `compile_image` would later fail with a missing-artifact
+    // error far from the configuration mistake. Image source names
+    // resolving to esps or build_steps are handled by their own
+    // expansions below; we only seed crate names here.
+    for (_h, image) in model.images.iter() {
+        let mut seed_entries = |entries: &[gluon_model::ImageEntry]| {
+            for entry in entries {
+                if let ImageSource::Crate(name) = &entry.source {
+                    if let Some(ch) = model.crates.lookup(name) {
+                        if visited.insert(ch) {
+                            queue.push_back(ch);
+                        }
+                    }
+                }
+            }
+        };
+        seed_entries(&image.entries);
+        for partition in &image.partitions {
+            seed_entries(&partition.entries);
+        }
+        for rw in &image.raw_writes {
+            if let RawSource::Crate { name } = &rw.source {
+                if let Some(ch) = model.crates.lookup(name) {
+                    if visited.insert(ch) {
+                        queue.push_back(ch);
+                    }
+                }
+            }
+        }
+    }
 
     while let Some(h) = queue.pop_front() {
         let Some(krate) = model.crates.get(h) else {
@@ -1296,6 +1363,71 @@ mod tests {
         assert!(
             names.contains(&"bootloader".into()),
             "ESP source crate included, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn filter_image_source_crate_pulled_in() {
+        // An image references a crate that the boot_binary closure does
+        // not reach. Without the image-seed expansion, that crate would
+        // be silently dropped and `compile_image` would later fail with
+        // a missing-artifact error far from the configuration.
+        let f = write_script(
+            r#"
+            project("t","1");
+            target("x","t.json");
+            target("y","y.json");
+            profile("default").target("x").boot_binary("crate_a");
+            let g1 = group("a").target("x");
+            g1.add("crate_a", "crates/a").crate_type("bin");
+            let g2 = group("b").target("y");
+            g2.add("crate_b", "crates/b").crate_type("bin");
+            image("disk")
+                .size(1)
+                .write_crate_at(0, "crate_b");
+            "#,
+        );
+        let model = evaluate_script(f.path()).expect("evaluate");
+        let names = crate_names_for_profile(&model, "default");
+        assert!(
+            names.contains(&"crate_b".into()),
+            "image-referenced crate_b should be in the reachable set, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn filter_build_step_runner_and_inputs_pulled_in() {
+        // A build_step's runner crate (a host bin) and its crate_in
+        // inputs must be in the reachable set even when the active
+        // profile's boot_binary closure doesn't reach them — gluon
+        // needs to compile the runner before spawning it and the
+        // inputs before passing their artifact paths in.
+        let f = write_script(
+            r#"
+            project("t","1");
+            target("x","t.json");
+            profile("default").target("x").boot_binary("crate_a");
+            let g1 = group("a").target("x");
+            g1.add("crate_a", "crates/a").crate_type("bin");
+            let host = group("host-tools").target("host");
+            host.add("runner", "tools/runner").crate_type("bin");
+            let g2 = group("b").target("x");
+            g2.add("input_crate", "crates/inp").crate_type("bin");
+            build_step("step")
+                .runner("runner")
+                .input("INPUT", crate_in("input_crate"))
+                .output("out.bin");
+            "#,
+        );
+        let model = evaluate_script(f.path()).expect("evaluate");
+        let names = crate_names_for_profile(&model, "default");
+        assert!(
+            names.contains(&"runner".into()),
+            "build_step runner should be reachable, got {names:?}"
+        );
+        assert!(
+            names.contains(&"input_crate".into()),
+            "build_step crate_in input should be reachable, got {names:?}"
         );
     }
 

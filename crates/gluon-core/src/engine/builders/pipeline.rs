@@ -5,12 +5,18 @@ use crate::engine::EngineState;
 use crate::engine::conversions::array_to_string_vec;
 use crate::error::Diagnostic;
 use gluon_model::{
-    BootMode, DiskSource, EspDef, EspEntry, EspSource, ImageDef, ImageEntry, ImageSource,
-    PartitionDef, PartitionTable, PipelineDef, PipelineStep, RawSource, RawWrite, RuleDef,
-    RuleHandler, SerialMode,
+    BootMode, BuildStepDef, BuildStepInput, DiskSource, DisplayMode, EspDef, EspEntry, EspSource,
+    ImageDef, ImageEntry, ImageSource, PartitionDef, PartitionTable, PipelineDef, PipelineStep,
+    RawSource, RawWrite, RuleDef, RuleHandler, SerialMode,
 };
 use rhai::{Dynamic, Engine, NativeCallContext, Position};
 use std::path::PathBuf;
+
+/// Reserved env-var name used to communicate the absolute output path
+/// to a build-step runner. Validation rejects this name in user-supplied
+/// `input(...)` and `env(...)` keys so the runtime injection cannot be
+/// accidentally shadowed by a user-declared input.
+pub(crate) const RESERVED_OUTPUT_ENV: &str = "GLUON_OUTPUT_PATH";
 
 /// Default name for the project-level singleton pipeline. The script calls
 /// `pipeline()` with no arguments and implicitly refers to this one.
@@ -105,6 +111,19 @@ pub struct EspBuilder {
     is_duplicate: bool,
 }
 
+/// Chainable builder returned by `build_step("name")`. Mutates a
+/// [`BuildStepDef`](gluon_model::BuildStepDef) in `model.build_steps`
+/// via the chained methods `.runner()`, `.input()`, `.env()`,
+/// `.output()`. Duplicate declarations short-circuit (the first one
+/// wins) so the second call cannot ghost-mutate the first.
+#[derive(Clone)]
+pub struct BuildStepBuilder {
+    state: EngineState,
+    name: String,
+    pos: Position,
+    is_duplicate: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Registration entry point
 // ---------------------------------------------------------------------------
@@ -116,6 +135,7 @@ pub(super) fn register(engine: &mut Engine, state: &EngineState) {
     register_bootloader(engine, state.clone());
     register_esp(engine, state.clone());
     register_image(engine, state.clone());
+    register_build_step(engine, state.clone());
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +485,38 @@ fn register_qemu(engine: &mut Engine, state: EngineState) {
             }
             let p = PathBuf::from(path);
             with_qemu(builder, |q| q.serial = Some(SerialMode::File(p)));
+            builder.clone()
+        },
+    );
+
+    // `.display(spec)` — pick QEMU's display backend.
+    //
+    // Special spec values:
+    //   "none"     → `-display none` (explicit headless; same as the
+    //                 implicit default but documents intent).
+    //   "default"  → omit `-display` so QEMU uses its compiled-in
+    //                 default backend (cocoa on macOS, gtk/sdl on
+    //                 Linux). Use this when you want a window without
+    //                 picking the backend yourself.
+    //   anything   → pass `-display <spec>` verbatim. Examples: "gtk",
+    //   else         "cocoa", "sdl", "vnc=:0". Gluon doesn't validate
+    //                 the spec — that's QEMU's vocabulary, and we'd
+    //                 rather pass through new backends than gatekeep.
+    //
+    // Not calling `.display(...)` keeps the implicit `-display none`
+    // default the runner uses today, preserving CI/test behaviour.
+    engine.register_fn(
+        "display",
+        |builder: &mut QemuBuilder, spec: &str| -> QemuBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            let mode = match spec {
+                "none" => DisplayMode::None,
+                "default" => DisplayMode::Default,
+                other => DisplayMode::Spec(other.to_string()),
+            };
+            with_qemu(builder, |q| q.display = Some(mode));
             builder.clone()
         },
     );
@@ -1567,5 +1619,234 @@ fn register_partition_methods(engine: &mut Engine, state: EngineState) {
                 is_duplicate: builder.is_duplicate,
             }
         },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// build_step("name") — declare a build step that invokes a host bin
+// crate ("runner") with curated env vars and captures one output file
+// into the artifact map.
+//
+// Surface:
+//   build_step("disk-image")
+//       .runner("image-builder")
+//       .input("KERNEL_PATH", crate_in("kernel"))
+//       .input("CONFIG_PATH", file_in("disk.toml"))
+//       .env("TARGET_SIZE_MB", "64")
+//       .output("disk.img");
+//
+// Resolution semantics live in the validator + scheduler:
+//   - The runner must resolve to a host `bin` crate.
+//   - Each `crate_in` input must resolve to a crate by name; the
+//     intern pass populates `BuildStepInput::Crate { crate_handle }`.
+//   - `output` is a plain filename; gluon places it under
+//     `build/build-steps/<name>/<output>` and passes the absolute path
+//     via the reserved env var `GLUON_OUTPUT_PATH`.
+// ---------------------------------------------------------------------------
+
+fn register_build_step(engine: &mut Engine, state: EngineState) {
+    let s = state.clone();
+    engine.register_fn(
+        "build_step",
+        move |ctx: NativeCallContext, name: &str| -> BuildStepBuilder {
+            let pos = ctx.call_position();
+            let span = s.span_from(pos);
+            if name.is_empty() {
+                s.push_diagnostic(
+                    Diagnostic::error("build_step() name must not be empty".to_string())
+                        .with_span(span.clone()),
+                );
+            }
+            let mut model = s.model.borrow_mut();
+            let (_h, inserted) = model.build_steps.insert(
+                name.into(),
+                BuildStepDef {
+                    name: name.into(),
+                    span: Some(span.clone()),
+                    ..Default::default()
+                },
+            );
+            let is_duplicate = !inserted;
+            drop(model);
+            if is_duplicate {
+                s.push_diagnostic(
+                    Diagnostic::error(format!("build_step(\"{name}\") is defined more than once"))
+                        .with_span(span),
+                );
+            }
+            BuildStepBuilder {
+                state: s.clone(),
+                name: name.into(),
+                pos,
+                is_duplicate,
+            }
+        },
+    );
+
+    // Free function: `crate_in("name")` — wraps a crate-name reference
+    // as a typed `BuildStepInput::Crate` value. The Rhai engine carries
+    // it as a `Dynamic` so the caller can pass it to `.input(key, src)`.
+    engine.register_fn("crate_in", |name: &str| -> Dynamic {
+        Dynamic::from(BuildStepInput::Crate {
+            crate_name: name.into(),
+            crate_handle: None,
+        })
+    });
+
+    // Free function: `file_in("relative/path")` — wraps a
+    // project-rooted file path as a typed `BuildStepInput::File`. The
+    // path is resolved against `project_root` at invocation time.
+    engine.register_fn("file_in", |path: &str| -> Dynamic {
+        Dynamic::from(BuildStepInput::File { path: path.into() })
+    });
+
+    // `.runner("crate-name")` — points the build step at the host bin
+    // crate that will be spawned.
+    builder_method!(
+        engine,
+        "runner",
+        BuildStepBuilder,
+        |state, model, name, pos, runner: &str| {
+            if runner.is_empty() {
+                state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{name}\").runner: runner crate name must not be empty"
+                    ))
+                    .with_span(state.span_from(pos)),
+                );
+            } else if let Some(h) = model.build_steps.lookup(name) {
+                if let Some(b) = model.build_steps.get_mut(h) {
+                    b.runner = runner.into();
+                }
+            }
+        }
+    );
+
+    // `.input("ENV_KEY", crate_in("name") | file_in("path"))` — declare
+    // an input env var that resolves to an artifact path or project file.
+    let s_in = state.clone();
+    engine.register_fn(
+        "input",
+        move |builder: &mut BuildStepBuilder,
+              env_key: &str,
+              source: Dynamic|
+              -> BuildStepBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            // Validate env-var key. Empty keys and the reserved output
+            // env var are both rejected — the latter would shadow the
+            // runtime injection of `GLUON_OUTPUT_PATH`, which gluon owns.
+            if env_key.is_empty() {
+                s_in.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{}\").input: env-var name must not be empty",
+                        builder.name
+                    ))
+                    .with_span(s_in.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            if env_key == RESERVED_OUTPUT_ENV {
+                s_in.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{}\").input: env-var name '{}' is reserved \
+                         for the output path injection — use a different name",
+                        builder.name, RESERVED_OUTPUT_ENV
+                    ))
+                    .with_span(s_in.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            let parsed = source.try_cast::<BuildStepInput>();
+            let input = match parsed {
+                Some(i) => i,
+                None => {
+                    s_in.push_diagnostic(
+                        Diagnostic::error(format!(
+                            "build_step(\"{}\").input: source must be `crate_in(...)` or \
+                             `file_in(...)`; got an unrecognised value",
+                            builder.name
+                        ))
+                        .with_span(s_in.span_from(builder.pos)),
+                    );
+                    return builder.clone();
+                }
+            };
+            let mut model = s_in.model.borrow_mut();
+            if let Some(h) = model.build_steps.lookup(&builder.name) {
+                if let Some(b) = model.build_steps.get_mut(h) {
+                    // Last-write-wins on duplicate keys. We could emit
+                    // a warning here but it would noise up the typical
+                    // case of programmatic generation.
+                    b.inputs.insert(env_key.into(), input);
+                }
+            }
+            drop(model);
+            builder.clone()
+        },
+    );
+
+    // `.env("KEY", "literal-value")` — pass-through env var. Distinct
+    // from `.input(...)` so the runner protocol stays clear: inputs
+    // resolve to paths; env entries are literal strings.
+    builder_method!(
+        engine,
+        "env",
+        BuildStepBuilder,
+        |state, model, name, pos, key: &str, value: &str| {
+            if key.is_empty() {
+                state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{name}\").env: env-var name must not be empty"
+                    ))
+                    .with_span(state.span_from(pos)),
+                );
+            } else if key == RESERVED_OUTPUT_ENV {
+                state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{name}\").env: env-var name '{RESERVED_OUTPUT_ENV}' \
+                         is reserved for the output path injection — use a different name"
+                    ))
+                    .with_span(state.span_from(pos)),
+                );
+            } else if let Some(h) = model.build_steps.lookup(name) {
+                if let Some(b) = model.build_steps.get_mut(h) {
+                    b.env.insert(key.into(), value.into());
+                }
+            }
+        }
+    );
+
+    // `.output("filename")` — sets the single output filename. Plain
+    // filename only; path separators are rejected so the output stays
+    // contained in the per-step build dir.
+    builder_method!(
+        engine,
+        "output",
+        BuildStepBuilder,
+        |state, model, name, pos, filename: &str| {
+            if filename.is_empty() {
+                state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{name}\").output: filename must not be empty"
+                    ))
+                    .with_span(state.span_from(pos)),
+                );
+            } else if filename.contains('/') || filename.contains('\\') {
+                state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "build_step(\"{name}\").output: filename '{filename}' must not \
+                         contain path separators (use a plain filename; gluon places it \
+                         under build/build-steps/<name>/)"
+                    ))
+                    .with_span(state.span_from(pos)),
+                );
+            } else if let Some(h) = model.build_steps.lookup(name) {
+                if let Some(b) = model.build_steps.get_mut(h) {
+                    b.output = filename.into();
+                }
+            }
+        }
     );
 }

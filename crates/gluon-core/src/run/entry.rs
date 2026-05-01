@@ -180,7 +180,22 @@ pub fn run(
                 map
             }
         };
-        let disk_path = resolve_disk_source(&disk_source, model, &image_paths)?;
+        // Build-step output paths follow the same pattern: take the
+        // post-build map, or synthesise from the layout in dry-run /
+        // --no-build mode so `disk_ref` to a build step's name still
+        // resolves to a deterministic path (the file just won't exist).
+        let build_step_paths = match build_summary.as_ref() {
+            Some(s) => s.build_step_paths.clone(),
+            None => {
+                let mut map: BTreeMap<_, _> = BTreeMap::new();
+                for (h, bs) in model.build_steps.iter() {
+                    map.insert(h, ctx.layout.build_step_dir(&bs.name).join(&bs.output));
+                }
+                map
+            }
+        };
+        let disk_path =
+            resolve_disk_source(&disk_source, model, &image_paths, &build_step_paths)?;
         resolved_qemu.disk = Some(disk_path);
     }
 

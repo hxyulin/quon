@@ -33,6 +33,7 @@ mod mbr;
 mod partition;
 mod stamp;
 
+use crate::compile::extern_map::resolve_artifact_by_name;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Error, Result};
 use gluon_model::{
@@ -247,17 +248,33 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
     for entry in &image.entries {
         match &entry.source {
             ImageSource::Crate(name) => {
-                let handle = match ictx.model.crates.lookup(name) {
-                    Some(h) => h,
-                    None => continue, // dangling — validate already diagnosed
+                // Unified artifact namespace: a name may resolve to a
+                // crate or to a build step. Validate has already
+                // rejected collisions, so at most one resolves.
+                // Unresolved names are silently skipped — the validate
+                // pass should already have diagnosed them; if not, the
+                // image will be built without that source and the user
+                // will see the missing data downstream.
+                let path = match resolve_artifact_by_name(ictx.model, ictx.artifacts, name) {
+                    Some(p) => p,
+                    None => {
+                        // Distinguish "name unknown to model" (silently
+                        // skipped) from "name known but artifact not
+                        // produced yet" (scheduler ordering bug). The
+                        // distinction matters because the latter is a
+                        // bug we want to surface loudly.
+                        let known_in_model = ictx.model.crates.lookup(name).is_some()
+                            || ictx.model.build_steps.lookup(name).is_some();
+                        if known_in_model {
+                            return Err(Error::Compile(format!(
+                                "scheduler: image('{}') entry source '{}' has no entry in \
+                                 ArtifactMap (DAG edge missing or ran out of order?)",
+                                image.name, name
+                            )));
+                        }
+                        continue;
+                    }
                 };
-                let path = ictx.artifacts.get(handle).ok_or_else(|| {
-                    Error::Compile(format!(
-                        "scheduler: image('{}') entry source crate '{}' has no \
-                         entry in ArtifactMap (DAG edge missing or ran out of order?)",
-                        image.name, name
-                    ))
-                })?;
                 out.push(ResolvedEntry {
                     dest_path: entry.dest_path.clone(),
                     source_path: path.to_path_buf(),
@@ -344,23 +361,22 @@ fn resolve_raw_writes<'a>(
     for rw in &image.raw_writes {
         match &rw.source {
             RawSource::Crate { name } => {
-                let handle = match ictx.model.crates.lookup(name) {
-                    Some(h) => h,
+                // Unified namespace: try crate then build_step.
+                let path = match resolve_artifact_by_name(ictx.model, ictx.artifacts, name) {
+                    Some(p) => p,
                     None => {
-                        // Dangling: validation already diagnosed it
-                        // (or should have). Skipping silently lets the
-                        // build fail later with a clearer overall
-                        // diagnostic instead of a follow-on panic.
+                        let known_in_model = ictx.model.crates.lookup(name).is_some()
+                            || ictx.model.build_steps.lookup(name).is_some();
+                        if known_in_model {
+                            return Err(Error::Compile(format!(
+                                "scheduler: image('{}') write_crate_at({}, '{}'): no entry \
+                                 in ArtifactMap (DAG edge missing or ran out of order?)",
+                                image.name, rw.lba, name
+                            )));
+                        }
                         continue;
                     }
                 };
-                let path = ictx.artifacts.get(handle).ok_or_else(|| {
-                    Error::Compile(format!(
-                        "scheduler: image('{}') write_crate_at({}, '{}'): no entry in \
-                         ArtifactMap (DAG edge missing or ran out of order?)",
-                        image.name, rw.lba, name
-                    ))
-                })?;
                 let bytes = std::fs::read(path).map_err(|e| Error::Io {
                     path: path.to_path_buf(),
                     source: e,

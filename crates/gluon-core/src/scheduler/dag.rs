@@ -30,7 +30,8 @@
 
 use crate::error::{Error, Result};
 use gluon_model::{
-    BuildModel, CrateDef, EspDef, Handle, ImageDef, ImageSource, ResolvedConfig, RuleDef, TargetDef,
+    BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, Handle, ImageDef, ImageSource,
+    ResolvedConfig, RuleDef, TargetDef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -67,6 +68,13 @@ pub enum DagNode {
     /// image's entries, and on every ESP referenced via
     /// `ImageSource::Esp`. See [`ImageDef`].
     Image(Handle<ImageDef>),
+    /// Invoke a host-bin runner with curated env vars and capture its
+    /// single output file as a named artifact. Depends on the runner
+    /// crate and on every `BuildStepInput::Crate` it references.
+    /// Consumers that look up the build step by name (image entries,
+    /// raw writes, qemu `disk_ref`, etc.) get edges *to* this node.
+    /// See [`BuildStepDef`].
+    BuildStep(Handle<BuildStepDef>),
 }
 
 // ---------------------------------------------------------------------------
@@ -429,12 +437,25 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
         // Helper closure used by every entry slot — top-level `entries`,
         // each partition's nested `entries`, and the raw_writes' crate
         // sources all share the same edge logic.
+        //
+        // Names are looked up in the unified artifact namespace: a
+        // crate first, then a build step. Validate has already
+        // rejected name collisions, so at most one of the two
+        // resolves. Build-step name resolution makes
+        // `image().add_crate("disk-image", ...)` work even when
+        // `disk-image` is a build step rather than a literal crate —
+        // the unified namespace promised in the design doc.
         let wire_image_source_crate = |dag: &mut Dag, name: &str| {
             if let Some(src_handle) = model.crates.lookup(name) {
                 if resolved_handles.contains(&src_handle) {
                     let src_id = dag.insert_node(DagNode::Crate(src_handle));
                     dag.add_edge(src_id, image_id);
                 }
+                return;
+            }
+            if let Some(bs_handle) = model.build_steps.lookup(name) {
+                let src_id = dag.insert_node(DagNode::BuildStep(bs_handle));
+                dag.add_edge(src_id, image_id);
             }
         };
         let wire_image_source_esp = |dag: &mut Dag, name: &str| {
@@ -473,6 +494,60 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
         for rw in &image.raw_writes {
             if let gluon_model::RawSource::Crate { name } = &rw.source {
                 wire_image_source_crate(&mut dag, name);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3d: BuildStep nodes.
+    // -----------------------------------------------------------------------
+    // Each declared build step becomes one node. Edge sources:
+    //   - The runner crate (must be a host bin) → BuildStep node. The
+    //     runner has to be compiled before gluon can invoke it.
+    //   - Each `BuildStepInput::Crate { crate_handle, .. }` → BuildStep
+    //     node. The input artifact must exist on disk before the runner
+    //     can read it. `File` and `Literal` inputs add no edges.
+    //
+    // Reachability filtering: today every declared build step is
+    // inserted unconditionally. Profile-aware reachability filtering
+    // (only enqueue build steps the active profile transitively
+    // references) is straightforward to add in `config::resolve` — see
+    // the plan §"Profile reachability". For the MVP we accept that
+    // unreachable build steps just won't have their consumers, so the
+    // node sits at in-degree 0 and runs eagerly. That matches today's
+    // behaviour for crates / images / esps that are similarly
+    // unreferenced.
+    //
+    // Unresolved runner / input handles are silently skipped — intern
+    // and validate have already pushed diagnostics for them, and the
+    // worker pool would error out the build at the diagnostics layer
+    // before reaching here.
+    for (bs_handle, step) in model.build_steps.iter() {
+        let bs_id = dag.insert_node(DagNode::BuildStep(bs_handle));
+
+        // Runner crate → BuildStep edge.
+        if let Some(runner_handle) = step.runner_handle {
+            // Only add the edge when the runner is actually in the
+            // resolved crate set (e.g. not gated out by profile or
+            // config). Otherwise the edge would point at a Crate node
+            // that never runs, leaving the BuildStep deadlocked.
+            if resolved_handles.contains(&runner_handle) {
+                let runner_id = dag.insert_node(DagNode::Crate(runner_handle));
+                dag.add_edge(runner_id, bs_id);
+            }
+        }
+
+        // Crate inputs → BuildStep edges.
+        for input in step.inputs.values() {
+            if let BuildStepInput::Crate {
+                crate_handle: Some(input_handle),
+                ..
+            } = input
+            {
+                if resolved_handles.contains(input_handle) {
+                    let input_id = dag.insert_node(DagNode::Crate(*input_handle));
+                    dag.add_edge(input_id, bs_id);
+                }
             }
         }
     }
@@ -1872,6 +1947,154 @@ mod tests {
         assert!(
             !cfg2_outs.contains(&c1_id),
             "ConfigCrate(t2) must NOT → crate-one"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BuildStep DAG ordering tests
+    //
+    // The BuildStep node must depend on:
+    //   1. The runner crate (Crate(runner_handle) → BuildStep).
+    //   2. Each Crate input listed in `inputs` (Crate(input) → BuildStep).
+    // And the BuildStep must be reachable as an artifact source from
+    // Image entries that name it.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_step_has_runner_and_input_edges() {
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-cross");
+
+        // Runner is a host bin crate.
+        let runner_h = make_host_crate(&mut model, "image-builder");
+        // Cross input crate.
+        let kernel_h = make_cross_crate(&mut model, "kernel", th);
+        // Build step that points at both.
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            "KERNEL_PATH".into(),
+            BuildStepInput::Crate {
+                crate_name: "kernel".into(),
+                crate_handle: Some(kernel_h),
+            },
+        );
+        let (bs_h, _) = model.build_steps.insert(
+            "disk-image".into(),
+            BuildStepDef {
+                name: "disk-image".into(),
+                runner: "image-builder".into(),
+                runner_handle: Some(runner_h),
+                inputs,
+                env: BTreeMap::new(),
+                output: "disk.img".into(),
+                span: None,
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![
+                ResolvedCrateRef {
+                    handle: runner_h,
+                    target: th,
+                    host: true,
+                },
+                ResolvedCrateRef {
+                    handle: kernel_h,
+                    target: th,
+                    host: false,
+                },
+            ],
+        );
+        let dag = build_dag(&resolved, &model).expect("dag built");
+
+        let bs_id = *dag
+            .node_index
+            .get(&DagNode::BuildStep(bs_h))
+            .expect("BuildStep node must be inserted");
+        let runner_id = *dag
+            .node_index
+            .get(&DagNode::Crate(runner_h))
+            .expect("runner crate node must exist");
+        let kernel_id = *dag
+            .node_index
+            .get(&DagNode::Crate(kernel_h))
+            .expect("kernel crate node must exist");
+
+        // Runner → BuildStep edge.
+        assert!(
+            dag.edges_out
+                .get(&runner_id)
+                .map(|outs| outs.contains(&bs_id))
+                .unwrap_or(false),
+            "Crate(runner) → BuildStep edge missing"
+        );
+        // Input crate → BuildStep edge.
+        assert!(
+            dag.edges_out
+                .get(&kernel_id)
+                .map(|outs| outs.contains(&bs_id))
+                .unwrap_or(false),
+            "Crate(input) → BuildStep edge missing"
+        );
+    }
+
+    #[test]
+    fn image_can_reference_build_step_by_name() {
+        // image().write_crate_at(0, "disk-image") should resolve
+        // "disk-image" against the build_step arena and add an edge
+        // from the BuildStep node to the Image node — proving the
+        // unified artifact namespace works.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-cross");
+
+        let runner_h = make_host_crate(&mut model, "image-builder");
+        let (bs_h, _) = model.build_steps.insert(
+            "disk-image".into(),
+            BuildStepDef {
+                name: "disk-image".into(),
+                runner: "image-builder".into(),
+                runner_handle: Some(runner_h),
+                inputs: BTreeMap::new(),
+                env: BTreeMap::new(),
+                output: "disk.img".into(),
+                span: None,
+            },
+        );
+        let (image_h, _) = model.images.insert(
+            "boot-disk".into(),
+            ImageDef {
+                name: "boot-disk".into(),
+                raw_writes: vec![gluon_model::RawWrite {
+                    lba: 0,
+                    max_sectors: None,
+                    source: gluon_model::RawSource::Crate {
+                        name: "disk-image".into(),
+                    },
+                    span: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef {
+                handle: runner_h,
+                target: th,
+                host: true,
+            }],
+        );
+        let dag = build_dag(&resolved, &model).expect("dag built");
+
+        let bs_id = *dag.node_index.get(&DagNode::BuildStep(bs_h)).unwrap();
+        let image_id = *dag.node_index.get(&DagNode::Image(image_h)).unwrap();
+        assert!(
+            dag.edges_out
+                .get(&bs_id)
+                .map(|outs| outs.contains(&image_id))
+                .unwrap_or(false),
+            "BuildStep → Image edge missing — unified artifact namespace not wired"
         );
     }
 }

@@ -9,7 +9,7 @@
 
 use crate::compile::compile_utils::normalize_crate_name;
 use crate::error::Diagnostic;
-use gluon_model::{BuildModel, Handle, ProfileDef};
+use gluon_model::{BuildModel, CrateType, Handle, ProfileDef};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Structural checks that happen after interning.
@@ -21,7 +21,112 @@ pub(crate) fn validate(model: &BuildModel) -> Vec<Diagnostic> {
     check_crate_output_name_uniqueness(model, &mut diags);
     check_pipeline_stage_references(model, &mut diags);
     check_artifact_deps_resolve(model, &mut diags);
+    check_build_steps(model, &mut diags);
     diags
+}
+
+/// Validate `BuildStepDef` entries:
+///
+/// 1. **Runner must resolve to a host bin crate.** The runner is invoked
+///    as a child process by the scheduler at build time; non-host or
+///    non-`bin` runners would be either uncompilable on the build
+///    machine or unrunnable. Empty `runner` is rejected by the builder
+///    so we only emit a diagnostic here when the name is set but
+///    resolves to something incompatible.
+/// 2. **Output must be set.** The builder rejects empty/path-bearing
+///    filenames at parse time; here we only catch the "user forgot to
+///    call `.output()` entirely" case.
+/// 3. **Name must not collide.** Build-step names live in the unified
+///    artifact namespace alongside crates / images / esps, so consumers
+///    can reference any of them by name without disambiguation. A
+///    collision would make the lookup ambiguous.
+fn check_build_steps(model: &BuildModel, diags: &mut Vec<Diagnostic>) {
+    for (_, step) in model.build_steps.iter() {
+        // Output must be set.
+        if step.output.is_empty() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "build_step(\"{}\") has no output declared. Add `.output(\"<filename>\")`.",
+                    step.name
+                ))
+                .with_optional_span(step.span.clone()),
+            );
+        }
+
+        // Runner: empty string was already diagnosed at the builder layer
+        // and yields runner_handle = None (no further check). When set
+        // but unresolvable, intern_build_steps emitted the diagnostic. When
+        // resolved, check it's a host bin crate.
+        if let Some(runner_h) = step.runner_handle {
+            if let Some(runner_def) = model.crates.get(runner_h) {
+                if runner_def.crate_type != CrateType::Bin {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "build_step(\"{}\").runner: crate '{}' must be a `bin` \
+                             crate; got `{}`",
+                            step.name,
+                            runner_def.name,
+                            runner_def.crate_type.as_str()
+                        ))
+                        .with_optional_span(step.span.clone()),
+                    );
+                }
+                // Host check: a runner is a host bin if its group's
+                // target is "host". Look up the group.
+                let runner_is_host = runner_def
+                    .group_handle
+                    .and_then(|gh| model.groups.get(gh))
+                    .map(|g| g.target == "host")
+                    .unwrap_or(false);
+                if !runner_is_host {
+                    diags.push(
+                        Diagnostic::error(format!(
+                            "build_step(\"{}\").runner: crate '{}' must be in a \
+                             group whose target is \"host\" — gluon needs to spawn \
+                             the runner on the build machine, not on the cross target",
+                            step.name, runner_def.name
+                        ))
+                        .with_optional_span(step.span.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    // Name collision check: build_step names must not overlap with
+    // crates / images / esps (the four spaces participate in one
+    // resolved-by-name artifact namespace at the consumer side).
+    for (_, step) in model.build_steps.iter() {
+        if model.crates.lookup(&step.name).is_some() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "build_step(\"{}\") collides with a crate of the same name. \
+                     Pick a different build-step name; the unified artifact \
+                     namespace requires unique names.",
+                    step.name
+                ))
+                .with_optional_span(step.span.clone()),
+            );
+        }
+        if model.images.lookup(&step.name).is_some() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "build_step(\"{}\") collides with an image of the same name.",
+                    step.name
+                ))
+                .with_optional_span(step.span.clone()),
+            );
+        }
+        if model.esps.lookup(&step.name).is_some() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "build_step(\"{}\") collides with an esp of the same name.",
+                    step.name
+                ))
+                .with_optional_span(step.span.clone()),
+            );
+        }
+    }
 }
 
 /// Reject `CrateDef::artifact_deps` entries that don't name a real crate.
