@@ -30,16 +30,16 @@ rustup component add rust-src
 
 ## How do I add a new target?
 
-Add a `target()` declaration in `gluon.rhai`:
+Add a `target()` declaration in `gluon.rs`:
 
-```rhai
-target("aarch64-unknown-none");
+```rust
+let target = cfg.target("aarch64-unknown-none");
 ```
 
 For custom target specs, provide a path to the JSON file:
 
-```rhai
-target("my-custom-target", "./targets/my-custom-target.json");
+```rust
+let target = cfg.target_spec("my-custom-target", "./targets/my-custom-target.json");
 ```
 
 Gluon will compile a separate sysroot for each declared target.
@@ -57,7 +57,7 @@ In the `build/` directory under your project root:
 
 ## How do I use Gluon with an existing kernel project?
 
-Create a `gluon.rhai` file in your project root. Declare your existing crates,
+Create a `gluon.rs` file in your project root. Declare your existing crates,
 targets, and dependencies. Gluon does not require any changes to your Rust
 source code -- it only needs to know where your crates are and how to compile
 them. You can migrate incrementally: start with one crate and expand from

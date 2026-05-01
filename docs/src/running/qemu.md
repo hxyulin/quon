@@ -1,15 +1,15 @@
 # QEMU Orchestration
 
 Gluon can build your project and launch it in QEMU in a single command.
-The QEMU configuration lives in your `gluon.rhai` alongside the rest of
+The QEMU configuration lives in your `gluon.rs` alongside the rest of
 the build model, so the run environment is versioned with your source code.
 
 ## Configuring QEMU
 
-Add a `qemu()` block to your `gluon.rhai`:
+Add a `cfg.qemu()` block to your `gluon.rs`:
 
-```rhai
-qemu("qemu-system-x86_64")
+```rust
+cfg.qemu("qemu-system-x86_64")
     .machine("q35")
     .memory(256)
     .cores(2)
@@ -49,7 +49,7 @@ Gluon resolves the boot mode using the following precedence (highest to
 lowest):
 
 1. **CLI flags:** `--uefi` or `--direct`
-2. **Profile settings:** `qemu().boot_mode("uefi")` in `gluon.rhai`
+2. **Profile settings:** `cfg.qemu().boot_mode("uefi")` in `gluon.rs`
 3. **Default:** direct kernel boot
 
 ### Direct boot
@@ -74,10 +74,10 @@ The timeout is useful for automated testing: QEMU is terminated after the
 specified number of seconds, and Gluon reports whether the process exited
 cleanly.
 
-The timeout can also be set per-profile in `gluon.rhai`:
+The timeout can also be set per-profile in `gluon.rs`:
 
-```rhai
-profile("test")
+```rust
+cfg.profile("test")
     .inherits("dev")
     .test_timeout(60);
 ```
@@ -87,12 +87,12 @@ profile("test")
 Profiles can override QEMU settings to tailor the run environment for
 different use cases:
 
-```rhai
-profile("test")
+```rust
+cfg.profile("test")
     .inherits("dev")
     .qemu_memory(512)
     .qemu_cores(4)
-    .qemu_extra_args(["-display", "none"])
+    .qemu_extra_args(&["-display", "none"])
     .test_timeout(60);
 ```
 

@@ -37,11 +37,12 @@ require('lspconfig').rust_analyzer.setup {
 If you use a different LSP client, the key setting is the same: point
 `linkedProjects` at your `rust-project.json` path.
 
-### Gluon DSL highlighting (gluon-lsp)
+### Gluon build script highlighting
 
-For rich editing of `gluon.rhai` — completions, hover signatures,
-diagnostics, and DSL-specific syntax highlighting — install and register
-`gluon-lsp`:
+For editing of `gluon.rs` — since Stage 1, Gluon uses Rust with
+rust-analyzer, which provides native completions, hover signatures,
+diagnostics, and syntax highlighting. No additional LSP setup is needed:
+rust-analyzer's built-in Rust support is fully sufficient.
 
 1. Install the binary:
 

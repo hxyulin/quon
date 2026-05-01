@@ -5,7 +5,7 @@ Cargo entirely, driving `rustc` directly with per-crate flag assembly,
 compiling custom sysroots (`core`, `alloc`, `compiler_builtins`) for arbitrary
 target triples, and orchestrating the full pipeline from configuration through
 compilation to bootable artifacts and QEMU runs. The entire build is declared
-in a single Rhai-scripted configuration file, `gluon.rhai`.
+in a single Rust build script, `gluon.rs`.
 
 **Why not Cargo?** Cargo is an excellent tool for userland Rust, but bare-metal
 kernels push it past its comfort zone. Custom sysroot compilation requires

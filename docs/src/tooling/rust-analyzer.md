@@ -24,7 +24,7 @@ gluon configure --output ./ide/rust-project.json
 
 Re-run `gluon configure` whenever you:
 
-- Add or remove crates in `gluon.rhai`
+- Add or remove crates in `gluon.rs`
 - Change dependencies between crates
 - Change target triples or `cfg` flags
 - Modify features or config options
@@ -60,6 +60,6 @@ once so the sysroot is compiled, then re-run `gluon configure`.
 generated during `gluon build`. After building, re-run `gluon configure` and
 restart the language server.
 
-**Changes to `gluon.rhai` are not reflected** -- `rust-project.json` is a
+**Changes to `gluon.rs` are not reflected** -- `rust-project.json` is a
 snapshot. Re-run `gluon configure` after editing the build script, then restart
 the language server.

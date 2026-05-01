@@ -8,7 +8,7 @@ certain things (like sysroot compilation) only happen on the first build.
 
 ### 1. Evaluate
 
-Gluon parses and executes your `gluon.rhai` script. The script declares
+Gluon parses and executes your `gluon.rs` script. The script declares
 projects, targets, crate groups, profiles, rules, pipelines, and QEMU
 settings. The result is a **BuildModel** -- a structured, in-memory
 representation of everything the build needs to know.
@@ -80,7 +80,7 @@ paths, linker scripts, and cross-target compilation within a single
 workspace.
 
 Gluon drives `rustc` directly and assembles flags per-crate from your
-`gluon.rhai` configuration. This gives full control over:
+`gluon.rs` configuration. This gives full control over:
 
 - Sysroot paths (custom-compiled `core`/`alloc` for your target)
 - Per-crate `--cfg` flags and features

@@ -15,7 +15,7 @@ be compiled from source.
 
 Gluon automatically compiles a custom sysroot for each target triple
 declared in your build model. No manual configuration is needed -- if your
-`gluon.rhai` declares a bare-metal target, Gluon takes care of the rest.
+`gluon.rs` declares a bare-metal target, Gluon takes care of the rest.
 
 The compiled sysroot lives at:
 

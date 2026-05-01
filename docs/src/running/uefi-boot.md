@@ -19,10 +19,10 @@ UEFI boot requires three components:
 
 ## ESP Assembly
 
-Declare an ESP layout in `gluon.rhai`:
+Declare an ESP layout in `gluon.rs`:
 
-```rhai
-esp("default")
+```rust
+cfg.esp("default")
     .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
 ```
 
@@ -32,8 +32,8 @@ ESP automatically after compilation completes.
 
 You can add multiple files to the ESP:
 
-```rhai
-esp("default")
+```rust
+cfg.esp("default")
     .add("bootloader", "EFI/BOOT/BOOTX64.EFI")
     .add("shell", "EFI/tools/Shell.efi");
 ```
@@ -65,46 +65,54 @@ export OVMF_VARS="$(brew --prefix)/share/qemu/edk2-i386-vars.fd"
 
 ## Complete Example
 
-The following `gluon.rhai` defines a project with a bare-metal kernel and
+The following `gluon.rs` defines a project with a bare-metal kernel and
 a UEFI bootloader. The bootloader embeds the kernel binary at compile time
 using `artifact_env`.
 
-```rhai
-project("my-os", "0.1.0")
-    .default_profile("debug");
+```rust
+use gluon_config::{Config, CrateType, Result};
 
-target("x86_64-unknown-none");
-target("x86_64-unknown-uefi");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-profile("debug")
-    .target("x86_64-unknown-uefi")
-    .opt_level(0)
-    .boot_binary("bootloader");
+    cfg.project("my-os", "0.1.0")
+        .default_profile("debug");
 
-// Kernel -- bare-metal, compiled for x86_64-unknown-none
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .linker_script("crates/kernel/kernel.ld");
+    let kernel_target = cfg.target("x86_64-unknown-none");
+    let uefi_target = cfg.target("x86_64-unknown-uefi");
 
-// Bootloader -- UEFI application, embeds the kernel binary
-group("uefi")
-    .target("x86_64-unknown-uefi")
-    .edition("2021")
-    .add("bootloader", "crates/bootloader")
-        .crate_type("bin")
-        .artifact_env("KERNEL_PATH", "kernel");
+    cfg.profile("debug")
+        .target(uefi_target)
+        .opt_level(0)
+        .boot_binary("bootloader");
 
-esp("default")
-    .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+    // Kernel -- bare-metal, compiled for x86_64-unknown-none
+    cfg.group("kernel")
+        .target(kernel_target)
+        .edition("2021")
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .linker_script("crates/kernel/kernel.ld");
 
-qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(256)
-    .serial_stdio()
-    .boot_mode("uefi");
+    // Bootloader -- UEFI application, embeds the kernel binary
+    cfg.group("uefi")
+        .target(uefi_target)
+        .edition("2021")
+        .add("bootloader", "crates/bootloader")
+            .crate_type(CrateType::Bin)
+            .artifact_env("KERNEL_PATH", "kernel");
+
+    cfg.esp("default")
+        .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+
+    cfg.qemu("qemu-system-x86_64")
+        .machine("q35")
+        .memory(256)
+        .serial_stdio()
+        .boot_mode("uefi");
+
+    cfg.emit()
+}
 ```
 
 ### How artifact_env works
