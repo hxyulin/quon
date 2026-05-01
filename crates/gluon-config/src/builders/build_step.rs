@@ -90,6 +90,13 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         if self.state.is_duplicate() {
             return self;
         }
+        if name.is_empty() {
+            let step_name = self.state.name().to_string();
+            self.cfg.diagnostics.push(ConfigError::new(format!(
+                "build_step(\"{step_name}\").env: env-var name must not be empty"
+            )));
+            return self;
+        }
         if name == RESERVED_OUTPUT_ENV {
             // Mirror engine wording from register_build_step (env method).
             let step_name = self.state.name().to_string();
@@ -114,6 +121,13 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         if self.state.is_duplicate() {
             return self;
         }
+        if filename.is_empty() {
+            let step_name = self.state.name().to_string();
+            self.cfg.diagnostics.push(ConfigError::new(format!(
+                "build_step(\"{step_name}\").output: filename must not be empty"
+            )));
+            return self;
+        }
         if filename.contains('/') || filename.contains('\\') {
             let step_name = self.state.name().to_string();
             self.cfg.diagnostics.push(ConfigError::new(format!(
@@ -128,13 +142,21 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         self
     }
 
-    /// Check whether `env_var` is the reserved output env-var name. If so,
-    /// push an engine-parity diagnostic and return `true` (meaning "reject").
+    /// Check whether `env_var` is empty or the reserved output env-var name.
+    /// If so, push an engine-parity diagnostic and return `true` (meaning
+    /// "reject").
     ///
     /// Also returns `true` (silently) when the builder is in `Duplicate`
     /// state, so callers can unconditionally `return self` on a `true` result.
     fn check_reserved_input(&mut self, env_var: &str) -> bool {
         if self.state.is_duplicate() {
+            return true;
+        }
+        if env_var.is_empty() {
+            let step_name = self.state.name().to_string();
+            self.cfg.diagnostics.push(ConfigError::new(format!(
+                "build_step(\"{step_name}\").input: env-var name must not be empty"
+            )));
             return true;
         }
         if env_var == RESERVED_OUTPUT_ENV {
@@ -207,5 +229,38 @@ mod tests {
         let mut cfg = Config::new();
         cfg.build_step("bs").runner("r").output("sub/dir/o.bin");
         assert!(cfg.diagnostics.iter().any(|d| d.message.contains("path separators")));
+    }
+
+    #[test]
+    fn build_step_empty_input_env_var_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.build_step("bs")
+            .runner("r")
+            .input_crate("", "k")
+            .output("o.bin");
+        assert!(cfg.diagnostics.iter().any(|d|
+            d.message.contains("input") && d.message.contains("must not be empty")
+        ));
+    }
+
+    #[test]
+    fn build_step_empty_env_var_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.build_step("bs")
+            .runner("r")
+            .env("", "value")
+            .output("o.bin");
+        assert!(cfg.diagnostics.iter().any(|d|
+            d.message.contains("env") && d.message.contains("must not be empty")
+        ));
+    }
+
+    #[test]
+    fn build_step_empty_output_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.build_step("bs").runner("r").output("");
+        assert!(cfg.diagnostics.iter().any(|d|
+            d.message.contains("output") && d.message.contains("must not be empty")
+        ));
     }
 }
