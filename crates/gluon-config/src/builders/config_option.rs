@@ -1,0 +1,275 @@
+//! Chainable builder for `ConfigOptionDef` entries.
+//!
+//! All seven typed `config_*` constructors on [`Config`] funnel through the
+//! shared [`ConfigOptionBuilder`]. Since `config_options` is a
+//! `BTreeMap<String, ConfigOptionDef>` (not an arena), there is no `Handle<T>`
+//! to carry; instead the builder holds a `BuilderState<()>` and re-looks the
+//! entry up by name on every mutation.  This is an accepted Stage 1 trade-off
+//! (O(log n) per chain call vs. O(1) for the arena path in Stage 4).
+
+use crate::builders::BuilderState;
+use crate::config::Config;
+use crate::error::ConfigError;
+use gluon_model::{Binding, ConfigOptionDef, ConfigType, ConfigValue, Expr};
+
+/// Chainable builder returned by the `config_bool` / `config_u32` / … family.
+pub struct ConfigOptionBuilder<'cfg> {
+    pub(crate) cfg: &'cfg mut Config,
+    pub(crate) state: BuilderState<()>,
+}
+
+impl<'cfg> ConfigOptionBuilder<'cfg> {
+    /// Apply `f` to the `ConfigOptionDef` if this builder is not a duplicate.
+    /// Uses a name lookup against the `BTreeMap` — acceptable for Stage 1.
+    fn modify<F: FnOnce(&mut ConfigOptionDef)>(&mut self, f: F) {
+        if !self.state.is_duplicate() {
+            let name = self.state.name().to_string();
+            if let Some(opt) = self.cfg.raw.model.config_options.get_mut(&name) {
+                f(opt);
+            }
+        }
+    }
+
+    /// Override the default value. The value must be type-compatible with the
+    /// option's declared `ConfigType`; if it isn't, a diagnostic is pushed and
+    /// the default is left unchanged.
+    ///
+    /// Mirrors the engine's type-mismatch wording verbatim:
+    /// `"config option '{name}': expected {type} value, got {observed}"`.
+    pub fn default(self, value: ConfigValue) -> Self {
+        if !self.state.is_duplicate() {
+            let name = self.state.name().to_string();
+            if let Some(opt) = self.cfg.raw.model.config_options.get(&name) {
+                let ty = opt.ty;
+                // Type-compatibility check: mirror the engine's conversions.rs
+                // `dynamic_to_config_value` logic. In the Rust API we receive a
+                // typed `ConfigValue` directly (not a Rhai Dynamic), so we
+                // compare discriminants rather than dynamic types.
+                let compatible = matches!(
+                    (ty, &value),
+                    (ConfigType::Bool, ConfigValue::Bool(_))
+                        | (ConfigType::U32, ConfigValue::U32(_))
+                        | (ConfigType::U64, ConfigValue::U64(_))
+                        | (ConfigType::Str, ConfigValue::Str(_))
+                        | (ConfigType::Choice, ConfigValue::Choice(_))
+                        | (ConfigType::List, ConfigValue::List(_))
+                        | (ConfigType::Tristate, ConfigValue::Tristate(_))
+                );
+
+                if compatible {
+                    if let Some(opt) = self.cfg.raw.model.config_options.get_mut(&name) {
+                        opt.default = value;
+                    }
+                } else {
+                    // Mirror engine wording from conversions.rs:
+                    // "config option '{option_name}': expected {expected_str} value, got {observed}"
+                    let expected_str = match ty {
+                        ConfigType::Bool => "bool",
+                        ConfigType::U32 => "u32",
+                        ConfigType::U64 => "u64",
+                        ConfigType::Str => "string",
+                        ConfigType::Choice => "string (choice variant name)",
+                        ConfigType::List => "array of strings",
+                        ConfigType::Tristate => "tristate string (\"y\"/\"n\"/\"m\")",
+                        ConfigType::Group => "group",
+                    };
+                    let observed = match &value {
+                        ConfigValue::Bool(_) => "bool",
+                        ConfigValue::U32(_) => "u32",
+                        ConfigValue::U64(_) => "u64",
+                        ConfigValue::Str(_) => "string",
+                        ConfigValue::Choice(_) => "choice string",
+                        ConfigValue::List(_) => "array",
+                        ConfigValue::Tristate(_) => "tristate",
+                    };
+                    self.cfg.diagnostics.push(ConfigError::new(format!(
+                        "config option '{name}': expected {expected_str} value, got {observed}"
+                    )));
+                }
+            }
+        }
+        self
+    }
+
+    /// Set a human-readable description for TUI/documentation use.
+    pub fn help(mut self, text: &str) -> Self {
+        let t = text.to_string();
+        self.modify(|opt| opt.help = Some(t));
+        self
+    }
+
+    /// Set a numeric range constraint `[lo, hi]` (inclusive).
+    ///
+    /// Mirrors the engine's range validation:
+    /// `"config option '{name}': invalid range ({lo}..={hi})"`.
+    pub fn range(mut self, lo: u64, hi: u64) -> Self {
+        if lo > hi {
+            let name = self.state.name().to_string();
+            self.cfg.diagnostics.push(ConfigError::new(format!(
+                "config option '{name}': invalid range ({lo}..={hi})"
+            )));
+        } else {
+            let (l, h) = (lo, hi);
+            self.modify(|opt| opt.range = Some((l, h)));
+        }
+        self
+    }
+
+    /// Set the exhaustive list of valid variant names (only meaningful on
+    /// `Choice` options; the engine emits a diagnostic for other types, but
+    /// Stage 1 accepts it silently — the validator enforces this).
+    pub fn choices(mut self, values: &[&str]) -> Self {
+        let v: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+        self.modify(|opt| opt.choices = Some(v));
+        self
+    }
+
+    /// Assign this option to a TUI menu category.
+    pub fn menu(mut self, name: &str) -> Self {
+        let n = name.to_string();
+        self.modify(|opt| opt.menu = Some(n));
+        self
+    }
+
+    /// Declare which other options this one force-enables when active.
+    pub fn selects(mut self, targets: &[&str]) -> Self {
+        let v: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+        self.modify(|opt| opt.selects = v);
+        self
+    }
+
+    /// Append a code-generation binding.
+    pub fn binding(mut self, b: Binding) -> Self {
+        self.modify(|opt| opt.bindings.push(b));
+        self
+    }
+
+    /// Set the `depends_on` clause as a pre-parsed [`Expr`].
+    ///
+    /// **Stage 1 limitation:** users must construct the `Expr` manually.
+    /// The engine accepts a mini boolean-expression *string* (`"A && !B"`) and
+    /// parses it via `gluon_core::kconfig::parse_bool_expr`, but that parser
+    /// lives in `gluon-core`, which `gluon-config` cannot depend on (would be
+    /// cyclic).  Users who need complex dependency expressions should declare
+    /// the option via `include_kconfig` instead.
+    pub fn depends_on_expr(mut self, expr: Expr) -> Self {
+        self.modify(|opt| opt.depends_on_expr = Some(expr));
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Config;
+    use gluon_model::{ConfigType, ConfigValue, TristateVal};
+
+    #[test]
+    fn config_bool_chain() {
+        let mut cfg = Config::new();
+        cfg.config_bool("CONFIG_FOO").default(ConfigValue::Bool(true)).help("helpful");
+        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        assert_eq!(opt.ty, ConfigType::Bool);
+        match opt.default {
+            ConfigValue::Bool(true) => {}
+            ref other => panic!("expected Bool(true), got {other:?}"),
+        }
+        assert_eq!(opt.help.as_deref(), Some("helpful"));
+        assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn config_u32_with_range() {
+        let mut cfg = Config::new();
+        cfg.config_u32("CONFIG_SIZE").default(ConfigValue::U32(4096)).range(0, 65536);
+        let opt = cfg.raw.model.config_options.get("CONFIG_SIZE").unwrap();
+        assert_eq!(opt.ty, ConfigType::U32);
+        assert_eq!(opt.range, Some((0, 65536)));
+    }
+
+    #[test]
+    fn config_choice_options() {
+        let mut cfg = Config::new();
+        cfg.config_choice("CONFIG_MODE")
+            .choices(&["debug", "release"])
+            .default(ConfigValue::Choice("debug".into()));
+        let opt = cfg.raw.model.config_options.get("CONFIG_MODE").unwrap();
+        assert_eq!(opt.ty, ConfigType::Choice);
+        match &opt.default {
+            ConfigValue::Choice(s) if s == "debug" => {}
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_config_option_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.config_bool("CONFIG_FOO").help("first");
+        cfg.config_bool("CONFIG_FOO").help("second");
+        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        assert_eq!(opt.help.as_deref(), Some("first"), "first definition preserved");
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(cfg.diagnostics[0].message.contains("CONFIG_FOO"));
+    }
+
+    #[test]
+    fn type_mismatched_default_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.config_bool("CONFIG_FOO").default(ConfigValue::U32(42));
+        // Engine wording: "config option '{name}': expected bool value, got u32"
+        assert!(
+            cfg.diagnostics.iter().any(|d| {
+                d.message.contains("CONFIG_FOO") && d.message.contains("bool")
+            }),
+            "expected type-mismatch diagnostic, got: {:?}",
+            cfg.diagnostics,
+        );
+    }
+
+    #[test]
+    fn config_tristate_seeds_no_default() {
+        let mut cfg = Config::new();
+        cfg.config_tristate("CONFIG_TRI");
+        let opt = cfg.raw.model.config_options.get("CONFIG_TRI").unwrap();
+        assert_eq!(opt.ty, ConfigType::Tristate);
+        assert_eq!(opt.default, ConfigValue::Tristate(TristateVal::No));
+    }
+
+    #[test]
+    fn config_str_seeds_empty_default() {
+        let mut cfg = Config::new();
+        cfg.config_str("CONFIG_S");
+        let opt = cfg.raw.model.config_options.get("CONFIG_S").unwrap();
+        assert_eq!(opt.ty, ConfigType::Str);
+        assert_eq!(opt.default, ConfigValue::Str(String::new()));
+    }
+
+    #[test]
+    fn config_u64_seeds_zero_default() {
+        let mut cfg = Config::new();
+        cfg.config_u64("CONFIG_BIG");
+        let opt = cfg.raw.model.config_options.get("CONFIG_BIG").unwrap();
+        assert_eq!(opt.ty, ConfigType::U64);
+        assert_eq!(opt.default, ConfigValue::U64(0));
+    }
+
+    #[test]
+    fn config_list_seeds_empty_default() {
+        let mut cfg = Config::new();
+        cfg.config_list("CONFIG_L");
+        let opt = cfg.raw.model.config_options.get("CONFIG_L").unwrap();
+        assert_eq!(opt.ty, ConfigType::List);
+        assert_eq!(opt.default, ConfigValue::List(vec![]));
+    }
+
+    #[test]
+    fn range_lo_gt_hi_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.config_u32("CONFIG_N").range(100, 0);
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(
+            cfg.diagnostics[0].message.contains("invalid range"),
+            "got: {}",
+            cfg.diagnostics[0].message,
+        );
+    }
+}

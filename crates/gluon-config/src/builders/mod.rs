@@ -2,21 +2,25 @@
 
 pub mod bootloader;
 pub mod build_step;
+pub mod config_option;
 pub mod crate_;
 pub mod esp;
 pub mod group;
 pub mod image;
 pub mod partition;
+pub mod preset;
 pub mod profile;
 pub mod qemu;
 pub mod rule;
 pub use bootloader::BootloaderBuilder;
 pub use build_step::BuildStepBuilder;
+pub use config_option::ConfigOptionBuilder;
 pub use crate_::CrateBuilder;
 pub use esp::EspBuilder;
 pub use group::GroupBuilder;
 pub use image::ImageBuilder;
 pub use partition::PartitionBuilder;
+pub use preset::PresetBuilder;
 pub use profile::ProfileBuilder;
 pub use qemu::QemuBuilder;
 pub use rule::RuleBuilder;

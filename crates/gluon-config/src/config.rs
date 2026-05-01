@@ -1,5 +1,12 @@
-use gluon_model::{BuildStepDef, EspDef, GroupDef, Handle, ImageDef, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef};
-use crate::builders::{BootloaderBuilder, BuildStepBuilder, BuilderState, EspBuilder, GroupBuilder, ImageBuilder, ProfileBuilder, QemuBuilder, RuleBuilder};
+use gluon_model::{
+    BuildStepDef, ConfigOptionDef, ConfigType, ConfigValue, EspDef, GroupDef, Handle, ImageDef,
+    PresetDef, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef,
+    TristateVal,
+};
+use crate::builders::{
+    BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
+    GroupBuilder, ImageBuilder, PresetBuilder, ProfileBuilder, QemuBuilder, RuleBuilder,
+};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
@@ -333,6 +340,149 @@ impl Config {
         };
         EspBuilder { cfg: self, state }
     }
+
+    // -----------------------------------------------------------------------
+    // Config-option builders
+    // -----------------------------------------------------------------------
+
+    /// Shared constructor for all typed `config_*` methods.
+    ///
+    /// If `name` is already registered, a duplicate diagnostic is pushed and a
+    /// [`ConfigOptionBuilder`] in the `Duplicate` state is returned so chained
+    /// calls become no-ops.  Mirrors the engine's exact wording:
+    /// `"config option '{name}' is defined more than once"`.
+    fn config_option_with_type(
+        &mut self,
+        name: &str,
+        ty: ConfigType,
+        default: ConfigValue,
+    ) -> ConfigOptionBuilder<'_> {
+        if self.raw.model.config_options.contains_key(name) {
+            self.diagnostics.push(ConfigError::new(format!(
+                "config option '{name}' is defined more than once"
+            )));
+            return ConfigOptionBuilder {
+                cfg: self,
+                state: BuilderState::Duplicate { name: name.into(), span: None },
+            };
+        }
+        self.raw.model.config_options.insert(
+            name.into(),
+            ConfigOptionDef {
+                name: name.into(),
+                ty,
+                default,
+                help: None,
+                selects: Vec::new(),
+                range: None,
+                choices: None,
+                menu: None,
+                bindings: Vec::new(),
+                span: None,
+                depends_on_expr: None,
+                visible_if_expr: None,
+            },
+        );
+        ConfigOptionBuilder {
+            cfg: self,
+            state: BuilderState::Valid { state: (), name: name.into(), span: None },
+        }
+    }
+
+    /// Declare a boolean config option (default: `false`).
+    pub fn config_bool(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::Bool, ConfigValue::Bool(false))
+    }
+
+    /// Declare a tristate config option (default: `No`).
+    pub fn config_tristate(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(
+            name,
+            ConfigType::Tristate,
+            ConfigValue::Tristate(TristateVal::No),
+        )
+    }
+
+    /// Declare a 32-bit unsigned integer config option (default: `0`).
+    pub fn config_u32(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::U32, ConfigValue::U32(0))
+    }
+
+    /// Declare a 64-bit unsigned integer config option (default: `0`).
+    pub fn config_u64(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::U64, ConfigValue::U64(0))
+    }
+
+    /// Declare a string config option (default: `""`).
+    pub fn config_str(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::Str, ConfigValue::Str(String::new()))
+    }
+
+    /// Declare a choice config option (default: `""`; use `.choices()` to
+    /// enumerate the valid variants and `.default(ConfigValue::Choice(...))` to
+    /// pick the initial value).
+    pub fn config_choice(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::Choice, ConfigValue::Choice(String::new()))
+    }
+
+    /// Declare a list-of-strings config option (default: empty list).
+    pub fn config_list(&mut self, name: &str) -> ConfigOptionBuilder<'_> {
+        self.config_option_with_type(name, ConfigType::List, ConfigValue::List(Vec::new()))
+    }
+
+    // -----------------------------------------------------------------------
+    // Preset builder
+    // -----------------------------------------------------------------------
+
+    /// Declare a named configuration preset. Returns a chainable
+    /// [`PresetBuilder`] that populates the new `PresetDef`.
+    ///
+    /// If a preset with this name was already declared, the builder enters the
+    /// `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"preset '{name}' is defined more than once"`.
+    pub fn preset(&mut self, name: &str) -> PresetBuilder<'_> {
+        if self.raw.model.presets.contains_key(name) {
+            self.diagnostics.push(ConfigError::new(format!(
+                "preset '{name}' is defined more than once"
+            )));
+            return PresetBuilder {
+                cfg: self,
+                state: BuilderState::Duplicate { name: name.into(), span: None },
+            };
+        }
+        self.raw.model.presets.insert(
+            name.into(),
+            PresetDef { name: name.into(), ..Default::default() },
+        );
+        PresetBuilder {
+            cfg: self,
+            state: BuilderState::Valid { state: (), name: name.into(), span: None },
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Kconfig include
+    // -----------------------------------------------------------------------
+
+    /// Record a `.kconfig` file path for host-side parsing.
+    ///
+    /// The file is **not parsed here** — `gluon-config` cannot depend on
+    /// `gluon-core` (would be cyclic).  The `script_runner` (Task 11) reads
+    /// each recorded path through `gluon_core::kconfig::load_kconfig` after
+    /// deserialising the JSON and before running intern, then merges the
+    /// resulting options/presets into the `BuildModel` with the same
+    /// duplicate-detection the Rhai engine uses today.
+    ///
+    /// The `Result<()>` signature is for forward compatibility: Stage 4+ may
+    /// validate path existence in-process.
+    pub fn include_kconfig(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        self.raw.kconfig_includes.push(path.as_ref().to_path_buf());
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -426,5 +576,26 @@ mod project_target_tests {
         let result = cfg.emit();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().message, "boom");
+    }
+}
+
+#[cfg(test)]
+mod kconfig_tests {
+    use super::*;
+
+    #[test]
+    fn include_kconfig_records_path() {
+        let mut cfg = Config::new();
+        cfg.include_kconfig("./options.kconfig").expect("ok");
+        cfg.include_kconfig("/abs/path.kconfig").expect("ok");
+        assert_eq!(cfg.raw.kconfig_includes.len(), 2);
+        assert_eq!(
+            cfg.raw.kconfig_includes[0],
+            std::path::PathBuf::from("./options.kconfig")
+        );
+        assert_eq!(
+            cfg.raw.kconfig_includes[1],
+            std::path::PathBuf::from("/abs/path.kconfig")
+        );
     }
 }
