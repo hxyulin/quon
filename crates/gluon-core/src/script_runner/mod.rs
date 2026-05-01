@@ -37,6 +37,24 @@
 //! every `gluon.rs` edit. Splitting them lets a normal "edit gluon.rs,
 //! re-run" loop avoid the rlib cost.
 //!
+//! ## Stage 1 limitations
+//!
+//! - **No advisory lock around the on-demand cargo build or script
+//!   compilation.** Two concurrent `gluon build` invocations may both
+//!   trigger `cargo build -p gluon-config` against the same `target/`
+//!   directory; cargo has its own `.cargo-lock`, so the cargo invocations
+//!   themselves serialise correctly, but they will both write to the
+//!   same script-runner cache directory. In the worst case this produces
+//!   a redundant rebuild rather than corruption (`std::fs::write` is
+//!   atomic on POSIX). Stage 1.7 follow-up may add explicit locking via
+//!   the existing `crate::cache::lock::CacheLock` infrastructure.
+//! - **`Cargo.lock` is hashed into the cache key but `target/deps/`
+//!   files are not.** If a transitive rlib in deps_dir is replaced with
+//!   a different SVH that happens to compile cleanly against the
+//!   user's `gluon.rs`, the cache may serve a stale binary. In practice
+//!   cargo's incremental rebuild keeps the deps in sync — the only path
+//!   where this matters is hand-deletion of files in `target/deps/`.
+//!
 //! ## Error surface
 //!
 //! Every failure mode below maps to a single [`Error`] variant. The CLI

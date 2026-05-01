@@ -137,10 +137,10 @@ impl ArtifactMap {
 ///   not yet been recorded in `artifacts` (the scheduler hasn't run it
 ///   yet, or the producer isn't part of this build).
 ///
-/// Consumers (image entries, qemu `disk_ref`, future name-based
-/// consumers) should prefer this helper over calling `model.crates.lookup`
-/// + `artifacts.get` directly so the unified namespace stays consistent
-/// across the codebase.
+///
+/// Consumers (image entries, qemu `disk_ref`, future name-based) should
+/// prefer this helper over calling `model.crates.lookup` + `artifacts.get`
+/// directly so the unified namespace stays consistent across the codebase.
 pub fn resolve_artifact_by_name<'a>(
     model: &BuildModel,
     artifacts: &'a ArtifactMap,

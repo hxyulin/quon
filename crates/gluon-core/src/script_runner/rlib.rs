@@ -163,6 +163,20 @@ fn compute_cache_key(workspace_dir: &Path, rustc_version: &str) -> Result<String
             hasher.update(h);
         }
     }
+    // Lock file captures transitive dep versions. If serde bumps from 1.0.196
+    // → 1.0.197 with no source changes here, our cache MUST invalidate so the
+    // new rlib is rebuilt against the new transitive deps. Without this hash,
+    // the cache hit path would return paths into target/ that may no longer
+    // exist.
+    let lock_path = workspace_dir.join("Cargo.lock");
+    if lock_path.is_file() {
+        let h = sha256_file(&lock_path)?;
+        hasher.update(h);
+    }
+    // (If Cargo.lock is absent — e.g., an unusual library-only workspace —
+    // skip the hash; cargo will regenerate the lock and the next call will
+    // pick it up.)
+
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -458,5 +472,29 @@ also not json
         let k1 = compute_cache_key(&workspace, "rustc 1.85.0").expect("k1");
         let k2 = compute_cache_key(&workspace, "rustc 1.86.0").expect("k2");
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_changes_when_cargo_lock_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Stub a minimal workspace layout with the two crates that
+        // compute_cache_key walks.
+        std::fs::create_dir_all(tmp.path().join("crates/gluon-config")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("crates/gluon-model")).unwrap();
+        std::fs::write(
+            tmp.path().join("crates/gluon-config/Cargo.toml"),
+            b"[package]\nname=\"gluon-config\"\nversion=\"0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("crates/gluon-model/Cargo.toml"),
+            b"[package]\nname=\"gluon-model\"\nversion=\"0\"\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("Cargo.lock"), b"# version 1\n").unwrap();
+        let k1 = compute_cache_key(tmp.path(), "rustc 1.0").unwrap();
+        std::fs::write(tmp.path().join("Cargo.lock"), b"# version 2\n").unwrap();
+        let k2 = compute_cache_key(tmp.path(), "rustc 1.0").unwrap();
+        assert_ne!(k1, k2, "cache key must invalidate when Cargo.lock changes");
     }
 }

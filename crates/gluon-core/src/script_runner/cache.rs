@@ -106,6 +106,7 @@ fn compile_script(
     // We invoke rustc directly (not via cargo) so the user's gluon.rs
     // doesn't need a Cargo.toml. The flags mirror what a minimal
     // `cargo build` would emit:
+    //   --error-format human      — see comment below.
     //   --edition 2024            — match the workspace edition; user's
     //                               script writes idiomatic modern Rust.
     //   --extern gluon_config=... — the precompiled rlib the script imports.
@@ -117,6 +118,18 @@ fn compile_script(
     //                               surfaces to the user.
     let output = Command::new(&rustc_info.rustc_path)
         .args([
+            // Force human-readable errors regardless of whether stderr is
+            // piped — cargo's terminal-detection default would otherwise
+            // swallow column info when our subprocess capture redirects.
+            "--error-format",
+            "human",
+            // Stage 1 assumption: gluon-config and gluon-model both use
+            // edition 2024 (matches workspace.package.edition in the root
+            // Cargo.toml). If the workspace edition ever changes, this
+            // constant must change in lockstep or the user's gluon.rs will
+            // fail with a confusing edition-mismatch error. Stage 4+ may
+            // read this from gluon-config's Cargo.toml at build.rs time and
+            // bake it via env!() so it stays in sync.
             "--edition",
             "2024",
             "--extern",
