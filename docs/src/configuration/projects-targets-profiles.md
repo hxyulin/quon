@@ -1,22 +1,24 @@
 # Projects, Targets, and Profiles
 
-Every `gluon.rhai` file declares at least one project, one target, and one
+Every `gluon.rs` file declares at least one project, one target, and one
 profile. These three entities establish the core identity and compilation
 settings for your build.
 
 ## Project
 
-```rhai
-project("my-kernel", "0.1.0")
-    .default_profile("dev")
-    .config_crate_name("my_kernel_config");
+```rust
+cfg.project("my-kernel", "0.1.0")
+    .default_profile("dev");
+
+cfg.config_crate_name("my_kernel_config");
 ```
 
-- **`project(name, version)`** -- the name and version are required. They are
-  used in build output paths and diagnostics.
+- **`cfg.project(name, version)`** -- the name and version are required. They are
+  used in build output paths and diagnostics. Returns a `ProjectBuilder` for
+  chaining `.default_profile()`.
 - **`.default_profile(name)`** -- the profile used when no `-p` flag is passed
   to the CLI. If omitted, Gluon requires an explicit profile selection.
-- **`.config_crate_name(name)`** -- overrides the name of the auto-generated
+- **`cfg.config_crate_name(name)`** -- overrides the name of the auto-generated
   config crate. The default is `<project>_config` (e.g., `my_kernel_config`
   for a project named `my-kernel`). See
   [Config Options and Kconfig](./config-options.md) for details on the config
@@ -24,18 +26,18 @@ project("my-kernel", "0.1.0")
 
 ## Target
 
-```rhai
-target("x86_64-unknown-none");
-target("aarch64-unknown-none").panic_strategy("abort");
-target("riscv64gc-custom", "./targets/riscv64gc-custom.json");
+```rust
+let t1 = cfg.target("x86_64-unknown-none");
+let t2 = cfg.target("aarch64-unknown-none").panic_strategy("abort");
+let t3 = cfg.target_spec("riscv64gc-custom", "./targets/riscv64gc-custom.json");
 ```
 
-- **`target(triple)`** -- registers a rustc target triple. Gluon will compile a
-  custom sysroot (`core`, `alloc`, `compiler_builtins`) for each registered
-  target.
-- **`target(name, path)`** -- the optional second argument is a path to a custom
-  target-spec JSON file, relative to `gluon.rhai`. Use this for targets that
-  are not built into rustc.
+- **`cfg.target(triple)`** -- registers a rustc target triple and returns a
+  handle to it. Gluon will compile a custom sysroot (`core`, `alloc`,
+  `compiler_builtins`) for each registered target.
+- **`cfg.target_spec(name, path)`** -- like `target()`, but the second argument
+  is a path to a custom target-spec JSON file, relative to `gluon.rs`. Use this
+  for targets that are not built into rustc.
 - **`.panic_strategy("abort")`** -- sets the panic strategy for bare-metal
   targets. Common values are `"abort"` and `"unwind"`.
 
@@ -48,14 +50,16 @@ triple -- require one.
 Profiles control how code is compiled. They are analogous to Cargo's `dev` and
 `release` profiles but are more explicit and flexible.
 
-```rhai
-profile("dev")
-    .target("x86_64-unknown-none")
+```rust
+let target = cfg.target("x86_64-unknown-none");
+
+cfg.profile("dev")
+    .target(target)
     .opt_level(0)
     .debug_info(true)
     .boot_binary("kernel");
 
-profile("release")
+cfg.profile("release")
     .inherits("dev")
     .opt_level(2)
     .lto("thin");
@@ -65,7 +69,7 @@ profile("release")
 
 | Method | Description |
 |---|---|
-| `.target(name)` | Which registered target to build for |
+| `.target(handle)` | Which registered target to build for (pass a target handle) |
 | `.opt_level(n)` | Optimization level: 0, 1, 2, or 3 |
 | `.debug_info(bool)` | Include debug symbols in the output |
 | `.lto(mode)` | Link-time optimization: `"thin"`, `"fat"`, or `"off"` |

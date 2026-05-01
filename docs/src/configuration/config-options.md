@@ -6,22 +6,24 @@ system, adapted for Rust's type system.
 
 ## Inline config options
 
-Declare config options directly in `gluon.rhai` using the typed builder
+Declare config options directly in `gluon.rs` using the typed builder
 functions:
 
-```rhai
-config_bool("LOG_ENABLED")
-    .default_value(true)
+```rust
+use gluon_config::{ConfigValue, Expr};
+
+cfg.config_bool("LOG_ENABLED")
+    .default_value(ConfigValue::Bool(true))
     .help("Enable runtime logging subsystem");
 
-config_u32("LOG_LEVEL")
-    .default_value(3)
+cfg.config_u32("LOG_LEVEL")
+    .default_value(ConfigValue::U32(3))
     .range(0, 5)
-    .depends_on("LOG_ENABLED")
+    .depends_on(Expr::Ident("LOG_ENABLED".into()))
     .help("Verbosity: 0 = off, 5 = trace");
 
-config_str("KERNEL_NAME")
-    .default_value("my-kernel")
+cfg.config_str("KERNEL_NAME")
+    .default_value(ConfigValue::Str("my-kernel".into()))
     .help("Kernel display name");
 ```
 
@@ -37,11 +39,10 @@ config_str("KERNEL_NAME")
 
 | Method | Description |
 |---|---|
-| `.default_value(val)` | Default when no override is applied |
+| `.default_value(val)` | Default when no override is applied (pass `ConfigValue::Bool(true)`, etc.) |
 | `.help("...")` | Human-readable description |
 | `.range(lo, hi)` | Valid range (integers only) |
-| `.depends_on("SYMBOL")` | Only active when SYMBOL is true |
-| `.depends_on_expr("A && !B")` | Arbitrary boolean expression using `&&`, `\|\|`, `!` |
+| `.depends_on(expr)` | Only active when `expr` evaluates to true (pass an `Expr` value) |
 
 When a config option has a `.depends_on()` constraint and the dependency
 evaluates to false, the option is disabled and uses its default value (or is
@@ -51,17 +52,21 @@ omitted entirely, depending on the type).
 
 Presets are named bundles of config overrides:
 
-```rhai
-preset("verbose")
-    .set("LOG_LEVEL", 5)
-    .set("DEBUG", true);
+```rust
+use gluon_config::ConfigValue;
+
+cfg.preset("verbose")
+    .set("LOG_LEVEL", ConfigValue::U32(5))
+    .set("DEBUG", ConfigValue::Bool(true));
 ```
 
 Apply a preset to a profile:
 
-```rhai
-profile("dev")
-    .target("x86_64-unknown-none")
+```rust
+let target = cfg.target("x86_64-unknown-none");
+
+cfg.profile("dev")
+    .target(target)
     .preset("verbose");
 ```
 
@@ -95,11 +100,12 @@ individual crates, use `.requires_config(true)` to opt in or
 For projects with many configuration options, you can load them from a
 Linux-style Kconfig file instead of (or in addition to) declaring them inline:
 
-```rhai
-load_kconfig("./options.kconfig");
+```rust
+cfg.include_kconfig("./options.kconfig")?;
 ```
 
-The path is relative to the `gluon.rhai` file.
+The path is relative to the `gluon.rs` file. The `?` operator propagates errors
+to `main()`, which returns `Result<()>`.
 
 ### Supported Kconfig syntax
 

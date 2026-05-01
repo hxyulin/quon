@@ -5,9 +5,9 @@ From highest to lowest priority:
 
 1. **`GLUON_*` environment variables** (highest priority)
 2. **`.gluon-config` file** (per-developer overrides)
-3. **`gluon.rhai` defaults** (lowest priority)
+3. **`gluon.rs` defaults** (lowest priority)
 
-This design lets the `gluon.rhai` file declare sensible defaults, individual
+This design lets the `gluon.rs` file declare sensible defaults, individual
 developers can override them locally without modifying the checked-in config,
 and CI or one-off builds can override everything via environment variables.
 
@@ -51,22 +51,22 @@ modifying any files.
 
 ## Where presets fit in
 
-Presets (applied via `profile().preset()`) sit between the `gluon.rhai`
+Presets (applied via `profile().preset()`) sit between the `gluon.rs`
 defaults and the `.gluon-config` overrides. The full precedence order is:
 
 1. `GLUON_*` environment variables
 2. `.gluon-config` file
 3. Profile-level `.config(key, value)` calls
-4. Preset values (via `profile().preset()`)
-5. `gluon.rhai` `config_*().default_value()` declarations
+4. Preset values (via `cfg.profile().preset()`)
+5. `gluon.rs` `cfg.config_*().default_value()` declarations
 
 ## Precedence example
 
 Given these three layers:
 
-```rhai
-// gluon.rhai
-config_u32("LOG_LEVEL").default_value(3);
+```rust
+// gluon.rs
+cfg.config_u32("LOG_LEVEL").default_value(ConfigValue::U32(3));
 ```
 
 ```
@@ -83,4 +83,4 @@ The resolved value of `LOG_LEVEL` is **5** -- the environment variable wins.
 
 Remove the environment variable, and the value becomes **4** (from
 `.gluon-config`). Remove the `.gluon-config` entry too, and it falls back to
-**3** (the default declared in `gluon.rhai`).
+**3** (the default declared in `gluon.rs`).

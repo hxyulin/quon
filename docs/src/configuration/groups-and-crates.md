@@ -5,9 +5,11 @@ build model belongs to exactly one group.
 
 ## Groups
 
-```rhai
-group("kernel")
-    .target("x86_64-unknown-none")
+```rust
+let target = cfg.target("x86_64-unknown-none");
+
+cfg.group("kernel")
+    .target(target)
     .edition("2021")
     .is_project(true)
     .config(true)
@@ -19,7 +21,7 @@ group("kernel")
 
 | Method | Description |
 |---|---|
-| `.target(name)` | All crates in this group compile for this target |
+| `.target(handle)` | All crates in this group compile for this target (pass a target handle) |
 | `.edition("2021")` | Rust edition for all crates in the group |
 | `.is_project(true)` | Marks these as project crates (affects clippy linting) |
 | `.config(true)` | Link crates in this group with the generated config crate |
@@ -35,32 +37,36 @@ Crates are added to a group via `.add(name, path)`. The name is used as the
 crate identifier throughout the build model, and the path is relative to the
 project root. After `.add()`, you chain crate-specific methods:
 
-```rhai
-group("kernel")
-    .target("x86_64-unknown-none")
+```rust
+use gluon_config::CrateType;
+
+let target = cfg.target("x86_64-unknown-none");
+
+cfg.group("kernel")
+    .target(target)
     .edition("2021")
     .add("kernel", "crates/kernel")
-        .crate_type("bin")
+        .crate_type(CrateType::Bin)
         .root("src/main.rs")
         .linker_script("crates/kernel/kernel.ld")
         .dep("log", "log")
-        .features(["alloc"])
-        .cfg_flags(["my_flag"])
-        .rustc_flags(["-C", "link-arg=-Tkernel.ld"]);
+        .features(&["alloc"])
+        .cfg_flag("my_flag")
+        .rustc_flag("-C").rustc_flag("link-arg=-Tkernel.ld");
 ```
 
 ### Crate methods
 
 | Method | Description |
 |---|---|
-| `.crate_type(type)` | `"bin"`, `"lib"` (default), `"proc-macro"`, `"staticlib"` |
+| `.crate_type(type)` | `CrateType::Bin`, `CrateType::Lib` (default), `CrateType::ProcMacro`, `CrateType::Staticlib` |
 | `.root(path)` | Entry point file (default: `src/lib.rs` for lib, `src/main.rs` for bin) |
 | `.linker_script(path)` | Linker script path, relative to the project root |
 | `.dep(alias, crate_name)` | Add a dependency on another crate in the build model |
 | `.dev_dep(alias, crate_name)` | Dev dependency (test/bench only) |
-| `.features(list)` | Cargo-style feature flags |
-| `.cfg_flags(list)` | `--cfg` flags passed to rustc |
-| `.rustc_flags(list)` | Arbitrary additional rustc flags |
+| `.features(&[...])` | Cargo-style feature flags as a slice of string references |
+| `.cfg_flag(flag)` | `--cfg` flag passed to rustc (chainable, call multiple times) |
+| `.rustc_flag(flag)` | Arbitrary additional rustc flag (chainable, call multiple times) |
 | `.requires_config(bool)` | Link with the generated config crate (overrides group setting) |
 
 The `.dep()` method takes two arguments: the alias (used in `extern crate` or
@@ -73,12 +79,16 @@ For project crates, it must match the name passed to `.add()`.
 The `.artifact_env()` method enables cross-crate artifact embedding -- a common
 pattern in bootloader/kernel setups.
 
-```rhai
-group("uefi")
-    .target("x86_64-unknown-uefi")
+```rust
+use gluon_config::CrateType;
+
+let target = cfg.target("x86_64-unknown-uefi");
+
+cfg.group("uefi")
+    .target(target)
     .edition("2021")
     .add("bootloader", "crates/bootloader")
-        .crate_type("bin")
+        .crate_type(CrateType::Bin)
         .artifact_env("KERNEL_PATH", "kernel");
 ```
 
