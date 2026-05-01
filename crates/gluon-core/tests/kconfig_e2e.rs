@@ -17,8 +17,11 @@
 //! # Why this lives in `gluon-core/tests/`
 //!
 //! It's a pure in-process test of the parse → load → lower → resolve
-//! pipeline. It does not spawn the `gluon` binary and does not need
-//! rustc — there's no `#[ignore]` gate. The CLI integration tests in
+//! pipeline. It does not spawn the `gluon` binary. Stage 2: the
+//! fixture-driven tests now call `load_build_model`, which prefers
+//! `gluon.rs` and therefore requires rustc — they are `#[ignore]`-gated
+//! with a probe-or-skip guard. The inline-tempdir test (`rhai_depends_on_expr_honours_or_semantics`)
+//! keeps `evaluate` and stays ungated. The CLI integration tests in
 //! `gluon-cli/tests/integration.rs` are reserved for behavior that
 //! actually shells out to the binary; this test would be misleading
 //! there because nothing about the CLI is being exercised.
@@ -41,7 +44,12 @@ fn fixture_dir(name: &str) -> PathBuf {
 }
 
 #[test]
+#[ignore]
 fn kconfig_loader_round_trips_against_rhai_builder() {
+    if gluon_core::RustcInfo::probe().is_err() {
+        eprintln!("kconfig_loader_round_trips_against_rhai_builder: skipped — rustc probe failed");
+        return;
+    }
     let kconfig_dir = fixture_dir("kconfig-minimal");
     let rhai_dir = fixture_dir("kconfig-rhai-equiv");
     assert!(
@@ -53,12 +61,13 @@ fn kconfig_loader_round_trips_against_rhai_builder() {
         "fixture missing at {rhai_dir:?}"
     );
 
-    // Evaluate both scripts. The kconfig fixture's `load_kconfig()`
-    // call merges the .kconfig contents into the same model.
+    // Load both fixture models. Stage 2: load_build_model prefers .rs
+    // over .rhai — the kconfig fixture's load_kconfig() call is wired
+    // through the .rs harness.
     let kconfig_model =
-        gluon_core::evaluate(&kconfig_dir.join("gluon.rhai")).expect("evaluate kconfig fixture");
+        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     let rhai_model =
-        gluon_core::evaluate(&rhai_dir.join("gluon.rhai")).expect("evaluate rhai fixture");
+        gluon_core::load_build_model(&rhai_dir).expect("load rhai fixture");
 
     // Resolve both with the default profile and no overrides.
     let kconfig_resolved =
@@ -85,7 +94,12 @@ fn kconfig_loader_round_trips_against_rhai_builder() {
 }
 
 #[test]
+#[ignore]
 fn kconfig_loader_resolves_boolean_expression_form() {
+    if gluon_core::RustcInfo::probe().is_err() {
+        eprintln!("kconfig_loader_resolves_boolean_expression_form: skipped — rustc probe failed");
+        return;
+    }
     // FANCY_FEATURE is declared in extras.kconfig with
     //     depends_on = LOG_ENABLED && !DEBUG
     // The defaults are LOG_ENABLED=true, DEBUG=false → expression is
@@ -96,7 +110,7 @@ fn kconfig_loader_resolves_boolean_expression_form() {
     // (`LOG_ENABLED` AND `DEBUG`), wrongly disabling FANCY_FEATURE.
     let kconfig_dir = fixture_dir("kconfig-minimal");
     let model =
-        gluon_core::evaluate(&kconfig_dir.join("gluon.rhai")).expect("evaluate kconfig fixture");
+        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     let resolved =
         gluon_core::resolve_config(&model, "default", None, &kconfig_dir, None).expect("resolve");
     // Pin the intermediate values explicitly so that editing the
@@ -166,13 +180,18 @@ fn rhai_depends_on_expr_honours_or_semantics() {
 }
 
 #[test]
+#[ignore]
 fn kconfig_source_directive_pulls_extras_into_model() {
+    if gluon_core::RustcInfo::probe().is_err() {
+        eprintln!("kconfig_source_directive_pulls_extras_into_model: skipped — rustc probe failed");
+        return;
+    }
     // FANCY_FEATURE only exists in extras.kconfig, which options.kconfig
     // pulls in via `source "./extras.kconfig"`. If the loader didn't
     // recurse into source directives this option would be missing.
     let kconfig_dir = fixture_dir("kconfig-minimal");
     let model =
-        gluon_core::evaluate(&kconfig_dir.join("gluon.rhai")).expect("evaluate kconfig fixture");
+        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     assert!(
         model.config_options.contains_key("FANCY_FEATURE"),
         "source directive failed to pull in FANCY_FEATURE from extras.kconfig"
