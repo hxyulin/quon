@@ -91,6 +91,48 @@ impl<'cfg> CrateBuilder<'cfg> {
         });
         self
     }
+
+    /// Inject an environment variable at rustc-spawn time whose value
+    /// is the referenced crate's primary output path (absolute,
+    /// canonicalised). Automatically adds the referenced crate to
+    /// `artifact_deps` so the DAG enforces build ordering.
+    ///
+    /// Use case: a bootloader crate declares
+    /// `artifact_env("KERNEL_PATH", "kernel")` and its source does
+    /// `static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));` to
+    /// embed the kernel binary.
+    ///
+    /// Mirrors the engine's empty-name validation:
+    /// `"crate '{name}' artifact_env: environment variable name must not be empty"`
+    /// and `... referenced crate name must not be empty`.
+    pub fn artifact_env(mut self, key: &str, dep_name: &str) -> Self {
+        if self.state.is_duplicate() {
+            return self;
+        }
+        if key.is_empty() {
+            let name = self.state.name().to_string();
+            self.cfg.diagnostics.push(crate::error::ConfigError::new(format!(
+                "crate '{name}' artifact_env: environment variable name must not be empty"
+            )));
+            return self;
+        }
+        if dep_name.is_empty() {
+            let name = self.state.name().to_string();
+            self.cfg.diagnostics.push(crate::error::ConfigError::new(format!(
+                "crate '{name}' artifact_env: referenced crate name must not be empty"
+            )));
+            return self;
+        }
+        let key_s = key.to_string();
+        let dep_s = dep_name.to_string();
+        self.modify(|c| {
+            c.artifact_env.insert(key_s, dep_s.clone());
+            if !c.artifact_deps.iter().any(|d| d == &dep_s) {
+                c.artifact_deps.push(dep_s);
+            }
+        });
+        self
+    }
 }
 
 #[cfg(test)]
@@ -158,5 +200,42 @@ mod tests {
         let dep = k.deps.get("bitflags").unwrap();
         assert!(dep.optional);
         assert!(!dep.default_features);
+    }
+
+    #[test]
+    fn artifact_env_inserts_pair_and_auto_dep_edge() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("kernel_group").target(t).add("kernel", "crates/kernel");
+        cfg.group("bootloader_group")
+            .target(t)
+            .add("bootloader", "crates/bootloader")
+            .artifact_env("KERNEL_PATH", "kernel");
+
+        let h = cfg.raw.model.crates.lookup("bootloader").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        assert_eq!(
+            k.artifact_env.get("KERNEL_PATH").map(|s| s.as_str()),
+            Some("kernel"),
+        );
+        assert_eq!(k.artifact_deps, vec!["kernel".to_string()]);
+    }
+
+    #[test]
+    fn artifact_env_idempotent_on_duplicate_edge() {
+        // Calling artifact_env twice for the same dep_name should not
+        // duplicate the artifact_deps entry.
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("kernel_group").target(t).add("kernel", "crates/kernel");
+        cfg.group("bootloader_group")
+            .target(t)
+            .add("bootloader", "crates/bootloader")
+            .artifact_env("KERNEL_A", "kernel")
+            .artifact_env("KERNEL_B", "kernel");
+        let h = cfg.raw.model.crates.lookup("bootloader").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        assert_eq!(k.artifact_deps, vec!["kernel".to_string()]);
+        assert_eq!(k.artifact_env.len(), 2);
     }
 }
