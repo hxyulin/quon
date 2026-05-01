@@ -101,26 +101,56 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
     /// Set a numeric range constraint `[lo, hi]` (inclusive).
     ///
     /// Mirrors the engine's range validation:
-    /// `"config option '{name}': invalid range ({lo}..={hi})"`.
+    /// - type guard: `"config option '{name}': .range() only applies to numeric (U32/U64) options"`
+    /// - invalid range: `"config option '{name}': invalid range ({lo}..={hi})"`
     pub fn range(mut self, lo: u64, hi: u64) -> Self {
-        if lo > hi {
-            let name = self.state.name().to_string();
-            self.cfg.diagnostics.push(ConfigError::new(format!(
-                "config option '{name}': invalid range ({lo}..={hi})"
-            )));
-        } else {
-            let (l, h) = (lo, hi);
-            self.modify(|opt| opt.range = Some((l, h)));
+        if self.state.is_duplicate() {
+            return self;
+        }
+        let name = self.state.name().to_string();
+        let ty = self.cfg.raw.model.config_options.get(&name).map(|o| o.ty);
+        match ty {
+            Some(ConfigType::U32) | Some(ConfigType::U64) => {
+                if lo > hi {
+                    self.cfg.diagnostics.push(ConfigError::new(format!(
+                        "config option '{name}': invalid range ({lo}..={hi})"
+                    )));
+                } else {
+                    self.modify(|opt| opt.range = Some((lo, hi)));
+                }
+            }
+            Some(_) => {
+                self.cfg.diagnostics.push(ConfigError::new(format!(
+                    "config option '{name}': .range() only applies to numeric (U32/U64) options"
+                )));
+            }
+            None => {} // option not present; should not happen on Valid state
         }
         self
     }
 
-    /// Set the exhaustive list of valid variant names (only meaningful on
-    /// `Choice` options; the engine emits a diagnostic for other types, but
-    /// Stage 1 accepts it silently — the validator enforces this).
+    /// Set the exhaustive list of valid variant names.
+    ///
+    /// Mirrors the engine's type guard:
+    /// `"config option '{name}': .choices() only applies to Choice options"`
     pub fn choices(mut self, values: &[&str]) -> Self {
-        let v: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-        self.modify(|opt| opt.choices = Some(v));
+        if self.state.is_duplicate() {
+            return self;
+        }
+        let name = self.state.name().to_string();
+        let ty = self.cfg.raw.model.config_options.get(&name).map(|o| o.ty);
+        match ty {
+            Some(ConfigType::Choice) => {
+                let v: Vec<String> = values.iter().map(|s| s.to_string()).collect();
+                self.modify(|opt| opt.choices = Some(v));
+            }
+            Some(_) => {
+                self.cfg.diagnostics.push(ConfigError::new(format!(
+                    "config option '{name}': .choices() only applies to Choice options"
+                )));
+            }
+            None => {} // option not present; should not happen on Valid state
+        }
         self
     }
 
@@ -271,5 +301,27 @@ mod tests {
             "got: {}",
             cfg.diagnostics[0].message,
         );
+    }
+
+    #[test]
+    fn range_on_non_numeric_type_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.config_bool("CONFIG_FOO").range(0, 100);
+        assert!(cfg.diagnostics.iter().any(|d| {
+            d.message.contains("range") && d.message.contains("CONFIG_FOO")
+        }));
+        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        assert!(opt.range.is_none(), "range must NOT be set on Bool option");
+    }
+
+    #[test]
+    fn choices_on_non_choice_type_pushes_diagnostic() {
+        let mut cfg = Config::new();
+        cfg.config_str("CONFIG_NAME").choices(&["a", "b"]);
+        assert!(cfg.diagnostics.iter().any(|d| {
+            d.message.contains("choices") && d.message.contains("CONFIG_NAME")
+        }));
+        let opt = cfg.raw.model.config_options.get("CONFIG_NAME").unwrap();
+        assert!(opt.choices.is_none(), "choices must NOT be set on Str option");
     }
 }
