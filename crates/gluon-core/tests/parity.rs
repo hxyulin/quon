@@ -279,3 +279,19 @@ fn parity_kconfig_rhai_equiv() {
 fn parity_multi_profile() {
     assert_fixture_parity("multi-profile");
 }
+
+#[test]
+#[ignore]
+fn parity_vendor_minimal() {
+    assert_fixture_parity("vendor-minimal");
+}
+
+#[test]
+#[ignore]
+fn parity_vendor_minimal_path_only() {
+    assert_fixture_parity_named(
+        "vendor-minimal",
+        "gluon.path-only.rhai",
+        "gluon.path-only.rs",
+    );
+}
