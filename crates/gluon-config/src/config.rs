@@ -472,6 +472,36 @@ impl Config {
     // Kconfig include
     // -----------------------------------------------------------------------
 
+    /// Declare an external dependency. Returns a chainable
+    /// [`DependencyBuilder`] that selects a source
+    /// (`.version`/`.path`/`.git`) and configures features/flags.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"dependency \"{name}\" is defined more than once"`.
+    pub fn dependency(&mut self, name: &str) -> crate::builders::DependencyBuilder<'_> {
+        let (handle, inserted) = self.raw.model.external_deps.insert(
+            name.into(),
+            gluon_model::ExternalDepDef {
+                name: name.into(),
+                source: gluon_model::DepSource::CratesIo { version: String::new() },
+                features: Vec::new(),
+                default_features: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                span: None,
+            },
+        );
+        let state = if inserted {
+            crate::builders::BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            self.diagnostics.push(crate::error::ConfigError::new(format!(
+                "dependency \"{name}\" is defined more than once"
+            )));
+            crate::builders::BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        crate::builders::DependencyBuilder { cfg: self, state }
+    }
+
     /// Record a `.kconfig` file path for host-side parsing.
     ///
     /// The file is **not parsed here** — `gluon-config` cannot depend on
