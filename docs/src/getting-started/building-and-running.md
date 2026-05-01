@@ -10,7 +10,7 @@ gluon build
 ```
 
 Compiles every crate in your project. Gluon drives `rustc` directly for each
-crate, assembling per-crate flags from your `gluon.rhai` configuration. Custom
+crate, assembling per-crate flags from your `gluon.rs` configuration. Custom
 sysroots (`core`, `alloc`, `compiler_builtins`) are compiled automatically for
 each registered target triple.
 
@@ -23,7 +23,7 @@ gluon run
 ```
 
 Builds the project (if needed) and launches QEMU using the configuration from
-the `qemu()` block in your `gluon.rhai`. This command requires a `qemu()`
+the `qemu()` block in your `gluon.rs`. This command requires a `qemu()`
 declaration in your configuration file.
 
 To pass extra arguments directly to QEMU, place them after `--`:
@@ -111,10 +111,10 @@ gluon build -t aarch64-unknown-none
 
 ## Setting a default profile
 
-Rather than passing `-p` every time, you can set a default in your `gluon.rhai`:
+Rather than passing `-p` every time, you can set a default in your `gluon.rs`:
 
-```rhai
-project("my-kernel", "0.1.0")
+```rust
+cfg.project("my-kernel", "0.1.0")
     .default_profile("dev");
 ```
 

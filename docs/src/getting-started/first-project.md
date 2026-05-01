@@ -1,45 +1,53 @@
 # Your First Project
 
 This page walks through creating a minimal bare-metal kernel project with
-Gluon. By the end you will have a `gluon.rhai` configuration file and a
+Gluon. By the end you will have a `gluon.rs` configuration file and a
 directory layout ready to build.
 
 ## Directory layout
 
 ```
 my-kernel/
-  gluon.rhai
+  gluon.rs
   crates/kernel/
     src/main.rs
     kernel.ld
 ```
 
-`gluon.rhai` is the single configuration file that declares your entire build.
+`gluon.rs` is the single configuration file that declares your entire build.
 It lives at the root of your project.
 
-## Writing gluon.rhai
+## Writing gluon.rs
 
 A minimal configuration needs four declarations: a project, a target, a
 profile, and a group containing at least one crate.
 
-```rhai
-project("my-kernel", "0.1.0");
+```rust
+use gluon_config::{Config, CrateType, Result};
 
-target("x86_64-unknown-none");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-profile("dev")
-    .target("x86_64-unknown-none")
-    .opt_level(0)
-    .debug_info(true)
-    .boot_binary("kernel");
+    cfg.project("my-kernel", "0.1.0");
 
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld");
+    let target = cfg.target("x86_64-unknown-none");
+
+    cfg.profile("dev")
+        .target(target)
+        .opt_level(0)
+        .debug_info(true)
+        .boot_binary("kernel");
+
+    cfg.group("kernel")
+        .target(target)
+        .edition("2021")
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs")
+            .linker_script("crates/kernel/kernel.ld");
+
+    cfg.emit()
+}
 ```
 
 ### What each declaration does
@@ -67,8 +75,8 @@ group("kernel")
 
 If you want to launch your kernel in QEMU with `gluon run`, add a QEMU block:
 
-```rhai
-qemu("qemu-system-x86_64")
+```rust
+cfg.qemu("qemu-system-x86_64")
     .machine("q35")
     .memory(128)
     .cores(1)
@@ -84,6 +92,6 @@ qemu("qemu-system-x86_64")
 
 ## Next steps
 
-With your `gluon.rhai` and source files in place, head to
+With your `gluon.rs` and source files in place, head to
 [Building and Running](./building-and-running.md) to compile and launch your
 kernel.
