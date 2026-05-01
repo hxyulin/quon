@@ -133,6 +133,13 @@ fn require_rustc_or_skip(test_name: &str) -> Option<()> {
 fn gluon_build_rhai_typo_diagnostic() {
     let (_tmp, fixture) = setup_fixture();
 
+    // Stage 2: the minimal fixture now ships both gluon.rs and gluon.rhai.
+    // load_build_model prefers .rs, so corrupting .rhai alone would be
+    // silently bypassed — the CLI would pick .rs and succeed. Delete .rs
+    // first so the only remaining entry point is the broken .rhai.
+    // Stage 3 will delete this test entirely (Rhai goes away).
+    let _ = fs::remove_file(fixture.join("gluon.rs"));
+
     // Clobber the script with something Rhai's parser will reject.
     // A stray unbalanced `}` at top level is a hard parse error.
     let broken = r#"project("minimal", "0.1.0");
