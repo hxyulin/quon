@@ -5,6 +5,16 @@
 //! `gluon-core/src/engine/intern.rs` (Rhai path) and lives here to keep
 //! gluon-config's emit → gluon-core's consume boundary serde-only.
 //! Stage 3 deletes the Rhai engine and this becomes the sole intern.
+//!
+//! # Borrow discipline
+//!
+//! Rust's borrow checker won't let us mutate an arena entry while holding
+//! a borrow on the same arena (`model.profiles.get_mut(h).inherits_handle =
+//! model.profiles.lookup(name)` is two simultaneous borrows). Each helper
+//! therefore runs in two passes: the first collects `(handle, resolved)`
+//! tuples into a scratch `Vec`, the second walks that `Vec` and performs
+//! the mutations. The scratch vectors are short-lived and bounded by the
+//! size of the arena being walked.
 
 use crate::build_model::{
     BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, GroupDef, PipelineDef, ProfileDef,
