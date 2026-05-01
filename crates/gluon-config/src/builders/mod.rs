@@ -10,6 +10,7 @@ pub mod image;
 pub mod partition;
 pub mod preset;
 pub mod profile;
+pub mod project;
 pub mod qemu;
 pub mod rule;
 pub use bootloader::BootloaderBuilder;
@@ -22,6 +23,7 @@ pub use image::ImageBuilder;
 pub use partition::PartitionBuilder;
 pub use preset::PresetBuilder;
 pub use profile::ProfileBuilder;
+pub use project::ProjectBuilder;
 pub use qemu::QemuBuilder;
 pub use rule::RuleBuilder;
 

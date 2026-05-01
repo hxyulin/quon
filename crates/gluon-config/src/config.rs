@@ -5,7 +5,7 @@ use gluon_model::{
 };
 use crate::builders::{
     BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
-    GroupBuilder, ImageBuilder, PresetBuilder, ProfileBuilder, QemuBuilder, RuleBuilder,
+    GroupBuilder, ImageBuilder, PresetBuilder, ProfileBuilder, ProjectBuilder, QemuBuilder, RuleBuilder,
 };
 use crate::error::{ConfigError, Result};
 
@@ -48,16 +48,20 @@ impl Config {
         Ok(())
     }
 
-    pub fn project(&mut self, name: &str, version: &str) -> &mut Self {
-        // Last call wins. A `gluon.rs` declares exactly one project; duplicate
-        // detection here would just complicate the legitimate "I overwrote it"
-        // pattern in test fixtures. The engine path has the same semantic.
+    pub fn project(&mut self, name: &str, version: &str) -> ProjectBuilder<'_> {
+        // Last call wins — no duplicate detection. A `gluon.rs` declares
+        // exactly one project; duplicate detection here would just
+        // complicate the legitimate "I overwrote it" pattern in test
+        // fixtures. The engine path has the same semantic.
         self.raw.model.project = Some(ProjectDef {
             name: name.into(),
             version: version.into(),
             ..Default::default()
         });
-        self
+        ProjectBuilder {
+            cfg: self,
+            state: BuilderState::Valid { state: (), name: name.into(), span: None },
+        }
     }
 
     /// Insert a builtin rustc target triple. If the same name was already
