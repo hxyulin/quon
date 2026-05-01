@@ -1,5 +1,5 @@
-use gluon_model::{BuildStepDef, EspDef, GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef};
-use crate::builders::{BootloaderBuilder, BuildStepBuilder, BuilderState, EspBuilder, GroupBuilder, ProfileBuilder, QemuBuilder, RuleBuilder};
+use gluon_model::{BuildStepDef, EspDef, GroupDef, Handle, ImageDef, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef};
+use crate::builders::{BootloaderBuilder, BuildStepBuilder, BuilderState, EspBuilder, GroupBuilder, ImageBuilder, ProfileBuilder, QemuBuilder, RuleBuilder};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
@@ -119,6 +119,36 @@ impl Config {
             BuilderState::Duplicate { name: name.into(), span: None }
         };
         GroupBuilder { cfg: self, state }
+    }
+
+    /// Declare a disk image. Returns a chainable [`ImageBuilder`] that
+    /// populates the new [`ImageDef`] and can spawn [`PartitionBuilder`]s
+    /// via [`ImageBuilder::partition`].
+    ///
+    /// If an image with this name was already declared, the builder enters
+    /// the `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"image(\"{name}\") is defined more than once"`.
+    pub fn image(&mut self, name: &str) -> ImageBuilder<'_> {
+        let (handle, inserted) = self.raw.model.images.insert(
+            name.into(),
+            ImageDef { name: name.into(), ..Default::default() },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording so the user sees
+            // the same message regardless of whether they use the DSL or the
+            // Rust config API.
+            self.diagnostics.push(ConfigError::new(format!(
+                "image(\"{name}\") is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        ImageBuilder { cfg: self, state }
     }
 
     /// Declare a build profile. Returns a chainable [`ProfileBuilder`] that
