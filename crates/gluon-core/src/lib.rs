@@ -308,13 +308,48 @@ pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
 /// The stub is only written if the file does not already exist; the
 /// real generated content is written by [`build`] on the next run and
 /// will overwrite the stub idempotently.
+///
+/// When `<project_root>/gluon.rs` exists, the emitted JSON also includes
+/// a crate entry for it (pointing at the gluon-config source crate so
+/// rust-analyzer resolves its types). If the workspace directory cannot
+/// be resolved (e.g. `GLUON_CONFIG_WORKSPACE_DIR` is stale after an
+/// install), the gluon.rs entry is silently omitted — the user gets a
+/// degraded but functional rust-analyzer view for the kernel sources.
 pub fn configure(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
     output: Option<&Path>,
 ) -> Result<()> {
-    let json = analyzer::generate_rust_project_json(model, resolved, &ctx.layout, &ctx.rustc_info);
+    // Detect whether the user has a gluon.rs and, if so, resolve the
+    // gluon-config lib.rs path so rust-analyzer can index it as a dep.
+    // This is a pure path resolution — no cargo build is triggered here.
+    let gluon_rs_path = resolved.project_root.join("gluon.rs");
+    let (opt_rs, opt_lib_rs) = if gluon_rs_path.is_file() {
+        match script_runner::rlib::workspace_dir() {
+            Ok(workspace) => {
+                let lib_rs = workspace.join("crates/gluon-config/src/lib.rs");
+                (Some(gluon_rs_path), Some(lib_rs))
+            }
+            Err(_) => {
+                // Workspace path unavailable (e.g. post-install without a
+                // source checkout). Emit JSON without the gluon.rs entry
+                // rather than failing configure entirely.
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+
+    let json = analyzer::generate_rust_project_json_with_script(
+        model,
+        resolved,
+        &ctx.layout,
+        &ctx.rustc_info,
+        opt_rs.as_deref(),
+        opt_lib_rs.as_deref(),
+    );
 
     let default_path;
     let output_path = match output {

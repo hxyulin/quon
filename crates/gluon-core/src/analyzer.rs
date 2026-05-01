@@ -29,6 +29,7 @@ use crate::compile::{BuildLayout, RustcInfo};
 use gluon_model::{BuildModel, CrateDef, CrateType, Handle, ResolvedConfig};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Generate a `rust-project.json` value for the given build.
 ///
@@ -244,6 +245,90 @@ pub fn generate_rust_project_json(
     }
     top.insert("crates".to_string(), Value::Array(crates_array));
     Value::Object(top)
+}
+
+/// Like [`generate_rust_project_json`] but also emits a crate entry for
+/// `gluon.rs` (the user's build script) when one is present, so
+/// rust-analyzer indexes the build script alongside the kernel sources.
+///
+/// `gluon_rs_path` is the absolute path to the user's `gluon.rs`.
+/// `gluon_config_lib_rs` is the path to the bundled `gluon-config` crate's
+/// `lib.rs` source file so rust-analyzer can index it as a normal workspace
+/// dep (rather than pointing at a `.rlib`, which the schema does not
+/// support). Both paths come from the gluon workspace resolved via
+/// `script_runner::rlib::workspace_dir`.
+///
+/// When either argument is `None` the output is identical to
+/// [`generate_rust_project_json`].
+pub fn generate_rust_project_json_with_script(
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    layout: &BuildLayout,
+    rustc_info: &RustcInfo,
+    gluon_rs_path: Option<&Path>,
+    gluon_config_lib_rs: Option<&Path>,
+) -> Value {
+    // Start with the existing emitter.
+    let mut json = generate_rust_project_json(model, resolved, layout, rustc_info);
+
+    // If no gluon.rs is present, return unchanged.
+    let (Some(rs_path), Some(lib_rs)) = (gluon_rs_path, gluon_config_lib_rs) else {
+        return json;
+    };
+
+    let crates = json["crates"]
+        .as_array_mut()
+        .expect("generate_rust_project_json always emits a crates array");
+
+    // Append the gluon-config source crate so rust-analyzer can resolve
+    // its types when indexing the user's gluon.rs. We mark it as a
+    // non-workspace member (it belongs to the gluon toolchain, not the
+    // user's project). The `source` block's `include_dirs` points at the
+    // crate's own source directory so rust-analyzer scans its modules.
+    let config_lib_rs_dir = lib_rs
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let config_crate_index = crates.len();
+    crates.push(json!({
+        "root_module": lib_rs.to_string_lossy(),
+        "edition": "2024",
+        "deps": [],
+        "cfg": [],
+        "env": {},
+        "is_workspace_member": false,
+        "is_proc_macro": false,
+        "source": {
+            "include_dirs": [config_lib_rs_dir],
+            "exclude_dirs": [],
+        },
+    }));
+
+    // Append the gluon.rs build-script crate. Its only dep is the
+    // gluon-config crate entry we just appended. The `source` block's
+    // `include_dirs` covers the project root so rust-analyzer discovers
+    // any modules the script might declare.
+    let rs_parent = rs_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    crates.push(json!({
+        "root_module": rs_path.to_string_lossy(),
+        "edition": "2024",
+        "deps": [
+            { "name": "gluon_config", "crate": config_crate_index }
+        ],
+        "cfg": [],
+        "env": {},
+        "is_workspace_member": true,
+        "is_proc_macro": false,
+        "source": {
+            "include_dirs": [rs_parent],
+            "exclude_dirs": [layout.root().to_string_lossy()],
+        },
+    }));
+
+    json
 }
 
 #[cfg(test)]
@@ -808,6 +893,91 @@ mod tests {
             kernel_entry["env"].as_object().unwrap().is_empty(),
             "kernel has no artifact_env so its env must be empty, got: {}",
             kernel_entry["env"]
+        );
+    }
+
+    #[test]
+    fn rust_project_json_includes_gluon_rs_entry_when_present() {
+        let (model, th) = make_fixture();
+        let resolved = make_resolved(th, vec![]);
+        let info = Arc::new(fake_rustc_info(Some(PathBuf::from("/rust-src"))));
+
+        let gluon_rs = PathBuf::from("/tmp/proj/gluon.rs");
+        let lib_rs = PathBuf::from("/some/workspace/crates/gluon-config/src/lib.rs");
+
+        let json = generate_rust_project_json_with_script(
+            &model,
+            &resolved,
+            &layout(),
+            &info,
+            Some(&gluon_rs),
+            Some(&lib_rs),
+        );
+
+        let crates = json["crates"].as_array().unwrap();
+
+        // The gluon.rs entry must be present.
+        let script_entry = crates
+            .iter()
+            .find(|c| {
+                c["root_module"]
+                    .as_str()
+                    .map(|s| s.ends_with("gluon.rs"))
+                    .unwrap_or(false)
+            })
+            .expect("gluon.rs crate entry must be present");
+
+        let deps = script_entry["deps"].as_array().unwrap();
+        assert!(
+            deps.iter().any(|d| d["name"] == "gluon_config"),
+            "gluon.rs entry must depend on gluon_config: {script_entry:?}"
+        );
+
+        // The dep's "crate" index must point at an entry whose root_module
+        // is the gluon-config lib.rs.
+        let dep_idx = deps
+            .iter()
+            .find(|d| d["name"] == "gluon_config")
+            .and_then(|d| d["crate"].as_u64())
+            .expect("gluon_config dep has crate index");
+        let dep_entry = &crates[dep_idx as usize];
+        assert!(
+            dep_entry["root_module"]
+                .as_str()
+                .map(|s| s.contains("gluon-config"))
+                .unwrap_or(false),
+            "dep crate root_module must point at gluon-config lib.rs: {dep_entry:?}"
+        );
+
+        // The gluon-config entry must not be a workspace member.
+        assert_eq!(
+            dep_entry["is_workspace_member"], false,
+            "gluon-config phantom entry must not be a workspace member"
+        );
+
+        // The gluon.rs entry must be a workspace member.
+        assert_eq!(
+            script_entry["is_workspace_member"], true,
+            "gluon.rs entry must be a workspace member"
+        );
+    }
+
+    #[test]
+    fn rust_project_json_omits_gluon_rs_entry_when_absent() {
+        // Existing behaviour preserved — generate_rust_project_json (no
+        // script args) and generate_rust_project_json_with_script(None, None)
+        // produce identical output.
+        let (model, th) = make_fixture();
+        let resolved = make_resolved(th, vec![]);
+        let info = Arc::new(fake_rustc_info(Some(PathBuf::from("/rust-src"))));
+
+        let v1 = generate_rust_project_json(&model, &resolved, &layout(), &info);
+        let v2 = generate_rust_project_json_with_script(
+            &model, &resolved, &layout(), &info, None, None,
+        );
+        assert_eq!(
+            v1, v2,
+            "with_script(None, None) must produce output identical to the no-script variant"
         );
     }
 }

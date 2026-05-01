@@ -101,7 +101,10 @@ pub fn ensure_gluon_config_rlib(build_dir: &Path, rustc_info: &RustcInfo) -> Res
 ///
 /// Both must point at a directory whose `crates/gluon-config/Cargo.toml`
 /// exists; otherwise we fail loudly so the user knows to set the env var.
-fn workspace_dir() -> Result<PathBuf> {
+///
+/// Exposed as `pub` so `configure` (Stage 1 shim) can compute the
+/// gluon-config `lib.rs` path without triggering a cargo build.
+pub fn workspace_dir() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("GLUON_CONFIG_SOURCE_DIR") {
         let p = PathBuf::from(p);
         if !p.join("crates/gluon-config/Cargo.toml").is_file() {
