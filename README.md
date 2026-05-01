@@ -75,6 +75,9 @@ qemu("qemu-system-x86_64")
     .serial_stdio();
 ```
 
+A `gluon.rs` build script (Stage 1+) provides the same configuration
+surface in typed Rust; see [the gluon.rs guide](docs/src/configuration/gluon-rs.md).
+
 **Build and run:**
 
 ```sh

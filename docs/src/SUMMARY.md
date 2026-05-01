@@ -11,6 +11,7 @@
 # Configuration Guide
 
 - [The gluon.rhai File](./configuration/gluon-rhai.md)
+- [The gluon.rs Build Script](./configuration/gluon-rs.md)
 - [Projects, Targets, and Profiles](./configuration/projects-targets-profiles.md)
 - [Groups and Crates](./configuration/groups-and-crates.md)
 - [Config Options and Kconfig](./configuration/config-options.md)
