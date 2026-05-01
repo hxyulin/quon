@@ -117,7 +117,22 @@ pub fn build_qemu_command(
             push_pflash(&mut args, &ovmf.code, true);
             push_pflash(&mut args, &ovmf.vars, false);
 
-            if let Some(esp) = &resolved.esp {
+            // Hybrid disk: a single raw drive that contains its own ESP
+            // partition. OVMF probes attached drives for an EFI System
+            // Partition automatically, so a generic `-drive` (no
+            // `if=ide`) suffices. `disk` takes precedence over `esp` —
+            // the user has named the disk explicitly, so any
+            // auto-wired ESP from `model.esps` is intentionally
+            // bypassed.
+            if let Some(disk) = &resolved.disk {
+                if !skip_path_checks && !disk.exists() {
+                    return Err(Error::EspMissing { path: disk.clone() });
+                }
+                args.push("-drive".into());
+                let mut spec = OsString::from("format=raw,file=");
+                spec.push(disk.as_os_str());
+                args.push(spec);
+            } else if let Some(esp) = &resolved.esp {
                 // `skip_path_checks` is set by the runner when it's
                 // in `--dry-run` or `--no-build` mode. In those modes
                 // the ESP path may legitimately not exist yet (dry-run
@@ -141,6 +156,57 @@ pub fn build_qemu_command(
                         args.push("-drive".into());
                         let mut spec = OsString::from("format=raw,file=");
                         spec.push(img.as_os_str());
+                        args.push(spec);
+                    }
+                }
+            }
+        }
+        BootMode::Bios => {
+            // No `-kernel` (SeaBIOS won't use it), no pflash (no OVMF).
+            // QEMU's default firmware for `pc`/`q35` is SeaBIOS; we
+            // deliberately do NOT emit `-bios` so users on machines
+            // with a different default (or a non-x86 host) aren't
+            // forced into a path that doesn't apply.
+            //
+            // The boot disk comes from `resolved.disk` first (the
+            // mode-agnostic surface). Falls back to `resolved.esp` for
+            // back-compat — the BIOS-mode `EspSource::Image` path
+            // predates `DiskSource` and is kept to avoid breaking
+            // existing configs.
+            //
+            // VVFAT (`EspSource::Dir`) is rejected: the VVFAT driver
+            // synthesises a FAT filesystem at the partition level and
+            // doesn't expose an MBR / boot sector, so SeaBIOS can't
+            // find anything to boot. The user must build a real disk
+            // image via image() or pre-supply one via disk_image().
+            if let Some(disk) = &resolved.disk {
+                if !skip_path_checks && !disk.exists() {
+                    return Err(Error::EspMissing { path: disk.clone() });
+                }
+                args.push("-drive".into());
+                let mut spec = OsString::from("format=raw,file=");
+                spec.push(disk.as_os_str());
+                spec.push(",if=ide,index=0");
+                args.push(spec);
+            } else if let Some(esp) = &resolved.esp {
+                match esp {
+                    EspSource::Dir(_) => {
+                        return Err(Error::Config(
+                            "qemu.boot_mode = \"bios\" with esp_dir(...) is not supported: \
+                             QEMU's VVFAT driver does not expose an MBR/boot-sector for \
+                             SeaBIOS to read. Use esp_image(<raw disk path>) or build a \
+                             hybrid disk via image()."
+                                .into(),
+                        ));
+                    }
+                    EspSource::Image(img) => {
+                        if !skip_path_checks && !img.exists() {
+                            return Err(Error::EspMissing { path: img.clone() });
+                        }
+                        args.push("-drive".into());
+                        let mut spec = OsString::from("format=raw,file=");
+                        spec.push(img.as_os_str());
+                        spec.push(",if=ide,index=0");
                         args.push(spec);
                     }
                 }
@@ -218,6 +284,7 @@ fn stub_resolved() -> ResolvedQemu {
         ovmf_code: None,
         ovmf_vars: None,
         esp: None,
+        disk: None,
         test_exit_port: 0xf4,
         test_success_code: 0x10,
         timeout: None,
@@ -649,6 +716,158 @@ mod tests {
         assert!(
             pos_device < pos_d,
             "managed -device must precede user extras: {a:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // BIOS-mode tests
+    // -----------------------------------------------------------------
+    //
+    // BIOS mode is the "let SeaBIOS run from a raw disk" path. Three
+    // invariants matter:
+    //
+    //   1. No `-kernel` (would short-circuit BIOS firmware).
+    //   2. No pflash (no OVMF — that's the UEFI path).
+    //   3. The raw disk attaches as `if=ide,index=0` so SeaBIOS
+    //      finds it as the first boot device.
+    //
+    // VVFAT (`EspSource::Dir`) is rejected because the synthesised
+    // FAT volume has no MBR for SeaBIOS to read.
+    #[test]
+    fn bios_mode_no_kernel_no_pflash() {
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Bios;
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/ignored"),
+            BootMode::Bios,
+            None,
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        assert!(
+            !a.iter().any(|s| s == "-kernel"),
+            "BIOS mode must not emit -kernel, got: {a:?}"
+        );
+        assert!(
+            !a.iter().any(|s| s.contains("pflash")),
+            "BIOS mode must not emit pflash, got: {a:?}"
+        );
+    }
+
+    #[test]
+    fn bios_mode_with_image_disk_attaches_as_ide0() {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("disk.img");
+        std::fs::write(&img, b"stub").unwrap();
+
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Bios;
+        r.esp = Some(EspSource::Image(img.clone()));
+        let inv = build_qemu_command(&r, Path::new("/k"), BootMode::Bios, None, &[], false, false)
+            .unwrap();
+        let a = args_to_strings(&inv.args);
+        let expected = format!("format=raw,file={},if=ide,index=0", img.display());
+        assert!(
+            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
+            "expected raw IDE drive for {}, got {a:?}",
+            img.display()
+        );
+    }
+
+    #[test]
+    fn bios_mode_rejects_esp_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("esp");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Bios;
+        r.esp = Some(EspSource::Dir(dir));
+        let err = build_qemu_command(&r, Path::new("/k"), BootMode::Bios, None, &[], false, false)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Config(ref msg) if msg.contains("VVFAT")),
+            "expected Config error mentioning VVFAT, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bios_mode_with_disk_takes_precedence_over_esp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let disk = tmp.path().join("hybrid.img");
+        std::fs::write(&disk, b"stub").unwrap();
+        let esp_img = tmp.path().join("legacy.img");
+        std::fs::write(&esp_img, b"legacy").unwrap();
+
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Bios;
+        r.disk = Some(disk.clone());
+        r.esp = Some(EspSource::Image(esp_img.clone()));
+        let inv = build_qemu_command(&r, Path::new("/k"), BootMode::Bios, None, &[], false, false)
+            .unwrap();
+        let a = args_to_strings(&inv.args);
+        let expected = format!("format=raw,file={},if=ide,index=0", disk.display());
+        assert!(
+            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
+            "expected disk to take precedence, got: {a:?}"
+        );
+        // Legacy esp_image must NOT also be attached.
+        let legacy = format!("format=raw,file={}", esp_img.display());
+        assert!(
+            !a.iter().any(|s| s.as_str() == legacy.as_str()),
+            "legacy esp must not appear when disk is set, got: {a:?}"
+        );
+    }
+
+    #[test]
+    fn uefi_mode_with_disk_attaches_raw_drive_no_ide_bus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let disk = tmp.path().join("hybrid.img");
+        std::fs::write(&disk, b"stub").unwrap();
+
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Uefi;
+        r.disk = Some(disk.clone());
+        let ovmf = ResolvedOvmf {
+            code: PathBuf::from("/a"),
+            vars: PathBuf::from("/b"),
+        };
+        let inv = build_qemu_command(
+            &r,
+            Path::new("/k"),
+            BootMode::Uefi,
+            Some(&ovmf),
+            &[],
+            false,
+            false,
+        )
+        .unwrap();
+        let a = args_to_strings(&inv.args);
+        // UEFI hybrid: a plain raw drive (no `if=ide` — OVMF probes any
+        // attached disk for an EFI System Partition).
+        let expected = format!("format=raw,file={}", disk.display());
+        assert!(
+            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
+            "expected raw UEFI drive without ide bus pin, got: {a:?}"
+        );
+    }
+
+    #[test]
+    fn bios_mode_without_esp_emits_no_drive() {
+        let mut r = stub_resolved();
+        r.boot_mode = BootMode::Bios;
+        let inv = build_qemu_command(&r, Path::new("/k"), BootMode::Bios, None, &[], false, false)
+            .unwrap();
+        let a = args_to_strings(&inv.args);
+        // No -drive flags should be present at all when no esp is set.
+        // The user is expected to supply a drive via extra_args.
+        assert!(
+            !a.iter().any(|s| s == "-drive"),
+            "BIOS mode without esp must not emit a managed -drive, got: {a:?}"
         );
     }
 }

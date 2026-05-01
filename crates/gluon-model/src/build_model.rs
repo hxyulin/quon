@@ -104,16 +104,38 @@ pub enum CrateType {
     ProcMacro,
     #[serde(rename = "staticlib")]
     StaticLib,
+    /// Flat-binary executable. From rustc's perspective this is still
+    /// `--crate-type=bin`; gluon additionally injects
+    /// `-C link-arg=--oformat=binary` so rust-lld writes a raw image
+    /// instead of an ELF, and uses a `.bin` artifact extension so
+    /// downstream consumers (`image()`, `${artifact:foo}`) get a stable
+    /// path. Linker scripts are permitted (and usually required, since
+    /// flat binaries have no PT_LOAD-driven layout to fall back on).
+    #[serde(rename = "raw-binary")]
+    RawBinary,
 }
 
 impl CrateType {
+    /// String passed to rustc's `--crate-type=` flag. `RawBinary` maps
+    /// to `bin` because rustc has no native concept of flat-binary
+    /// output; the difference is the linker `--oformat=binary` flag,
+    /// which is appended at command-assembly time, not communicated
+    /// via crate-type.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Lib => "lib",
             Self::Bin => "bin",
             Self::ProcMacro => "proc-macro",
             Self::StaticLib => "staticlib",
+            Self::RawBinary => "bin",
         }
+    }
+
+    /// True for crate types that produce an executable (ELF or flat).
+    /// Used by the rustc command builder to decide whether linker
+    /// scripts and binary-output conventions apply.
+    pub fn is_executable(&self) -> bool {
+        matches!(self, Self::Bin | Self::RawBinary)
     }
 }
 
@@ -140,6 +162,13 @@ pub struct ProfileDef {
     pub qemu_memory: Option<u32>,
     pub qemu_cores: Option<u32>,
     pub qemu_extra_args: Option<Vec<String>>,
+    /// Profile-level boot-mode override. Wins over the project-level
+    /// `qemu().boot_mode(...)` and is itself overridden by CLI flags
+    /// (`--uefi` / `--direct` / `--bios`). Lets a single config define
+    /// `dev-bios` and `dev-uefi` profiles that share crates and the
+    /// disk image while diverging only on firmware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu_boot_mode: Option<BootMode>,
     pub test_timeout: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
@@ -161,6 +190,23 @@ pub struct GroupDef {
     pub is_project: bool,
     /// Whether crates in this group should be linked with the config crate.
     pub config: bool,
+    /// Skip sysroot and config-crate wiring for crates in this group.
+    ///
+    /// Set this when the group's target cannot satisfy a `core`/`alloc`/
+    /// `compiler_builtins` build (e.g. 16-bit real-mode boot sectors,
+    /// or any custom target whose data layout / atomic width disallows
+    /// the standard library's intrinsics). Crates in a `no_sysroot`
+    /// group are responsible for declaring `#![no_core]` (or an
+    /// equivalent restricted attribute) themselves; they must not
+    /// depend on `core`, `alloc`, or the auto-injected config crate.
+    ///
+    /// Caveat: the profile's running-target sysroot is still always
+    /// built (the config crate compiles against it). If the profile
+    /// target itself falls in a `no_sysroot` group, the build will
+    /// fail trying to compile the config crate — pick a different
+    /// target for the profile (kernel target, not boot-sector target).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sysroot: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
 }
@@ -176,6 +222,7 @@ impl Default for GroupDef {
             shared_flags: Vec::new(),
             is_project: true,
             config: false,
+            no_sysroot: false,
             span: None,
         }
     }
@@ -387,22 +434,50 @@ pub struct BootloaderDef {
 }
 
 /// Disk image configuration. Describes how to assemble a bootable image
-/// from build artifacts. The actual image creation is a future scheduler
-/// node; this type defines the model so the Rhai surface and data types
-/// are ready before consumption code lands.
+/// from build artifacts.
+///
+/// Two shapes:
+///
+/// - **Flat-FS image** (no `partition_table`, no `partitions`):
+///   `entries` are placed directly into a single filesystem (e.g. a
+///   FAT32 ESP for `qemu -drive file=,format=raw + OVMF`). This is the
+///   Phase 2 surface and remains the default.
+/// - **Partitioned hybrid disk** (`partition_table = Some(Mbr)`):
+///   `raw_writes` place bytes at LBA offsets (boot sector code, stage
+///   blobs), and each `partitions` entry describes a sub-region with
+///   its own filesystem. `entries` must be empty in this mode — file
+///   placement happens *inside* a [`PartitionDef`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImageDef {
     pub name: String,
     /// Image format: `"fat12"`, `"fat16"`, `"fat32"`, `"raw"`, `"iso9660"`.
+    /// Ignored when `partition_table` is set (the format is implicitly
+    /// `"raw"` — a partitioned disk container).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     /// Optional image size in MiB. When `None`, the builder determines
-    /// the minimum size from the entries.
+    /// the minimum size from the entries (flat-FS) or from the largest
+    /// LBA written by raw_writes/partitions (partitioned disk).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size_mb: Option<u32>,
-    /// Ordered list of entries to place into the image.
+    /// Flat-FS entries. Mutually exclusive with `partitions` — if both
+    /// are present the builder errors at validation time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<ImageEntry>,
+    /// Partition table to emit at sector 0. `None` means flat image
+    /// (no MBR/GPT). Phase 3 implements MBR only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_table: Option<PartitionTable>,
+    /// Raw byte placements at LBA offsets. Used for boot-sector code
+    /// (LBA 0), stage blobs (low LBAs reserved before the first
+    /// partition), and any other "this exact byte sequence at this
+    /// exact sector" need. Order is preserved for diagnostics; the
+    /// actual writes don't depend on it (each has its own LBA).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_writes: Vec<RawWrite>,
+    /// Partitioned regions of the disk, each with its own filesystem.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<PartitionDef>,
     /// Forward-compatible escape hatch.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extras: BTreeMap<String, String>,
@@ -429,6 +504,104 @@ pub enum ImageSource {
     File(String),
     /// An assembled ESP directory (by name).
     Esp(String),
+}
+
+/// Partition-table flavour. Sector 0 layout differs by variant — MBR
+/// uses the legacy DOS partition table at bytes 446..510 + the 0x55AA
+/// signature; GPT writes a protective MBR plus a header at LBA 1.
+///
+/// Phase 3 implements MBR only. The variant is kept open so that GPT
+/// can be added without churning the model wire format.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionTable {
+    Mbr,
+    Gpt,
+}
+
+/// A raw byte placement at a specific LBA (sector) on the disk.
+///
+/// This is the primitive that lets a `gluon.rhai` script say "the BIOS
+/// boot sector is the output of crate X, written at sector 0" or
+/// "stage 1.5 lives at sector 66 and must fit in 958 sectors". Use
+/// `partitions` instead for filesystem-shaped writes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawWrite {
+    /// Logical Block Address (sector index, 512 bytes per sector) of
+    /// the first byte to write.
+    pub lba: u64,
+    /// Where the bytes come from.
+    pub source: RawSource,
+    /// Optional cap on the number of sectors the source may occupy.
+    /// When set and exceeded, image building errors out — useful for
+    /// hard size constraints (e.g. "stage 1.1 must fit in 64 sectors
+    /// because stage 1.5 starts at LBA 66").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sectors: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Source of bytes for a [`RawWrite`].
+///
+/// Tagged enum (rather than newtype-around-string) for the same reason
+/// as `StampSource` in the image builder: a future `Computed` variant
+/// (post-layout-callback bytes) will need additional fields, and
+/// internally-tagged serde wants a struct payload so `kind` has a
+/// place to land alongside the data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RawSource {
+    /// A compiled crate's primary artifact (typically a `RawBinary`
+    /// crate's `.bin` file). The crate must produce a single contiguous
+    /// blob of bytes — ELF inputs are a configuration error and are
+    /// caught at image-build time.
+    Crate { name: String },
+    /// A file on the host filesystem (relative to project root). Used
+    /// for pre-built blobs the user wants to drop in unchanged
+    /// (e.g. a Stage1Meta binary produced by an out-of-band build
+    /// step).
+    File { path: String },
+    /// Inline bytes. Useful for tiny constant payloads — magic numbers,
+    /// signature blocks, padding. Not intended for kilobyte-scale data
+    /// (the model is serialised into the cache key, so big inline
+    /// blobs balloon stamp files).
+    Bytes { bytes: Vec<u8> },
+}
+
+/// A partitioned region of the disk, identified by an LBA range and a
+/// filesystem type.
+///
+/// `start_lba` and `end_lba` are both inclusive — the partition occupies
+/// sectors `[start_lba, end_lba]`. `end_lba == None` means "extend to
+/// the last available sector of the image"; the builder fills it in
+/// once `size_mb` is known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartitionDef {
+    pub name: String,
+    pub start_lba: u64,
+    /// Inclusive end LBA. `None` means "fill to end of image" — the
+    /// builder resolves this once the total image size is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_lba: Option<u64>,
+    /// Filesystem to format inside the partition. `"fat32"` is the only
+    /// value Phase 3 understands; `"raw"` is reserved for "partitioned
+    /// region with no filesystem on top, populated via raw_writes
+    /// scoped to its LBA range" — not yet implemented.
+    pub fs_type: String,
+    /// MBR partition type byte. Common values: `0x83` (Linux),
+    /// `0xEF` (EFI System Partition), `0x0C` (FAT32 LBA).
+    pub partition_type: u8,
+    /// MBR active/bootable flag. Setting this on an ESP for legacy
+    /// BIOS+UEFI hybrid disks is the typical case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bootable: bool,
+    /// Files placed inside the partition's filesystem. Same shape as
+    /// `ImageDef::entries` for flat-FS images.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<ImageEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
 }
 
 impl Named for ImageDef {
@@ -474,8 +647,19 @@ pub struct QemuDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ovmf_vars: Option<PathBuf>,
     /// EFI System Partition source. Mutually exclusive variants.
+    /// Used by UEFI mode for the `EFI/BOOT/BOOT*.EFI` source. Ignored
+    /// when `disk` is set (a hybrid disk supplies its own ESP via a
+    /// FAT32 partition).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub esp: Option<EspSource>,
+    /// Boot disk attached to QEMU as the first IDE drive. Mode-agnostic:
+    /// BIOS mode boots from it directly via SeaBIOS, and UEFI mode lets
+    /// OVMF locate `EFI/BOOT/BOOTX64.EFI` inside the disk's FAT32
+    /// partition. Mutually compatible with `esp` only when `esp` is the
+    /// VVFAT directory variant — but the typical hybrid-disk shape
+    /// leaves `esp` unset entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskSource>,
     /// `isa-debug-exit` I/O port (for the future test harness). Defaults
     /// to `0xf4` at resolve time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -508,6 +692,14 @@ pub enum BootMode {
     /// UEFI boot via OVMF pflash firmware. An optional ESP source
     /// provides the bootable `EFI/BOOT/BOOTX64.EFI` (or equivalent).
     Uefi,
+    /// Legacy BIOS boot via QEMU's default firmware (SeaBIOS for
+    /// `pc`/`q35` machines). No `-kernel` and no pflash are emitted;
+    /// the boot path comes entirely from the disk image attached as
+    /// the first IDE drive. Pair with a hybrid disk (MBR boot code at
+    /// LBA 0) or a flat `EspSource::Image` containing the BIOS
+    /// loader. `EspSource::Dir` (VVFAT) is rejected — VVFAT skips
+    /// the MBR/boot-sector area, so SeaBIOS sees no bootable device.
+    Bios,
 }
 
 /// Serial output policy for QEMU.
@@ -532,6 +724,27 @@ pub enum EspSource {
     /// Pre-built raw disk image
     /// (`-drive format=raw,file=<img>`).
     Image(PathBuf),
+}
+
+/// Source for QEMU's boot disk. Mode-agnostic: BIOS mode reads it
+/// directly via SeaBIOS, UEFI mode lets OVMF find a FAT32 ESP
+/// partition inside it. Tagged-enum because future variants
+/// (`Vvfat(PathBuf)`, `Cdrom(PathBuf)`) are likely.
+///
+/// `Image(PathBuf)` is for a *pre-built* disk image (the user
+/// supplies the path). `ImageRef(name)` defers resolution to
+/// runtime — at qemu-resolve time we look up `name` in the
+/// scheduler's image artifact map (the `ImageDef` named `name`
+/// must exist and have been built).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiskSource {
+    /// Pre-built raw disk image at a fixed path.
+    Image { path: PathBuf },
+    /// Reference to an image declared via `image("<name>")`. Resolved
+    /// to a path at qemu-spawn time so the disk is whichever image
+    /// the scheduler produced for the active build.
+    ImageRef { name: String },
 }
 
 /// EFI System Partition declaration. Describes a set of build artifacts
@@ -750,6 +963,9 @@ mod tests {
                     source: ImageSource::Crate("bootloader".into()),
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
+                partition_table: None,
+                raw_writes: Vec::new(),
+                partitions: Vec::new(),
                 extras: BTreeMap::new(),
                 span: None,
             },

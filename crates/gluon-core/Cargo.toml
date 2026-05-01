@@ -15,6 +15,12 @@ workspace = true
 [dependencies]
 gluon-model.workspace = true
 fs2 = "0.4"
+# In-process FAT12/16/32 formatter + writer. Used by the `image()`
+# scheduler node to assemble bootable disk images from compiled
+# artifacts without shelling out to mtools / mkfs.fat. Synchronous,
+# `no_std`-compatible upstream but we use the `std` paths.
+# Pinned to 1.x; the API has stabilised since 1.0.
+hadris-fat = "1.1"
 # `metadata` is enabled so `engine::dsl_signatures()` can enumerate the
 # registered DSL surface for editor tooling (LSP + tree-sitter query
 # regeneration). The feature adds per-function signature strings to the

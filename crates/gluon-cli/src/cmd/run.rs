@@ -12,14 +12,16 @@ use std::time::Duration;
 
 /// Execute the `gluon run` pipeline against the prepared context.
 pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
-    // CLI boot-mode override. `--uefi` and `--direct` are mutually
-    // exclusive in the clap schema; if neither is set, we pass `None`
-    // so the profile's own `qemu().boot_mode(...)` wins.
-    let boot_mode_override = match (args.uefi, args.direct) {
-        (true, false) => Some(BootMode::Uefi),
-        (false, true) => Some(BootMode::Direct),
-        (false, false) => None,
-        (true, true) => unreachable!("clap enforces mutual exclusion"),
+    // CLI boot-mode override. The three flags are mutually exclusive
+    // in the clap schema; if none are set, we pass `None` so the
+    // profile's own `qemu_boot_mode(...)` (or project-level
+    // `qemu().boot_mode(...)`) wins.
+    let boot_mode_override = match (args.uefi, args.direct, args.bios) {
+        (true, false, false) => Some(BootMode::Uefi),
+        (false, true, false) => Some(BootMode::Direct),
+        (false, false, true) => Some(BootMode::Bios),
+        (false, false, false) => None,
+        _ => unreachable!("clap enforces mutual exclusion"),
     };
 
     let opts = gluon_core::RunOptions {

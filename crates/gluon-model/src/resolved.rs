@@ -7,7 +7,7 @@
 //! Everything downstream of resolution works with these types, never with
 //! the raw build model directly.
 
-use crate::build_model::{CrateDef, ProjectDef, TargetDef};
+use crate::build_model::{BootMode, CrateDef, ProjectDef, TargetDef};
 use crate::handle::Handle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,6 +45,10 @@ pub struct ResolvedProfile {
     /// `QemuDef::extra_args`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub qemu_extra_args: Vec<String>,
+    /// Profile-level boot mode. Wins over `QemuDef::boot_mode` when set.
+    /// CLI flags (`--uefi` / `--direct` / `--bios`) win over both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu_boot_mode: Option<BootMode>,
     /// Profile-level timeout (seconds) for `gluon run`/`test` invocations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_timeout: Option<u32>,

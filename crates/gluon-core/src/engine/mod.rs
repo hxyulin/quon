@@ -660,6 +660,44 @@ mod tests {
     }
 
     #[test]
+    fn qemu_boot_mode_bios_parses() {
+        let f = write_script(
+            r#"
+            project("t", "0.1.0");
+            qemu().boot_mode("bios");
+            "#,
+        );
+        let model = evaluate_script(f.path()).expect("script must evaluate");
+        assert_eq!(model.qemu.boot_mode, Some(gluon_model::BootMode::Bios));
+    }
+
+    // crate_type("raw_binary") and the kebab form must both resolve to
+    // CrateType::RawBinary. Boot sectors and other flat-binary crates
+    // depend on this surface.
+    #[test]
+    fn crate_type_raw_binary_parses() {
+        for type_str in ["raw_binary", "raw-binary"] {
+            let script = format!(
+                r#"
+                project("t", "0.1.0");
+                target("custom", "custom.json");
+                let g = group("boot").target("custom");
+                g.add("bs", "crates/bs").crate_type("{type_str}");
+                "#,
+            );
+            let f = write_script(&script);
+            let model = evaluate_script(f.path()).expect("script must evaluate");
+            let h = model.crates.lookup("bs").expect("bs crate exists");
+            let krate = model.crates.get(h).unwrap();
+            assert_eq!(
+                krate.crate_type,
+                CrateType::RawBinary,
+                "crate_type(\"{type_str}\") must produce CrateType::RawBinary"
+            );
+        }
+    }
+
+    #[test]
     fn qemu_esp_mutually_exclusive() {
         let f = write_script(
             r#"

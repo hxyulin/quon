@@ -14,6 +14,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod fmt;
+pub mod image;
 pub mod kconfig;
 pub mod project_root;
 pub mod rule;
@@ -460,6 +461,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             },
             options: BTreeMap::new(),
@@ -528,6 +530,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             },
             options: BTreeMap::new(),

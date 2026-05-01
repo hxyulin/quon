@@ -85,6 +85,12 @@ use std::sync::mpsc;
 /// auto-wire the ESP into QEMU's `-drive fat:rw:` flag. The map is
 /// empty for builds that do not declare any `esp(...)` blocks.
 ///
+/// `image_paths` is the parallel surface for `DagNode::Image` nodes:
+/// keyed by [`gluon_model::Handle<ImageDef>`], it carries the
+/// `<build>/images/<name>.img` paths produced by `image()` blocks.
+/// Consumed by `run::entry` for `qemu().disk(image_ref(...))` and by
+/// the `${image:name}` rule-substitution path.
+///
 /// (`Copy` was dropped when `esp_dirs` was added — call sites clone
 /// explicitly. There are no hot paths relying on a bitwise copy.)
 #[derive(Debug, Clone, Default)]
@@ -97,6 +103,9 @@ pub struct BuildSummary {
     /// Assembled-ESP directories keyed by [`gluon_model::EspDef`] handle.
     pub esp_dirs:
         std::collections::BTreeMap<gluon_model::Handle<gluon_model::EspDef>, std::path::PathBuf>,
+    /// Built disk-image paths keyed by [`gluon_model::ImageDef`] handle.
+    pub image_paths:
+        std::collections::BTreeMap<gluon_model::Handle<gluon_model::ImageDef>, std::path::PathBuf>,
 }
 
 /// Per-node execution closure.

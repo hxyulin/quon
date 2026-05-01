@@ -6,8 +6,8 @@ use crate::engine::EngineState;
 use crate::engine::conversions::{array_to_string_vec, parse_dep_map};
 use crate::error::Diagnostic;
 use gluon_model::{
-    BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef, ProfileDef,
-    ProjectDef, TargetDef,
+    BootMode, BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef,
+    ProfileDef, ProjectDef, TargetDef,
 };
 use rhai::{Dynamic, Engine, Map, NativeCallContext, Position};
 
@@ -84,6 +84,7 @@ fn crate_type_from_i64(v: i64) -> Option<CrateType> {
         1 => Some(CrateType::Bin),
         2 => Some(CrateType::ProcMacro),
         3 => Some(CrateType::StaticLib),
+        4 => Some(CrateType::RawBinary),
         _ => None,
     }
 }
@@ -94,6 +95,7 @@ fn crate_type_from_str(s: &str) -> Option<CrateType> {
         "bin" => Some(CrateType::Bin),
         "proc-macro" | "proc_macro" => Some(CrateType::ProcMacro),
         "staticlib" => Some(CrateType::StaticLib),
+        "raw-binary" | "raw_binary" => Some(CrateType::RawBinary),
         _ => None,
     }
 }
@@ -406,6 +408,43 @@ fn register_profile(engine: &mut Engine, state: EngineState) {
             }
         }
     );
+
+    // qemu_boot_mode("uefi" | "bios" | "direct"). Wins over the
+    // project-level `qemu().boot_mode(...)` and lets a single config
+    // declare e.g. `dev-bios` and `dev-uefi` profiles that share crates
+    // and the disk image, diverging only on the firmware path.
+    builder_method!(
+        engine,
+        "qemu_boot_mode",
+        ProfileBuilder,
+        |state, model, name, pos, mode: &str| {
+            let span = state.span_from(pos);
+            let parsed = match mode.to_ascii_lowercase().as_str() {
+                "uefi" => Some(BootMode::Uefi),
+                "bios" => Some(BootMode::Bios),
+                "direct" => Some(BootMode::Direct),
+                _ => None,
+            };
+            match parsed {
+                Some(m) => {
+                    if let Some(h) = model.profiles.lookup(name) {
+                        if let Some(p) = model.profiles.get_mut(h) {
+                            p.qemu_boot_mode = Some(m);
+                        }
+                    }
+                }
+                None => {
+                    state.push_diagnostic(
+                        Diagnostic::error(format!(
+                            "profile(\"{name}\").qemu_boot_mode(\"{mode}\"): \
+                             unknown value (expected \"uefi\", \"bios\", or \"direct\")"
+                        ))
+                        .with_span(span),
+                    );
+                }
+            }
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +532,24 @@ fn register_group(engine: &mut Engine, state: EngineState) {
             if let Some(h) = model.groups.lookup(name) {
                 if let Some(g) = model.groups.get_mut(h) {
                     g.config = has_config;
+                }
+            }
+        }
+    );
+
+    // group.no_sysroot(true|false) — opt out of the custom sysroot,
+    // implicit core/alloc/compiler_builtins externs, and the auto-injected
+    // config crate. Required for targets that cannot satisfy a stdlib
+    // build (e.g. 16-bit real-mode boot sectors).
+    builder_method!(
+        engine,
+        "no_sysroot",
+        GroupBuilder,
+        |state, model, name, pos, opt_out: bool| {
+            let _ = (state, pos);
+            if let Some(h) = model.groups.lookup(name) {
+                if let Some(g) = model.groups.get_mut(h) {
+                    g.no_sysroot = opt_out;
                 }
             }
         }

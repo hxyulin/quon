@@ -194,6 +194,21 @@ impl BuildLayout {
             .join(esp_name)
     }
 
+    /// Path of an image artifact (`<root>/images/<name>.img`).
+    ///
+    /// Image outputs are profile-agnostic: a single `image()` block in
+    /// `gluon.rhai` produces one canonical artifact, regardless of which
+    /// profile triggered the build. This reflects how images are
+    /// consumed downstream — `qemu().disk(image_ref("..."))` references
+    /// an image by name, not by (profile, name) pair, and rebuilding
+    /// the same image into different paths per profile would just waste
+    /// disk and confuse the cache.
+    pub fn image_path(&self, image_name: &str) -> PathBuf {
+        self.user_crate_root()
+            .join("images")
+            .join(format!("{image_name}.img"))
+    }
+
     /// Directory containing the generated config crate
     /// (`<root>/generated/<project>_config/`).
     ///
@@ -288,6 +303,7 @@ mod tests {
             qemu_memory: None,
             qemu_cores: None,
             qemu_extra_args: Vec::new(),
+            qemu_boot_mode: None,
             test_timeout: None,
         }
     }

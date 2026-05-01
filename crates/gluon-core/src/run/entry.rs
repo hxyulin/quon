@@ -12,11 +12,12 @@
 
 use super::ovmf::{OvmfResolveCtx, resolve_ovmf};
 use super::qemu_cmd::{QemuInvocation, build_qemu_command};
-use super::resolve::resolve_qemu;
+use super::resolve::{resolve_disk_source, resolve_qemu};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use crate::{build_with_workers, model::BootMode};
 use gluon_model::{BuildModel, EspSource, ResolvedConfig};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
@@ -155,6 +156,33 @@ pub fn run(
         opts.boot_mode_override,
         opts.timeout_override,
     )?;
+
+    // Step 3a: resolve `qemu().disk_*(...)` to a concrete path.
+    //
+    // `disk_image("path")` is a host file the user manages directly.
+    // `disk_ref("name")` references an `image("name")` declared in the
+    // same script — we resolve through the build summary's
+    // `image_paths` map, falling back to `BuildLayout::image_path` in
+    // dry-run / `--no-build` modes (where the build didn't run, so the
+    // map is empty).
+    if let Some(disk_source) = model.qemu.disk.clone() {
+        let image_paths = match build_summary.as_ref() {
+            Some(s) => s.image_paths.clone(),
+            None => {
+                // Dry-run / no-build fallback: synthesise paths via
+                // layout arithmetic. Keeps `gluon run --dry-run` from
+                // failing at config-resolve time when the image hasn't
+                // been built yet.
+                let mut map: BTreeMap<_, _> = BTreeMap::new();
+                for (h, img) in model.images.iter() {
+                    map.insert(h, ctx.layout.image_path(&img.name));
+                }
+                map
+            }
+        };
+        let disk_path = resolve_disk_source(&disk_source, model, &image_paths)?;
+        resolved_qemu.disk = Some(disk_path);
+    }
 
     // Step 3b: auto-wire the ESP directory for UEFI boot.
     //

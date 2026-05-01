@@ -22,9 +22,10 @@ pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
 
 use crate::compile::{ArtifactMap, CompileCrateInput, CompileCtx, compile_crate};
 use crate::error::{Error, Result};
+use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, EspDef, Handle, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, EspDef, Handle, ImageDef, ResolvedConfig, TargetDef};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -57,6 +58,11 @@ struct PipelineDispatcher<'a> {
     /// `Esp` nodes; read by `run::entry` after the build completes to
     /// auto-wire the ESP into QEMU's `-drive fat:rw:` flag.
     esps: &'a Mutex<BTreeMap<Handle<EspDef>, PathBuf>>,
+    /// Built disk-image paths keyed by `ImageDef` handle. Written by
+    /// `Image` nodes; consumed by `Image` source resolution (when an
+    /// image references another via `${image:name}`) and by
+    /// `run::entry` to surface the path to QEMU.
+    images: &'a Mutex<BTreeMap<Handle<ImageDef>, PathBuf>>,
     /// Lock-free counter for nodes that ran rustc to completion.
     /// `Rule` nodes are not counted (they are not cacheable in MVP-M).
     built: &'a AtomicUsize,
@@ -158,7 +164,21 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // For cross crates, look up the pre-built sysroot. The DAG
                 // ensures the Sysroot node for this target completed before
                 // this Crate node was dispatched.
-                let sysroot_dir: Option<PathBuf> = if crate_ref.host {
+                //
+                // Crates whose group sets `no_sysroot=true` skip this:
+                // they have no Sysroot DAG edge, no sysroot was built for
+                // their target, and `compile_crate` is configured to omit
+                // `--sysroot` and the implicit core/alloc/compiler_builtins
+                // externs.
+                let group_no_sysroot = self
+                    .model
+                    .crates
+                    .get(crate_handle)
+                    .and_then(|c| c.group_handle)
+                    .and_then(|h| self.model.groups.get(h))
+                    .map(|g| g.no_sysroot)
+                    .unwrap_or(false);
+                let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
                     None
                 } else {
                     let map = lock_or_poison(self.sysroots, "sysroots")?;
@@ -226,6 +246,30 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             }
 
             // ------------------------------------------------------------------
+            // Image — assemble a bootable disk image. See image::build_image.
+            // ------------------------------------------------------------------
+            DagNode::Image(image_handle) => {
+                // Snapshot artifacts and esp_dirs so the helper can
+                // resolve sources without holding the locks across the
+                // FAT format + write loop (which can take 100s of ms
+                // for large images).
+                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                let esp_dirs_snapshot = lock_or_poison(self.esps, "esps")?.clone();
+                let ictx = ImageCtx {
+                    ctx: self.ctx,
+                    model: self.model,
+                    resolved: self.resolved,
+                    artifacts: &artifacts_snapshot,
+                    esp_dirs: &esp_dirs_snapshot,
+                };
+                let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
+                lock_or_poison(self.images, "images")?.insert(image_handle, path);
+                self.record(was_cached);
+                let _ = stderr;
+                Ok(())
+            }
+
+            // ------------------------------------------------------------------
             // Rule — run a user-declared rule through the registry.
             // ------------------------------------------------------------------
             DagNode::Rule(rule_handle) => {
@@ -240,11 +284,16 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // outputs via ${artifact:<crate_name>}. Same lock-and-clone
                 // pattern used by Esp nodes.
                 let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                // Snapshot image_paths too so `${image:name}` substitution
+                // sees the up-to-date set without holding the lock for
+                // the rule's runtime.
+                let images_snapshot = lock_or_poison(self.images, "images")?.clone();
                 let rule_ctx = RuleCtx {
                     layout: &self.ctx.layout,
                     resolved: self.resolved,
                     model: self.model,
                     artifacts: &artifacts_snapshot,
+                    image_paths: &images_snapshot,
                 };
                 self.rules.dispatch(&rule_ctx, rule, stdout, stderr)?;
                 Ok(())
@@ -289,6 +338,7 @@ pub fn execute_pipeline(
     let sysroots: Mutex<BTreeMap<Handle<TargetDef>, PathBuf>> = Mutex::new(BTreeMap::new());
     let artifacts: Mutex<ArtifactMap> = Mutex::new(ArtifactMap::new());
     let esps: Mutex<BTreeMap<Handle<EspDef>, PathBuf>> = Mutex::new(BTreeMap::new());
+    let images: Mutex<BTreeMap<Handle<ImageDef>, PathBuf>> = Mutex::new(BTreeMap::new());
     // `Relaxed` is sufficient: we only need atomicity, not ordering
     // relative to other memory operations. The counters are read once
     // after `pool.execute` returns (a happens-before point already
@@ -305,6 +355,7 @@ pub fn execute_pipeline(
         sysroots: &sysroots,
         artifacts: &artifacts,
         esps: &esps,
+        images: &images,
         built: &built,
         cached: &cached,
     };
@@ -312,16 +363,21 @@ pub fn execute_pipeline(
     let pool = WorkerPool::new(workers);
     pool.execute(&dag, &dispatcher, stdout, stderr)?;
 
-    // Drain the esps map into the summary. The mutex is uncontested at
-    // this point (the worker pool has joined), so `into_inner` is safe.
+    // Drain the esps and images maps into the summary. The mutexes are
+    // uncontested at this point (the worker pool has joined), so
+    // `into_inner` is safe.
     let esp_dirs = esps
         .into_inner()
         .map_err(|_| Error::Config("scheduler: esps mutex poisoned".into()))?;
+    let image_paths = images
+        .into_inner()
+        .map_err(|_| Error::Config("scheduler: images mutex poisoned".into()))?;
 
     Ok(BuildSummary {
         built: built.load(Ordering::Relaxed),
         cached: cached.load(Ordering::Relaxed),
         esp_dirs,
+        image_paths,
     })
 }
 
@@ -390,6 +446,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             },
             options: BTreeMap::new(),
@@ -643,6 +700,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             },
             options: BTreeMap::new(),

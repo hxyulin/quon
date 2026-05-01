@@ -362,6 +362,7 @@ pub fn resolve(
             qemu_memory: flattened.qemu_memory,
             qemu_cores: flattened.qemu_cores,
             qemu_extra_args: flattened.qemu_extra_args.clone().unwrap_or_default(),
+            qemu_boot_mode: flattened.qemu_boot_mode,
             test_timeout: flattened.test_timeout,
         },
         options: resolved_options,
@@ -439,6 +440,9 @@ fn flatten_profile(
         }
         if p.qemu_extra_args.is_some() {
             acc.qemu_extra_args = p.qemu_extra_args.clone();
+        }
+        if p.qemu_boot_mode.is_some() {
+            acc.qemu_boot_mode = p.qemu_boot_mode;
         }
         if p.test_timeout.is_some() {
             acc.test_timeout = p.test_timeout;

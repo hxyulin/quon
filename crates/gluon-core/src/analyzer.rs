@@ -102,11 +102,10 @@ pub fn generate_rust_project_json(
         let crate_dir = resolved.project_root.join(&krate.path);
         let root_module = if let Some(root) = &krate.root {
             crate_dir.join(root)
+        } else if krate.crate_type.is_executable() {
+            crate_dir.join("src").join("main.rs")
         } else {
-            match krate.crate_type {
-                CrateType::Bin => crate_dir.join("src").join("main.rs"),
-                _ => crate_dir.join("src").join("lib.rs"),
-            }
+            crate_dir.join("src").join("lib.rs")
         };
 
         let edition = if krate.edition.is_empty() {
@@ -281,6 +280,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             },
             options: BTreeMap::new(),

@@ -34,7 +34,7 @@ use super::command_builder::build_rustc_command;
 use crate::cache::BuildRecord;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig, ResolvedCrateRef};
+use gluon_model::{BuildModel, CrateDef, ResolvedConfig, ResolvedCrateRef};
 use std::path::{Path, PathBuf};
 
 /// Input bundle for [`compile`]. Grouped into a struct so the function
@@ -167,9 +167,10 @@ pub fn compile(
     // mkdir, then spawn).
     let out_dir = if crate_ref.host {
         ctx.layout.host_artifact_dir(crate_def)
-    } else if crate_def.crate_type == CrateType::Bin {
-        // Cross Bin crates use cross_final_dir as --out-dir (see
-        // build_rustc_command comment).
+    } else if crate_def.crate_type.is_executable() {
+        // Cross Bin and RawBinary crates use cross_final_dir as --out-dir
+        // (see build_rustc_command comment). Both produce a single
+        // executable artifact (ELF or flat) at a deterministic name.
         let target = model.targets.get(crate_ref.target).ok_or_else(|| {
             Error::Compile(format!(
                 "crate '{}': target handle not found when creating output directory",
@@ -351,6 +352,7 @@ mod tests {
             qemu_memory: None,
             qemu_cores: None,
             qemu_extra_args: Vec::new(),
+            qemu_boot_mode: None,
             test_timeout: None,
         }
     }
@@ -1229,6 +1231,220 @@ mod tests {
         assert!(
             !output_path.to_string_lossy().contains("-gluon-"),
             "output path should not contain -gluon- suffix, got: {output_path:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // RawBinary crate-type tests
+    // ---------------------------------------------------------------
+    //
+    // RawBinary is the flat-binary cousin of Bin. The invariants the
+    // command builder must uphold:
+    //
+    //   1. Output filename ends with `.bin` (not the empty/exe suffix
+    //      Bin would use).
+    //   2. `-C link-arg=--oformat=binary` is appended so rust-lld
+    //      writes a flat image instead of an ELF.
+    //   3. `-o <output_path>` is set (rustc otherwise wouldn't write
+    //      to a `.bin` extension).
+    //   4. No `-C extra-filename` (same as Bin — rustc doesn't
+    //      hash-suffix executables, and we want a stable filename).
+    //   5. `--crate-type=bin` is what rustc sees (rustc has no
+    //      first-class concept of flat-binary).
+    //   6. Linker scripts are accepted — gating on Bin alone would
+    //      reject them, breaking real-mode boot sectors which need
+    //      `-T boot.ld` to define their load layout.
+    #[test]
+    fn flag_assembly_raw_binary_emits_oformat_and_dot_bin_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
+        let sysroot_dir = tmp.path().join("sysroot");
+
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("x86-real", "x86_64-unknown-none", true),
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "boot-sector".into(),
+                path: "crates/boot-sector".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::RawBinary,
+                linker_script: Some("crates/boot-sector/boot.ld".into()),
+                ..Default::default()
+            },
+        );
+        let resolved = make_resolved(th, tmp.path().to_path_buf());
+        let crate_ref = cross_ref(ch, th);
+        let artifacts = ArtifactMap::new();
+
+        let (builder, output_path, _depfile) = build_rustc_command(
+            &ctx,
+            &CompileCrateInput {
+                model: &model,
+                resolved: &resolved,
+                crate_ref: &crate_ref,
+                artifacts: &artifacts,
+                sysroot_dir: Some(&sysroot_dir),
+            },
+        )
+        .unwrap();
+
+        let args: Vec<String> = builder
+            .args()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+
+        // 1. Output filename uses `.bin`.
+        assert!(
+            output_path.to_string_lossy().ends_with("boot_sector.bin"),
+            "RawBinary artifact must end with .bin (using rustc-normalized name), got: {output_path:?}"
+        );
+
+        // 2. `--oformat=binary` is injected as a link-arg.
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-C" && w[1] == "link-arg=--oformat=binary"),
+            "RawBinary must emit -C link-arg=--oformat=binary, got: {args:?}"
+        );
+
+        // 3. `-o <output_path>` is set.
+        let o_pos = args.iter().position(|a| a == "-o");
+        assert!(
+            o_pos.is_some(),
+            "RawBinary must emit -o to force the .bin extension, got: {args:?}"
+        );
+        assert_eq!(
+            args.get(o_pos.unwrap() + 1).map(String::as_str),
+            Some(output_path.to_string_lossy().as_ref()),
+            "-o must point at the resolved output path, got: {args:?}"
+        );
+
+        // 4. No `-C extra-filename`.
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-C" && w[1].contains("extra-filename")),
+            "RawBinary must not emit -C extra-filename, got: {args:?}"
+        );
+
+        // 5. `--crate-type=bin` is what rustc sees (RawBinary has no
+        //    native rustc representation).
+        let ct_pos = args.iter().position(|a| a == "--crate-type").unwrap();
+        assert_eq!(
+            args.get(ct_pos + 1).map(String::as_str),
+            Some("bin"),
+            "RawBinary must pass --crate-type=bin to rustc, got: {args:?}"
+        );
+
+        // 6. Linker script is emitted (gated by is_executable, not
+        //    crate_type == Bin).
+        assert!(
+            args.iter().any(|a| a.contains("boot.ld")),
+            "RawBinary linker_script must be honoured, got: {args:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // no_sysroot tests
+    // ---------------------------------------------------------------
+    //
+    // A crate whose group sets `no_sysroot=true` must NOT receive:
+    //   - `--sysroot <path>`
+    //   - `--extern core=...`, `--extern alloc=...`,
+    //     `--extern compiler_builtins=...`
+    //   - `--extern <project>_config=...`
+    //
+    // It still gets `--target <spec>` (rustc needs a target to know
+    // pointer width / atomic width / data layout etc.) and `--out-dir`.
+    // sysroot_dir=None is the contract — the scheduler omits the
+    // sysroot lookup for no_sysroot crates.
+    #[test]
+    fn flag_assembly_no_sysroot_group_omits_sysroot_and_implicit_externs() {
+        use gluon_model::GroupDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
+
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("x86-real", "x86_64-unknown-none", true),
+        );
+
+        // Insert a no_sysroot group, then a crate that points at it.
+        let (group_h, _) = model.groups.insert(
+            "bios-boot".into(),
+            GroupDef {
+                name: "bios-boot".into(),
+                target: "x86-real".into(),
+                target_handle: Some(th),
+                no_sysroot: true,
+                ..Default::default()
+            },
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "boot-sector".into(),
+                path: "crates/boot-sector".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::RawBinary,
+                target_handle: Some(th),
+                group: "bios-boot".into(),
+                group_handle: Some(group_h),
+                ..Default::default()
+            },
+        );
+
+        let resolved = make_resolved(th, tmp.path().to_path_buf());
+        let crate_ref = cross_ref(ch, th);
+        let artifacts = ArtifactMap::new();
+
+        let (builder, _, _) = build_rustc_command(
+            &ctx,
+            &CompileCrateInput {
+                model: &model,
+                resolved: &resolved,
+                crate_ref: &crate_ref,
+                artifacts: &artifacts,
+                sysroot_dir: None, // scheduler passes None for no_sysroot crates
+            },
+        )
+        .unwrap();
+
+        let args: Vec<String> = builder
+            .args()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+
+        // No --sysroot.
+        assert!(
+            !args.iter().any(|a| a == "--sysroot"),
+            "no_sysroot crate must not emit --sysroot, got: {args:?}"
+        );
+
+        // No implicit `--extern core/alloc/compiler_builtins`.
+        for forbidden in ["core", "alloc", "compiler_builtins"] {
+            assert!(
+                !args.iter().any(|a| a.starts_with(&format!("{forbidden}="))),
+                "no_sysroot crate must not emit --extern {forbidden}=, got: {args:?}"
+            );
+        }
+
+        // Target IS present (rustc needs it for pointer/atomic widths).
+        // Builtin triples come as a single `--target=<spec>` token;
+        // custom JSON specs come as two tokens (`--target` + path) so we
+        // accept either form.
+        assert!(
+            args.iter()
+                .any(|a| a == "--target" || a.starts_with("--target=")),
+            "no_sysroot crate must still emit --target (target spec is mandatory \
+             for cross compilation regardless of sysroot strategy), got: {args:?}"
         );
     }
 

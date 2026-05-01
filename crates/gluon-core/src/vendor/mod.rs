@@ -578,6 +578,7 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
         shared_flags: Vec::new(),
         is_project: false,
         config: false,
+        no_sysroot: false,
         span: None,
     };
     model.groups.insert(VENDORED_GROUP_NAME.into(), group);

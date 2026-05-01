@@ -58,11 +58,10 @@ pub(crate) fn build_rustc_command(
     let crate_dir = project_root.join(&crate_def.path);
     let src_file = if let Some(root_override) = &crate_def.root {
         crate_dir.join(root_override)
+    } else if crate_def.crate_type.is_executable() {
+        crate_dir.join("src/main.rs")
     } else {
-        match crate_def.crate_type {
-            CrateType::Bin => crate_dir.join("src/main.rs"),
-            _ => crate_dir.join("src/lib.rs"),
-        }
+        crate_dir.join("src/lib.rs")
     };
 
     // Determine the output directory and artifact path. We use
@@ -151,6 +150,29 @@ pub(crate) fn build_rustc_command(
                 // The incremental dir is set separately via -C incremental=.
                 (final_dir, artifact, depfile)
             }
+            CrateType::RawBinary => {
+                // Same out-dir handling as Bin (no extra-filename, lands
+                // directly in cross_final_dir). The difference is the
+                // file extension: rustc + `--oformat=binary` writes the
+                // executable to `<crate_name>` with no native suffix
+                // applied — the `-C link-arg=--oformat=binary` we inject
+                // overrides the target's preferred ELF/PE output to a
+                // raw image. We rename the artifact to `<crate_name>.bin`
+                // post-link via a dedicated `-o` override so downstream
+                // consumers (`image()`, `${artifact:foo}`) get a stable,
+                // self-describing path.
+                //
+                // Rationale for `.bin` over the empty/exe suffix:
+                //   - Disambiguates from ELF binaries (Bin) at a glance.
+                //   - Matches the convention used by other build systems
+                //     for flat-binary outputs (e.g. Zephyr, U-Boot).
+                //   - Lets the analyzer (rust-project.json) treat the
+                //     two crate types differently if it ever needs to.
+                let final_dir = layout.cross_final_dir(target, &resolved.profile);
+                let artifact = final_dir.join(format!("{crate_name_rustc}.bin"));
+                let depfile = final_dir.join(format!("{crate_name_rustc}.d"));
+                (final_dir, artifact, depfile)
+            }
             _ => {
                 let out_dir = layout.cross_artifact_dir(target, &resolved.profile, crate_def);
                 let artifact = out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib"));
@@ -181,9 +203,35 @@ pub(crate) fn build_rustc_command(
         .crate_type(crate_def.crate_type)
         .edition(&crate_def.edition);
 
+    // Look up whether this crate's group has `no_sysroot=true`. Such
+    // crates skip the custom sysroot, the implicit core/alloc/compiler_builtins
+    // externs, and the auto-injected config crate. They still get
+    // `--target` (the target spec is needed to compile correctly), but
+    // are responsible for declaring `#![no_core]` (or equivalent) and
+    // providing their own runtime primitives.
+    let group_no_sysroot = crate_def
+        .group_handle
+        .and_then(|h| model.groups.get(h))
+        .map(|g| g.no_sysroot)
+        .unwrap_or(false);
+
     if crate_ref.host {
         // Host crates: no sysroot, no target. rustc uses its built-in sysroot.
         builder.out_dir(&out_dir);
+    } else if group_no_sysroot {
+        // No-sysroot cross crates: emit `--target` only. No sysroot,
+        // no implicit externs, no config crate. The crate is on its
+        // own — `#![no_core]` is mandatory.
+        let target_handle = crate_ref.target;
+        let target = model.targets.get(target_handle).ok_or_else(|| {
+            Error::Compile(format!(
+                "crate '{}': target handle {:?} not found in build model",
+                crate_name, target_handle
+            ))
+        })?;
+        builder
+            .target(&target.spec, target.builtin)
+            .out_dir(&out_dir);
     } else {
         // Cross crates: sysroot and target are required.
         let sysroot = input.sysroot_dir.ok_or_else(|| {
@@ -259,9 +307,13 @@ pub(crate) fn build_rustc_command(
     // has exactly the same behavior — it always builds proc-macros
     // fully, regardless of the check vs build distinction. We mirror
     // that.
-    let default_emit: &[Emit] = match crate_def.crate_type {
-        CrateType::Bin => &[Emit::Link, Emit::DepInfo],
-        _ => &[Emit::Link, Emit::Metadata, Emit::DepInfo],
+    let default_emit: &[Emit] = if crate_def.crate_type.is_executable() {
+        // Executables (Bin, RawBinary) don't produce metadata that other
+        // crates would `--extern` against. Skipping `--emit=metadata`
+        // saves a few hundred ms per binary build.
+        &[Emit::Link, Emit::DepInfo]
+    } else {
+        &[Emit::Link, Emit::Metadata, Emit::DepInfo]
     };
     let emit_kinds: &[Emit] = if crate_def.crate_type == CrateType::ProcMacro {
         default_emit
@@ -365,8 +417,9 @@ pub(crate) fn build_rustc_command(
     // Incremental compilation directory.
     builder.incremental(&layout.incremental_dir(crate_def));
 
-    // Linker script (Bin crates only). Resolved relative to the project root.
-    if crate_def.crate_type == CrateType::Bin {
+    // Linker script (executable crates only — Bin or RawBinary).
+    // Resolved relative to the project root.
+    if crate_def.crate_type.is_executable() {
         if let Some(ls) = &crate_def.linker_script {
             builder.linker_script(&project_root.join(ls));
         }
@@ -375,17 +428,33 @@ pub(crate) fn build_rustc_command(
         // for Bin crates (see the output-path derivation above for rationale).
         // For host Bin crates (unusual), `-o` is also omitted; they use the
         // host_artifact_dir as --out-dir with extra-filename.
+        //
+        // RawBinary is the exception: its artifact path uses a `.bin`
+        // extension that rustc has no native concept of, so we force the
+        // output filename via `-o` *and* inject `--oformat=binary` so
+        // rust-lld writes a flat image rather than an ELF.
+        if crate_def.crate_type == CrateType::RawBinary {
+            builder.raw_arg("-o").raw_arg(output_path.as_os_str());
+            // The `--oformat=binary` flag is consumed by rust-lld at
+            // link time and replaces the default ELF/PE output with a
+            // raw byte image (no headers, sections concatenated in
+            // load-address order). Linker scripts are typically the
+            // way users define that load order — see the boot-sector
+            // crate in lepton-os for the canonical pattern.
+            builder.raw_arg("-C").raw_arg("link-arg=--oformat=binary");
+        }
     }
 
     // Append -C extra-filename LAST (mirrors sysroot convention). This must
     // come after all other flags so the canonical token order (and therefore
     // the cache hash) stays stable.
     //
-    // Exception: cross Bin crates skip extra-filename entirely. See the
-    // output-path derivation comment above for the full rationale. The `if`
-    // here ensures the cache key is still stable — the absence of the flag for
-    // Bin crates is part of the canonical token order.
-    if crate_def.crate_type != CrateType::Bin || crate_ref.host {
+    // Exception: cross executables (Bin and RawBinary) skip extra-filename
+    // entirely. See the output-path derivation comment above for the full
+    // rationale. The `if` here ensures the cache key is still stable —
+    // the absence of the flag for executable crates is part of the
+    // canonical token order.
+    if !crate_def.crate_type.is_executable() || crate_ref.host {
         builder
             .raw_arg("-C")
             .raw_arg(format!("extra-filename={extra_filename}"));

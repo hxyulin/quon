@@ -182,13 +182,20 @@ pub struct ConfigureArgs {
 pub struct RunArgs {
     /// Force UEFI boot (OVMF pflash). Overrides the profile's
     /// `qemu().boot_mode(...)` setting. Mutually exclusive with
-    /// `--direct`.
-    #[arg(long, conflicts_with = "direct")]
+    /// `--direct` and `--bios`.
+    #[arg(long, conflicts_with_all = ["direct", "bios"])]
     pub uefi: bool,
     /// Force direct-kernel boot (`-kernel <path>`). Overrides the
-    /// profile's `qemu().boot_mode(...)` setting.
-    #[arg(long)]
+    /// profile's `qemu().boot_mode(...)` setting. Mutually exclusive
+    /// with `--bios`.
+    #[arg(long, conflicts_with = "bios")]
     pub direct: bool,
+    /// Force legacy-BIOS boot (SeaBIOS, no `-kernel`, no pflash). Boots
+    /// from the disk attached via `qemu().disk_*(...)` (or the legacy
+    /// `qemu().esp_image(...)` raw image). Overrides the profile's
+    /// `qemu().boot_mode(...)` setting.
+    #[arg(long)]
+    pub bios: bool,
     /// Wall-clock timeout in seconds. QEMU is killed on expiry and
     /// gluon exits with a non-zero status. Overrides the profile's
     /// `test_timeout`.

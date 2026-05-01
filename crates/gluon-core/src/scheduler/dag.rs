@@ -29,7 +29,9 @@
 //! **Do not change `edges_out` to `Vec` under any circumstances.**
 
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, CrateDef, EspDef, Handle, ResolvedConfig, RuleDef, TargetDef};
+use gluon_model::{
+    BuildModel, CrateDef, EspDef, Handle, ImageDef, ImageSource, ResolvedConfig, RuleDef, TargetDef,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
@@ -59,6 +61,12 @@ pub enum DagNode {
     /// outputs of one or more sibling crates. Depends on every source
     /// crate referenced by the ESP's entries. See [`EspDef`].
     Esp(Handle<EspDef>),
+    /// Assemble a bootable disk image from compiled crate artifacts,
+    /// host files, and (in Phase 3+) raw byte placements + nested
+    /// partitions. Depends on every source crate referenced by the
+    /// image's entries, and on every ESP referenced via
+    /// `ImageSource::Esp`. See [`ImageDef`].
+    Image(Handle<ImageDef>),
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +245,27 @@ impl Default for Dag {
 pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     let mut dag = Dag::new();
 
+    // Helper: look up whether a crate's group has `no_sysroot=true`.
+    // Returns false if the group handle isn't set (defensive: a crate
+    // without a resolved group is a resolver bug, but we'd rather fall
+    // back to the safe behaviour — wire up the sysroot edges — than
+    // silently drop them and produce a broken build).
+    let crate_no_sysroot = |handle: Handle<CrateDef>| -> bool {
+        let crate_def = match model.crates.get(handle) {
+            Some(c) => c,
+            None => return false,
+        };
+        let group_handle = match crate_def.group_handle {
+            Some(h) => h,
+            None => return false,
+        };
+        model
+            .groups
+            .get(group_handle)
+            .map(|g| g.no_sysroot)
+            .unwrap_or(false)
+    };
+
     // -----------------------------------------------------------------------
     // Step 1: Insert cross Sysroot nodes for every target in use.
     // -----------------------------------------------------------------------
@@ -248,9 +277,15 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     //
     // The profile's target always gets a sysroot node (for the config crate);
     // additional targets appear if any resolved crate references them.
+    //
+    // Crates whose group sets `no_sysroot=true` are excluded — their
+    // target may be incompatible with `core`/`alloc`/`compiler_builtins`
+    // (e.g. 16-bit real-mode boot sector targets). The user is
+    // responsible for ensuring that no `no_sysroot` group's target is
+    // also used by a sysroot-dependent crate.
     dag.insert_node(DagNode::Sysroot(resolved.profile.target));
     for crate_ref in &resolved.crates {
-        if !crate_ref.host {
+        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
             dag.insert_node(DagNode::Sysroot(crate_ref.target));
         }
     }
@@ -261,11 +296,12 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     // -----------------------------------------------------------------------
     // Collect distinct cross targets. The profile target always gets one
     // (even if no crate uses it — the config crate is unconditional);
-    // additional targets appear from resolved.crates.
+    // additional targets appear from resolved.crates. `no_sysroot`
+    // crates are again excluded — they don't link the config crate.
     let mut config_targets: BTreeSet<Handle<TargetDef>> = BTreeSet::new();
     config_targets.insert(resolved.profile.target);
     for crate_ref in &resolved.crates {
-        if !crate_ref.host {
+        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
             config_targets.insert(crate_ref.target);
         }
     }
@@ -289,7 +325,11 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
         // Edge rule 1 + 2: cross crates depend on Sysroot and ConfigCrate.
         // Host crates (proc-macros, build scripts) are compiled for the build
         // machine and do not use the custom sysroot or config crate.
-        if !crate_ref.host {
+        // `no_sysroot` group crates also skip both edges — they declare
+        // `#![no_core]` (or equivalent) and provide their own runtime
+        // primitives; wiring them to a sysroot they can't link against
+        // would force a doomed build.
+        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
             // Rule 1: cross crate → sysroot FOR ITS OWN TARGET (not
             // necessarily the profile target — multi-target projects have
             // independent sysroots per target).
@@ -365,6 +405,75 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
             }
             let src_id = dag.insert_node(DagNode::Crate(src_handle));
             dag.add_edge(src_id, esp_id);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3c: Image nodes.
+    // -----------------------------------------------------------------------
+    // Each declared image becomes one node. Edge sources:
+    //   - `ImageSource::Crate(name)` → DagNode::Crate(handle).
+    //   - `ImageSource::Esp(name)`   → DagNode::Esp(handle) (the ESP
+    //     directory must be assembled before the image packs it).
+    //   - `ImageSource::File(path)`  → no edge (host-side file with no
+    //     build dependency).
+    //
+    // Mirrors the ESP loop's policy: source names that don't resolve
+    // are skipped silently (validate.rs surfaces them via diagnostic),
+    // and missing handles in `resolved.crates` (e.g. gated behind a
+    // disabled config option) are skipped too. An image with zero
+    // resolvable entries still gets a node — its dispatcher will
+    // produce an empty image, which is observable rather than silent.
+    for (image_handle, image) in model.images.iter() {
+        let image_id = dag.insert_node(DagNode::Image(image_handle));
+        // Helper closure used by every entry slot — top-level `entries`,
+        // each partition's nested `entries`, and the raw_writes' crate
+        // sources all share the same edge logic.
+        let wire_image_source_crate = |dag: &mut Dag, name: &str| {
+            if let Some(src_handle) = model.crates.lookup(name) {
+                if resolved_handles.contains(&src_handle) {
+                    let src_id = dag.insert_node(DagNode::Crate(src_handle));
+                    dag.add_edge(src_id, image_id);
+                }
+            }
+        };
+        let wire_image_source_esp = |dag: &mut Dag, name: &str| {
+            if let Some(esp_handle) = model.esps.lookup(name) {
+                let src_id = dag.insert_node(DagNode::Esp(esp_handle));
+                dag.add_edge(src_id, image_id);
+            }
+        };
+        let wire_entries = |dag: &mut Dag, entries: &[gluon_model::ImageEntry]| {
+            for entry in entries {
+                match &entry.source {
+                    ImageSource::Crate(name) => wire_image_source_crate(dag, name),
+                    ImageSource::Esp(name) => wire_image_source_esp(dag, name),
+                    ImageSource::File(_) => {
+                        // No build dependency: host files exist on disk
+                        // before gluon runs. Mtime-based cache
+                        // invalidation happens inside the image
+                        // dispatcher.
+                    }
+                }
+            }
+        };
+
+        // Top-level entries (flat-FS image shape).
+        wire_entries(&mut dag, &image.entries);
+
+        // Each partition's entries (partitioned-disk shape). Same
+        // resolution, just nested.
+        for partition in &image.partitions {
+            wire_entries(&mut dag, &partition.entries);
+        }
+
+        // Raw writes targeting compiled crates (typically a BIOS boot
+        // sector or a stage blob built as `crate_type("raw_binary")`).
+        // File and Bytes sources have no build dependency.
+        for rw in &image.raw_writes {
+            if let gluon_model::RawSource::Crate { name } = &rw.source {
+                wire_image_source_crate(&mut dag, name);
+            }
         }
     }
 
@@ -480,6 +589,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             }
         }
@@ -1317,6 +1427,389 @@ mod tests {
         // Consumer's in-degree: Sysroot + ConfigCrate only (no artifact edge).
         let consumer_id = *dag.node_index.get(&DagNode::Crate(consumer_h)).unwrap();
         assert_eq!(*dag.in_degree.get(&consumer_id).unwrap(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Image DAG node depends on its source crates and ESPs
+    // -----------------------------------------------------------------------
+    //
+    // An ImageDef with one Crate-source entry and one Esp-source entry
+    // must produce:
+    //   - exactly one DagNode::Image,
+    //   - an edge from the source Crate to the Image,
+    //   - an edge from the source Esp to the Image,
+    //   - and the Image must NOT directly depend on the ESP's source
+    //     crates (that's transitive through Esp → Image).
+    //
+    // ImageSource::File entries produce no edges — they're host files
+    // outside the build graph.
+    #[test]
+    fn build_dag_image_node_wires_crate_and_esp_sources() {
+        use gluon_model::{EspDef, EspEntry, ImageEntry, ImageSource as ModelImageSource};
+
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-unknown-uefi");
+
+        // Bootloader crate the ESP will host.
+        let (bl_h, _) = model.crates.insert(
+            "bootloader".into(),
+            CrateDef {
+                name: "bootloader".into(),
+                path: "crates/bootloader".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: "cross".into(),
+                target_handle: Some(th),
+                group: "uefi".into(),
+                ..Default::default()
+            },
+        );
+
+        // Kernel crate the image packs directly (no ESP indirection).
+        let (kernel_h, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "crates/kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: "cross".into(),
+                target_handle: Some(th),
+                group: "uefi".into(),
+                ..Default::default()
+            },
+        );
+
+        // ESP that grafts the bootloader.
+        let (esp_h, _) = model.esps.insert(
+            "default".into(),
+            EspDef {
+                name: "default".into(),
+                entries: vec![EspEntry {
+                    source_crate: "bootloader".into(),
+                    source_crate_handle: Some(bl_h),
+                    dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
+                }],
+                span: None,
+            },
+        );
+
+        // Image that packs both the ESP and the kernel.
+        let (img_h, _) = model.images.insert(
+            "boot-disk".into(),
+            gluon_model::ImageDef {
+                name: "boot-disk".into(),
+                format: Some("fat32".into()),
+                size_mb: Some(64),
+                entries: vec![
+                    ImageEntry {
+                        source: ModelImageSource::Esp("default".into()),
+                        dest_path: "/".into(),
+                    },
+                    ImageEntry {
+                        source: ModelImageSource::Crate("kernel".into()),
+                        dest_path: "/boot/kernel.img".into(),
+                    },
+                    // host file: must not produce an edge
+                    ImageEntry {
+                        source: ModelImageSource::File("boot/config.cfg".into()),
+                        dest_path: "/boot/config.cfg".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![
+                ResolvedCrateRef {
+                    handle: bl_h,
+                    target: th,
+                    host: false,
+                },
+                ResolvedCrateRef {
+                    handle: kernel_h,
+                    target: th,
+                    host: false,
+                },
+            ],
+        );
+
+        let dag = build_dag(&resolved, &model).unwrap();
+
+        let img_id = *dag
+            .node_index
+            .get(&DagNode::Image(img_h))
+            .expect("Image node must exist");
+        let esp_id = *dag.node_index.get(&DagNode::Esp(esp_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
+
+        // Esp → Image edge present.
+        let esp_outs = dag.edges_out.get(&esp_id).unwrap();
+        assert!(
+            esp_outs.contains(&img_id),
+            "Esp → Image edge must exist (esp must complete before image packs it)"
+        );
+
+        // Crate(kernel) → Image edge present.
+        let kernel_outs = dag.edges_out.get(&kernel_id).unwrap();
+        assert!(
+            kernel_outs.contains(&img_id),
+            "Crate(kernel) → Image edge must exist for direct crate sources"
+        );
+
+        // The image's in-degree counts: 1 from Esp + 1 from Kernel = 2.
+        // Bootloader's edge goes to Esp, not directly to Image.
+        assert_eq!(*dag.in_degree.get(&img_id).unwrap(), 2);
+    }
+
+    // Image with partition.entries and raw_writes(crate=...) sources
+    // wires edges to the correct crates. Without this the partitioned
+    // path would race the image build ahead of its inputs.
+    #[test]
+    fn build_dag_image_node_wires_partition_entries_and_raw_writes() {
+        use gluon_model::{
+            ImageEntry, ImageSource as ModelImageSource, PartitionDef, PartitionTable, RawSource,
+            RawWrite,
+        };
+
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-unknown-none");
+
+        let (kernel_h, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "crates/kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: "cross".into(),
+                target_handle: Some(th),
+                group: "kernel".into(),
+                ..Default::default()
+            },
+        );
+        let (boot_h, _) = model.crates.insert(
+            "boot-sector".into(),
+            CrateDef {
+                name: "boot-sector".into(),
+                path: "crates/boot-sector".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::RawBinary,
+                target: "cross".into(),
+                target_handle: Some(th),
+                group: "kernel".into(),
+                ..Default::default()
+            },
+        );
+
+        let (img_h, _) = model.images.insert(
+            "disk".into(),
+            gluon_model::ImageDef {
+                name: "disk".into(),
+                size_mb: Some(64),
+                partition_table: Some(PartitionTable::Mbr),
+                raw_writes: vec![RawWrite {
+                    lba: 0,
+                    source: RawSource::Crate {
+                        name: "boot-sector".into(),
+                    },
+                    max_sectors: Some(1),
+                    span: None,
+                }],
+                partitions: vec![PartitionDef {
+                    name: "esp".into(),
+                    start_lba: 2048,
+                    end_lba: None,
+                    fs_type: "fat32".into(),
+                    partition_type: 0xEF,
+                    bootable: true,
+                    entries: vec![ImageEntry {
+                        source: ModelImageSource::Crate("kernel".into()),
+                        dest_path: "/boot/kernel.bin".into(),
+                    }],
+                    span: None,
+                }],
+                ..Default::default()
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![
+                ResolvedCrateRef {
+                    handle: kernel_h,
+                    target: th,
+                    host: false,
+                },
+                ResolvedCrateRef {
+                    handle: boot_h,
+                    target: th,
+                    host: false,
+                },
+            ],
+        );
+
+        let dag = build_dag(&resolved, &model).unwrap();
+        let img_id = *dag.node_index.get(&DagNode::Image(img_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
+        let boot_id = *dag.node_index.get(&DagNode::Crate(boot_h)).unwrap();
+
+        // partition.entries crate → image edge.
+        assert!(
+            dag.edges_out.get(&kernel_id).unwrap().contains(&img_id),
+            "Crate(kernel) inside partition.entries must edge into the image"
+        );
+        // raw_writes Crate source → image edge.
+        assert!(
+            dag.edges_out.get(&boot_id).unwrap().contains(&img_id),
+            "Crate(boot-sector) referenced by raw_write must edge into the image"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: no_sysroot group skips Sysroot and ConfigCrate edges
+    // -----------------------------------------------------------------------
+    //
+    // A crate whose group has `no_sysroot=true` must:
+    //   - NOT have an incoming edge from `Sysroot(its target)`.
+    //   - NOT have an incoming edge from `ConfigCrate(its target)`.
+    //   - NOT cause `Sysroot(its target)` or `ConfigCrate(its target)`
+    //     to appear in the DAG at all (assuming no other crate uses
+    //     that target). Otherwise we'd build a sysroot for a target
+    //     that can't satisfy `core` (e.g. 16-bit real mode).
+    //
+    // This is the load-bearing test for lepton-os's BIOS boot sector
+    // group. Wire it up wrong and gluon spawns rustc on a doomed
+    // sysroot build before the user's first crate gets a chance to
+    // compile.
+    #[test]
+    fn no_sysroot_group_skips_sysroot_and_config_crate_nodes() {
+        let mut model = BuildModel::default();
+
+        // Two targets: one normal (kernel), one for boot sectors.
+        let kernel_target = make_target(&mut model, "x86_64-unknown-none");
+        let bios_target = make_target(&mut model, "i386-code16-boot-sector");
+
+        // Normal kernel group — wants the sysroot.
+        let (_kernel_group, _) = model.groups.insert(
+            "kernel".into(),
+            GroupDef {
+                name: "kernel".into(),
+                target: "x86_64-unknown-none".into(),
+                target_handle: Some(kernel_target),
+                no_sysroot: false,
+                ..Default::default()
+            },
+        );
+
+        // Boot-sector group with no_sysroot=true.
+        let (bios_group_h, _) = model.groups.insert(
+            "bios-boot".into(),
+            GroupDef {
+                name: "bios-boot".into(),
+                target: "i386-code16-boot-sector".into(),
+                target_handle: Some(bios_target),
+                no_sysroot: true,
+                ..Default::default()
+            },
+        );
+
+        // Kernel crate (regular).
+        let kernel_h = model
+            .crates
+            .insert(
+                "kernel".into(),
+                CrateDef {
+                    name: "kernel".into(),
+                    path: "kernel".into(),
+                    edition: "2021".into(),
+                    crate_type: CrateType::Bin,
+                    target_handle: Some(kernel_target),
+                    group: "kernel".into(),
+                    ..Default::default()
+                },
+            )
+            .0;
+
+        // Boot-sector crate (no_sysroot via group).
+        let bs_h = model
+            .crates
+            .insert(
+                "boot-sector".into(),
+                CrateDef {
+                    name: "boot-sector".into(),
+                    path: "boot-sector".into(),
+                    edition: "2021".into(),
+                    crate_type: CrateType::RawBinary,
+                    target_handle: Some(bios_target),
+                    group: "bios-boot".into(),
+                    group_handle: Some(bios_group_h),
+                    ..Default::default()
+                },
+            )
+            .0;
+
+        let resolved = make_resolved(
+            kernel_target,
+            vec![
+                ResolvedCrateRef {
+                    handle: kernel_h,
+                    target: kernel_target,
+                    host: false,
+                },
+                ResolvedCrateRef {
+                    handle: bs_h,
+                    target: bios_target,
+                    host: false,
+                },
+            ],
+        );
+
+        let dag = build_dag(&resolved, &model).unwrap();
+
+        // The bios target must NOT have a Sysroot or ConfigCrate node.
+        assert!(
+            dag.node_index.get(&DagNode::Sysroot(bios_target)).is_none(),
+            "no_sysroot group's target must not get a Sysroot node"
+        );
+        assert!(
+            dag.node_index
+                .get(&DagNode::ConfigCrate(bios_target))
+                .is_none(),
+            "no_sysroot group's target must not get a ConfigCrate node"
+        );
+
+        // The kernel target should have both (it's a normal cross target).
+        assert!(
+            dag.node_index
+                .get(&DagNode::Sysroot(kernel_target))
+                .is_some(),
+            "regular cross target must still get a Sysroot node"
+        );
+        assert!(
+            dag.node_index
+                .get(&DagNode::ConfigCrate(kernel_target))
+                .is_some(),
+            "regular cross target must still get a ConfigCrate node"
+        );
+
+        // The boot-sector crate's in-degree must be 0 (no edges from
+        // Sysroot or ConfigCrate). The kernel crate's in-degree must
+        // include both.
+        let bs_id = *dag.node_index.get(&DagNode::Crate(bs_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
+        assert_eq!(
+            *dag.in_degree.get(&bs_id).unwrap(),
+            0,
+            "no_sysroot crate must have no incoming sysroot/config edges"
+        );
+        assert_eq!(
+            *dag.in_degree.get(&kernel_id).unwrap(),
+            2,
+            "regular cross crate's in-degree = Sysroot + ConfigCrate = 2"
+        );
     }
 
     // -----------------------------------------------------------------------

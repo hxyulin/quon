@@ -40,6 +40,36 @@ pub struct RuleCtx<'a> {
     pub resolved: &'a ResolvedConfig,
     pub model: &'a BuildModel,
     pub artifacts: &'a ArtifactMap,
+    /// Output paths for built images, keyed by [`gluon_model::ImageDef`]
+    /// handle. Used by `${image:<name>}` substitution. May be empty
+    /// when no `image()` blocks were declared, or when the rule fires
+    /// before the scheduler has produced any image artifacts (the
+    /// substitution will then surface a clear "image not built yet"
+    /// diagnostic).
+    pub image_paths: &'a std::collections::BTreeMap<
+        gluon_model::Handle<gluon_model::ImageDef>,
+        std::path::PathBuf,
+    >,
+}
+
+impl<'a> RuleCtx<'a> {
+    /// Static reference to an empty image-path map. Useful for tests
+    /// and call sites that legitimately have no image artifacts to
+    /// expose (e.g. the `gluon vendor` workflow). Avoids forcing every
+    /// caller to thread a local `BTreeMap::new()` through the scope.
+    pub fn empty_image_paths() -> &'static std::collections::BTreeMap<
+        gluon_model::Handle<gluon_model::ImageDef>,
+        std::path::PathBuf,
+    > {
+        use std::sync::OnceLock;
+        static MAP: OnceLock<
+            std::collections::BTreeMap<
+                gluon_model::Handle<gluon_model::ImageDef>,
+                std::path::PathBuf,
+            >,
+        > = OnceLock::new();
+        MAP.get_or_init(std::collections::BTreeMap::new)
+    }
 }
 
 /// A rule handler. Implementations receive pre-substituted argument strings —
@@ -275,6 +305,10 @@ fn resolve_var(ctx: &RuleCtx<'_>, rule: &RuleDef, var_name: &str) -> Result<Stri
     if let Some(crate_name) = var_name.strip_prefix("artifact:") {
         return resolve_artifact(ctx, rule, crate_name);
     }
+    // Prefixed variables: ${image:<image_name>}
+    if let Some(image_name) = var_name.strip_prefix("image:") {
+        return resolve_image(ctx, rule, image_name);
+    }
 
     match var_name {
         "build_dir" => Ok(ctx.layout.root().display().to_string()),
@@ -297,12 +331,54 @@ fn resolve_var(ctx: &RuleCtx<'_>, rule: &RuleDef, var_name: &str) -> Result<Stri
         }
         unknown => Err(Error::Compile(format!(
             "rule '{}': unknown substitution variable '${{{}}}'; \
-             known variables: [{}], or use ${{artifact:<crate_name>}}",
+             known variables: [{}], or use ${{artifact:<crate_name>}} / \
+             ${{image:<image_name>}}",
             rule.name,
             unknown,
             KNOWN_VARS.join(", ")
         ))),
     }
+}
+
+/// Resolve `${image:<image_name>}` to the built image's output path.
+///
+/// Mirrors [`resolve_artifact`]: validates the name resolves in the
+/// model first (so an unknown image name produces a discoverable error
+/// listing the available images), then looks up the actual output path
+/// in the scheduler's `image_paths` snapshot.
+fn resolve_image(ctx: &RuleCtx<'_>, rule: &RuleDef, image_name: &str) -> Result<String> {
+    if image_name.is_empty() {
+        return Err(Error::Compile(format!(
+            "rule '{}': empty image name in ${{image:}}",
+            rule.name
+        )));
+    }
+
+    let handle = ctx.model.images.lookup(image_name).ok_or_else(|| {
+        let available: Vec<&str> = ctx
+            .model
+            .images
+            .iter()
+            .map(|(_, i): (_, &gluon_model::ImageDef)| i.name.as_str())
+            .collect();
+        Error::Compile(format!(
+            "rule '{}': ${{image:{}}} references unknown image; available: [{}]",
+            rule.name,
+            image_name,
+            available.join(", ")
+        ))
+    })?;
+
+    let path = ctx.image_paths.get(&handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "rule '{}': ${{image:{}}} — image is declared but no output path is \
+             registered yet (ensure the rule's pipeline stage runs after the image \
+             scheduler node)",
+            rule.name, image_name
+        ))
+    })?;
+
+    Ok(path.display().to_string())
 }
 
 /// Resolve `${artifact:<crate_name>}` to the compiled output path.
@@ -394,6 +470,7 @@ mod tests {
                 qemu_memory: None,
                 qemu_cores: None,
                 qemu_extra_args: Vec::new(),
+                qemu_boot_mode: None,
                 test_timeout: None,
             }
         }
@@ -481,6 +558,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
         let rule = RuleDef {
             name: "myrule".into(),
@@ -521,6 +599,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
         let rule = RuleDef {
             name: "scriptrule".into(),
@@ -554,6 +633,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
         let rule = RuleDef {
             name: "badsyntax".into(),
@@ -628,6 +708,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _captured_outputs, handler) = make_capturing_rule();
@@ -677,6 +758,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _captured_outputs, handler) = make_capturing_rule();
@@ -712,6 +794,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _captured_outputs, handler) = make_capturing_rule();
@@ -744,6 +827,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (_, _, handler) = make_capturing_rule();
@@ -783,6 +867,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (_, _, handler) = make_capturing_rule();
@@ -824,6 +909,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _, handler) = make_capturing_rule();
@@ -860,6 +946,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (_, captured_outputs, handler) = make_capturing_rule();
@@ -931,6 +1018,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _, handler) = make_capturing_rule();
@@ -963,6 +1051,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (_, _, handler) = make_capturing_rule();
@@ -991,6 +1080,194 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Image substitution tests
+    // -----------------------------------------------------------------------
+    //
+    // ${image:name} mirrors ${artifact:crate} but resolves through the
+    // scheduler's image_paths map instead of the per-crate ArtifactMap.
+    // The shape parallels the artifact tests above.
+
+    #[test]
+    fn substitution_resolves_image_by_name() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+
+        let (image_h, _) = model.images.insert(
+            "boot-disk".into(),
+            ImageDef {
+                name: "boot-disk".into(),
+                ..Default::default()
+            },
+        );
+        let image_path = tmp.path().join("build/images/boot-disk.img");
+        let mut image_paths = std::collections::BTreeMap::new();
+        image_paths.insert(image_h, image_path.clone());
+
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: &image_paths,
+        };
+
+        let (captured_inputs, _, handler) = make_capturing_rule();
+        let mut registry = RuleRegistry::new();
+        registry.register("capture", handler);
+
+        let rule = RuleDef {
+            name: "checksum".into(),
+            inputs: vec!["sha256sum".into(), "${image:boot-disk}".into()],
+            outputs: vec![],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        };
+
+        registry
+            .dispatch(&ctx, &rule, &mut Vec::new(), &mut Vec::new())
+            .unwrap();
+        let args = captured_inputs.lock().unwrap().clone();
+        assert_eq!(args[1], image_path.display().to_string());
+    }
+
+    #[test]
+    fn substitution_image_unknown_name_lists_available() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+
+        model.images.insert(
+            "alpha".into(),
+            ImageDef {
+                name: "alpha".into(),
+                ..Default::default()
+            },
+        );
+        model.images.insert(
+            "beta".into(),
+            ImageDef {
+                name: "beta".into(),
+                ..Default::default()
+            },
+        );
+
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let (_, _, handler) = make_capturing_rule();
+        let mut registry = RuleRegistry::new();
+        registry.register("capture", handler);
+
+        let rule = RuleDef {
+            name: "checksum".into(),
+            inputs: vec!["${image:gamma}".into()],
+            outputs: vec![],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        };
+
+        let err = registry
+            .dispatch(&ctx, &rule, &mut Vec::new(), &mut Vec::new())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gamma"), "{msg}");
+        assert!(msg.contains("alpha") && msg.contains("beta"), "{msg}");
+    }
+
+    #[test]
+    fn substitution_image_known_but_no_path_diagnoses_ordering() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        model.images.insert(
+            "boot-disk".into(),
+            ImageDef {
+                name: "boot-disk".into(),
+                ..Default::default()
+            },
+        );
+
+        // image_paths is empty: simulates a rule that fires before the
+        // image scheduler node has produced any output.
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let (_, _, handler) = make_capturing_rule();
+        let mut registry = RuleRegistry::new();
+        registry.register("capture", handler);
+
+        let rule = RuleDef {
+            name: "checksum".into(),
+            inputs: vec!["${image:boot-disk}".into()],
+            outputs: vec![],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        };
+
+        let err = registry
+            .dispatch(&ctx, &rule, &mut Vec::new(), &mut Vec::new())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("scheduler") || msg.contains("pipeline stage"),
+            "diagnostic should hint at the ordering bug, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn substitution_image_empty_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let (_, _, handler) = make_capturing_rule();
+        let mut registry = RuleRegistry::new();
+        registry.register("capture", handler);
+
+        let rule = RuleDef {
+            name: "badrule".into(),
+            inputs: vec!["${image:}".into()],
+            outputs: vec![],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        };
+
+        let err = registry
+            .dispatch(&ctx, &rule, &mut Vec::new(), &mut Vec::new())
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "{msg}");
+    }
+
     #[test]
     fn substitution_artifact_empty_name_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1000,6 +1277,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (_, _, handler) = make_capturing_rule();
@@ -1040,6 +1318,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _, handler) = make_capturing_rule();
@@ -1075,6 +1354,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _, handler) = make_capturing_rule();
@@ -1107,6 +1387,7 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let (captured_inputs, _, handler) = make_capturing_rule();

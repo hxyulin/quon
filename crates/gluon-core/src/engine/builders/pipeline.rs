@@ -5,8 +5,9 @@ use crate::engine::EngineState;
 use crate::engine::conversions::array_to_string_vec;
 use crate::error::Diagnostic;
 use gluon_model::{
-    BootMode, EspDef, EspEntry, EspSource, ImageDef, ImageEntry, ImageSource, PipelineDef,
-    PipelineStep, RuleDef, RuleHandler, SerialMode,
+    BootMode, DiskSource, EspDef, EspEntry, EspSource, ImageDef, ImageEntry, ImageSource,
+    PartitionDef, PartitionTable, PipelineDef, PipelineStep, RawSource, RawWrite, RuleDef,
+    RuleHandler, SerialMode,
 };
 use rhai::{Dynamic, Engine, NativeCallContext, Position};
 use std::path::PathBuf;
@@ -68,6 +69,26 @@ pub struct BootloaderBuilder {
 pub struct ImageBuilder {
     state: EngineState,
     name: String,
+    pos: Position,
+    is_duplicate: bool,
+}
+
+/// Chainable builder returned by [`ImageBuilder`]'s `partition(name,
+/// start_lba, fs_type)` method. Mutates a specific
+/// [`PartitionDef`](gluon_model::PartitionDef) inside the parent image
+/// (identified by index — partitions are append-only during config
+/// evaluation, so the index is stable).
+///
+/// Calling `.end()` returns an [`ImageBuilder`] for the same image so
+/// the caller can keep chaining at the disk level.
+#[derive(Clone)]
+pub struct PartitionBuilder {
+    state: EngineState,
+    image_name: String,
+    /// Index into `ImageDef::partitions`. Stable for the lifetime of
+    /// the script because partitions are only ever pushed onto the
+    /// vector — never reordered or removed.
+    partition_index: usize,
     pos: Position,
     is_duplicate: bool,
 }
@@ -474,10 +495,12 @@ fn register_qemu(engine: &mut Engine, state: EngineState) {
             let parsed = match mode {
                 "direct" => Some(BootMode::Direct),
                 "uefi" => Some(BootMode::Uefi),
+                "bios" => Some(BootMode::Bios),
                 other => {
                     builder.state.push_diagnostic(
                         Diagnostic::error(format!(
-                            "qemu.boot_mode: expected \"direct\" or \"uefi\", got \"{other}\""
+                            "qemu.boot_mode: expected \"direct\", \"uefi\", or \"bios\", \
+                             got \"{other}\""
                         ))
                         .with_span(builder.state.span_from(builder.pos)),
                     );
@@ -533,6 +556,58 @@ fn register_qemu(engine: &mut Engine, state: EngineState) {
                 return builder.clone();
             }
             set_esp(builder, EspSource::Image(PathBuf::from(path)));
+            builder.clone()
+        },
+    );
+
+    // -----------------------------------------------------------------
+    // Boot-disk wiring (mode-agnostic).
+    //
+    // `disk_image("path/to/disk.img")` for a pre-built disk on the host
+    // filesystem, and `disk_ref("name")` for a reference to an
+    // `image("name")` declared in the same script — that one resolves
+    // to whichever path the scheduler produces for the active build.
+    //
+    // We keep these as separate methods rather than a tagged-value
+    // helper (`disk(image_ref(...))`) because Rhai's tagged values are
+    // awkward to express precisely and don't compose well with the
+    // diagnostic span attached to the *call* site.
+    // -----------------------------------------------------------------
+    engine.register_fn(
+        "disk_image",
+        |builder: &mut QemuBuilder, path: &str| -> QemuBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            set_disk(
+                builder,
+                DiskSource::Image {
+                    path: PathBuf::from(path),
+                },
+            );
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "disk_ref",
+        |builder: &mut QemuBuilder, name: &str| -> QemuBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            if name.is_empty() {
+                builder.state.push_diagnostic(
+                    Diagnostic::error("qemu.disk_ref: image name must not be empty".to_string())
+                        .with_span(builder.state.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            set_disk(
+                builder,
+                DiskSource::ImageRef {
+                    name: name.to_string(),
+                },
+            );
             builder.clone()
         },
     );
@@ -666,6 +741,21 @@ fn set_esp(builder: &QemuBuilder, esp: EspSource) {
         return;
     }
     model.qemu.esp = Some(esp);
+}
+
+fn set_disk(builder: &QemuBuilder, disk: DiskSource) {
+    let mut model = builder.state.model.borrow_mut();
+    if model.qemu.disk.is_some() {
+        drop(model);
+        builder.state.push_diagnostic(
+            Diagnostic::error(
+                "qemu: disk_image / disk_ref may only be called once per profile".to_string(),
+            )
+            .with_span(builder.state.span_from(builder.pos)),
+        );
+        return;
+    }
+    model.qemu.disk = Some(disk);
 }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +972,7 @@ fn start_esp(s: &EngineState, pos: Position, name: &str) -> EspBuilder {
 // ---------------------------------------------------------------------------
 
 fn register_image(engine: &mut Engine, state: EngineState) {
-    let s = state;
+    let s = state.clone();
     engine.register_fn(
         "image",
         move |ctx: NativeCallContext, name: &str| -> ImageBuilder {
@@ -1016,6 +1106,466 @@ fn register_image(engine: &mut Engine, state: EngineState) {
                 }
             }
             builder.clone()
+        },
+    );
+
+    // -----------------------------------------------------------------
+    // Partition-table primitives (Phase 3).
+    //
+    // `image(...).partition_table("mbr")` switches the image into
+    // partitioned-disk mode. After this, `add_crate` / `add_file` /
+    // `add_esp` (which target the flat-FS root) are still legal but
+    // produce a validation error at image-build time — the caller is
+    // expected to use `.partition(...)` to scope file placement.
+    // -----------------------------------------------------------------
+
+    engine.register_fn(
+        "partition_table",
+        |builder: &mut ImageBuilder, kind: &str| -> ImageBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            let table = match kind.to_ascii_lowercase().as_str() {
+                "mbr" => PartitionTable::Mbr,
+                "gpt" => {
+                    builder.state.push_diagnostic(
+                        Diagnostic::error(format!(
+                            "image(\"{}\").partition_table(\"gpt\"): GPT is not implemented yet. \
+                             Use \"mbr\" for now (the only Phase 3 supported value).",
+                            builder.name
+                        ))
+                        .with_span(builder.state.span_from(builder.pos)),
+                    );
+                    return builder.clone();
+                }
+                other => {
+                    builder.state.push_diagnostic(
+                        Diagnostic::error(format!(
+                            "image(\"{}\").partition_table(\"{other}\"): unknown partition table. \
+                             Supported: \"mbr\".",
+                            builder.name
+                        ))
+                        .with_span(builder.state.span_from(builder.pos)),
+                    );
+                    return builder.clone();
+                }
+            };
+            let mut model = builder.state.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    img.partition_table = Some(table);
+                }
+            }
+            builder.clone()
+        },
+    );
+
+    // Raw byte placements at LBA offsets. We expose three source
+    // flavours via separate methods rather than tagged values because
+    // Rhai's tagged-value ergonomics are awkward — keeping each source
+    // kind as its own method preserves chained-builder readability:
+    //
+    //   .write_crate_at(0, "bios-boot-sector")
+    //   .write_file_at(1, "boot/stage1_meta.bin")
+    //   .write_bytes_at(2, [0xCC, 0xDD, ...])
+    //
+    // `.max_sectors(n)` retroactively bounds the last `write_*_at`.
+    let s_wca = state.clone();
+    engine.register_fn(
+        "write_crate_at",
+        move |ctx: NativeCallContext,
+              builder: &mut ImageBuilder,
+              lba: i64,
+              crate_name: &str|
+              -> ImageBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            let span = s_wca.span_from(ctx.call_position());
+            if lba < 0 {
+                s_wca.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").write_crate_at: lba must be >= 0, got {lba}",
+                        builder.name
+                    ))
+                    .with_span(span),
+                );
+                return builder.clone();
+            }
+            let mut model = builder.state.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    img.raw_writes.push(RawWrite {
+                        lba: lba as u64,
+                        source: RawSource::Crate {
+                            name: crate_name.into(),
+                        },
+                        max_sectors: None,
+                        span: Some(span),
+                    });
+                }
+            }
+            builder.clone()
+        },
+    );
+
+    let s_wfa = state.clone();
+    engine.register_fn(
+        "write_file_at",
+        move |ctx: NativeCallContext,
+              builder: &mut ImageBuilder,
+              lba: i64,
+              path: &str|
+              -> ImageBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            let span = s_wfa.span_from(ctx.call_position());
+            if lba < 0 {
+                s_wfa.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").write_file_at: lba must be >= 0, got {lba}",
+                        builder.name
+                    ))
+                    .with_span(span),
+                );
+                return builder.clone();
+            }
+            let mut model = builder.state.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    img.raw_writes.push(RawWrite {
+                        lba: lba as u64,
+                        source: RawSource::File { path: path.into() },
+                        max_sectors: None,
+                        span: Some(span),
+                    });
+                }
+            }
+            builder.clone()
+        },
+    );
+
+    let s_wba = state.clone();
+    engine.register_fn(
+        "write_bytes_at",
+        move |ctx: NativeCallContext,
+              builder: &mut ImageBuilder,
+              lba: i64,
+              bytes: rhai::Array|
+              -> ImageBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            let span = s_wba.span_from(ctx.call_position());
+            if lba < 0 {
+                s_wba.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").write_bytes_at: lba must be >= 0, got {lba}",
+                        builder.name
+                    ))
+                    .with_span(span),
+                );
+                return builder.clone();
+            }
+            // Each Rhai array element should be a small non-negative
+            // integer. Validate so that an accidental string or float
+            // doesn't get silently coerced.
+            let mut payload = Vec::with_capacity(bytes.len());
+            for (i, v) in bytes.into_iter().enumerate() {
+                let n = match v.as_int() {
+                    Ok(n) => n,
+                    Err(actual) => {
+                        s_wba.push_diagnostic(
+                            Diagnostic::error(format!(
+                                "image(\"{}\").write_bytes_at: byte index {i} is not an integer (got {actual})",
+                                builder.name
+                            ))
+                            .with_span(span.clone()),
+                        );
+                        return builder.clone();
+                    }
+                };
+                if !(0..=255).contains(&n) {
+                    s_wba.push_diagnostic(
+                        Diagnostic::error(format!(
+                            "image(\"{}\").write_bytes_at: byte index {i} = {n}, must be in 0..=255",
+                            builder.name
+                        ))
+                        .with_span(span.clone()),
+                    );
+                    return builder.clone();
+                }
+                payload.push(n as u8);
+            }
+            let mut model = builder.state.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    img.raw_writes.push(RawWrite {
+                        lba: lba as u64,
+                        source: RawSource::Bytes { bytes: payload },
+                        max_sectors: None,
+                        span: Some(span),
+                    });
+                }
+            }
+            builder.clone()
+        },
+    );
+
+    // Cap on the most recently appended raw_write. We deliberately
+    // attach to the *last* entry rather than threading a per-write
+    // builder type — chains stay flat (`write_crate_at(...).max_sectors(64)`)
+    // and there's no incentive to apply a cap to anything but the
+    // write you just declared.
+    engine.register_fn(
+        "max_sectors",
+        |builder: &mut ImageBuilder, n: i64| -> ImageBuilder {
+            if builder.is_duplicate {
+                return builder.clone();
+            }
+            if n <= 0 {
+                builder.state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").max_sectors: must be positive, got {n}",
+                        builder.name
+                    ))
+                    .with_span(builder.state.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            let mut model = builder.state.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    if let Some(last) = img.raw_writes.last_mut() {
+                        last.max_sectors = Some(n as u64);
+                    } else {
+                        builder.state.push_diagnostic(
+                            Diagnostic::error(format!(
+                                "image(\"{}\").max_sectors called with no preceding write_*_at(...)",
+                                builder.name
+                            ))
+                            .with_span(builder.state.span_from(builder.pos)),
+                        );
+                    }
+                }
+            }
+            builder.clone()
+        },
+    );
+
+    // -----------------------------------------------------------------
+    // Sub-partition builder.
+    //
+    // image(...).partition("esp", 2048, "fat32")
+    //     .partition_type(0xEF)
+    //     .bootable(true)
+    //     .add_crate("kernel", "/boot/kernel.bin")
+    //     .end()
+    //
+    // The opening call appends a `PartitionDef` and returns a
+    // PartitionBuilder pinned to that index. `.end()` returns an
+    // `ImageBuilder` for the same image so the caller can keep chaining
+    // at the disk level.
+    // -----------------------------------------------------------------
+
+    let s_part = state.clone();
+    engine.register_fn(
+        "partition",
+        move |ctx: NativeCallContext,
+              builder: &mut ImageBuilder,
+              name: &str,
+              start_lba: i64,
+              fs_type: &str|
+              -> PartitionBuilder {
+            let pos = ctx.call_position();
+            let span = s_part.span_from(pos);
+            if builder.is_duplicate {
+                return PartitionBuilder {
+                    state: s_part.clone(),
+                    image_name: builder.name.clone(),
+                    partition_index: usize::MAX,
+                    pos,
+                    is_duplicate: true,
+                };
+            }
+            if name.is_empty() {
+                s_part.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").partition(...): name must not be empty",
+                        builder.name
+                    ))
+                    .with_span(span.clone()),
+                );
+            }
+            if start_lba < 0 {
+                s_part.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").partition(\"{name}\", {start_lba}, ...): start_lba must be >= 0",
+                        builder.name
+                    ))
+                    .with_span(span.clone()),
+                );
+            }
+            let mut idx = usize::MAX;
+            let mut model = s_part.model.borrow_mut();
+            if let Some(h) = model.images.lookup(&builder.name) {
+                if let Some(img) = model.images.get_mut(h) {
+                    // Reject duplicate partition names on the same image
+                    // — the name is what the user uses in diagnostics
+                    // and (later) in `${partition:image:name}` lookups.
+                    if img.partitions.iter().any(|p| p.name == name) {
+                        s_part.push_diagnostic(
+                            Diagnostic::error(format!(
+                                "image(\"{}\").partition(\"{name}\", ...): a partition with this name already exists on this image",
+                                builder.name
+                            ))
+                            .with_span(span.clone()),
+                        );
+                    } else {
+                        idx = img.partitions.len();
+                        img.partitions.push(PartitionDef {
+                            name: name.into(),
+                            start_lba: start_lba.max(0) as u64,
+                            end_lba: None,
+                            fs_type: fs_type.into(),
+                            // Default to 0x83 (Linux) — a safe non-zero
+                            // value. Users typically override via
+                            // `.partition_type(0xEF)` for the ESP.
+                            partition_type: 0x83,
+                            bootable: false,
+                            entries: Vec::new(),
+                            span: Some(span),
+                        });
+                    }
+                }
+            }
+            PartitionBuilder {
+                state: s_part.clone(),
+                image_name: builder.name.clone(),
+                partition_index: idx,
+                pos,
+                is_duplicate: idx == usize::MAX,
+            }
+        },
+    );
+
+    register_partition_methods(engine, state.clone());
+}
+
+fn register_partition_methods(engine: &mut Engine, state: EngineState) {
+    // Helper closure to mutate the targeted partition. Returns whether
+    // a mutation happened (i.e. handle resolved + index in bounds).
+    fn with_partition_mut(builder: &PartitionBuilder, f: impl FnOnce(&mut PartitionDef)) {
+        if builder.is_duplicate || builder.partition_index == usize::MAX {
+            return;
+        }
+        let mut model = builder.state.model.borrow_mut();
+        if let Some(h) = model.images.lookup(&builder.image_name) {
+            if let Some(img) = model.images.get_mut(h) {
+                if let Some(p) = img.partitions.get_mut(builder.partition_index) {
+                    f(p);
+                }
+            }
+        }
+    }
+
+    engine.register_fn(
+        "end_lba",
+        |builder: &mut PartitionBuilder, lba: i64| -> PartitionBuilder {
+            if lba < 0 {
+                builder.state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").partition: end_lba must be >= 0, got {lba}",
+                        builder.image_name
+                    ))
+                    .with_span(builder.state.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            with_partition_mut(builder, |p| p.end_lba = Some(lba as u64));
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "partition_type",
+        |builder: &mut PartitionBuilder, ty: i64| -> PartitionBuilder {
+            if !(0..=0xFF).contains(&ty) {
+                builder.state.push_diagnostic(
+                    Diagnostic::error(format!(
+                        "image(\"{}\").partition: partition_type must fit in a byte (0..=255), got {ty}",
+                        builder.image_name
+                    ))
+                    .with_span(builder.state.span_from(builder.pos)),
+                );
+                return builder.clone();
+            }
+            with_partition_mut(builder, |p| p.partition_type = ty as u8);
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "bootable",
+        |builder: &mut PartitionBuilder, flag: bool| -> PartitionBuilder {
+            with_partition_mut(builder, |p| p.bootable = flag);
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "add_crate",
+        |builder: &mut PartitionBuilder, crate_name: &str, dest: &str| -> PartitionBuilder {
+            with_partition_mut(builder, |p| {
+                p.entries.push(ImageEntry {
+                    source: ImageSource::Crate(crate_name.into()),
+                    dest_path: dest.into(),
+                });
+            });
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "add_file",
+        |builder: &mut PartitionBuilder, path: &str, dest: &str| -> PartitionBuilder {
+            with_partition_mut(builder, |p| {
+                p.entries.push(ImageEntry {
+                    source: ImageSource::File(path.into()),
+                    dest_path: dest.into(),
+                });
+            });
+            builder.clone()
+        },
+    );
+
+    engine.register_fn(
+        "add_esp",
+        |builder: &mut PartitionBuilder, esp_name: &str, dest: &str| -> PartitionBuilder {
+            with_partition_mut(builder, |p| {
+                p.entries.push(ImageEntry {
+                    source: ImageSource::Esp(esp_name.into()),
+                    dest_path: dest.into(),
+                });
+            });
+            builder.clone()
+        },
+    );
+
+    // Close the partition sub-builder and hand the caller back an
+    // ImageBuilder for the same image, so they can keep chaining at
+    // the disk level (declare another partition, set `size`, etc.).
+    let s_end = state.clone();
+    engine.register_fn(
+        "end",
+        move |builder: &mut PartitionBuilder| -> ImageBuilder {
+            ImageBuilder {
+                state: s_end.clone(),
+                name: builder.image_name.clone(),
+                pos: builder.pos,
+                is_duplicate: builder.is_duplicate,
+            }
         },
     );
 }
