@@ -5,48 +5,56 @@ of typed constants. This lets you define build-time options -- feature toggles,
 numeric tuning knobs, string paths -- and access them as normal Rust constants
 with full type safety.
 
-## gluon.rhai
+## gluon.rs
 
-```rhai
-project("configurable_kernel", "0.1.0");
+```rust
+use gluon_config::{Config, CrateType, ConfigValue, Expr, Result};
 
-target("x86_64-unknown-none");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-profile("default")
-    .target("x86_64-unknown-none")
-    .opt_level(0)
-    .debug_info(true);
+    cfg.project("configurable_kernel", "0.1.0");
 
-// Typed configuration options
-config_bool("LOG_ENABLED")
-    .default_value(true)
-    .help("Enable runtime logging subsystem");
+    let target = cfg.target("x86_64-unknown-none");
 
-config_u32("LOG_LEVEL")
-    .default_value(3)
-    .range(0, 5)
-    .depends_on("LOG_ENABLED")
-    .help("Verbosity: 0 = off, 5 = trace");
+    cfg.profile("default")
+        .target(target)
+        .opt_level(0)
+        .debug_info(true);
 
-config_bool("DEBUG")
-    .default_value(false)
-    .help("Enable kernel debug assertions");
+    // Typed configuration options
+    cfg.config_bool("LOG_ENABLED")
+        .default_value(ConfigValue::Bool(true))
+        .help("Enable runtime logging subsystem");
 
-// Presets bundle config overrides
-preset("verbose")
-    .set("LOG_LEVEL", 5)
-    .set("DEBUG", true);
+    cfg.config_u32("LOG_LEVEL")
+        .default_value(ConfigValue::U32(3))
+        .range(0, 5)
+        .depends_on(Expr::Ident("LOG_ENABLED".into()))
+        .help("Verbosity: 0 = off, 5 = trace");
 
-preset("quiet")
-    .set("LOG_ENABLED", false);
+    cfg.config_bool("DEBUG")
+        .default_value(ConfigValue::Bool(false))
+        .help("Enable kernel debug assertions");
 
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .config(true)    // Link with the generated config crate
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .root("src/main.rs");
+    // Presets bundle config overrides
+    cfg.preset("verbose")
+        .set("LOG_LEVEL", ConfigValue::U32(5))
+        .set("DEBUG", ConfigValue::Bool(true));
+
+    cfg.preset("quiet")
+        .set("LOG_ENABLED", ConfigValue::Bool(false));
+
+    cfg.group("kernel")
+        .target(target)
+        .edition("2021")
+        .config(true)    // Link with the generated config crate
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs");
+
+    cfg.emit()
+}
 ```
 
 ## Using config values in Rust
@@ -71,7 +79,7 @@ runtime cost.
 
 ## Overriding values
 
-There are several ways to override the defaults declared in `gluon.rhai`.
+There are several ways to override the defaults declared in `gluon.rs`.
 
 ### Per-developer file (`.gluon-config`)
 
@@ -96,8 +104,8 @@ Environment variables take precedence over `.gluon-config`.
 
 Presets bundle multiple overrides into a named set. Apply them in a profile:
 
-```rhai
-profile("verbose-dev")
+```rust
+cfg.profile("verbose-dev")
     .inherits("default")
     .preset("verbose");
 ```
@@ -106,7 +114,7 @@ profile("verbose-dev")
 
 From lowest to highest priority:
 
-1. `default_value()` in `gluon.rhai`
+1. `default_value()` in `gluon.rs`
 2. Preset applied by the active profile
 3. `.gluon-config` file
 4. `--config-file` flag (overrides the `.gluon-config` path)
@@ -117,8 +125,8 @@ From lowest to highest priority:
 If you prefer the traditional Kconfig format, replace inline declarations with
 a `.kconfig` file:
 
-```rhai
-load_kconfig("./options.kconfig");
+```rust
+cfg.include_kconfig("./options.kconfig")?;
 ```
 
 ```kconfig
@@ -138,4 +146,4 @@ Both approaches produce the same generated config crate. Use whichever fits
 your project better -- inline declarations for small projects, Kconfig files
 for larger ones with many options.
 
-This example is based on `examples/with-config.rhai` in the Gluon repository.
+This example is based on `examples/with-config.rs` in the Gluon repository.

@@ -3,44 +3,52 @@
 A walkthrough of the simplest useful Gluon project: a single bare-metal binary
 compiled for `x86_64-unknown-none` and launched in QEMU.
 
-## gluon.rhai
+## gluon.rs
 
-```rhai
-// Every project starts with a name and version.
-project("my-kernel", "0.1.0");
+```rust
+use gluon_config::{Config, CrateType, Result};
 
-// Declare the target triple for the kernel.
-target("x86_64-unknown-none");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-// A profile controls optimization, debug info, and which target to use.
-profile("dev")
-    .target("x86_64-unknown-none")
-    .opt_level(0)
-    .debug_info(true)
-    .boot_binary("kernel");
+    // Every project starts with a name and version.
+    cfg.project("my-kernel", "0.1.0");
 
-// A group collects crates sharing a target and edition.
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld");
+    // Declare the target triple for the kernel.
+    let target = cfg.target("x86_64-unknown-none");
 
-// Optional: configure QEMU for `gluon run`.
-qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(128)
-    .cores(1)
-    .serial_stdio();
+    // A profile controls optimization, debug info, and which target to use.
+    cfg.profile("dev")
+        .target(target)
+        .opt_level(0)
+        .debug_info(true)
+        .boot_binary("kernel");
+
+    // A group collects crates sharing a target and edition.
+    cfg.group("kernel")
+        .target(target)
+        .edition("2021")
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs")
+            .linker_script("crates/kernel/kernel.ld");
+
+    // Optional: configure QEMU for `gluon run`.
+    cfg.qemu("qemu-system-x86_64")
+        .machine("q35")
+        .memory(128)
+        .cores(1)
+        .serial_stdio();
+
+    cfg.emit()
+}
 ```
 
 ## Directory layout
 
 ```
 my-kernel/
-  gluon.rhai
+  gluon.rs
   crates/kernel/
     src/main.rs
     kernel.ld
@@ -72,7 +80,7 @@ gluon configure      # Generate rust-project.json for your editor
 ## What happens during `gluon run`
 
 After a successful build, Gluon launches QEMU with the configuration from the
-`qemu()` block. The `boot_binary("kernel")` setting in the profile tells Gluon
+`cfg.qemu()` block. The `boot_binary("kernel")` setting in the profile tells Gluon
 which crate's output to pass to QEMU as the kernel image. Serial output is
 forwarded to your terminal via `.serial_stdio()`.
 
@@ -82,5 +90,5 @@ forwarded to your terminal via `.serial_stdio()`.
 - Add a UEFI bootloader: see [UEFI Bootloader + Kernel](./uefi-bootloader.md)
 - Set up your editor: see [Editor Setup](../tooling/editor-setup.md)
 
-This example is based on the `examples/basic-kernel.rhai` file in the Gluon
+This example is based on the `examples/basic-kernel.rs` file in the Gluon
 repository.

@@ -5,65 +5,73 @@ bare-metal kernel binary, with ESP assembly and QEMU integration. It
 demonstrates multi-target builds, cross-crate artifact dependencies, and UEFI
 boot configuration.
 
-## gluon.rhai
+## gluon.rs
 
-```rhai
-project("my-os", "0.1.0")
-    .default_profile("debug");
+```rust
+use gluon_config::{Config, CrateType, Result};
 
-// Two targets: bare-metal for kernel, UEFI for bootloader
-target("x86_64-unknown-none");
-target("x86_64-unknown-uefi");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-profile("debug")
-    .target("x86_64-unknown-uefi")
-    .opt_level(0)
-    .debug_info(true)
-    .boot_binary("bootloader");
+    cfg.project("my-os", "0.1.0")
+        .default_profile("debug");
 
-profile("release")
-    .target("x86_64-unknown-uefi")
-    .opt_level(2)
-    .lto("thin")
-    .boot_binary("bootloader");
+    // Two targets: bare-metal for kernel, UEFI for bootloader
+    let kernel_target = cfg.target("x86_64-unknown-none");
+    let uefi_target = cfg.target("x86_64-unknown-uefi");
 
-// Kernel group -- compiled for bare-metal
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld");
+    cfg.profile("debug")
+        .target(uefi_target)
+        .opt_level(0)
+        .debug_info(true)
+        .boot_binary("bootloader");
 
-// Bootloader group -- compiled for UEFI
-// artifact_env injects the kernel's output path and adds a build dependency
-group("uefi")
-    .target("x86_64-unknown-uefi")
-    .edition("2021")
-    .add("bootloader", "crates/bootloader")
-        .crate_type("bin")
-        .root("src/main.rs")
-        .artifact_env("KERNEL_PATH", "kernel");
+    cfg.profile("release")
+        .target(uefi_target)
+        .opt_level(2)
+        .lto("thin")
+        .boot_binary("bootloader");
 
-// Assemble an EFI System Partition
-esp("default")
-    .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+    // Kernel group -- compiled for bare-metal
+    cfg.group("kernel")
+        .target(kernel_target)
+        .edition("2021")
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs")
+            .linker_script("crates/kernel/kernel.ld");
 
-// QEMU with UEFI boot (requires OVMF)
-qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(256)
-    .cores(1)
-    .serial_stdio()
-    .boot_mode("uefi");
+    // Bootloader group -- compiled for UEFI
+    // artifact_env injects the kernel's output path and adds a build dependency
+    cfg.group("uefi")
+        .target(uefi_target)
+        .edition("2021")
+        .add("bootloader", "crates/bootloader")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs")
+            .artifact_env("KERNEL_PATH", "kernel");
+
+    // Assemble an EFI System Partition
+    cfg.esp("default")
+        .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+
+    // QEMU with UEFI boot (requires OVMF)
+    cfg.qemu("qemu-system-x86_64")
+        .machine("q35")
+        .memory(256)
+        .cores(1)
+        .serial_stdio()
+        .boot_mode("uefi");
+
+    cfg.emit()
+}
 ```
 
 ## Directory layout
 
 ```
 my-os/
-  gluon.rhai
+  gluon.rs
   crates/
     kernel/
       src/main.rs
@@ -145,5 +153,5 @@ their group's `.target()` setting. The dependency graph spans target boundaries
 -- the bootloader (UEFI target) depends on the kernel (bare-metal target) via
 `artifact_env`.
 
-This example is based on `examples/uefi-with-bootloader.rhai` in the Gluon
+This example is based on `examples/uefi-with-bootloader.rs` in the Gluon
 repository.
