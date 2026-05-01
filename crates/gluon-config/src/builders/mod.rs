@@ -33,14 +33,6 @@ impl<S> BuilderState<S> {
             BuilderState::Valid { name, .. } | BuilderState::Duplicate { name, .. } => name,
         }
     }
-
-    /// Apply `f` to the state if `Valid`; no-op when `Duplicate`. The
-    /// closure is the body of every chained method.
-    pub fn with<F: FnOnce(&mut S)>(&mut self, f: F) {
-        if let BuilderState::Valid { state, .. } = self {
-            f(state);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -48,25 +40,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn valid_state_invokes_closure() {
-        let mut s: BuilderState<u32> = BuilderState::Valid {
-            state: 0, name: "x".into(), span: None,
-        };
-        s.with(|n| *n = 42);
-        match s {
-            BuilderState::Valid { state, .. } => assert_eq!(state, 42),
-            _ => panic!("must be Valid"),
-        }
-    }
-
-    #[test]
-    fn duplicate_state_skips_closure() {
-        let mut s: BuilderState<u32> = BuilderState::Duplicate {
-            name: "x".into(), span: None,
-        };
-        let mut called = false;
-        s.with(|_| called = true);
-        assert!(!called, "closure must not run for Duplicate");
+    fn is_duplicate_distinguishes_variants() {
+        let v: BuilderState<()> = BuilderState::Valid { state: (), name: "v".into(), span: None };
+        let d: BuilderState<()> = BuilderState::Duplicate { name: "d".into(), span: None };
+        assert!(!v.is_duplicate());
+        assert!(d.is_duplicate());
     }
 
     #[test]
