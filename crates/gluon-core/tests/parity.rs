@@ -249,3 +249,27 @@ fn main() -> gluon_config::Result<()> {
 fn parity_minimal() {
     assert_fixture_parity("minimal");
 }
+
+#[test]
+#[ignore]
+fn parity_minimal_uefi() {
+    assert_fixture_parity("minimal-uefi");
+}
+
+#[test]
+#[ignore]
+fn parity_uefi_bootloader_kernel() {
+    assert_fixture_parity("uefi-bootloader-kernel");
+}
+
+#[test]
+#[ignore]
+fn parity_kconfig_minimal() {
+    assert_fixture_parity("kconfig-minimal");
+}
+
+#[test]
+#[ignore]
+fn parity_kconfig_rhai_equiv() {
+    assert_fixture_parity("kconfig-rhai-equiv");
+}
