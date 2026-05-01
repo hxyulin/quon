@@ -4,6 +4,7 @@ members = [
     "crates/gluon-model",
     "crates/gluon-core",
     "crates/gluon-cli",
+    "crates/gluon-config",
     "crates/gluon-lsp",
     "crates/tree-sitter-rhai",
 ]
@@ -22,5 +23,6 @@ categories = ["development-tools::build-utils", "embedded", "no-std"]
 unsafe_code = "warn"
 
 [workspace.dependencies]
-gluon-model = { path = "crates/gluon-model" }
+gluon-config = { path = "crates/gluon-config" }
 gluon-core = { path = "crates/gluon-core" }
+gluon-model = { path = "crates/gluon-model" }

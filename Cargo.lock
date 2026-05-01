@@ -429,6 +429,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gluon-config"
+version = "0.1.1"
+dependencies = [
+ "gluon-model",
+ "serde_json",
+]
+
+[[package]]
 name = "gluon-core"
 version = "0.1.1"
 dependencies = [
