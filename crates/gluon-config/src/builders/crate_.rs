@@ -238,4 +238,52 @@ mod tests {
         assert_eq!(k.artifact_deps, vec!["kernel".to_string()]);
         assert_eq!(k.artifact_env.len(), 2);
     }
+
+    // Empty-string diagnostic wording is parity-sensitive: the engine
+    // path emits these exact strings (engine model.rs:836-848). Lock
+    // the contract here so a typo can't slip past the parity test
+    // (which only fires on fixtures, not these targeted edges).
+    #[test]
+    fn artifact_env_empty_key_emits_engine_parity_diagnostic() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("g")
+            .target(t)
+            .add("foo", "crates/foo")
+            .artifact_env("", "kernel");
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(
+            cfg.diagnostics[0].message.contains(
+                "crate 'foo' artifact_env: environment variable name must not be empty"
+            ),
+            "got: {}",
+            cfg.diagnostics[0].message
+        );
+        let h = cfg.raw.model.crates.lookup("foo").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        assert!(k.artifact_env.is_empty());
+        assert!(k.artifact_deps.is_empty());
+    }
+
+    #[test]
+    fn artifact_env_empty_dep_name_emits_engine_parity_diagnostic() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("g")
+            .target(t)
+            .add("foo", "crates/foo")
+            .artifact_env("KERNEL_PATH", "");
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(
+            cfg.diagnostics[0].message.contains(
+                "crate 'foo' artifact_env: referenced crate name must not be empty"
+            ),
+            "got: {}",
+            cfg.diagnostics[0].message
+        );
+        let h = cfg.raw.model.crates.lookup("foo").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        assert!(k.artifact_env.is_empty());
+        assert!(k.artifact_deps.is_empty());
+    }
 }
