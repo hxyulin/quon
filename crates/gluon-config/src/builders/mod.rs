@@ -1,6 +1,10 @@
 //! Chainable builders shared by `Config::profile`, `Config::group`, etc.
 
+pub mod crate_;
+pub mod group;
 pub mod profile;
+pub use crate_::CrateBuilder;
+pub use group::GroupBuilder;
 pub use profile::ProfileBuilder;
 
 use gluon_model::SourceSpan;

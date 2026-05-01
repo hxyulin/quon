@@ -1,4 +1,5 @@
-use gluon_model::{Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
+use gluon_model::{GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
+use crate::builders::group::GroupBuilder;
 use crate::builders::{BuilderState, ProfileBuilder};
 use crate::error::{ConfigError, Result};
 
@@ -92,6 +93,33 @@ impl Config {
             )));
         }
         h
+    }
+
+    /// Declare a crate group. Returns a chainable [`GroupBuilder`] that
+    /// populates the new `GroupDef` and can spawn [`crate::builders::CrateBuilder`]s
+    /// via [`GroupBuilder::add`].
+    ///
+    /// If a group with this name was already declared, the builder enters the
+    /// `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    pub fn group(&mut self, name: &str) -> GroupBuilder<'_> {
+        let (handle, inserted) = self.raw.model.groups.insert(
+            name.into(),
+            GroupDef { name: name.into(), ..Default::default() },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording so the user sees
+            // the same message regardless of whether they use the DSL or the
+            // Rust config API.
+            self.diagnostics.push(ConfigError::new(format!(
+                "group \"{name}\" is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        GroupBuilder { cfg: self, state }
     }
 
     /// Declare a build profile. Returns a chainable [`ProfileBuilder`] that
