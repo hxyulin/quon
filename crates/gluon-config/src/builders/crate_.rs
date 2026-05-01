@@ -67,6 +67,30 @@ impl<'cfg> CrateBuilder<'cfg> {
         });
         self
     }
+
+    /// Add a dependency edge with optional feature/version overrides.
+    ///
+    /// The closure receives a [`crate::builders::DepBuilder`] and is
+    /// invoked synchronously on the just-inserted [`DepDef`]. For
+    /// dependencies with no extra options, prefer the simpler
+    /// [`Self::dep`] form.
+    pub fn dep_with<F: FnOnce(&mut crate::builders::DepBuilder<'_>)>(
+        mut self,
+        extern_name: &str,
+        crate_name: &str,
+        configure: F,
+    ) -> Self {
+        let key = extern_name.to_string();
+        let cn = crate_name.to_string();
+        self.modify(|c| {
+            let dep = c.deps.entry(key).or_insert_with(|| DepDef {
+                crate_name: cn,
+                ..Default::default()
+            });
+            configure(&mut crate::builders::DepBuilder::new(dep));
+        });
+        self
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +120,43 @@ mod tests {
             vec!["-C".to_string(), "opt-level=2".to_string()]
         );
         assert!(cfg.diagnostics.is_empty(), "happy path produces no diagnostics");
+    }
+
+    #[test]
+    fn dep_with_records_features_and_version() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("k").target(t).add("foo", "crates/foo").dep_with(
+            "mylib",
+            "mylib",
+            |b| {
+                b.features(&["logging", "fancy"]).version("1.2");
+            },
+        );
+        let h = cfg.raw.model.crates.lookup("foo").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        let dep = k.deps.get("mylib").unwrap();
+        assert_eq!(dep.crate_name, "mylib");
+        assert_eq!(dep.features, vec!["logging".to_string(), "fancy".to_string()]);
+        assert_eq!(dep.version.as_deref(), Some("1.2"));
+        assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn dep_with_supports_optional_and_no_default_features() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("k").target(t).add("foo", "crates/foo").dep_with(
+            "bitflags",
+            "bitflags",
+            |b| {
+                b.optional(true).no_default_features();
+            },
+        );
+        let h = cfg.raw.model.crates.lookup("foo").unwrap();
+        let k = cfg.raw.model.crates.get(h).unwrap();
+        let dep = k.deps.get("bitflags").unwrap();
+        assert!(dep.optional);
+        assert!(!dep.default_features);
     }
 }
