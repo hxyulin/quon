@@ -95,5 +95,6 @@ mod tests {
             k.rustc_flags,
             vec!["-C".to_string(), "opt-level=2".to_string()]
         );
+        assert!(cfg.diagnostics.is_empty(), "happy path produces no diagnostics");
     }
 }

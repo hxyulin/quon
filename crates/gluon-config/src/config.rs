@@ -1,6 +1,5 @@
 use gluon_model::{GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
-use crate::builders::group::GroupBuilder;
-use crate::builders::{BuilderState, ProfileBuilder};
+use crate::builders::{BuilderState, GroupBuilder, ProfileBuilder};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
