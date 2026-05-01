@@ -1,11 +1,15 @@
 //! Chainable builders shared by `Config::profile`, `Config::group`, etc.
 
+pub mod bootloader;
 pub mod crate_;
 pub mod group;
 pub mod profile;
+pub mod qemu;
+pub use bootloader::BootloaderBuilder;
 pub use crate_::CrateBuilder;
 pub use group::GroupBuilder;
 pub use profile::ProfileBuilder;
+pub use qemu::QemuBuilder;
 
 use gluon_model::SourceSpan;
 

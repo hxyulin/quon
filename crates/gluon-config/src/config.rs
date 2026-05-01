@@ -1,5 +1,5 @@
 use gluon_model::{GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
-use crate::builders::{BuilderState, GroupBuilder, ProfileBuilder};
+use crate::builders::{BootloaderBuilder, BuilderState, GroupBuilder, ProfileBuilder, QemuBuilder};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
@@ -149,6 +149,54 @@ impl Config {
             BuilderState::Duplicate { name: name.into(), span: None }
         };
         ProfileBuilder { cfg: self, state }
+    }
+
+    /// Configure the singleton QEMU runner. Returns a chainable
+    /// [`QemuBuilder`] that populates the project-level `QemuDef`.
+    ///
+    /// `qemu` is a **singleton**: calling this more than once pushes a
+    /// [`ConfigError`] into `self.diagnostics` and returns a builder in the
+    /// `Duplicate` state — all chained methods on the second (and subsequent)
+    /// builder become no-ops so the first call's values are preserved.
+    ///
+    /// This mirrors the engine's exact diagnostic string:
+    /// `"qemu is defined more than once"`.
+    pub fn qemu(&mut self, program: &str) -> QemuBuilder<'_> {
+        let state = if self.raw.qemu_was_set {
+            // Mirror engine wording verbatim.
+            self.diagnostics
+                .push(ConfigError::new("qemu is defined more than once".to_string()));
+            BuilderState::Duplicate { name: program.into(), span: None }
+        } else {
+            self.raw.qemu_was_set = true;
+            self.raw.model.qemu.binary = Some(program.into());
+            BuilderState::Valid { state: (), name: program.into(), span: None }
+        };
+        QemuBuilder { cfg: self, state }
+    }
+
+    /// Configure the singleton bootloader. Returns a chainable
+    /// [`BootloaderBuilder`] that populates the project-level `BootloaderDef`.
+    ///
+    /// `bootloader` is a **singleton**: calling this more than once pushes a
+    /// [`ConfigError`] into `self.diagnostics` and returns a builder in the
+    /// `Duplicate` state — all chained methods on the second (and subsequent)
+    /// builder become no-ops so the first call's values are preserved.
+    ///
+    /// This mirrors the engine's exact diagnostic string:
+    /// `"bootloader is defined more than once"`.
+    pub fn bootloader(&mut self, kind: &str) -> BootloaderBuilder<'_> {
+        let state = if self.raw.bootloader_was_set {
+            // Mirror engine wording verbatim.
+            self.diagnostics
+                .push(ConfigError::new("bootloader is defined more than once".to_string()));
+            BuilderState::Duplicate { name: kind.into(), span: None }
+        } else {
+            self.raw.bootloader_was_set = true;
+            self.raw.model.bootloader.kind = kind.into();
+            BuilderState::Valid { state: (), name: kind.into(), span: None }
+        };
+        BootloaderBuilder { cfg: self, state }
     }
 }
 

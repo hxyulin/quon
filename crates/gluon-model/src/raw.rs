@@ -18,6 +18,14 @@ pub struct RawBuildModel {
     /// Not part of the final `BuildModel`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
+    /// Stage-1 sidecar. `qemu(...)` and `bootloader(...)` are singletons;
+    /// today's `BuildModel.qemu` / `.bootloader` are non-`Option` so we
+    /// track "user actually called this" out-of-band. Stage 4 (D4.3)
+    /// makes the model fields `Option<...>` and removes these flags.
+    #[serde(skip)]
+    pub qemu_was_set: bool,
+    #[serde(skip)]
+    pub bootloader_was_set: bool,
 }
 
 #[cfg(test)]
