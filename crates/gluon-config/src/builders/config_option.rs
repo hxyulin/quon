@@ -174,17 +174,37 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
         self
     }
 
-    /// Set the `depends_on` clause as a pre-parsed [`Expr`].
+    /// Set the `depends_on` clause as a structural [`Expr`].
     ///
-    /// **Stage 1 limitation:** users must construct the `Expr` manually.
-    /// The engine accepts a mini boolean-expression *string* (`"A && !B"`) and
-    /// parses it via `gluon_core::kconfig::parse_bool_expr`, but that parser
-    /// lives in `gluon-core`, which `gluon-config` cannot depend on (would be
-    /// cyclic).  Users who need complex dependency expressions should declare
-    /// the option via `include_kconfig` instead.
-    pub fn depends_on_expr(mut self, expr: Expr) -> Self {
+    /// The resolver evaluates this expression with full
+    /// `&&` / `||` / `!` / grouping support — `Expr::Ident("X")`
+    /// means "depends on X"; `Expr::And(vec![..])` composes
+    /// requirements; `Expr::Not(..)` negates. See [`Expr::eval`].
+    ///
+    /// Last-call-wins: a second call overwrites the previous value.
+    /// Users who want the AND-fold pattern Rhai exposes through
+    /// `.depends_on(name)` chains pass a structural `Expr::And`
+    /// in a single call.
+    ///
+    /// **No string-form parser:** Rhai's
+    /// `.depends_on_expr("A && !B")` is unavailable here because the
+    /// parser lives in `gluon-core` and would require a circular
+    /// dependency. For projects that lean heavily on boolean logic,
+    /// declare options in a `.kconfig` file and pull it in via
+    /// [`crate::Config::include_kconfig`].
+    pub fn depends_on(mut self, expr: Expr) -> Self {
         self.modify(|opt| opt.depends_on_expr = Some(expr));
         self
+    }
+
+    /// Engine-parity alias for [`Self::default`]. Kept distinct so
+    /// migrating `.rhai` users can search-and-replace `default_value`
+    /// 1:1 without renaming.
+    ///
+    /// (Rhai reserves `default` as a keyword, so the engine surface
+    /// uses `default_value`. The Rust API exposes both.)
+    pub fn default_value(self, value: ConfigValue) -> Self {
+        self.default(value)
     }
 }
 
@@ -289,6 +309,67 @@ mod tests {
         let opt = cfg.raw.model.config_options.get("CONFIG_L").unwrap();
         assert_eq!(opt.ty, ConfigType::List);
         assert_eq!(opt.default, ConfigValue::List(vec![]));
+    }
+
+    #[test]
+    fn default_value_is_alias_for_default() {
+        use gluon_model::ConfigValue;
+        let mut cfg = Config::new();
+        cfg.config_bool("CONFIG_FOO").default_value(ConfigValue::Bool(true));
+        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        match opt.default {
+            ConfigValue::Bool(true) => {}
+            ref other => panic!("got {other:?}"),
+        }
+        assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn depends_on_records_ident_expr() {
+        use gluon_model::Expr;
+        let mut cfg = Config::new();
+        cfg.config_u32("LOG_LEVEL").depends_on(Expr::Ident("LOG_ENABLED".into()));
+        let opt = cfg.raw.model.config_options.get("LOG_LEVEL").unwrap();
+        match opt.depends_on_expr.as_ref() {
+            Some(Expr::Ident(s)) if s == "LOG_ENABLED" => {}
+            other => panic!("expected Ident(\"LOG_ENABLED\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depends_on_records_compound_expr() {
+        use gluon_model::Expr;
+        let mut cfg = Config::new();
+        cfg.config_bool("FANCY").depends_on(Expr::And(vec![
+            Expr::Ident("A".into()),
+            Expr::Not(Box::new(Expr::Ident("B".into()))),
+        ]));
+        let opt = cfg.raw.model.config_options.get("FANCY").unwrap();
+        match opt.depends_on_expr.as_ref() {
+            Some(Expr::And(xs)) => {
+                assert_eq!(xs.len(), 2);
+                assert!(matches!(&xs[0], Expr::Ident(a) if a == "A"));
+                assert!(matches!(&xs[1], Expr::Not(_)));
+            }
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depends_on_overwrites_on_repeat_call() {
+        // Last-call-wins: `.depends_on(...)` overwrites any previous
+        // value. To compose, the user passes a structural `Expr::And`
+        // in a single call.
+        use gluon_model::Expr;
+        let mut cfg = Config::new();
+        cfg.config_bool("FANCY")
+            .depends_on(Expr::Ident("A".into()))
+            .depends_on(Expr::Ident("B".into()));
+        let opt = cfg.raw.model.config_options.get("FANCY").unwrap();
+        match opt.depends_on_expr.as_ref() {
+            Some(Expr::Ident(s)) if s == "B" => {}
+            other => panic!("expected Ident(\"B\"), got {other:?}"),
+        }
     }
 
     #[test]
