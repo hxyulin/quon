@@ -61,19 +61,16 @@ impl<'cfg> DependencyBuilder<'cfg> {
         self.set_git_ref(GitRef::Branch(branch.into()))
     }
 
-    fn set_git_ref(mut self, new_ref: GitRef) -> Self {
+    fn set_git_ref(self, new_ref: GitRef) -> Self {
         if self.state.is_duplicate() {
             return self;
         }
         let name = self.state.name().to_string();
         if let BuilderState::Valid { state: handle, .. } = &self.state {
             if let Some(d) = self.cfg.raw.model.external_deps.get_mut(*handle) {
-                match &mut d.source {
-                    DepSource::Git { reference, .. } => {
-                        *reference = new_ref;
-                        return self;
-                    }
-                    _ => {}
+                if let DepSource::Git { reference, .. } = &mut d.source {
+                    *reference = new_ref;
+                    return self;
                 }
             }
         }
