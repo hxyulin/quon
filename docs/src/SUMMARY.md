@@ -10,8 +10,8 @@
 
 # Configuration Guide
 
-- [The gluon.rhai File](./configuration/gluon-rhai.md)
 - [The gluon.rs Build Script](./configuration/gluon-rs.md)
+- [The gluon.rhai File (legacy)](./configuration/gluon-rhai.md)
 - [Projects, Targets, and Profiles](./configuration/projects-targets-profiles.md)
 - [Groups and Crates](./configuration/groups-and-crates.md)
 - [Config Options and Kconfig](./configuration/config-options.md)
@@ -45,6 +45,10 @@
 - [Minimal Kernel](./cookbook/minimal-kernel.md)
 - [Kernel with Config Options](./cookbook/config-options.md)
 - [UEFI Bootloader + Kernel](./cookbook/uefi-bootloader.md)
+
+# Migration
+
+- [Rhai to Rust](./migration/rhai-to-rust.md)
 
 ---
 
