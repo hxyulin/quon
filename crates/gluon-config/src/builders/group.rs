@@ -79,26 +79,23 @@ impl<'cfg> GroupBuilder<'cfg> {
     }
 
     /// Insert a crate into this group and return a [`CrateBuilder`] to
-    /// configure it. Transfers ownership of `cfg` to the new builder — to
-    /// add multiple crates, call `cfg.group("name").add(...)` again for each.
+    /// configure it. The returned `CrateBuilder` borrows from this
+    /// `GroupBuilder`, so multiple `.add(...)` calls on a stored
+    /// `let mut g = ...` work — `g.add("a", "..."); g.add("b", "...");`.
     ///
-    /// The new `CrateDef` inherits the group's `target` and `default_edition`
-    /// at the time of this call.
-    pub fn add(self, crate_name: &str, path: &str) -> CrateBuilder<'cfg> {
-        let cfg = self.cfg;
-
-        // If the parent group was a duplicate, propagate the flag so chained
-        // CrateBuilder methods also no-op. We do not insert the crate either,
-        // since the group is not the one the author intended.
+    /// Inherits `target` and `default_edition` from this group at the
+    /// time of the call.
+    pub fn add(&mut self, crate_name: &str, path: &str) -> CrateBuilder<'_> {
+        // Propagate Duplicate state on the parent group.
         if self.state.is_duplicate() {
             let state = BuilderState::Duplicate { name: crate_name.into(), span: None };
-            return CrateBuilder { cfg, state };
+            return CrateBuilder { cfg: &mut *self.cfg, state };
         }
 
         // Resolve group-level defaults for the new CrateDef.
         let (edition, target, group_name) = {
             if let BuilderState::Valid { state: handle, .. } = &self.state {
-                if let Some(g) = cfg.raw.model.groups.get(*handle) {
+                if let Some(g) = self.cfg.raw.model.groups.get(*handle) {
                     (g.default_edition.clone(), g.target.clone(), g.name.clone())
                 } else {
                     ("2024".to_string(), "host".to_string(), self.state.name().to_string())
@@ -131,25 +128,26 @@ impl<'cfg> GroupBuilder<'cfg> {
             span: None,
         };
 
-        let (crate_handle, inserted) = cfg.raw.model.crates.insert(crate_name.into(), new_crate);
+        let (crate_handle, inserted) =
+            self.cfg.raw.model.crates.insert(crate_name.into(), new_crate);
         if !inserted {
-            cfg.diagnostics.push(ConfigError::new(format!(
+            self.cfg.diagnostics.push(ConfigError::new(format!(
                 "crate \"{crate_name}\" is defined more than once"
             )));
             let state = BuilderState::Duplicate { name: crate_name.into(), span: None };
-            return CrateBuilder { cfg, state };
+            return CrateBuilder { cfg: &mut *self.cfg, state };
         }
 
         // Record the crate under its group for later resolution.
         if let BuilderState::Valid { state: group_handle, .. } = &self.state {
-            if let Some(g) = cfg.raw.model.groups.get_mut(*group_handle) {
+            if let Some(g) = self.cfg.raw.model.groups.get_mut(*group_handle) {
                 g.crates.push(crate_name.to_string());
             }
         }
 
         let state =
             BuilderState::Valid { state: crate_handle, name: crate_name.into(), span: None };
-        CrateBuilder { cfg, state }
+        CrateBuilder { cfg: &mut *self.cfg, state }
     }
 }
 
@@ -221,6 +219,25 @@ mod tests {
             "duplicate crate must push exactly one diagnostic"
         );
         assert!(cfg.diagnostics[0].message.contains("foo"));
+    }
+
+    #[test]
+    fn group_supports_multi_add_via_bound_builder() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        let mut g = cfg.group("kernel").target(t).edition("2021");
+        g.add("a", "crates/a");
+        g.add("b", "crates/b").crate_type(CrateType::Bin);
+        drop(g);
+
+        // Both crates should be inserted, and both should be recorded
+        // under the group.
+        assert!(cfg.raw.model.crates.lookup("a").is_some());
+        assert!(cfg.raw.model.crates.lookup("b").is_some());
+        let h = cfg.raw.model.groups.lookup("kernel").unwrap();
+        let group = cfg.raw.model.groups.get(h).unwrap();
+        assert_eq!(group.crates, vec!["a".to_string(), "b".to_string()]);
+        assert!(cfg.diagnostics.is_empty());
     }
 
     #[test]
