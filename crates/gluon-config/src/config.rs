@@ -102,16 +102,20 @@ impl Config {
     /// definition is preserved. A [`ConfigError`] is pushed into
     /// `self.diagnostics` so [`Config::emit`] can surface the problem.
     pub fn profile(&mut self, name: &str) -> ProfileBuilder<'_> {
-        let (_, inserted) = self.raw.model.profiles.insert(
+        let (handle, inserted) = self.raw.model.profiles.insert(
             name.into(),
             ProfileDef { name: name.into(), ..Default::default() },
         );
         let state = if inserted {
-            BuilderState::Valid { state: (), name: name.into(), span: None }
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
         } else {
             // Mirror the engine's exact diagnostic wording so the user sees
             // the same message regardless of whether they use the DSL or the
             // Rust config API.
+            //
+            // The handle returned here is the existing entry's handle, but we
+            // deliberately do NOT store it in the Valid branch: chained methods
+            // on a Duplicate must be no-ops so the first definition is preserved.
             self.diagnostics.push(ConfigError::new(format!(
                 "profile \"{name}\" is defined more than once"
             )));
