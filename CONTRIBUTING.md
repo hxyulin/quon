@@ -55,7 +55,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 Gluon is a **kernel-agnostic** build system. Contributions should:
 
 - Not bake assumptions about a specific kernel, target triple, or
-  bootloader into core code — that belongs in `gluon.rhai`
+  bootloader into core code — that belongs in `gluon.rs`
 - Prefer deterministic, reproducible behavior (stable ordering,
   no reliance on `HashMap` iteration order)
 - Surface errors with context — build failures should point the user at

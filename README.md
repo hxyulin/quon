@@ -30,7 +30,7 @@ pushes against its assumptions:
   ranges, presets, and override layers.
 
 Gluon replaces this patchwork with a single tool driven by a declarative
-Rhai configuration file.
+Rust build script.
 
 ## Quick Start
 
@@ -47,36 +47,44 @@ cd gluon
 cargo install --path crates/gluon-cli
 ```
 
-**Create `gluon.rhai` in your project root:**
+**Create `gluon.rs` in your project root:**
 
-```rhai
-project("my-kernel", "0.1.0");
+```rust
+use gluon_config::{Config, CrateType, Result};
 
-target("x86_64-unknown-none");
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
 
-profile("dev")
-    .target("x86_64-unknown-none")
-    .opt_level(0)
-    .debug_info(true)
-    .boot_binary("kernel");
+    cfg.project("my-kernel", "0.1.0");
 
-group("kernel")
-    .target("x86_64-unknown-none")
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .crate_type("bin")
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld");
+    let target = cfg.target("x86_64-unknown-none");
 
-qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(128)
-    .cores(1)
-    .serial_stdio();
+    cfg.profile("dev")
+        .target(target)
+        .opt_level(0)
+        .debug_info(true)
+        .boot_binary("kernel");
+
+    cfg.group("kernel")
+        .target(target)
+        .edition("2021")
+        .add("kernel", "crates/kernel")
+            .crate_type(CrateType::Bin)
+            .root("src/main.rs")
+            .linker_script("crates/kernel/kernel.ld");
+
+    cfg.qemu("qemu-system-x86_64")
+        .machine("q35")
+        .memory(128)
+        .cores(1)
+        .serial_stdio();
+
+    cfg.emit()
+}
 ```
 
-A `gluon.rs` build script (Stage 1+) provides the same configuration
-surface in typed Rust; see [the gluon.rs guide](docs/src/configuration/gluon-rs.md).
+See [the gluon.rs guide](docs/src/configuration/gluon-rs.md) for details on
+the build script API.
 
 **Build and run:**
 
@@ -91,9 +99,9 @@ gluon configure          # Generate rust-project.json for rust-analyzer
 
 - **Direct rustc invocation** -- per-crate flag assembly, no Cargo overhead
 - **Custom sysroot compilation** -- `core`, `alloc`, `compiler_builtins` built for your target
-- **Rhai configuration** -- declarative `gluon.rhai` with projects, targets, profiles, groups, and crates
+- **Rust build script** -- type-safe `gluon.rs` with projects, targets, profiles, groups, and crates
 - **Kconfig-style options** -- typed config options with defaults, ranges, dependencies, and presets
-- **Configuration overrides** -- `gluon.rhai` defaults, `.gluon-config` file, and `GLUON_*` environment variables
+- **Configuration overrides** -- `gluon.rs` defaults, `.gluon-config` file, and `GLUON_*` environment variables
 - **Hybrid build cache** -- two-tier mtime + SHA-256 freshness checking
 - **Parallel DAG scheduler** -- dependency-aware build graph with worker pool
 - **Dependency vendoring** -- `gluon vendor` with lockfile and fingerprinting
