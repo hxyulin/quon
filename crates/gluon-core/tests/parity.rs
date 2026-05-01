@@ -273,3 +273,9 @@ fn parity_kconfig_minimal() {
 fn parity_kconfig_rhai_equiv() {
     assert_fixture_parity("kconfig-rhai-equiv");
 }
+
+#[test]
+#[ignore]
+fn parity_multi_profile() {
+    assert_fixture_parity("multi-profile");
+}
