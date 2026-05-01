@@ -51,10 +51,17 @@ mod tests {
             ..Default::default()
         });
         raw.kconfig_includes.push(PathBuf::from("./options.kconfig"));
+        raw.qemu_was_set = true;
+        raw.bootloader_was_set = true;
 
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert_eq!(de.model.project.as_ref().unwrap().name, "demo");
         assert_eq!(de.kconfig_includes, vec![PathBuf::from("./options.kconfig")]);
+        // Sanity-check the #[serde(skip)] contract: sidecar flags must NOT
+        // round-trip — even if `raw` has them set true before serialisation,
+        // the deserialised value sees them as false (the bool default).
+        assert!(!de.qemu_was_set, "qemu_was_set must be skipped on deserialize");
+        assert!(!de.bootloader_was_set, "bootloader_was_set must be skipped on deserialize");
     }
 }

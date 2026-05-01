@@ -91,4 +91,13 @@ mod tests {
         assert_eq!(bl.extras.get("flavor").map(String::as_str), Some("limine"));
         assert_eq!(bl.extras.get("strict").map(String::as_str), Some("true"));
     }
+
+    #[test]
+    fn bootloader_was_set_does_not_serialize() {
+        let mut cfg = Config::new();
+        cfg.bootloader("uefi");
+        let json = serde_json::to_string(&cfg.raw).unwrap();
+        assert!(!json.contains("bootloader_was_set"),
+            "bootloader_was_set must be #[serde(skip)] — not serialized");
+    }
 }

@@ -75,8 +75,8 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// Append extra QEMU arguments. All arguments are appended after every
     /// gluon-managed flag.
     pub fn extra_args(mut self, args: &[&str]) -> Self {
-        let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        self.modify(|q| q.extra_args = v);
+        let v: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
+        self.modify(|q| q.extra_args.extend(v.iter().cloned()));
         self
     }
 
@@ -91,6 +91,9 @@ impl<'cfg> QemuBuilder<'cfg> {
             other => {
                 // Mirror engine wording verbatim so the user sees the same
                 // message regardless of whether they use the DSL or the Rust API.
+                // Diagnostic guard is manual here because `modify()` only gates the
+                // model write; pushing a diagnostic when the builder is Duplicate
+                // would falsely accuse the second `qemu()` caller of the parsing error.
                 if !self.state.is_duplicate() {
                     self.cfg.diagnostics.push(ConfigError::new(format!(
                         "qemu.boot_mode: expected \"direct\", \"uefi\", or \"bios\", \
@@ -249,6 +252,19 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.message.contains("esp_dir") && d.message.contains("esp_image")));
+    }
+
+    #[test]
+    fn extra_args_appends_across_calls() {
+        let mut cfg = Config::new();
+        cfg.qemu("q")
+            .extra_args(&["-display", "none"])
+            .extra_args(&["-no-reboot"]);
+        assert_eq!(
+            cfg.raw.model.qemu.extra_args,
+            vec!["-display".to_string(), "none".to_string(), "-no-reboot".to_string()],
+        );
+        assert!(cfg.diagnostics.is_empty());
     }
 
     #[test]
