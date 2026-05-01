@@ -47,6 +47,33 @@ use gluon_model::{BuildModel, ConfigValue, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Load a [`BuildModel`] from `<project_root>/gluon.rs` (preferred) or
+/// `<project_root>/gluon.rhai` (legacy, deleted in Stage 3).
+///
+/// When both files exist, `gluon.rs` wins — Stage 2 fixtures port one
+/// at a time and the new path takes precedence on every fixture that
+/// has been ported.
+///
+/// This is the canonical unified entry point. CLI subcommands and
+/// embedders should call this rather than `evaluate` or
+/// `script_runner::compile_and_run` directly.
+pub fn load_build_model(project_root: &Path) -> Result<BuildModel> {
+    let rs_path = project_root.join("gluon.rs");
+    if rs_path.is_file() {
+        let layout = compile::BuildLayout::new(project_root.join("build"), "script-runner");
+        let info = compile::RustcInfo::load_or_probe(&layout)?;
+        return script_runner::compile_and_run(project_root, layout.root(), &info);
+    }
+    let rhai_path = project_root.join("gluon.rhai");
+    if rhai_path.is_file() {
+        return evaluate(&rhai_path);
+    }
+    Err(Error::Config(format!(
+        "no gluon.rs or gluon.rhai in {}",
+        project_root.display()
+    )))
+}
+
 /// Parse and evaluate a `gluon.rhai` file at `path`, returning the
 /// resulting [`BuildModel`].
 ///

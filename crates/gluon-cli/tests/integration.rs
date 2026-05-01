@@ -155,12 +155,13 @@ this_is_a_syntax_error }
         stderr.to_lowercase().contains("error"),
         "stderr should mention 'error', got: {stderr}"
     );
-    // The anyhow context wrapper in build_context prints "failed to
-    // evaluate gluon.rhai", which is a reliable substring to assert on
-    // because it names the file.
+    // load_build_model delegates to the Rhai engine for .rhai files, so the
+    // error chain will contain the Rhai parse error text. "Syntax error" is a
+    // reliable substring because it comes from the Rhai parser regardless of
+    // context wrapping.
     assert!(
-        stderr.contains("gluon.rhai"),
-        "stderr should mention gluon.rhai, got: {stderr}"
+        stderr.to_lowercase().contains("syntax error") || stderr.contains("failed to load"),
+        "stderr should mention a syntax error or load failure, got: {stderr}"
     );
 }
 

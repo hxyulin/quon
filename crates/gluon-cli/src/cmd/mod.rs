@@ -1,10 +1,10 @@
 //! Shared command context and plumbing for `gluon-cli` subcommands.
 //!
 //! Each subcommand needs some subset of the same preamble work: walk
-//! up from the current directory to find a `gluon.rhai`, evaluate it,
-//! pick a profile, resolve the config, probe rustc, load the cache
-//! manifest, and construct a `CompileCtx`. Two entry points are
-//! provided here:
+//! up from the current directory to find a `gluon.rs` or `gluon.rhai`,
+//! load the build model, pick a profile, resolve the config, probe
+//! rustc, load the cache manifest, and construct a `CompileCtx`. Two
+//! entry points are provided here:
 //!
 //! - [`build_context_at_for_driver`] does the full wiring including the
 //!   rustc probe. Used by `build`, `check`, `clippy`, and `configure`
@@ -46,7 +46,7 @@ use gluon_core::config::{
 use gluon_core::model::{BuildModel, ResolvedConfig};
 use gluon_core::vendor as core_vendor;
 use gluon_core::{
-    BuildLayout, Cache, CompileCtx, DriverKind, RustcInfo, evaluate, find_project_root,
+    BuildLayout, Cache, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model,
     resolve_config,
 };
 use std::path::{Path, PathBuf};
@@ -65,7 +65,7 @@ pub struct CmdContext {
     /// Layout, rustc metadata, and cache manifest — everything rustc
     /// invocations need.
     pub ctx: CompileCtx,
-    /// The directory containing `gluon.rhai` (the project root).
+    /// The directory containing `gluon.rs` or `gluon.rhai` (the project root).
     ///
     /// Not consumed by today's three subcommands (`build`, `clean`,
     /// `configure`) — they all reach for `resolved.project_root`
@@ -219,20 +219,20 @@ pub fn build_layout_context_at_with_opts(
     opts: LayoutContextOpts,
 ) -> Result<LayoutContext> {
     let project_root = find_project_root(cwd)
-        .context("could not find a gluon.rhai in the current directory or any parent")?;
-    let script = project_root.join("gluon.rhai");
-    let mut model = evaluate(&script).context("failed to evaluate gluon.rhai")?;
+        .context("could not find a gluon.rs or gluon.rhai in the current directory or any parent")?;
+    let mut model = load_build_model(&project_root)
+        .context("failed to load build model")?;
 
     // --- Vendor auto-registration ---
     //
-    // Runs after the Rhai intern pass (which already happened inside
-    // `evaluate`) and before `resolve_config`. Reads `gluon.lock`,
-    // verifies its fingerprint against the live model, and inserts
-    // synthetic CrateDefs for every pinned package so the compile
-    // path sees vendored crates as ordinary model entries. `gluon
-    // vendor` skips this via `opts.skip_vendor_autoreg` because *it*
-    // is the thing that fixes a stale lock — running the check here
-    // would abort before the fix could run.
+    // Runs after the build model is loaded (intern pass already
+    // happened inside `load_build_model`) and before `resolve_config`.
+    // Reads `gluon.lock`, verifies its fingerprint against the live
+    // model, and inserts synthetic CrateDefs for every pinned package
+    // so the compile path sees vendored crates as ordinary model
+    // entries. `gluon vendor` skips this via `opts.skip_vendor_autoreg`
+    // because *it* is the thing that fixes a stale lock — running the
+    // check here would abort before the fix could run.
     if !opts.skip_vendor_autoreg {
         let layout_for_vendor = BuildLayout::new(
             project_root.join("build"),
@@ -260,8 +260,8 @@ pub fn build_layout_context_at_with_opts(
                 Some(n) => n,
                 None => {
                     return Err(anyhow::anyhow!(
-                        "no profiles declared in gluon.rhai; add at least one `profile(...)` \
-                         definition or pass `-p <name>`"
+                        "no profiles declared in gluon.rs or gluon.rhai; add at least one \
+                         `profile(...)` definition or pass `-p <name>`"
                     ));
                 }
             }
