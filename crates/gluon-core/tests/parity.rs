@@ -243,3 +243,9 @@ fn main() -> gluon_config::Result<()> {
     let model = load_build_model(dir.path()).unwrap();
     assert_eq!(model.project.unwrap().name, "from-rs");
 }
+
+#[test]
+#[ignore]
+fn parity_minimal() {
+    assert_fixture_parity("minimal");
+}
