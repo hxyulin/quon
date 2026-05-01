@@ -132,8 +132,11 @@ impl<'cfg> ImageBuilder<'cfg> {
         // If already a duplicate, propagate without touching the model.
         if self.state.is_duplicate() {
             let state = BuilderState::Duplicate { name: name.into(), span: None };
-            // We need a placeholder handle; use the zero handle since we won't
-            // actually access it (is_duplicate guards all mutations).
+            // Placeholder handle — never resolved during a successful path:
+            // `PartitionBuilder::modify` short-circuits on `is_duplicate`, and
+            // `end()` reads via `arena.get(...).map(name).unwrap_or_default()`,
+            // so a stale or out-of-bounds value is benign (resulting builder
+            // stays Duplicate with an empty name; chained methods no-op).
             let image_handle: Handle<ImageDef> = Handle::new(0);
             return PartitionBuilder {
                 cfg: self.cfg,
