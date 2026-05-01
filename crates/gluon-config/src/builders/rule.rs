@@ -2,7 +2,6 @@
 
 use crate::builders::BuilderState;
 use crate::config::Config;
-use crate::error::ConfigError;
 use gluon_model::{Handle, RuleDef, RuleHandler};
 
 /// Chainable builder returned by [`Config::rule`].
@@ -77,47 +76,6 @@ impl<'cfg> RuleBuilder<'cfg> {
         let v: Vec<String> = items.iter().map(|s| s.to_string()).collect();
         self.modify(|r| r.depends_on.extend(v));
         self
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Config::rule
-// ---------------------------------------------------------------------------
-
-impl Config {
-    /// Declare a build rule. Returns a chainable [`RuleBuilder`] that
-    /// populates the new `RuleDef`.
-    ///
-    /// If a rule with this name was already declared, the builder enters the
-    /// `Duplicate` state: all chained methods become no-ops and the first
-    /// definition is preserved. A [`ConfigError`] is pushed into
-    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
-    ///
-    /// Mirrors the engine's exact diagnostic string:
-    /// `"rule '{name}' is defined more than once"` (single quotes, engine line 166).
-    pub fn rule(&mut self, name: &str) -> RuleBuilder<'_> {
-        let (handle, inserted) = self.raw.model.rules.insert(
-            name.into(),
-            RuleDef {
-                name: name.into(),
-                inputs: Vec::new(),
-                outputs: Vec::new(),
-                depends_on: Vec::new(),
-                handler: RuleHandler::Builtin("exec".into()),
-                working_dir: None,
-                span: None,
-            },
-        );
-        let state = if inserted {
-            BuilderState::Valid { state: handle, name: name.into(), span: None }
-        } else {
-            // Mirror the engine's exact diagnostic wording (single quotes, engine line 166).
-            self.diagnostics.push(ConfigError::new(format!(
-                "rule '{name}' is defined more than once"
-            )));
-            BuilderState::Duplicate { name: name.into(), span: None }
-        };
-        RuleBuilder { cfg: self, state }
     }
 }
 

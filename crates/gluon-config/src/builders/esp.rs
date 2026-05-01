@@ -56,39 +56,6 @@ impl<'cfg> EspBuilder<'cfg> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Config::esp
-// ---------------------------------------------------------------------------
-
-impl Config {
-    /// Declare an EFI System Partition layout. Returns a chainable
-    /// [`EspBuilder`] that accumulates `(source_crate, dest_path)` entries.
-    ///
-    /// If an ESP with this name was already declared, the builder enters the
-    /// `Duplicate` state: all chained methods become no-ops and the first
-    /// definition is preserved. A [`ConfigError`] is pushed into
-    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
-    ///
-    /// Mirrors the engine's exact diagnostic string:
-    /// `"esp(\"{name}\") is defined more than once"`.
-    pub fn esp(&mut self, name: &str) -> EspBuilder<'_> {
-        let (handle, inserted) = self.raw.model.esps.insert(
-            name.into(),
-            EspDef { name: name.into(), entries: Vec::new(), span: None },
-        );
-        let state = if inserted {
-            BuilderState::Valid { state: handle, name: name.into(), span: None }
-        } else {
-            // Mirror the engine's exact diagnostic wording.
-            self.diagnostics.push(ConfigError::new(format!(
-                "esp(\"{name}\") is defined more than once"
-            )));
-            BuilderState::Duplicate { name: name.into(), span: None }
-        };
-        EspBuilder { cfg: self, state }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::Config;

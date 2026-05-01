@@ -1,5 +1,5 @@
-use gluon_model::{GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
-use crate::builders::{BootloaderBuilder, BuilderState, GroupBuilder, ProfileBuilder, QemuBuilder};
+use gluon_model::{BuildStepDef, EspDef, GroupDef, Handle, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef};
+use crate::builders::{BootloaderBuilder, BuildStepBuilder, BuilderState, EspBuilder, GroupBuilder, ProfileBuilder, QemuBuilder, RuleBuilder};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
@@ -197,6 +197,111 @@ impl Config {
             BuilderState::Valid { state: (), name: kind.into(), span: None }
         };
         BootloaderBuilder { cfg: self, state }
+    }
+
+    /// Declare a build rule. Returns a chainable [`RuleBuilder`] that
+    /// populates the new `RuleDef`.
+    ///
+    /// If a rule with this name was already declared, the builder enters the
+    /// `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"rule '{name}' is defined more than once"` (single quotes, engine line 166).
+    pub fn rule(&mut self, name: &str) -> RuleBuilder<'_> {
+        let (handle, inserted) = self.raw.model.rules.insert(
+            name.into(),
+            RuleDef {
+                name: name.into(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                depends_on: Vec::new(),
+                handler: RuleHandler::Builtin("exec".into()),
+                working_dir: None,
+                span: None,
+            },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording (single quotes, engine line 166).
+            self.diagnostics.push(ConfigError::new(format!(
+                "rule '{name}' is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        RuleBuilder { cfg: self, state }
+    }
+
+    /// Declare a build step. Returns a chainable [`BuildStepBuilder`] that
+    /// populates the new `BuildStepDef`.
+    ///
+    /// If a build step with this name was already declared, the builder enters
+    /// the `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    ///
+    /// If the name collides with an existing crate, a diagnostic is pushed
+    /// (mirroring the engine validator in `validate.rs`) but the build step
+    /// is still inserted — the validator, not the builder, is where this is
+    /// enforced at engine level.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"build_step(\"{name}\") is defined more than once"`.
+    pub fn build_step(&mut self, name: &str) -> BuildStepBuilder<'_> {
+        // Check for crate-name collision before insert, mirroring the engine
+        // validator (validate.rs:103). We still insert regardless — the
+        // validator does too.
+        if self.raw.model.crates.lookup(name).is_some() {
+            self.diagnostics.push(ConfigError::new(format!(
+                "build_step(\"{name}\") collides with a crate of the same name. \
+                 Pick a different build-step name; the unified artifact \
+                 namespace requires unique names."
+            )));
+        }
+
+        let (handle, inserted) = self.raw.model.build_steps.insert(
+            name.into(),
+            BuildStepDef { name: name.into(), ..Default::default() },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording.
+            self.diagnostics.push(ConfigError::new(format!(
+                "build_step(\"{name}\") is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        BuildStepBuilder { cfg: self, state }
+    }
+
+    /// Declare an EFI System Partition layout. Returns a chainable
+    /// [`EspBuilder`] that accumulates `(source_crate, dest_path)` entries.
+    ///
+    /// If an ESP with this name was already declared, the builder enters the
+    /// `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    ///
+    /// Mirrors the engine's exact diagnostic string:
+    /// `"esp(\"{name}\") is defined more than once"`.
+    pub fn esp(&mut self, name: &str) -> EspBuilder<'_> {
+        let (handle, inserted) = self.raw.model.esps.insert(
+            name.into(),
+            EspDef { name: name.into(), entries: Vec::new(), span: None },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: handle, name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording.
+            self.diagnostics.push(ConfigError::new(format!(
+                "esp(\"{name}\") is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        EspBuilder { cfg: self, state }
     }
 }
 

@@ -150,55 +150,6 @@ impl<'cfg> BuildStepBuilder<'cfg> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Config::build_step
-// ---------------------------------------------------------------------------
-
-impl Config {
-    /// Declare a build step. Returns a chainable [`BuildStepBuilder`] that
-    /// populates the new `BuildStepDef`.
-    ///
-    /// If a build step with this name was already declared, the builder enters
-    /// the `Duplicate` state: all chained methods become no-ops and the first
-    /// definition is preserved. A [`ConfigError`] is pushed into
-    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
-    ///
-    /// If the name collides with an existing crate, a diagnostic is pushed
-    /// (mirroring the engine validator in `validate.rs`) but the build step
-    /// is still inserted — the validator, not the builder, is where this is
-    /// enforced at engine level.
-    ///
-    /// Mirrors the engine's exact diagnostic string:
-    /// `"build_step(\"{name}\") is defined more than once"`.
-    pub fn build_step(&mut self, name: &str) -> BuildStepBuilder<'_> {
-        // Check for crate-name collision before insert, mirroring the engine
-        // validator (validate.rs:103). We still insert regardless — the
-        // validator does too.
-        if self.raw.model.crates.lookup(name).is_some() {
-            self.diagnostics.push(ConfigError::new(format!(
-                "build_step(\"{name}\") collides with a crate of the same name. \
-                 Pick a different build-step name; the unified artifact \
-                 namespace requires unique names."
-            )));
-        }
-
-        let (handle, inserted) = self.raw.model.build_steps.insert(
-            name.into(),
-            BuildStepDef { name: name.into(), ..Default::default() },
-        );
-        let state = if inserted {
-            BuilderState::Valid { state: handle, name: name.into(), span: None }
-        } else {
-            // Mirror the engine's exact diagnostic wording.
-            self.diagnostics.push(ConfigError::new(format!(
-                "build_step(\"{name}\") is defined more than once"
-            )));
-            BuilderState::Duplicate { name: name.into(), span: None }
-        };
-        BuildStepBuilder { cfg: self, state }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::Config;
