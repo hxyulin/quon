@@ -1,5 +1,8 @@
 //! Chainable builders shared by `Config::profile`, `Config::group`, etc.
 
+pub mod profile;
+pub use profile::ProfileBuilder;
+
 use gluon_model::SourceSpan;
 
 /// Per-builder state. Every `XBuilder<'cfg>` carries one of these and

@@ -1,4 +1,5 @@
-use gluon_model::{Handle, ProjectDef, RawBuildModel, TargetDef};
+use gluon_model::{Handle, ProfileDef, ProjectDef, RawBuildModel, TargetDef};
+use crate::builders::{BuilderState, ProfileBuilder};
 use crate::error::{ConfigError, Result};
 
 #[derive(Debug)]
@@ -91,6 +92,32 @@ impl Config {
             )));
         }
         h
+    }
+
+    /// Declare a build profile. Returns a chainable [`ProfileBuilder`] that
+    /// populates the new `ProfileDef`.
+    ///
+    /// If a profile with this name was already declared, the builder enters
+    /// the `Duplicate` state: all chained methods become no-ops and the first
+    /// definition is preserved. A [`ConfigError`] is pushed into
+    /// `self.diagnostics` so [`Config::emit`] can surface the problem.
+    pub fn profile(&mut self, name: &str) -> ProfileBuilder<'_> {
+        let (_, inserted) = self.raw.model.profiles.insert(
+            name.into(),
+            ProfileDef { name: name.into(), ..Default::default() },
+        );
+        let state = if inserted {
+            BuilderState::Valid { state: (), name: name.into(), span: None }
+        } else {
+            // Mirror the engine's exact diagnostic wording so the user sees
+            // the same message regardless of whether they use the DSL or the
+            // Rust config API.
+            self.diagnostics.push(ConfigError::new(format!(
+                "profile \"{name}\" is defined more than once"
+            )));
+            BuilderState::Duplicate { name: name.into(), span: None }
+        };
+        ProfileBuilder { cfg: self, state }
     }
 }
 
