@@ -24,7 +24,6 @@ use gluon_model::{BuildModel, CrateDef, ResolvedConfig, RuleDef, RuleHandler, Ta
 use std::collections::BTreeMap;
 
 pub mod builtin;
-pub mod script;
 
 /// Execution context handed to a [`RuleFn`] when the scheduler invokes a rule.
 ///
@@ -148,7 +147,7 @@ impl RuleRegistry {
     /// ### Error cases
     ///
     /// - `rule.handler` is `RuleHandler::Script(_)` — script-backed rules are
-    ///   not implemented in MVP-M; returns a contextual `Error::Compile`.
+    ///   removed; returns a contextual `Error::Compile`.
     /// - `rule.handler` is `RuleHandler::Builtin(name)` and `name` is not
     ///   registered — the error message names the rule, the requested builtin,
     ///   and the sorted list of registered builtin names.
@@ -163,12 +162,17 @@ impl RuleRegistry {
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> Result<()> {
-        // Script handlers delegate to the embedded Rhai engine.
+        // Script-backed rules were a Rhai-era feature; no public path
+        // constructs RuleHandler::Script(_) any more (the gluon-config
+        // builder API exposes no `.on_execute(...)`). Defending against
+        // a stale model JSON that still carries the variant is cheap.
         let builtin_name = match &rule.handler {
             RuleHandler::Script(_) => {
-                let inputs = substitute_args(ctx, rule, &rule.inputs)?;
-                let outputs = substitute_args(ctx, rule, &rule.outputs)?;
-                return script::execute_script(ctx, rule, &inputs, &outputs, stdout, stderr);
+                return Err(Error::Compile(format!(
+                    "rule '{}': script-backed handlers are no longer \
+                     supported; use a builtin handler",
+                    rule.name
+                )));
             }
             RuleHandler::Builtin(name) => name,
         };
@@ -590,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_script_handler_executes_rhai_script() {
+    fn dispatch_script_handler_returns_removed_error() {
         let registry = RuleRegistry::new();
         let tmp = tempfile::tempdir().unwrap();
         let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
@@ -606,41 +610,7 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
             depends_on: vec![],
-            handler: RuleHandler::Script(r#"log("hello from script");"#.into()),
-            working_dir: None,
-            span: None,
-        };
-
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        registry
-            .dispatch(&ctx, &rule, &mut stdout, &mut stderr)
-            .unwrap();
-        let output = String::from_utf8_lossy(&stdout);
-        assert!(
-            output.contains("hello from script"),
-            "script log should appear in stdout: {output}"
-        );
-    }
-
-    #[test]
-    fn dispatch_script_handler_syntax_error_returns_compile_error() {
-        let registry = RuleRegistry::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
-        };
-        let rule = RuleDef {
-            name: "badsyntax".into(),
-            inputs: vec![],
-            outputs: vec![],
-            depends_on: vec![],
-            handler: RuleHandler::Script("let x = ;".into()),
+            handler: RuleHandler::Script("any".into()),
             working_dir: None,
             span: None,
         };
@@ -650,10 +620,10 @@ mod tests {
             .unwrap_err();
         match err {
             Error::Compile(msg) => {
-                assert!(msg.contains("badsyntax"), "should name rule: {msg}");
+                assert!(msg.contains("scriptrule"), "should name rule: {msg}");
                 assert!(
-                    msg.contains("script execution failed"),
-                    "should mention script failure: {msg}"
+                    msg.contains("no longer supported"),
+                    "should explain removal: {msg}"
                 );
             }
             other => panic!("expected Error::Compile, got {other:?}"),
