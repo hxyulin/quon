@@ -2,24 +2,24 @@
 //!
 //! These exercise the full pipeline:
 //!
-//!   gluon.rhai → evaluate → vendor_sync → auto_register_vendored_deps
+//!   gluon.rs → load_build_model → vendor_sync → auto_register_vendored_deps
 //!
 //! against a real fixture on disk. Unit tests already cover every
 //! individual helper under `crates/gluon-core/src/vendor/`; these are
-//! the tests that catch integration bugs between the Rhai builder,
+//! the tests that catch integration bugs between the Config builder,
 //! the lockfile format, and the model load path.
 //!
 //! # Two tiers
 //!
-//! 1. **Path-only**: always runs. Uses `gluon.path-only.rhai` which
+//! 1. **Path-only**: always runs. Uses `gluon.path-only.rs` which
 //!    declares a single `DepSource::Path` dep and never touches the
-//!    network. Exercises the Rhai `.path(...)` builder, the
+//!    network. Exercises the `.path(...)` builder, the
 //!    `vendor_sync` Path branch, lockfile round-trip,
 //!    fingerprint-stable fast path, and auto-registration.
 //!
 //! 2. **Network-gated**: runs only when
 //!    `--features gluon-core/network-tests` is enabled. Uses the full
-//!    `gluon.rhai` which adds a real `bitflags` crates.io dep and
+//!    `gluon.rs` which adds a real `bitflags` crates.io dep and
 //!    actually shells out to `cargo vendor`. Catches regressions in
 //!    the manifest generator, `cargo vendor` wrapper, and directory
 //!    checksum.
@@ -49,7 +49,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 /// leave files behind across runs.
 ///
 /// The sibling `vendor-minimal-helper` fixture has to come along too
-/// because `gluon.rhai` references it via `../vendor-minimal-helper`.
+/// because the build script references it via `../vendor-minimal-helper`.
 /// We preserve the relative sibling layout by copying both into the
 /// same parent inside the tempdir.
 fn stage_fixture(tmp: &Path) -> PathBuf {
@@ -79,17 +79,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-/// Install the path-only build script as `gluon.rs` and remove the
-/// default `gluon.rhai` so `load_build_model` unambiguously picks the
-/// path-only `.rs` form. Stage 2: `.rs` wins over `.rhai` when both
-/// exist; removing the default `.rhai` eliminates any ambiguity for
-/// the model-load path.
+/// Install the path-only build script as `gluon.rs` so
+/// `load_build_model` picks the path-only form.
 fn use_path_only_script(project: &Path) {
     fs::copy(project.join("gluon.path-only.rs"), project.join("gluon.rs"))
         .expect("install path-only gluon.rs");
-    // Remove the default .rhai so load_build_model unambiguously
-    // picks our .rs.
-    let _ = fs::remove_file(project.join("gluon.rhai"));
 }
 
 #[test]
@@ -103,9 +97,9 @@ fn path_only_fixture_vendors_and_auto_registers() {
     let project = stage_fixture(tmp.path());
     use_path_only_script(&project);
 
-    // Load the model. Stage 2: load_build_model prefers .rs over .rhai.
-    // Pre-check the model has our path dep before vendor_sync to make
-    // sure the .path(...) builder method actually wired it up.
+    // Load the model via load_build_model. Pre-check the model has
+    // our path dep before vendor_sync to make sure the .path(...)
+    // builder method actually wired it up.
     let model = gluon_core::load_build_model(&project).expect("load_build_model");
     let helper_handle = model
         .external_deps
@@ -176,30 +170,27 @@ fn path_only_fixture_detects_stale_lock_after_model_edit() {
     let project = stage_fixture(tmp.path());
     use_path_only_script(&project);
 
-    // Vendor once so gluon.lock exists. Stage 2: load_build_model picks
-    // the path-only gluon.rs installed by use_path_only_script.
+    // Vendor once so gluon.lock exists.
     let model_v1 = gluon_core::load_build_model(&project).expect("load v1");
     let layout = BuildLayout::new(project.join("build"), "vendor-minimal");
     vendor::vendor_sync(&model_v1, &layout, &project, VendorOptions::default()).expect("vendor v1");
 
-    // Simulate a model edit: remove gluon.rs so load_build_model falls
-    // back to an inline-written gluon.rhai that adds a new dep. This
-    // replicates a user manually editing the build script after the
-    // initial vendor run. Stage 3 will rewrite this using a real .rs
-    // edit; for now we drop back to the Rhai path to keep the test
-    // hermetic without writing valid Rust source.
-    fs::remove_file(project.join("gluon.rs")).expect("remove gluon.rs");
-    fs::write(
-        project.join("gluon.rhai"),
-        b"project(\"vendor-minimal\", \"0.1.0\");\n\
-          target(\"x86_64-unknown-none\");\n\
-          profile(\"dev\").target(\"x86_64-unknown-none\").opt_level(0).debug_info(true);\n\
-          dependency(\"vendor_minimal_helper\").path(\"../vendor-minimal-helper\");\n\
-          dependency(\"bitflags\").version(\"2.11\");\n",
-    )
-    .expect("write gluon.rhai with extra dep");
-
-    let model_v2 = gluon_core::evaluate(&project.join("gluon.rhai")).expect("eval v2");
+    // Build v2's model in-process: same project/target as v1 but with
+    // an extra `bitflags` crates.io dep. This replicates a user editing
+    // the build script after the initial vendor run, without touching
+    // the on-disk gluon.rs.
+    use gluon_config::Config;
+    use gluon_model::intern;
+    let mut cfg = Config::new();
+    cfg.project("vendor-minimal", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("dev").target(t).opt_level(0).debug_info(true);
+    cfg.dependency("vendor_minimal_helper")
+        .path("../vendor-minimal-helper");
+    cfg.dependency("bitflags").version("2.11");
+    let raw = cfg.into_raw();
+    let (model_v2, diags) = intern(raw);
+    assert!(diags.is_empty(), "intern diags: {diags:?}");
 
     // vendor_check must flag the mismatch.
     let report = vendor::vendor_check(&model_v2, &layout, &project).expect("check v2");
@@ -228,7 +219,6 @@ fn full_fixture_vendors_bitflags_from_crates_io() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let project = stage_fixture(tmp.path());
 
-    // Stage 2: load_build_model prefers .rs over .rhai when both exist.
     let model = gluon_core::load_build_model(&project).expect("load_build_model");
     assert_eq!(model.external_deps.len(), 2);
 
