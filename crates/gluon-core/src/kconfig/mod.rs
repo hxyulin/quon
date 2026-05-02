@@ -73,7 +73,7 @@ mod tests {
     use gluon_model::Expr;
 
     fn origin() -> SourceSpan {
-        SourceSpan::point("test.rhai", 1, 1)
+        SourceSpan::point("test.rs", 1, 1)
     }
 
     fn parse(s: &str) -> Result<Expr, Diagnostic> {
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn error_span_points_to_origin() {
-        let o = SourceSpan::point("my.rhai", 42, 7);
+        let o = SourceSpan::point("my.rs", 42, 7);
         let d = parse_bool_expr("A && ", o.clone()).unwrap_err();
         assert_eq!(d.span.unwrap(), o);
     }

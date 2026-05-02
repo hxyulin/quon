@@ -159,8 +159,8 @@ mod tests {
 
     #[test]
     fn diagnostic_error_with_span() {
-        let d = Diagnostic::error("msg").with_span(SourceSpan::point("foo.rhai", 10, 3));
-        assert_eq!(d.to_string(), "foo.rhai:10:3: error: msg");
+        let d = Diagnostic::error("msg").with_span(SourceSpan::point("foo.rs", 10, 3));
+        assert_eq!(d.to_string(), "foo.rs:10:3: error: msg");
     }
 
     #[test]

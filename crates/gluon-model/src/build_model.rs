@@ -792,8 +792,8 @@ pub enum DiskSource {
 /// `EspBuild` scheduler node whenever a source artifact changes.
 ///
 /// The typical shape is a single entry for the bootloader:
-/// ```rhai
-/// esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+/// ```rust,ignore
+/// cfg.esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
 /// ```
 ///
 /// `gluon run` auto-picks this ESP when a profile is `boot_mode("uefi")`

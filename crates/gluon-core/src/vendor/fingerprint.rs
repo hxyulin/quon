@@ -390,7 +390,7 @@ mod tests {
             },
         );
         let mut b = a.clone();
-        b.span = Some(gluon_model::SourceSpan::point("fake.rhai", 1, 1));
+        b.span = Some(gluon_model::SourceSpan::point("fake.rs", 1, 1));
         assert_eq!(
             fingerprint_external_deps(&arena_with(vec![a])),
             fingerprint_external_deps(&arena_with(vec![b]))

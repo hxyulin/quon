@@ -197,12 +197,11 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
         self
     }
 
-    /// Engine-parity alias for [`Self::default`]. Kept distinct so
-    /// migrating `.rhai` users can search-and-replace `default_value`
-    /// 1:1 without renaming.
+    /// Alias for [`Self::default`].
     ///
-    /// (Rhai reserves `default` as a keyword, so the engine surface
-    /// uses `default_value`. The Rust API exposes both.)
+    /// The Rust API exposes both names; see the migration guide in
+    /// `docs/src/migration/` for the surface-level mapping from the
+    /// old scripted format.
     pub fn default_value(self, value: ConfigValue) -> Self {
         self.default(value)
     }

@@ -284,12 +284,12 @@ fn push_pflash(args: &mut Vec<OsString>, file: &Path, readonly: bool) {
 
 /// Whether any of the user-provided argument lists contain `flag`.
 ///
-/// Checks both the Rhai-level `extra_args` and the `gluon run -- ...`
+/// Checks both the script-level `extra_args` and the `gluon run -- ...`
 /// CLI pass-through. Used by the default `-display none` / `-serial
 /// stdio` insertion logic so users can override either with a bare
 /// `-display gtk` in their config or on the command line.
-fn user_has_flag(rhai_extras: &[String], cli_extras: &[OsString], flag: &str) -> bool {
-    rhai_extras.iter().any(|a| a == flag) || cli_extras.iter().any(|a| a.to_string_lossy() == flag)
+fn user_has_flag(script_extras: &[String], cli_extras: &[OsString], flag: &str) -> bool {
+    script_extras.iter().any(|a| a == flag) || cli_extras.iter().any(|a| a.to_string_lossy() == flag)
 }
 
 /// Suggestive test helper: a `ResolvedQemu` that the caller customises.
@@ -672,7 +672,7 @@ mod tests {
         .unwrap();
         let a = args_to_strings(&inv.args);
         // The kernel flag is part of gluon's managed section;
-        // user args (rhai then cli) come after it in order.
+        // user args (script then cli) come after it in order.
         let k = a.iter().position(|s| s == "-kernel").unwrap();
         let d = a.iter().position(|s| s == "-d").unwrap();
         let nr = a.iter().position(|s| s == "-no-reboot").unwrap();
