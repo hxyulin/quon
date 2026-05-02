@@ -2,12 +2,11 @@
 //! consumed by the resolver.
 //!
 //! This layer mirrors the type-directed coercion done by
-//! `engine::conversions::dynamic_to_config_value` but operates on
-//! parser literals rather than Rhai `Dynamic` values, so there is no
-//! Rhai dependency. Duplicates between the two paths (Rhai builder and
-//! `.kconfig` loader) are intentional — the logic is compact, and
-//! keeping them separate means the `.kconfig` loader compiles cleanly
-//! without pulling in Rhai when used from an LSP or validator.
+//! `gluon-config::builders::config_option` but operates on parser
+//! literals rather than builder API calls, so there is no dependency on
+//! the builder crate. Keeping them separate means the `.kconfig` loader
+//! compiles cleanly without pulling in `gluon-config` when used from an
+//! LSP or validator.
 //!
 //! # Passes
 //!
@@ -431,9 +430,8 @@ fn neutral_default(ty: ConfigType) -> ConfigValue {
         ConfigType::Str => ConfigValue::Str(String::new()),
         ConfigType::Choice => ConfigValue::Choice(String::new()),
         ConfigType::List => ConfigValue::List(Vec::new()),
-        // Group-typed options never carry a value; match the Rhai
-        // builder's neutral placeholder at
-        // `engine/builders/config.rs:default_value_for`.
+        // Group-typed options never carry a value; use a neutral Bool(false)
+        // placeholder (matches `gluon-config::builders::config_option` behaviour).
         ConfigType::Group => ConfigValue::Bool(false),
     }
 }

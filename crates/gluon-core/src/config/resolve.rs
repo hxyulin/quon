@@ -816,8 +816,8 @@ mod tests {
         assert!(diags.is_empty(), "intern produced diagnostics: {:?}", diags);
 
         // Load kconfig and merge options/presets directly into the
-        // interned BuildModel, mirroring what the Rhai `load_kconfig`
-        // function does in engine/builders/kconfig.rs.
+        // interned BuildModel, mirroring what `script_runner::finalize`
+        // does.
         let lowered = crate::kconfig::load_kconfig(&kconfig_path)
             .expect("load kconfig");
         for (name, opt) in lowered.options {

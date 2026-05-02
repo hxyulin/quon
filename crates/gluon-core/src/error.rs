@@ -129,7 +129,7 @@ pub enum Error {
     },
 
     #[error(
-        "cannot pick a default QEMU binary for target '{triple}': unknown architecture.\nSet one explicitly with `qemu(\"qemu-system-<arch>\")` in your gluon.rhai."
+        "cannot pick a default QEMU binary for target '{triple}': unknown architecture.\nSet one explicitly with `qemu(\"qemu-system-<arch>\")` in your gluon.rs."
     )]
     UnknownQemuTarget { triple: String },
 

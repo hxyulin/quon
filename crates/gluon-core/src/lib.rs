@@ -2,7 +2,7 @@
 //!
 //! Host-side build-system primitives consumed by the `gluon-cli` binary
 //! and external embedders. The top-level entry points
-//! ([`evaluate`], [`resolve_config`], [`build`], [`clean`], [`configure`],
+//! ([`resolve_config`], [`build`], [`clean`], [`configure`],
 //! [`find_project_root`]) are the stable surface that CLI and editor
 //! integrations should depend on; everything inside `pub mod` blocks is
 //! considered semi-internal and may be reshaped between MVP releases.
@@ -11,7 +11,6 @@ pub mod analyzer;
 pub mod cache;
 pub mod compile;
 pub mod config;
-pub mod engine;
 pub mod error;
 pub mod fmt;
 pub mod image;
@@ -47,16 +46,10 @@ use gluon_model::{BuildModel, ConfigValue, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// Load a [`BuildModel`] from `<project_root>/gluon.rs` (preferred) or
-/// `<project_root>/gluon.rhai` (legacy, deleted in Stage 3).
+/// Load a [`BuildModel`] from `<project_root>/gluon.rs`.
 ///
-/// When both files exist, `gluon.rs` wins — Stage 2 fixtures port one
-/// at a time and the new path takes precedence on every fixture that
-/// has been ported.
-///
-/// This is the canonical unified entry point. CLI subcommands and
-/// embedders should call this rather than `evaluate` or
-/// `script_runner::compile_and_run` directly.
+/// This is the canonical entry point. CLI subcommands and embedders
+/// should call this rather than `script_runner::compile_and_run` directly.
 pub fn load_build_model(project_root: &Path) -> Result<BuildModel> {
     let rs_path = project_root.join("gluon.rs");
     if rs_path.is_file() {
@@ -64,32 +57,17 @@ pub fn load_build_model(project_root: &Path) -> Result<BuildModel> {
         let info = compile::RustcInfo::load_or_probe(&layout)?;
         return script_runner::compile_and_run(project_root, layout.root(), &info);
     }
-    let rhai_path = project_root.join("gluon.rhai");
-    if rhai_path.is_file() {
-        return evaluate(&rhai_path);
-    }
     Err(Error::Config(format!(
-        "no gluon.rs or gluon.rhai in {}",
+        "no gluon.rs in {}",
         project_root.display()
     )))
-}
-
-/// Parse and evaluate a `gluon.rhai` file at `path`, returning the
-/// resulting [`BuildModel`].
-///
-/// This is the canonical top-level entry point for parsing gluon scripts.
-/// Embedders that also want the accumulated non-fatal diagnostics can
-/// reach into [`engine::evaluate_script_raw`].
-pub fn evaluate(path: &Path) -> Result<BuildModel> {
-    engine::evaluate_script(path)
 }
 
 /// Resolve a [`BuildModel`] into a [`ResolvedConfig`] for a specific
 /// profile, optionally overriding the target and per-option config
 /// values.
 ///
-/// Thin wrapper around [`config::resolve`] — exists for symmetry with
-/// [`evaluate`]. The `target` argument overrides the profile's declared
+/// Thin wrapper around [`config::resolve`]. The `target` argument overrides the profile's declared
 /// target when `Some`; pass `None` to use whatever target the profile
 /// itself selected. `overrides` is typically loaded from a per-developer
 /// `.gluon-config` file.

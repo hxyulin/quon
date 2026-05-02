@@ -2,10 +2,10 @@
 //!
 //! Gluon config options can be declared in two equivalent ways:
 //!
-//! 1. **Inline in Rhai** via the `engine::builders::config` module
-//!    (`config_bool("NAME", ...)` and friends).
-//! 2. **Externally in a `.kconfig` file** loaded from `gluon.rhai` via the
-//!    `load_kconfig("./options.kconfig")` Rhai function.
+//! 1. **Inline in `gluon.rs`** via the `gluon_config` builder API
+//!    (`cfg.config_bool("NAME", ...)` and friends).
+//! 2. **Externally in a `.kconfig` file** referenced from `gluon.rs` via
+//!    `cfg.load_kconfig("./options.kconfig")`.
 //!
 //! Both paths produce the same [`gluon_model::ConfigOptionDef`] and
 //! [`gluon_model::PresetDef`] shapes, so downstream resolution and codegen
@@ -45,13 +45,12 @@ use std::path::Path;
 ///
 /// On success, returns the parsed [`Expr`]. On failure, returns a single
 /// [`Diagnostic`] attributed to `origin` — the source location of the
-/// Rhai call site — so the user sees the error pointing into their
-/// `gluon.rhai` rather than into a synthetic internal buffer. The lexer
-/// and parser both emit their own spans against an internal
-/// `<depends_on_expr>` pseudo-path; we deliberately discard those and
-/// re-attach `origin` because per-character offsets inside a Rhai string
-/// literal are not visible to us at this layer (Rhai only gives us the
-/// line/column of the function call itself).
+/// call site — so the user sees the error pointing into their source
+/// rather than into a synthetic internal buffer. The lexer and parser
+/// both emit their own spans against an internal `<depends_on_expr>`
+/// pseudo-path; we deliberately discard those and re-attach `origin`
+/// because per-character offsets inside an inline expression string are
+/// not visible at this layer.
 pub fn parse_bool_expr(input: &str, origin: SourceSpan) -> Result<Expr, Diagnostic> {
     let pseudo_path = Path::new("<depends_on_expr>");
     let tokens =

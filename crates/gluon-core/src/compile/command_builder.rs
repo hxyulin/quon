@@ -41,14 +41,13 @@ pub(crate) fn build_rustc_command(
     let crate_name = &crate_def.name;
     // rustc rejects `-` in `--crate-name`. Cargo silently normalizes
     // `my-crate` → `my_crate`; we mirror that so cargo-style names in
-    // `gluon.rhai` Just Work. The original `crate_name` is kept for error
+    // `gluon.rs` Just Work. The original `crate_name` is kept for error
     // messages and cache keys (it's what the user typed). The normalized
     // form (`crate_name_rustc`) is what we hand to rustc and what we
     // splice into on-disk filenames so they line up with what rustc
     // actually writes (rustc derives the filename from `--crate-name` +
-    // `extra-filename`). See `engine::validate` for the post-normalization
-    // collision check that rejects e.g. both `foo-bar` and `foo_bar` in
-    // the same model.
+    // `extra-filename`). The post-normalization collision check (rejecting
+    // e.g. both `foo-bar` and `foo_bar`) is done in `gluon_model::intern`.
     let crate_name_rustc = normalize_crate_name(crate_name);
 
     // Resolve the source input file. `CrateDef::path` is a directory path

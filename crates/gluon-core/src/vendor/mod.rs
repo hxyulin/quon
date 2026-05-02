@@ -614,14 +614,12 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
 ///
 /// # Ordering
 ///
-/// Must be called **after** the Rhai script has been evaluated and
+/// Must be called **after** the script has been compiled and run and
 /// the intern pass has run (so `model.crates` contains all the user
 /// crates with their handles populated), and **before** the resolve
 /// pass (so resolve sees the vendored crates when walking the crate
-/// graph). The live call site is
-/// [`crate::engine::evaluate_script_raw`] — see
-/// `auto_register_vendored_deps_inline` below, or use this function
-/// directly from a CLI layer.
+/// graph). See `auto_register_vendored_deps_inline` below, or use this
+/// function directly from a CLI layer.
 pub fn auto_register_vendored_deps(
     model: &mut BuildModel,
     layout: &BuildLayout,

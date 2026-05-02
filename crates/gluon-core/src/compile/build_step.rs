@@ -45,9 +45,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Reserved env-var name used to communicate the output path. Must
-/// match the constant in `engine::builders::pipeline`. Kept as a
-/// separate copy here to avoid a dependency from `compile` to `engine`;
-/// the test in `engine::builders::pipeline` covers the value.
+/// match the constant in `gluon_config::builders::build_step`.
 const RESERVED_OUTPUT_ENV: &str = "GLUON_OUTPUT_PATH";
 
 /// Run a build step. Returns the output path and a `was_cached` flag

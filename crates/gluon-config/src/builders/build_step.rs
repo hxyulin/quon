@@ -7,7 +7,7 @@ use gluon_model::{BuildStepDef, BuildStepInput, Handle};
 
 /// Reserved env-var name used by the gluon runtime to communicate the
 /// absolute output path to a build-step runner. Mirrors
-/// `gluon_core::engine::builders::pipeline::RESERVED_OUTPUT_ENV`.
+/// `gluon_core::compile::build_step::RESERVED_OUTPUT_ENV`.
 const RESERVED_OUTPUT_ENV: &str = "GLUON_OUTPUT_PATH";
 
 /// Chainable builder returned by [`Config::build_step`].

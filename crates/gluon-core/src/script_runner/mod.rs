@@ -133,9 +133,9 @@ fn run_script_binary(bin: &Path) -> Result<Vec<u8>> {
 /// model, run intern, and translate any intern diagnostics into
 /// gluon-core's [`Diagnostic`] type.
 ///
-/// Mirrors `engine/builders/kconfig.rs:69-97` for cross-source
-/// duplicate detection so .rs and .rhai users see the same diagnostic
-/// wording.
+/// Mirrors `gluon-config/src/builders/config_option.rs` for cross-source
+/// duplicate detection so `.rs` and `.kconfig` users see the same
+/// diagnostic wording.
 fn finalize(mut raw: RawBuildModel, project_root: &Path) -> Result<BuildModel> {
     // Drain the include list — it's a sidecar field that doesn't belong
     // in the final BuildModel and we don't want it accidentally
