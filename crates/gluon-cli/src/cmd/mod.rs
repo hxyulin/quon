@@ -34,7 +34,6 @@ pub mod clippy;
 pub mod configure;
 pub mod external;
 pub mod fmt;
-pub mod internal;
 pub mod run;
 pub mod vendor;
 
