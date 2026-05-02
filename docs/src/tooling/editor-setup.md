@@ -37,48 +37,13 @@ require('lspconfig').rust_analyzer.setup {
 If you use a different LSP client, the key setting is the same: point
 `linkedProjects` at your `rust-project.json` path.
 
-### Gluon build script highlighting
+### Gluon build script (`gluon.rs`)
 
-For editing of `gluon.rs` — since Stage 1, Gluon uses Rust with
-rust-analyzer, which provides native completions, hover signatures,
-diagnostics, and syntax highlighting. No additional LSP setup is needed:
-rust-analyzer's built-in Rust support is fully sufficient.
-
-1. Install the binary:
-
-   ```sh
-   cargo install --path crates/gluon-lsp
-   ```
-
-2. Install `tree-sitter-rhai` for base Rhai syntax (strings, comments,
-   numbers, keywords):
-
-   ```
-   :TSInstall rhai
-   ```
-
-3. Register `gluon-lsp` with nvim-lspconfig (Neovim 0.9+):
-
-   ```lua
-   local lspconfig = require('lspconfig')
-   local configs = require('lspconfig.configs')
-
-   if not configs.gluon then
-     configs.gluon = {
-       default_config = {
-         cmd = { 'gluon-lsp' },
-         filetypes = { 'rhai' },
-         root_dir = lspconfig.util.root_pattern('gluon.rhai'),
-       },
-     }
-   end
-
-   lspconfig.gluon.setup({})
-   ```
-
-   DSL-specific highlighting (Gluon builtins and builder methods) is
-   delivered automatically via LSP semantic tokens — no query files to
-   copy or maintain. Neovim 0.9+ applies semantic tokens out of the box.
+Since the Rust DSL switch, Gluon's build script is regular Rust.
+rust-analyzer provides completions, hover, goto-def, and live type
+errors out of the box — no Gluon-specific LSP is required. Make
+sure you've run `gluon configure` so the generated `rust-project.json`
+includes the `gluon.rs` crate entry.
 
 ## Helix
 

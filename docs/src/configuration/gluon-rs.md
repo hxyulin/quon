@@ -1,9 +1,6 @@
 # The `gluon.rs` build script
 
-> **Status:** Stage 1 — coexists with `gluon.rhai`. When both files are
-> present in the project root, `gluon.rs` takes precedence. Stage 3
-> deletes the `gluon.rhai` path entirely; the migration is mechanical
-> and a guide ships with that release.
+The single configuration file for every Gluon project.
 
 A `gluon.rs` is a regular Rust source file that imports the
 [`gluon-config`] crate, constructs a `Config` value, and emits it as
@@ -49,9 +46,8 @@ The Rhai DSL was carrying the cost of fighting a dynamic-typed scripting
 language inside a statically-typed host. Going Rust eliminates the
 engine, intern, and validate runtime layers — the type system catches
 most of what they enforced — and editor support strictly improves:
-rust-analyzer gives autocomplete, hover, goto-def, refactoring, and
-live type errors. Custom highlighting / completions / diagnostics that
-`gluon-lsp` delivered for `.rhai` are now free.
+rust-analyzer provides completions, hover, goto-def, and inline type
+errors against `gluon.rs` for free.
 
 The trade-offs:
 
