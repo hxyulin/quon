@@ -20,8 +20,6 @@
 //! scheduler end-to-end tests in `gluon-core`.
 //!
 //! Tests that do **not** require rustc run in the default suite:
-//!   - The Rhai-diagnostic test deliberately corrupts the script so
-//!     that `evaluate()` fails before any rustc probe.
 //!   - The `gluon clean` tests use `build_layout_context`, which
 //!     stops short of the rustc probe — `clean` should work on
 //!     machines with broken or missing toolchains.
@@ -121,56 +119,6 @@ fn require_rustc_or_skip(test_name: &str) -> Option<()> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-/// A Rhai parse error in `gluon.rhai` must be reported to stderr with the
-/// file name somewhere in the message, and the CLI must exit non-zero.
-///
-/// This test deliberately induces a Rhai *parse* failure — not a semantic
-/// one — so `evaluate()` fails before `build_context` ever reaches the
-/// rustc probe. That's what lets this single test run in the default
-/// (non-`--ignored`) test set without a working toolchain.
-#[test]
-fn gluon_build_rhai_typo_diagnostic() {
-    let (_tmp, fixture) = setup_fixture();
-
-    // Stage 2: the minimal fixture now ships both gluon.rs and gluon.rhai.
-    // load_build_model prefers .rs, so corrupting .rhai alone would be
-    // silently bypassed — the CLI would pick .rs and succeed. Delete .rs
-    // first so the only remaining entry point is the broken .rhai.
-    // Stage 3 will delete this test entirely (Rhai goes away).
-    let _ = fs::remove_file(fixture.join("gluon.rs"));
-
-    // Clobber the script with something Rhai's parser will reject.
-    // A stray unbalanced `}` at top level is a hard parse error.
-    let broken = r#"project("minimal", "0.1.0");
-this_is_a_syntax_error }
-"#;
-    fs::write(fixture.join("gluon.rhai"), broken).expect("rewrite gluon.rhai");
-
-    let output = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn gluon build");
-
-    assert!(
-        !output.status.success(),
-        "gluon build should fail on a broken gluon.rhai, got status {:?}",
-        output.status
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.to_lowercase().contains("error"),
-        "stderr should mention 'error', got: {stderr}"
-    );
-    // load_build_model delegates to the Rhai engine for .rhai files, so the
-    // error chain will contain the Rhai parse error text. "Syntax error" is a
-    // reliable substring because it comes from the Rhai parser regardless of
-    // context wrapping.
-    assert!(
-        stderr.to_lowercase().contains("syntax error") || stderr.contains("failed to load"),
-        "stderr should mention a syntax error or load failure, got: {stderr}"
-    );
-}
 
 /// Cold build, then a second build that hits the cache.
 ///
