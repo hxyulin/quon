@@ -186,6 +186,7 @@ mod tests {
     ///   - 0xEF type
     ///   - LBA fields matching start / count
     ///   - 0x55AA signature
+    ///
     /// And the boot-code area is left untouched (we pre-fill with 0xCC).
     #[test]
     fn write_mbr_emits_canonical_partition_entry_and_signature() {

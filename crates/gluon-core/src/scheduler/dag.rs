@@ -1846,27 +1846,24 @@ mod tests {
 
         // The bios target must NOT have a Sysroot or ConfigCrate node.
         assert!(
-            dag.node_index.get(&DagNode::Sysroot(bios_target)).is_none(),
+            !dag.node_index.contains_key(&DagNode::Sysroot(bios_target)),
             "no_sysroot group's target must not get a Sysroot node"
         );
         assert!(
-            dag.node_index
-                .get(&DagNode::ConfigCrate(bios_target))
-                .is_none(),
+            !dag.node_index
+                .contains_key(&DagNode::ConfigCrate(bios_target)),
             "no_sysroot group's target must not get a ConfigCrate node"
         );
 
         // The kernel target should have both (it's a normal cross target).
         assert!(
             dag.node_index
-                .get(&DagNode::Sysroot(kernel_target))
-                .is_some(),
+                .contains_key(&DagNode::Sysroot(kernel_target)),
             "regular cross target must still get a Sysroot node"
         );
         assert!(
             dag.node_index
-                .get(&DagNode::ConfigCrate(kernel_target))
-                .is_some(),
+                .contains_key(&DagNode::ConfigCrate(kernel_target)),
             "regular cross target must still get a ConfigCrate node"
         );
 
