@@ -28,7 +28,7 @@ fn parse_jobs(s: &str) -> Result<usize, String> {
 #[derive(Parser, Debug)]
 #[command(name = "gluon", version, about = "Bare-metal Rust kernel build system")]
 pub struct Cli {
-    /// Profile name to use (overrides the default in gluon.rhai).
+    /// Profile name to use (overrides the default in gluon.rs).
     #[arg(short = 'p', long, global = true)]
     pub profile: Option<String>,
 
@@ -40,7 +40,7 @@ pub struct Cli {
     /// `<project_root>/.gluon-config` when present).
     ///
     /// Values from this file are merged on top of the defaults declared
-    /// in `gluon.rhai`. Environment variables prefixed `GLUON_` win over
+    /// in `gluon.rs`. Environment variables prefixed `GLUON_` win over
     /// the file. See `gluon_core::config::overrides` for the grammar.
     #[arg(short = 'C', long = "config-file", global = true)]
     pub config_file: Option<PathBuf>,
@@ -88,7 +88,7 @@ pub enum Command {
     Clean(CleanArgs),
     /// Generate `rust-project.json` for rust-analyzer.
     Configure(ConfigureArgs),
-    /// Vendor external dependencies declared in `gluon.rhai`.
+    /// Vendor external dependencies declared in `gluon.rs`.
     ///
     /// Synthesises a scratch `Cargo.toml`, invokes `cargo vendor` to
     /// populate `./vendor/`, and writes `gluon.lock` pinning the

@@ -37,14 +37,14 @@ use tempfile::TempDir;
 
 /// Copy the on-disk minimal fixture into a fresh tempdir and return a
 /// handle to the tempdir along with the absolute path of the copied
-/// project root (the directory containing the new `gluon.rhai`).
+/// project root (the directory containing the new `gluon.rs`).
 ///
 /// The returned `TempDir` is kept alive by the caller; dropping it
 /// cleans up the entire tree.
 fn setup_fixture() -> (TempDir, PathBuf) {
     let src = fixture_source_dir();
     assert!(
-        src.join("gluon.rhai").is_file(),
+        src.join("gluon.rs").is_file(),
         "fixture missing at {src:?}: check tests/fixtures/minimal/"
     );
     let tmp = tempfile::tempdir().expect("create tempdir");

@@ -44,7 +44,7 @@ pub(crate) fn normalize_crate_name(name: &str) -> Cow<'_, str> {
 /// The match is intentionally conservative: unknown targets get no suffix
 /// (the common case for bare-metal). If a custom target spec has an unusual
 /// suffix, the user can work around this by adding `-o <name>` to
-/// `rustc_flags` in their `gluon.rhai`.
+/// `rustc_flags` in their `gluon.rs`.
 pub(crate) fn exe_suffix_for_target(spec: &str) -> &'static str {
     // UEFI targets produce PE32+ with .efi extension.
     if spec.ends_with("-uefi") || spec.contains("-uefi-") {

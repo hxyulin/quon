@@ -59,7 +59,7 @@ const STUB_LIB_RS: &str = "// Auto-generated stub for `cargo vendor`. Do not edi
 /// when a [`DepSource::CratesIo`] entry has an empty version (the
 /// Rhai builder defaults to `""` when `.version()` is never called,
 /// which is a user error we detect here rather than at `cargo vendor`
-/// time so the diagnostic points at the right line in `gluon.rhai`).
+/// time so the diagnostic points at the right line in `gluon.rs`).
 pub fn generate_vendor_cargo_toml(deps: &Arena<ExternalDepDef>) -> Result<String> {
     // Collect diagnostics across all deps so the user sees every
     // problem in one pass, not just the first one. Matches the
@@ -257,11 +257,11 @@ mod tests {
     #[test]
     fn empty_crates_io_version_is_diagnosed() {
         let mut d = dep("bitflags", DepSource::CratesIo { version: "".into() });
-        d.span = Some(SourceSpan::point("gluon.rhai", 42, 1));
+        d.span = Some(SourceSpan::point("gluon.rs", 42, 1));
         let err = generate_vendor_cargo_toml(&arena(vec![d])).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("no version specified"), "msg: {msg}");
-        assert!(msg.contains("gluon.rhai:42:1"), "msg: {msg}");
+        assert!(msg.contains("gluon.rs:42:1"), "msg: {msg}");
         assert!(
             msg.contains(".version("),
             "should carry the fix hint, got: {msg}"

@@ -9,7 +9,7 @@ fn default_true() -> bool {
     true
 }
 
-/// The complete build model produced by evaluating `gluon.rhai`.
+/// The complete build model produced by evaluating `gluon.rs`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BuildModel {
     pub project: Option<ProjectDef>,
@@ -344,7 +344,7 @@ pub enum GitRef {
     Default,
 }
 
-/// An external dependency declaration from `gluon.rhai`.
+/// An external dependency declaration from `gluon.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalDepDef {
     pub name: String,
@@ -529,7 +529,7 @@ pub enum PartitionTable {
 
 /// A raw byte placement at a specific LBA (sector) on the disk.
 ///
-/// This is the primitive that lets a `gluon.rhai` script say "the BIOS
+/// This is the primitive that lets a `gluon.rs` script say "the BIOS
 /// boot sector is the output of crate X, written at sector 0" or
 /// "stage 1.5 lives at sector 66 and must fit in 958 sectors". Use
 /// `partitions` instead for filesystem-shaped writes.

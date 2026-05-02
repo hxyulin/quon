@@ -1,6 +1,6 @@
 //! Per-checkout config option overrides.
 //!
-//! `gluon.rhai` is the canonical declaration of every config option a
+//! `gluon.rs` is the canonical declaration of every config option a
 //! project understands, but values can be overridden two ways without
 //! editing the script:
 //!
@@ -8,7 +8,7 @@
 //!    `<project_root>/.gluon-config` (or wherever `-C/--config-file`
 //!    points). One option per line, `KEY = value` syntax. Useful for
 //!    "my dev box always builds with `DEBUG_LOG = true`" without
-//!    polluting the committed `gluon.rhai`.
+//!    polluting the committed `gluon.rs`.
 //! 2. **Environment variables** — `GLUON_<NAME>=<value>` in the env at
 //!    invocation time. Useful for ad-hoc one-shot overrides
 //!    (`GLUON_DEBUG_LOG=true gluon build`) and for CI matrix builds.
@@ -29,7 +29,7 @@
 //!   richer parser. Locking in TOML now would create a migration headache.
 //! - The values it can express are exactly what `ConfigValue` can hold:
 //!   bool, integer, quoted string. No nesting, no arrays — list-typed
-//!   options can stay in `gluon.rhai`.
+//!   options can stay in `gluon.rs`.
 //!
 //! Grammar (one entry per line):
 //!

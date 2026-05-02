@@ -501,7 +501,7 @@ fn literal_to_config_value(
         // Rhai instead. Keep the error message actionable.
         (ConfigType::List, _) => Err(Diagnostic::error(format!(
             "config option '{option_name}': default values for list-typed options are not \
-             supported in .kconfig — declare the default from gluon.rhai instead"
+             supported in .kconfig — declare the default from gluon.rs instead"
         ))
         .with_span(span)),
 

@@ -197,7 +197,7 @@ impl BuildLayout {
     /// Path of an image artifact (`<root>/images/<name>.img`).
     ///
     /// Image outputs are profile-agnostic: a single `image()` block in
-    /// `gluon.rhai` produces one canonical artifact, regardless of which
+    /// `gluon.rs` produces one canonical artifact, regardless of which
     /// profile triggered the build. This reflects how images are
     /// consumed downstream — `qemu().disk(image_ref("..."))` references
     /// an image by name, not by (profile, name) pair, and rebuilding

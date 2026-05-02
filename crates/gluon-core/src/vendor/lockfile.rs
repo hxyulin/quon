@@ -7,7 +7,7 @@
 //!
 //! 1. A **fingerprint** over the declared `BuildModel::external_deps`
 //!    set, so `gluon build` can tell in O(model-size) time whether the
-//!    user has edited `gluon.rhai` since the last `gluon vendor` run.
+//!    user has edited `gluon.rs` since the last `gluon vendor` run.
 //!    See [`super::fingerprint`] for the hash function.
 //! 2. The **list of packages** that were actually vendored, with
 //!    per-package checksums. This lets `gluon vendor --check` detect
@@ -42,7 +42,7 @@ use std::path::Path;
 /// gluon.lock diffs are obvious at a glance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorLockPackage {
-    /// Crate name as it appears in `Cargo.toml` / `gluon.rhai`.
+    /// Crate name as it appears in `Cargo.toml` / `gluon.rs`.
     pub name: String,
     /// Resolved version. For git deps this is the version declared in
     /// the vendored `Cargo.toml`; for path deps it is the path crate's

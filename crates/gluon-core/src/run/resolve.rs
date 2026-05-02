@@ -1,7 +1,7 @@
 //! Merge [`QemuDef`] + [`ResolvedProfile`] into a fully-defaulted
 //! [`ResolvedQemu`].
 //!
-//! The `gluon.rhai` schema lets users set `qemu(...)` knobs at the
+//! The `gluon.rs` schema lets users set `qemu(...)` knobs at the
 //! project level *and* override a subset of them per profile
 //! (`profile.qemu_memory(...)`, `.qemu_cores(...)`, `.qemu_extra_args(...)`,
 //! `.test_timeout(...)`). Resolving merges these two sources into a
@@ -37,7 +37,7 @@ pub struct ResolvedQemu {
     /// Display policy. `None` means "user said nothing" — the runner
     /// keeps its implicit `-display none` default to stay headless for
     /// CI / test flows. A `Some(...)` value reflects an explicit
-    /// `qemu().display(...)` call from the user's gluon.rhai.
+    /// `qemu().display(...)` call from the user's gluon.rs.
     pub display: Option<DisplayMode>,
     pub extra_args: Vec<String>,
     pub boot_mode: BootMode,

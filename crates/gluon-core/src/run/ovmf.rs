@@ -11,7 +11,7 @@
 //! We do not ship OVMF. Users provide paths via (in precedence order):
 //!
 //! 1. Explicit `.ovmf_code(...)` / `.ovmf_vars(...)` calls in
-//!    `gluon.rhai` → populate [`gluon_model::QemuDef::ovmf_code`] and
+//!    `gluon.rs` → populate [`gluon_model::QemuDef::ovmf_code`] and
 //!    `ovmf_vars`.
 //! 2. `OVMF_CODE` / `OVMF_VARS` environment variables.
 //! 3. A small table of well-known system paths per OS.
@@ -239,7 +239,7 @@ fn render_attempts(
     }
     out.push_str(
         "\nInstall OVMF (apt install ovmf / brew install qemu / pacman -S edk2-ovmf),\n\
-         or set OVMF_CODE and OVMF_VARS, or declare explicit paths in gluon.rhai via\n\
+         or set OVMF_CODE and OVMF_VARS, or declare explicit paths in gluon.rs via\n\
          qemu().ovmf_code(\"...\").ovmf_vars(\"...\").",
     );
     out
@@ -247,7 +247,7 @@ fn render_attempts(
 
 fn source_label(explicit: &Option<PathBuf>, env: &Option<PathBuf>) -> &'static str {
     match (explicit, env) {
-        (Some(_), _) => "explicit .ovmf_* setting in gluon.rhai",
+        (Some(_), _) => "explicit .ovmf_* setting in gluon.rs",
         (None, Some(_)) => "OVMF_CODE / OVMF_VARS env var",
         (None, None) => "system probe",
     }

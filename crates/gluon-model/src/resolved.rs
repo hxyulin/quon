@@ -1,6 +1,6 @@
 //! Post-resolution types consumed by the scheduler and compile pipeline.
 //!
-//! After the engine evaluates `gluon.rhai` and the user selects a profile,
+//! After the engine evaluates `gluon.rs` and the user selects a profile,
 //! [`crate::build_model::BuildModel`] is collapsed into a
 //! [`ResolvedConfig`]: profile inheritance is applied, config options are
 //! resolved to final typed values, and crate/target bindings are frozen.
@@ -79,7 +79,7 @@ pub struct ResolvedConfig {
     pub crates: Vec<ResolvedCrateRef>,
     pub build_dir: PathBuf,
     /// Absolute path to the project root (the directory containing
-    /// `gluon.rhai`). Used by `compile_crate` to resolve `CrateDef::path`
+    /// `gluon.rs`). Used by `compile_crate` to resolve `CrateDef::path`
     /// and `CrateDef::linker_script` against the project tree.
     pub project_root: PathBuf,
 }

@@ -62,7 +62,7 @@ pub struct VendorOptions {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VendorCheckReport {
     /// Fingerprint in `gluon.lock` does not match the live model.
-    /// The user has edited `gluon.rhai` since the last vendor run.
+    /// The user has edited `gluon.rs` since the last vendor run.
     pub fingerprint_mismatch: bool,
     /// Package names listed in `gluon.lock` whose vendored directory
     /// is missing from disk.

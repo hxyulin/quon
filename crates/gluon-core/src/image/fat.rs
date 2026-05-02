@@ -101,7 +101,7 @@ where
     })?;
 
     // Write every entry. Order matters for determinism: entries are in
-    // the order the user wrote them in gluon.rhai (preserved by
+    // the order the user wrote them in gluon.rs (preserved by
     // ImageDef::entries: Vec<ImageEntry>), and FAT directory ordering
     // follows file-creation order, so the byte layout is reproducible
     // across runs assuming inputs match.

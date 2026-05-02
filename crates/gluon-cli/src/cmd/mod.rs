@@ -1,7 +1,7 @@
 //! Shared command context and plumbing for `gluon-cli` subcommands.
 //!
 //! Each subcommand needs some subset of the same preamble work: walk
-//! up from the current directory to find a `gluon.rs` or `gluon.rhai`,
+//! up from the current directory to find a `gluon.rs`,
 //! load the build model, pick a profile, resolve the config, probe
 //! rustc, load the cache manifest, and construct a `CompileCtx`. Two
 //! entry points are provided here:
@@ -55,7 +55,7 @@ use std::sync::Arc;
 /// resolved config for the active profile, the compile context
 /// (layout + rustc info + cache), and where the project lives on disk.
 pub struct CmdContext {
-    /// The evaluated `gluon.rhai` model, kept around so subcommands can
+    /// The evaluated `gluon.rs` model, kept around so subcommands can
     /// look up targets, crates, and groups referenced from the resolved
     /// config by handle.
     pub model: BuildModel,
@@ -64,7 +64,7 @@ pub struct CmdContext {
     /// Layout, rustc metadata, and cache manifest — everything rustc
     /// invocations need.
     pub ctx: CompileCtx,
-    /// The directory containing `gluon.rs` or `gluon.rhai` (the project root).
+    /// The directory containing `gluon.rs` (the project root).
     ///
     /// Not consumed by today's three subcommands (`build`, `clean`,
     /// `configure`) — they all reach for `resolved.project_root`
@@ -218,7 +218,7 @@ pub fn build_layout_context_at_with_opts(
     opts: LayoutContextOpts,
 ) -> Result<LayoutContext> {
     let project_root = find_project_root(cwd)
-        .context("could not find a gluon.rs or gluon.rhai in the current directory or any parent")?;
+        .context("could not find a gluon.rs in the current directory or any parent")?;
     let mut model = load_build_model(&project_root)
         .context("failed to load build model")?;
 
@@ -259,7 +259,7 @@ pub fn build_layout_context_at_with_opts(
                 Some(n) => n,
                 None => {
                     return Err(anyhow::anyhow!(
-                        "no profiles declared in gluon.rs or gluon.rhai; add at least one \
+                        "no profiles declared in gluon.rs; add at least one \
                          `profile(...)` definition or pass `-p <name>`"
                     ));
                 }
@@ -358,7 +358,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    /// Write the smallest possible valid `gluon.rhai` that evaluates
+    /// Write the smallest possible valid `gluon.rs` that evaluates
     /// and resolves cleanly — a project, a builtin target, and a
     /// profile pinned to that target. No crates or groups required.
     fn write_min_script(dir: &Path) {
@@ -370,7 +370,7 @@ mod tests {
                 .opt_level(0)
                 .debug_info(true);
         "#;
-        fs::write(dir.join("gluon.rhai"), script).expect("write gluon.rhai");
+        fs::write(dir.join("gluon.rs"), script).expect("write gluon.rs");
     }
 
     // These tests exercise the full context-building pipeline, which
@@ -419,7 +419,7 @@ mod tests {
             profile("zeta").target("x86_64-unknown-none");
             profile("alpha").target("x86_64-unknown-none");
         "#;
-        fs::write(tmp.path().join("gluon.rhai"), script).expect("write");
+        fs::write(tmp.path().join("gluon.rs"), script).expect("write");
         let cmd = build_context_at_for_driver(
             tmp.path(),
             None,

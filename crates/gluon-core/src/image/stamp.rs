@@ -14,7 +14,7 @@ use std::path::Path;
 use super::ResolvedEntry;
 
 /// Tag identifying where a stamp's source came from. Stored in the
-/// stamp so that, e.g., a crate→file rename in `gluon.rhai` is visible
+/// stamp so that, e.g., a crate→file rename in `gluon.rs` is visible
 /// even if the resolved on-disk path happens to match.
 ///
 /// Uses struct variants (rather than newtype-around-String) because
