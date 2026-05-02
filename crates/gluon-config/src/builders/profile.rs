@@ -81,6 +81,15 @@ impl<'cfg> ProfileBuilder<'cfg> {
         self.modify(|pf| pf.inherits = Some(p_name));
         self
     }
+
+    /// Set the named preset to apply to this profile's config options.
+    /// The preset is looked up by name during the resolver pass; only
+    /// the string is written here (mirrors how `inherits` works).
+    pub fn preset(mut self, name: &str) -> Self {
+        let n = name.to_string();
+        self.modify(|p| p.preset = Some(n));
+        self
+    }
 }
 
 #[cfg(test)]

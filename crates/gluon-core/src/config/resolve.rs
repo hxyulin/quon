@@ -767,35 +767,76 @@ fn _crate_handle_marker(_: Handle<CrateDef>, _: Handle<TargetDef>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::evaluate_script;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
+    use gluon_config::Config;
+    use gluon_model::{intern, BuildModel, ConfigValue, CrateType};
 
-    fn write_script(contents: &str) -> NamedTempFile {
-        let mut f = tempfile::Builder::new()
-            .prefix("gluon-resolve-test-")
-            .suffix(".rhai")
-            .tempfile()
-            .expect("create temp file");
-        f.write_all(contents.as_bytes()).expect("write");
-        f.flush().expect("flush");
-        f
+    /// Build a `BuildModel` in-process via the gluon-config builder
+    /// and the gluon-model intern pass. Replaces the Stage 1/2
+    /// `evaluate_script` call sites that drove the same model
+    /// construction through inline Rhai strings.
+    fn build_model<F>(build: F) -> BuildModel
+    where
+        F: FnOnce(&mut Config),
+    {
+        let mut cfg = Config::new();
+        build(&mut cfg);
+        let raw = cfg.into_raw();
+        let (model, diags) = intern::intern(raw);
+        assert!(
+            diags.is_empty(),
+            "intern produced diagnostics: {:?}",
+            diags
+        );
+        model
     }
 
     fn resolve_default(model: &BuildModel) -> Result<ResolvedConfig> {
         resolve(model, "default", None, Path::new("/tmp/proj"), None)
     }
 
+    /// Helper for the kconfig depends_on tests: build the base model
+    /// with the Config builder (project/target/profile), then load
+    /// and merge a kconfig file, and resolve the default profile.
+    ///
+    /// The .kconfig path is what populates `depends_on_expr` — the
+    /// Config builder produces only structural `Expr` values. Writing
+    /// the kconfig to a temp file and loading it is the only way to
+    /// drive the kconfig-parsed expression path end-to-end.
+    fn resolve_kconfig(kconfig: &str) -> Result<ResolvedConfig> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let kconfig_path = dir.path().join("options.kconfig");
+        std::fs::write(&kconfig_path, kconfig).expect("write kconfig");
+
+        let mut cfg = Config::new();
+        cfg.project("t", "1");
+        let t = cfg.target_spec("x", "t.json");
+        cfg.profile("default").target(t);
+        let raw = cfg.into_raw();
+        let (mut model, diags) = intern::intern(raw);
+        assert!(diags.is_empty(), "intern produced diagnostics: {:?}", diags);
+
+        // Load kconfig and merge options/presets directly into the
+        // interned BuildModel, mirroring what the Rhai `load_kconfig`
+        // function does in engine/builders/kconfig.rs.
+        let lowered = crate::kconfig::load_kconfig(&kconfig_path)
+            .expect("load kconfig");
+        for (name, opt) in lowered.options {
+            model.config_options.insert(name, opt);
+        }
+        for (name, preset) in lowered.presets {
+            model.presets.insert(name, preset);
+        }
+
+        resolve(&model, "default", None, dir.path(), None)
+    }
+
     #[test]
     fn resolve_basic_profile() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x", "t.json");
-            profile("default").target("x").opt_level(2).debug_info(true);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t).opt_level(2).debug_info(true);
+        });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.profile.opt_level, 2);
         assert!(cfg.profile.debug_info);
@@ -805,15 +846,12 @@ mod tests {
 
     #[test]
     fn resolve_profile_inheritance() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x", "t.json");
-            profile("base").target("x").opt_level(2);
-            profile("dev").inherits("base").debug_info(true);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("base").target(t).opt_level(2);
+            cfg.profile("dev").inherits("base").debug_info(true);
+        });
         let cfg = resolve(&model, "dev", None, Path::new("/tmp"), None).expect("resolve");
         assert_eq!(
             cfg.profile.opt_level, 2,
@@ -825,29 +863,23 @@ mod tests {
 
     #[test]
     fn resolve_target_override() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("a", "a.json");
-            target("b", "b.json");
-            profile("default").target("a");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let a = cfg.target_spec("a", "a.json");
+            let _ = cfg.target_spec("b", "b.json");
+            cfg.profile("default").target(a);
+        });
         let cfg = resolve(&model, "default", Some("b"), Path::new("/tmp"), None).expect("resolve");
         assert_eq!(cfg.profile.target, model.targets.lookup("b").unwrap());
     }
 
     #[test]
     fn resolve_unknown_profile_error() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+        });
         let err =
             resolve(&model, "missing", None, Path::new("/tmp"), None).expect_err("should fail");
         match err {
@@ -860,13 +892,10 @@ mod tests {
 
     #[test]
     fn resolve_profile_without_target_error() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            profile("default").opt_level(0);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            cfg.profile("default").opt_level(0);
+        });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
             Error::Diagnostics(v) => {
@@ -881,16 +910,13 @@ mod tests {
 
     #[test]
     fn resolve_config_defaults() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x", "t.json");
-            profile("default").target("x");
-            config_u32("SIZE").default_value(4096);
-            config_bool("DEBUG").default_value(true);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
+            cfg.config_bool("DEBUG").default_value(ConfigValue::Bool(true));
+        });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.options.get("SIZE"), Some(&ResolvedValue::U32(4096)));
         assert_eq!(cfg.options.get("DEBUG"), Some(&ResolvedValue::Bool(true)));
@@ -898,34 +924,27 @@ mod tests {
 
     #[test]
     fn resolve_config_preset_override() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            config_u32("SIZE").default_value(4096);
-            preset("big").set("SIZE", 8192);
-            profile("default").target("x").preset("big");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
+            cfg.preset("big").set("SIZE", ConfigValue::U64(8192));
+            cfg.profile("default").target(t).preset("big");
+        });
         let cfg = resolve_default(&model).expect("resolve");
-        // Note: preset.set with an integer literal lands as U64, but the
-        // option is declared U32; coercion narrows it.
+        // Note: preset.set with U64 but option declared U32; coercion narrows it.
         assert_eq!(cfg.options.get("SIZE"), Some(&ResolvedValue::U32(8192)));
     }
 
     #[test]
     fn resolve_config_external_override() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            config_u32("SIZE").default_value(4096);
-            preset("big").set("SIZE", 8192);
-            profile("default").target("x").preset("big");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
+            cfg.preset("big").set("SIZE", ConfigValue::U64(8192));
+            cfg.profile("default").target(t).preset("big");
+        });
         let mut overrides = BTreeMap::new();
         overrides.insert("SIZE".to_string(), ConfigValue::U32(16384));
         let cfg =
@@ -935,15 +954,14 @@ mod tests {
 
     #[test]
     fn resolve_config_range_violation() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            config_u32("SIZE").default_value(999999).range(0, 65536);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.config_u32("SIZE")
+                .default_value(ConfigValue::U32(999999))
+                .range(0, 65536);
+        });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
             Error::Diagnostics(v) => {
@@ -957,33 +975,10 @@ mod tests {
         }
     }
 
-    /// Helper for the K8 expression-form depends_on tests: write a
-    /// `gluon.rhai` + sibling `options.kconfig` into a tempdir, evaluate
-    /// the script, and resolve the default profile. Returns the
-    /// resolved config so each test can assert on the option states.
-    ///
-    /// The .kconfig path is what populates `depends_on_expr` — the Rhai
-    /// builder still produces only `Vec<String>` form. So this helper
-    /// is the only way to drive the new resolver branch end-to-end.
-    fn resolve_kconfig_pair(rhai: &str, kconfig: &str) -> Result<ResolvedConfig> {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let script = dir.path().join("gluon.rhai");
-        std::fs::write(&script, rhai).expect("write rhai");
-        std::fs::write(dir.path().join("options.kconfig"), kconfig).expect("write kconfig");
-        let model = evaluate_script(&script).expect("evaluate");
-        resolve(&model, "default", None, dir.path(), None)
-    }
-
     #[test]
     fn resolve_config_depends_on_expr_and_satisfied() {
         // A && B with both A and B on → X stays at its default (true).
-        let cfg = resolve_kconfig_pair(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            load_kconfig("./options.kconfig");
-            "#,
+        let cfg = resolve_kconfig(
             r#"
             config A: bool { default = true }
             config B: bool { default = true }
@@ -997,13 +992,7 @@ mod tests {
     #[test]
     fn resolve_config_depends_on_expr_and_unsatisfied() {
         // A && B but B is off → X must be forced off.
-        let cfg = resolve_kconfig_pair(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            load_kconfig("./options.kconfig");
-            "#,
+        let cfg = resolve_kconfig(
             r#"
             config A: bool { default = true }
             config B: bool { default = false }
@@ -1036,13 +1025,7 @@ mod tests {
         // For `A || B` with both A and B off, the expression doesn't
         // reduce to a single responsible dep, so the resolver falls
         // back to the generic "expression is not satisfied" message.
-        let cfg = resolve_kconfig_pair(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            load_kconfig("./options.kconfig");
-            "#,
+        let cfg = resolve_kconfig(
             r#"
             config A: bool { default = false }
             config B: bool { default = false }
@@ -1066,13 +1049,7 @@ mod tests {
         // A || B with only A on → X stays satisfied. This is the case
         // where flatten-based eval would WRONGLY disable X (because B
         // is off and the flat form treats it as required).
-        let cfg = resolve_kconfig_pair(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            load_kconfig("./options.kconfig");
-            "#,
+        let cfg = resolve_kconfig(
             r#"
             config A: bool { default = true }
             config B: bool { default = false }
@@ -1086,13 +1063,7 @@ mod tests {
     #[test]
     fn resolve_config_depends_on_expr_not_inverts() {
         // !DISABLED with DISABLED off → expression is true → X enabled.
-        let cfg = resolve_kconfig_pair(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            load_kconfig("./options.kconfig");
-            "#,
+        let cfg = resolve_kconfig(
             r#"
             config DISABLED: bool { default = false }
             config X: bool { default = true depends_on = !DISABLED }
@@ -1104,16 +1075,15 @@ mod tests {
 
     #[test]
     fn resolve_config_selects() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            config_bool("A").default_value(true).selects(["B"]);
-            config_bool("B").default_value(false);
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.config_bool("A")
+                .default_value(ConfigValue::Bool(true))
+                .selects(&["B"]);
+            cfg.config_bool("B").default_value(ConfigValue::Bool(false));
+        });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.options.get("A"), Some(&ResolvedValue::Bool(true)));
         assert_eq!(
@@ -1125,16 +1095,15 @@ mod tests {
 
     #[test]
     fn resolve_interpolation() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            config_str("NAME").default_value("foo");
-            config_str("MSG").default_value("hello ${NAME}");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.config_str("NAME")
+                .default_value(ConfigValue::Str("foo".into()));
+            cfg.config_str("MSG")
+                .default_value(ConfigValue::Str("hello ${NAME}".into()));
+        });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(
             cfg.options.get("MSG"),
@@ -1144,16 +1113,13 @@ mod tests {
 
     #[test]
     fn resolve_interpolation_cycle_is_error() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            config_str("A").default_value("${B}");
-            config_str("B").default_value("${A}");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.config_str("A").default_value(ConfigValue::Str("${B}".into()));
+            cfg.config_str("B").default_value(ConfigValue::Str("${A}".into()));
+        });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
             Error::Diagnostics(v) => {
@@ -1168,18 +1134,19 @@ mod tests {
 
     #[test]
     fn resolve_crates_list() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            let k = group("kernel").target("x");
-            k.add("kfoo", "crates/kfoo");
-            let h = group("tools").target("host");
-            h.add("hbar", "crates/hbar");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            {
+                let mut kg = cfg.group("kernel").target(t);
+                kg.add("kfoo", "crates/kfoo");
+            }
+            {
+                let mut hg = cfg.group("tools").target_host();
+                hg.add("hbar", "crates/hbar");
+            }
+        });
         let cfg = resolve_default(&model).expect("resolve");
         let names: Vec<&str> = cfg
             .crates
@@ -1214,19 +1181,20 @@ mod tests {
 
     #[test]
     fn filter_no_boot_binary_includes_all() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("default").target("x");
-            let g1 = group("a").target("x");
-            g1.add("crate_a", "crates/a");
-            let g2 = group("b").target("y");
-            g2.add("crate_b", "crates/b");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(x);
+            {
+                let mut g1 = cfg.group("a").target(x);
+                g1.add("crate_a", "crates/a");
+            }
+            {
+                let mut g2 = cfg.group("b").target(y);
+                g2.add("crate_b", "crates/b");
+            }
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"crate_a".into()), "got {names:?}");
         assert!(
@@ -1237,19 +1205,20 @@ mod tests {
 
     #[test]
     fn filter_boot_binary_restricts_to_reachable() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("default").target("x").boot_binary("crate_a");
-            let g1 = group("a").target("x");
-            g1.add("crate_a", "crates/a").crate_type("bin");
-            let g2 = group("b").target("y");
-            g2.add("crate_b", "crates/b").crate_type("bin");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(x).boot_binary("crate_a");
+            {
+                let mut g1 = cfg.group("a").target(x);
+                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("b").target(y);
+                g2.add("crate_b", "crates/b").crate_type(CrateType::Bin);
+            }
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"crate_a".into()),
@@ -1264,21 +1233,22 @@ mod tests {
     #[test]
     fn filter_artifact_deps_cross_target_included() {
         // Bootloader on target Y depends on kernel on target X via artifact_env.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("default").target("y").boot_binary("bootloader");
-            let g1 = group("kernel").target("x");
-            g1.add("kernel", "crates/kernel").crate_type("bin");
-            let g2 = group("boot").target("y");
-            g2.add("bootloader", "crates/boot")
-                .crate_type("bin")
-                .artifact_env("KERNEL_PATH", "kernel");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(y).boot_binary("bootloader");
+            {
+                let mut g1 = cfg.group("kernel").target(x);
+                g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("boot").target(y);
+                g2.add("bootloader", "crates/boot")
+                    .crate_type(CrateType::Bin)
+                    .artifact_env("KERNEL_PATH", "kernel");
+            }
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"bootloader".into()),
@@ -1293,20 +1263,22 @@ mod tests {
     #[test]
     fn filter_deps_host_crate_included() {
         // Cross crate depends on a host proc-macro — both should be included.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x").boot_binary("kernel");
-            let h = group("host_tools").target("host");
-            h.add("my_derive", "crates/derive").crate_type("proc-macro");
-            let k = group("kernel").target("x");
-            k.add("kernel", "crates/kernel")
-                .crate_type("bin")
-                .deps(#{ my_derive: #{ crate: "my_derive" } });
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(x).boot_binary("kernel");
+            {
+                let mut h = cfg.group("host_tools").target_host();
+                h.add("my_derive", "crates/derive")
+                    .crate_type(CrateType::ProcMacro);
+            }
+            {
+                let mut k = cfg.group("kernel").target(x);
+                k.add("kernel", "crates/kernel")
+                    .crate_type(CrateType::Bin)
+                    .dep("my_derive", "my_derive");
+            }
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"kernel".into()), "got {names:?}");
         assert!(
@@ -1318,20 +1290,21 @@ mod tests {
     #[test]
     fn filter_two_profiles_disjoint_sets() {
         // Two profiles with different boot_binary should produce disjoint crate sets.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("prof_x").target("x").boot_binary("crate_x");
-            profile("prof_y").target("y").boot_binary("crate_y");
-            let g1 = group("gx").target("x");
-            g1.add("crate_x", "crates/x").crate_type("bin");
-            let g2 = group("gy").target("y");
-            g2.add("crate_y", "crates/y").crate_type("bin");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("prof_x").target(x).boot_binary("crate_x");
+            cfg.profile("prof_y").target(y).boot_binary("crate_y");
+            {
+                let mut g1 = cfg.group("gx").target(x);
+                g1.add("crate_x", "crates/x").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("gy").target(y);
+                g2.add("crate_y", "crates/y").crate_type(CrateType::Bin);
+            }
+        });
         let names_x = crate_names_for_profile(&model, "prof_x");
         let names_y = crate_names_for_profile(&model, "prof_y");
         assert_eq!(names_x, vec!["crate_x"], "prof_x only builds crate_x");
@@ -1342,23 +1315,23 @@ mod tests {
     fn filter_esp_expansion() {
         // ESP source crate is pulled in even if not directly reachable,
         // as long as another entry in the same ESP is reachable.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("default").target("y").boot_binary("bootloader");
-            let g1 = group("kernel").target("x");
-            g1.add("kernel", "crates/kernel").crate_type("bin");
-            let g2 = group("boot").target("y");
-            g2.add("bootloader", "crates/boot")
-                .crate_type("bin")
-                .artifact_env("KERNEL_PATH", "kernel");
-            esp("default")
-                .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(y).boot_binary("bootloader");
+            {
+                let mut g1 = cfg.group("kernel").target(x);
+                g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("boot").target(y);
+                g2.add("bootloader", "crates/boot")
+                    .crate_type(CrateType::Bin)
+                    .artifact_env("KERNEL_PATH", "kernel");
+            }
+            cfg.esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"bootloader".into()),
@@ -1372,22 +1345,23 @@ mod tests {
         // not reach. Without the image-seed expansion, that crate would
         // be silently dropped and `compile_image` would later fail with
         // a missing-artifact error far from the configuration.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            target("y","y.json");
-            profile("default").target("x").boot_binary("crate_a");
-            let g1 = group("a").target("x");
-            g1.add("crate_a", "crates/a").crate_type("bin");
-            let g2 = group("b").target("y");
-            g2.add("crate_b", "crates/b").crate_type("bin");
-            image("disk")
-                .size(1)
-                .write_crate_at(0, "crate_b");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(x).boot_binary("crate_a");
+            {
+                let mut g1 = cfg.group("a").target(x);
+                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("b").target(y);
+                g2.add("crate_b", "crates/b").crate_type(CrateType::Bin);
+            }
+            cfg.image("disk")
+                .size_mb(1)
+                .raw_write_crate(0, "crate_b", None);
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"crate_b".into()),
@@ -1402,24 +1376,27 @@ mod tests {
         // profile's boot_binary closure doesn't reach them — gluon
         // needs to compile the runner before spawning it and the
         // inputs before passing their artifact paths in.
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x").boot_binary("crate_a");
-            let g1 = group("a").target("x");
-            g1.add("crate_a", "crates/a").crate_type("bin");
-            let host = group("host-tools").target("host");
-            host.add("runner", "tools/runner").crate_type("bin");
-            let g2 = group("b").target("x");
-            g2.add("input_crate", "crates/inp").crate_type("bin");
-            build_step("step")
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(x).boot_binary("crate_a");
+            {
+                let mut g1 = cfg.group("a").target(x);
+                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
+            }
+            {
+                let mut host = cfg.group("host-tools").target_host();
+                host.add("runner", "tools/runner").crate_type(CrateType::Bin);
+            }
+            {
+                let mut g2 = cfg.group("b").target(x);
+                g2.add("input_crate", "crates/inp").crate_type(CrateType::Bin);
+            }
+            cfg.build_step("step")
                 .runner("runner")
-                .input("INPUT", crate_in("input_crate"))
+                .input_crate("INPUT", "input_crate")
                 .output("out.bin");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        });
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"runner".into()),
@@ -1432,22 +1409,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Rhai builder tests for BootloaderDef and ImageDef
+    // Builder tests for BootloaderDef and ImageDef
     // -----------------------------------------------------------------------
 
     #[test]
     fn bootloader_builder_populates_typed_fields() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            bootloader("uefi")
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.bootloader("uefi")
                 .entry_crate("boot")
                 .protocol("gop");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+        });
         assert_eq!(model.bootloader.kind, "uefi");
         assert_eq!(model.bootloader.entry_crate.as_deref(), Some("boot"));
         assert_eq!(model.bootloader.protocol.as_deref(), Some("gop"));
@@ -1455,20 +1429,17 @@ mod tests {
 
     #[test]
     fn image_builder_populates_model() {
-        let f = write_script(
-            r#"
-            project("t","1");
-            target("x","t.json");
-            profile("default").target("x");
-            image("disk")
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let t = cfg.target_spec("x", "t.json");
+            cfg.profile("default").target(t);
+            cfg.image("disk")
                 .format("fat32")
-                .size(64)
-                .add_crate("bootloader", "EFI/BOOT/BOOTX64.EFI")
-                .add_file("splash.bmp", "boot/splash.bmp")
-                .add_esp("default", "/");
-            "#,
-        );
-        let model = evaluate_script(f.path()).expect("evaluate");
+                .size_mb(64)
+                .add_entry_crate("bootloader", "EFI/BOOT/BOOTX64.EFI")
+                .add_entry_file("splash.bmp", "boot/splash.bmp")
+                .add_entry_esp("default", "/");
+        });
         let h = model.images.lookup("disk").expect("image must exist");
         let img = model.images.get(h).unwrap();
         assert_eq!(img.format.as_deref(), Some("fat32"));
