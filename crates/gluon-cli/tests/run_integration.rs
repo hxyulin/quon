@@ -39,7 +39,7 @@ fn workspace_fixture_dir(name: &str) -> PathBuf {
 fn setup_fixture(name: &str) -> (TempDir, PathBuf) {
     let src = workspace_fixture_dir(name);
     assert!(
-        src.join("gluon.rhai").is_file(),
+        src.join("gluon.rs").is_file(),
         "fixture missing at {src:?}"
     );
     let tmp = tempfile::tempdir().expect("create tempdir");
@@ -363,37 +363,17 @@ fn gluon_run_extra_args_pass_through() {
 // --no-build path
 // ---------------------------------------------------------------------------
 
-/// Rewrite the fixture's `qemu("...")` binary to point at a different
-/// path. Used by tests that want to spawn the runner against a fake
-/// QEMU binary instead of the real one.
-///
-/// Stage 2: the minimal fixture ships both `gluon.rs` and `gluon.rhai`.
-/// `load_build_model` prefers `.rs`, so we must rewrite both files to
-/// ensure the fake binary path is seen regardless of which entry point
-/// the CLI picks. Both files contain the literal `"qemu-system-x86_64"`
-/// — the assertion verifies at least `gluon.rhai` was patched (the `.rs`
-/// rewrite is best-effort via `if … is_file`). Stage 3 removes the
-/// `.rhai` rewrite path entirely.
+/// Rewrite the fixture's `qemu("...")` binary to point at a different path.
 fn rewrite_qemu_binary(fixture: &Path, new_binary: &str) {
-    // Rewrite gluon.rhai (legacy path; also the authoritative existence check).
-    let rhai_path = fixture.join("gluon.rhai");
-    let original = fs::read_to_string(&rhai_path).expect("read gluon.rhai");
+    let rs_path = fixture.join("gluon.rs");
+    let original = fs::read_to_string(&rs_path).expect("read gluon.rs");
     let rewritten = original.replace("qemu-system-x86_64", new_binary);
     assert_ne!(
         original, rewritten,
         "expected fixture to contain 'qemu-system-x86_64' literal so the \
-         test can rewrite it; check tests/fixtures/minimal/gluon.rhai"
+         test can rewrite it; check tests/fixtures/minimal/gluon.rs"
     );
-    fs::write(&rhai_path, rewritten).expect("write gluon.rhai");
-
-    // Stage 2: also rewrite gluon.rs so load_build_model's preferred
-    // .rs path points at the fake binary too.
-    let rs_path = fixture.join("gluon.rs");
-    if rs_path.is_file() {
-        let rs_original = fs::read_to_string(&rs_path).expect("read gluon.rs");
-        let rs_rewritten = rs_original.replace("qemu-system-x86_64", new_binary);
-        fs::write(&rs_path, rs_rewritten).expect("write gluon.rs");
-    }
+    fs::write(&rs_path, rewritten).expect("write gluon.rs");
 }
 
 #[test]
