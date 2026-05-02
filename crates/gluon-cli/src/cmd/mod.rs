@@ -362,14 +362,14 @@ mod tests {
     /// and resolves cleanly — a project, a builtin target, and a
     /// profile pinned to that target. No crates or groups required.
     fn write_min_script(dir: &Path) {
-        let script = r#"
-            project("demo", "0.1.0");
-            target("x86_64-unknown-none");
-            profile("dev")
-                .target("x86_64-unknown-none")
-                .opt_level(0)
-                .debug_info(true);
-        "#;
+        let script = r#"fn main() -> gluon_config::Result<()> {
+    let mut cfg = gluon_config::Config::new();
+    cfg.project("demo", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("dev").target(t).opt_level(0).debug_info(true);
+    cfg.emit()
+}
+"#;
         fs::write(dir.join("gluon.rs"), script).expect("write gluon.rs");
     }
 
@@ -413,12 +413,15 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().expect("tempdir");
-        let script = r#"
-            project("demo", "0.1.0");
-            target("x86_64-unknown-none");
-            profile("zeta").target("x86_64-unknown-none");
-            profile("alpha").target("x86_64-unknown-none");
-        "#;
+        let script = r#"fn main() -> gluon_config::Result<()> {
+    let mut cfg = gluon_config::Config::new();
+    cfg.project("demo", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("zeta").target(t);
+    cfg.profile("alpha").target(t);
+    cfg.emit()
+}
+"#;
         fs::write(tmp.path().join("gluon.rs"), script).expect("write");
         let cmd = build_context_at_for_driver(
             tmp.path(),
