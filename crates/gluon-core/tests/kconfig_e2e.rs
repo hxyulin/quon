@@ -20,8 +20,9 @@
 //! pipeline. It does not spawn the `gluon` binary. Stage 2: the
 //! fixture-driven tests now call `load_build_model`, which prefers
 //! `gluon.rs` and therefore requires rustc — they are `#[ignore]`-gated
-//! with a probe-or-skip guard. The inline-tempdir test (`rhai_depends_on_expr_honours_or_semantics`)
-//! keeps `evaluate` and stays ungated. The CLI integration tests in
+//! with a probe-or-skip guard. The inline builder test
+//! (`depends_on_expr_honours_or_semantics`) constructs the model in-
+//! process via `Config` and stays ungated. The CLI integration tests in
 //! `gluon-cli/tests/integration.rs` are reserved for behavior that
 //! actually shells out to the binary; this test would be misleading
 //! there because nothing about the CLI is being exercised.
@@ -53,11 +54,11 @@ fn kconfig_loader_round_trips_against_rhai_builder() {
     let kconfig_dir = fixture_dir("kconfig-minimal");
     let rhai_dir = fixture_dir("kconfig-rhai-equiv");
     assert!(
-        kconfig_dir.join("gluon.rhai").is_file(),
+        kconfig_dir.join("gluon.rs").is_file(),
         "fixture missing at {kconfig_dir:?}"
     );
     assert!(
-        rhai_dir.join("gluon.rhai").is_file(),
+        rhai_dir.join("gluon.rs").is_file(),
         "fixture missing at {rhai_dir:?}"
     );
 
@@ -135,42 +136,50 @@ fn kconfig_loader_resolves_boolean_expression_form() {
 }
 
 #[test]
-fn rhai_depends_on_expr_honours_or_semantics() {
-    // Parity check for `.depends_on_expr(...)` on the Rhai side.
-    //
+fn depends_on_expr_honours_or_semantics() {
     // Defaults: A=true, B=false. The expression `A || B` is true
-    // under the *semantic* Expr evaluation path (reuses the kconfig
-    // grammar) so DEP keeps its default of true. If the Rhai builder
-    // were still routing this through the legacy flat `Vec<String>`
-    // AND-of-names path, it would treat `A` and `B` as two separate
+    // under the Expr evaluation path (reuses the kconfig grammar)
+    // so DEP keeps its default of true. If the builder were still
+    // routing this through the legacy flat `Vec<String>` AND-of-
+    // names path, it would treat `A` and `B` as two separate
     // required symbols, see `B` is off, and force DEP to false.
-    // Therefore this test's pass/fail cleanly distinguishes the two
-    // encodings — it is the smoking gun proving the Rhai surface
-    // reuses the `.kconfig` expression grammar, not a second parser.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let script = r#"
-        project("expr-parity", "0.1.0");
-        target("x86_64-unknown-none");
-        profile("default").target("x86_64-unknown-none");
-        config_bool("A").default_value(true);
-        config_bool("B").default_value(false);
-        config_bool("DEP").default_value(true).depends_on_expr("A || B");
-    "#;
-    std::fs::write(tmp.path().join("gluon.rhai"), script).unwrap();
+    use gluon_config::Config;
+    use gluon_model::{intern, ConfigValue, Expr};
 
-    let model = gluon_core::evaluate(&tmp.path().join("gluon.rhai")).expect("evaluate");
-    let resolved =
-        gluon_core::resolve_config(&model, "default", None, tmp.path(), None).expect("resolve");
+    let mut cfg = Config::new();
+    cfg.project("expr-parity", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("default").target(t);
+    cfg.config_bool("A")
+        .default_value(ConfigValue::Bool(true));
+    cfg.config_bool("B")
+        .default_value(ConfigValue::Bool(false));
+    cfg.config_bool("DEP")
+        .default_value(ConfigValue::Bool(true))
+        .depends_on(Expr::Or(vec![
+            Expr::Ident("A".into()),
+            Expr::Ident("B".into()),
+        ]));
+
+    let raw = cfg.into_raw();
+    let (model, diags) = intern(raw);
+    assert!(diags.is_empty(), "intern diags: {diags:?}");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let resolved = gluon_core::resolve_config(
+        &model, "default", None, tmp.path(), None,
+    )
+    .expect("resolve");
 
     assert_eq!(
         resolved.options.get("A"),
         Some(&ResolvedValue::Bool(true)),
-        "sanity check: A should default to true"
+        "sanity: A defaults to true"
     );
     assert_eq!(
         resolved.options.get("B"),
         Some(&ResolvedValue::Bool(false)),
-        "sanity check: B should default to false"
+        "sanity: B defaults to false"
     );
     assert_eq!(
         resolved.options.get("DEP"),
