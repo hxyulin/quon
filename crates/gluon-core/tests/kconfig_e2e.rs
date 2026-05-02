@@ -6,8 +6,8 @@
 //! - `tests/fixtures/kconfig-minimal/` — declares its options through a
 //!   `.kconfig` file loaded via `load_kconfig()`. Also exercises menus,
 //!   the `source` directive, and a boolean expression in `depends_on`.
-//! - `tests/fixtures/kconfig-rhai-equiv/` — declares the same options
-//!   through the inline `config_*` Rhai builders, omitting the
+//! - `tests/fixtures/kconfig-builder-equiv/` — declares the same options
+//!   through the inline `config_*` builders, omitting the
 //!   features the legacy builder cannot express (`||`/`!`).
 //!
 //! For the AND-of-symbols subset both forms can express, every option's
@@ -46,50 +46,50 @@ fn fixture_dir(name: &str) -> PathBuf {
 
 #[test]
 #[ignore]
-fn kconfig_loader_round_trips_against_rhai_builder() {
+fn kconfig_loader_round_trips_against_builder() {
     if gluon_core::RustcInfo::probe().is_err() {
-        eprintln!("kconfig_loader_round_trips_against_rhai_builder: skipped — rustc probe failed");
+        eprintln!("kconfig_loader_round_trips_against_builder: skipped — rustc probe failed");
         return;
     }
     let kconfig_dir = fixture_dir("kconfig-minimal");
-    let rhai_dir = fixture_dir("kconfig-rhai-equiv");
+    let builder_dir = fixture_dir("kconfig-builder-equiv");
     assert!(
         kconfig_dir.join("gluon.rs").is_file(),
         "fixture missing at {kconfig_dir:?}"
     );
     assert!(
-        rhai_dir.join("gluon.rs").is_file(),
-        "fixture missing at {rhai_dir:?}"
+        builder_dir.join("gluon.rs").is_file(),
+        "fixture missing at {builder_dir:?}"
     );
 
     // Load both fixture models. Stage 2: load_build_model prefers .rs
-    // over .rhai — the kconfig fixture's load_kconfig() call is wired
-    // through the .rs harness.
+    // over the legacy format — the kconfig fixture's load_kconfig() call
+    // is wired through the .rs harness.
     let kconfig_model =
         gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
-    let rhai_model =
-        gluon_core::load_build_model(&rhai_dir).expect("load rhai fixture");
+    let builder_model =
+        gluon_core::load_build_model(&builder_dir).expect("load builder fixture");
 
     // Resolve both with the default profile and no overrides.
     let kconfig_resolved =
         gluon_core::resolve_config(&kconfig_model, "default", None, &kconfig_dir, None)
             .expect("resolve kconfig fixture");
-    let rhai_resolved = gluon_core::resolve_config(&rhai_model, "default", None, &rhai_dir, None)
-        .expect("resolve rhai fixture");
+    let builder_resolved = gluon_core::resolve_config(&builder_model, "default", None, &builder_dir, None)
+        .expect("resolve builder fixture");
 
-    // For every option declared in the Rhai equivalent, the kconfig
+    // For every option declared in the builder equivalent, the kconfig
     // resolved value should match. The kconfig form may declare
-    // additional options (e.g. FANCY_FEATURE) that the Rhai form
-    // cannot express, so we iterate over the Rhai keys and treat that
+    // additional options (e.g. FANCY_FEATURE) that the builder form
+    // cannot express, so we iterate over the builder keys and treat that
     // as the parity baseline.
-    for (name, rhai_value) in &rhai_resolved.options {
+    for (name, builder_value) in &builder_resolved.options {
         let kconfig_value = kconfig_resolved
             .options
             .get(name)
             .unwrap_or_else(|| panic!("kconfig fixture is missing option '{name}'"));
         assert_eq!(
-            kconfig_value, rhai_value,
-            "option '{name}' resolved differently:\n  kconfig: {kconfig_value:?}\n  rhai:    {rhai_value:?}"
+            kconfig_value, builder_value,
+            "option '{name}' resolved differently:\n  kconfig: {kconfig_value:?}\n  builder: {builder_value:?}"
         );
     }
 }
