@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- `gluon.rhai` configuration format. Every project must now declare
+  its build via `gluon.rs`. See
+  [`docs/src/migration/rhai-to-rust.md`](docs/src/migration/rhai-to-rust.md)
+  for the surface mapping.
+- `gluon-lsp` crate. rust-analyzer covers the editor story for
+  `gluon.rs`.
+- `tree-sitter-rhai` crate.
+- `gluon-core::engine` module and the `gluon_core::evaluate` public
+  function. `gluon_core::load_build_model` is the surviving entry
+  point.
+- `gluon internal dump-dsl` hidden subcommand.
+- Script-backed rule handlers (`RuleHandler::Script`). Built-in
+  handlers (`copy`, `exec`) are unchanged.
+- `pipeline(...)` Rhai builder. The DAG generated from
+  `artifact_deps` and `artifact_env` is the surviving ordering
+  primitive.
+- `rhai` workspace dependency.
+
 ## [0.1.0] - 2026-04-09
 
 ### Added
