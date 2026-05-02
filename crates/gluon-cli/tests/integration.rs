@@ -733,22 +733,28 @@ fn multi_profile_fixture_dir() -> PathBuf {
         .join("multi-profile")
 }
 
-/// Evaluate the multi-profile fixture and verify the model captures
-/// multiple profiles, cfg_flags, dependency features, and default_profile.
+/// Loads the multi-profile fixture via `load_build_model` and verifies
+/// the model captures multiple profiles, cfg_flags, dependency features,
+/// and `default_profile`.
 ///
-/// This test exercises model evaluation only — no rustc probe required —
-/// so it runs in the default (non-`--ignored`) test set.
+/// `#[ignore]`-gated because `load_build_model` spawns rustc to compile
+/// the script-runner binary.
 #[test]
+#[ignore]
 fn multi_profile_fixture_model() {
+    let Some(()) = require_rustc_or_skip("multi_profile_fixture_model") else {
+        return;
+    };
+
     let fixture = multi_profile_fixture_dir();
-    let script = fixture.join("gluon.rhai");
+    let script = fixture.join("gluon.rs");
     assert!(
         script.is_file(),
-        "multi-profile fixture missing at {script:?}"
+        "multi-profile fixture missing gluon.rs at {fixture:?}"
     );
 
     let model =
-        gluon_core::evaluate(&script).expect("evaluate multi-profile gluon.rhai should succeed");
+        gluon_core::load_build_model(&fixture).expect("load_build_model for multi-profile should succeed");
 
     // -- Project & default_profile --
     let project = model.project.as_ref().expect("project should be set");
