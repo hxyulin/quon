@@ -24,6 +24,31 @@ impl Config {
         }
     }
 
+    /// Borrow the underlying `RawBuildModel`. Useful for tests and
+    /// in-process tooling that wants to drive `gluon_model::intern`
+    /// without round-tripping through stdout JSON.
+    ///
+    /// The returned reference reflects every builder call made so
+    /// far. Diagnostics accumulated by builders are reachable via
+    /// [`Config::diagnostics`] (see below).
+    pub fn raw(&self) -> &gluon_model::RawBuildModel {
+        &self.raw
+    }
+
+    /// Consume the builder and return the underlying `RawBuildModel`.
+    /// Mirrors [`Config::raw`] but transfers ownership — convenient
+    /// when the caller wants to feed the raw model into intern
+    /// without keeping the builder alive.
+    pub fn into_raw(self) -> gluon_model::RawBuildModel {
+        self.raw
+    }
+
+    /// Borrow the accumulated diagnostics. Empty unless a builder
+    /// flagged a duplicate name or other recoverable error.
+    pub fn diagnostics(&self) -> &[crate::error::ConfigError] {
+        &self.diagnostics
+    }
+
     /// Serialise the underlying `RawBuildModel` as pretty-printed JSON to
     /// stdout. Called from the user's `main()`.
     ///
@@ -631,5 +656,31 @@ mod kconfig_tests {
             cfg.raw.kconfig_includes[1],
             std::path::PathBuf::from("/abs/path.kconfig")
         );
+    }
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    #[test]
+    fn raw_and_into_raw_expose_builder_state() {
+        let mut cfg = Config::new();
+        cfg.project("acc-test", "0.1.0");
+        let _ = cfg.target("x");
+
+        // Borrow the raw model.
+        assert_eq!(
+            cfg.raw().model.project.as_ref().unwrap().name,
+            "acc-test"
+        );
+        assert!(cfg.raw().model.targets.lookup("x").is_some());
+
+        // No diagnostics for this minimal sequence.
+        assert!(cfg.diagnostics().is_empty());
+
+        // Consume into raw.
+        let raw = cfg.into_raw();
+        assert_eq!(raw.model.project.unwrap().name, "acc-test");
     }
 }
