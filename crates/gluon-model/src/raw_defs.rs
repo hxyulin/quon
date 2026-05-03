@@ -6,7 +6,7 @@
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
-use crate::build_model::{default_true, BootMode};
+use crate::build_model::{default_true, BootMode, CrateType};
 use crate::handle::Named;
 use crate::kconfig::ConfigValue;
 use crate::source::SourceSpan;
@@ -123,6 +123,39 @@ impl Named for RawGroupDef {
     fn name(&self) -> &str { &self.name }
 }
 
+/// Raw form of [`crate::build_model::CrateDef`]: `target` and `group`
+/// carried as name strings; deps are [`RawDepDef`]s.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawCrateDef {
+    pub name: String,
+    pub path: String,
+    pub edition: String,
+    pub crate_type: CrateType,
+    pub target: String,
+    pub deps: BTreeMap<String, RawDepDef>,
+    pub dev_deps: BTreeMap<String, RawDepDef>,
+    pub features: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linker_script: Option<String>,
+    pub group: String,
+    pub is_project_crate: bool,
+    pub cfg_flags: Vec<String>,
+    pub rustc_flags: Vec<String>,
+    pub requires_config: Vec<String>,
+    #[serde(default)]
+    pub artifact_deps: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub artifact_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawCrateDef {
+    fn name(&self) -> &str { &self.name }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +225,39 @@ mod tests {
         let de: RawGroupDef = serde_json::from_str(&json).unwrap();
         assert_eq!(de.target, "x86_64");
         assert_eq!(de.crates, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn raw_crate_def_round_trips_through_json() {
+        let mut c = RawCrateDef {
+            name: "main".into(),
+            path: "src/main".into(),
+            edition: "2024".into(),
+            crate_type: crate::build_model::CrateType::Bin,
+            target: "x86_64".into(),
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            group: "kernel".into(),
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
+        };
+        c.deps.insert(
+            "log".into(),
+            RawDepDef { crate_name: "log".into(), ..Default::default() },
+        );
+        let json = serde_json::to_string(&c).unwrap();
+        let de: RawCrateDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.target, "x86_64");
+        assert_eq!(de.group, "kernel");
+        assert_eq!(de.deps.len(), 1);
+        assert_eq!(de.deps["log"].crate_name, "log");
     }
 }
