@@ -5,8 +5,9 @@
 //! It was extracted from `compile_crate.rs` to keep that module focused on
 //! cache integration and process management.
 
+use super::artifact_shape::CrateArtifactShape;
 use super::compile_crate::CompileCrateInput;
-use super::compile_utils::{exe_suffix_for_target, normalize_crate_name, sanitise_crate_name};
+use super::compile_utils::{normalize_crate_name, sanitise_crate_name};
 use super::{CompileCtx, Emit, RustcCommandBuilder};
 use crate::error::{Error, Result};
 use gluon_model::{CrateDef, CrateType, DepResolution};
@@ -63,123 +64,25 @@ pub(crate) fn build_rustc_command(
         crate_dir.join("src/lib.rs")
     };
 
-    // Determine the output directory and artifact path. We use
-    // `-C extra-filename=-gluon-<name>` so rustc writes a deterministic
-    // name instead of the default hash-suffixed form — this lets us know
-    // the output path without globbing post-spawn.
+    // Determine the output directory and artifact paths via
+    // [`CrateArtifactShape`] — the single source of truth for crate
+    // path arithmetic, also consumed by [`crate::compile::artifact_path`]
+    // for analyzer-time lookups. Keep `extra_filename` available
+    // locally; it is still emitted as `-C extra-filename=...` further
+    // down for non-executable / host crates.
     //
-    // Exception: cross Bin crates do NOT use extra-filename. Rustc never
-    // appends a hash suffix to binary outputs (unlike rlibs), and adding
-    // extra-filename to a binary produces an ugly `hello-gluon-hello` name
-    // in the final output directory. The binary is placed directly into
-    // `cross_final_dir` via `--out-dir`; its canonical name is just
-    // `<crate_name>` with no suffix. Dep-info for bins is therefore also
-    // suffix-free: `<crate_name>.d` in `cross_final_dir`.
+    // Why bins skip extra-filename: rustc never hash-suffixes binary
+    // names, and adding extra-filename produces an ugly
+    // `hello-gluon-hello` final binary. The shape constructor encodes
+    // the same exception (cross Bin / RawBinary use `cross_final_dir`
+    // with bare crate names); the `-C extra-filename` emit below is
+    // gated on `!crate_type.is_executable() || crate_ref.host`.
     let extra_filename = format!("-gluon-{crate_name_rustc}");
 
-    let (out_dir, output_path, depfile_path) = if crate_ref.host {
-        // Host crates: output under build/host/<crate>/.
-        let out_dir = layout.host_artifact_dir(crate_def);
-        // Host proc-macros and libs both produce an rlib or .so/.dylib;
-        // for cache purposes we track the rlib (lib crates always produce
-        // one; proc-macros produce a dylib but also an .rmeta; the
-        // out-dir is what matters for --extern resolution).
-        let artifact = match crate_def.crate_type {
-            CrateType::Bin => {
-                // Bins on host are unusual but supported; name has no lib prefix.
-                out_dir.join(format!("{crate_name_rustc}{extra_filename}"))
-            }
-            CrateType::ProcMacro => {
-                // Proc-macros produce a .so/.dylib. rustc determines the
-                // exact extension; for the cache output_path we use the
-                // platform DLL extension so the existence check is accurate.
-                let ext = std::env::consts::DLL_EXTENSION;
-                out_dir.join(format!(
-                    "{}{}{}{}",
-                    std::env::consts::DLL_PREFIX,
-                    crate_name_rustc,
-                    extra_filename,
-                    if ext.is_empty() {
-                        String::new()
-                    } else {
-                        format!(".{ext}")
-                    }
-                ))
-            }
-            _ => out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib")),
-        };
-        let depfile = out_dir.join(format!("{crate_name_rustc}{extra_filename}.d"));
-        (out_dir, artifact, depfile)
-    } else {
-        // Cross crates: dispatch on crate type for output location.
-        let target_handle = crate_ref.target;
-        let target = model.targets.get(target_handle).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle {:?} not found in build model",
-                crate_name, target_handle
-            ))
-        })?;
-
-        match crate_def.crate_type {
-            CrateType::Bin => {
-                // Cross binaries land directly in `cross_final_dir`. We set
-                // `--out-dir` to `final_dir` (no `-o` override) and do NOT
-                // use `-C extra-filename` for Bin crates. Reasons:
-                //   1. rustc never hash-suffixes binary names, so no
-                //      extra-filename is needed to make the name deterministic.
-                //   2. `-C extra-filename` with `--out-dir` would produce
-                //      `hello-gluon-hello`, which is ugly for a final binary.
-                //   3. Omitting extra-filename keeps the canonical output name
-                //      equal to the crate name, matching user expectations.
-                // The artifact_dir (cross_artifact_dir) is kept for incremental
-                // state; out_dir points to final_dir so the binary lands there.
-                let final_dir = layout.cross_final_dir(target, &resolved.profile);
-                // For binaries, rustc writes the file at
-                // `<--crate-name><exe-suffix>` where exe-suffix is
-                // target-specific (empty for bare-metal, `.efi` for UEFI,
-                // `.exe` for Windows). We must use the *normalized* name
-                // and the correct suffix so the artifact path matches
-                // what rustc actually writes on disk.
-                let suffix = exe_suffix_for_target(&target.spec);
-                let artifact = final_dir.join(format!("{}{suffix}", crate_name_rustc));
-                // Depfile: without extra-filename, rustc writes `<name>.d`
-                // in the --out-dir (final_dir).
-                let depfile = final_dir.join(format!("{crate_name_rustc}.d"));
-                // Use final_dir as out_dir so the binary is placed there.
-                // The incremental dir is set separately via -C incremental=.
-                (final_dir, artifact, depfile)
-            }
-            CrateType::RawBinary => {
-                // Same out-dir handling as Bin (no extra-filename, lands
-                // directly in cross_final_dir). The difference is the
-                // file extension: rustc + `--oformat=binary` writes the
-                // executable to `<crate_name>` with no native suffix
-                // applied — the `-C link-arg=--oformat=binary` we inject
-                // overrides the target's preferred ELF/PE output to a
-                // raw image. We rename the artifact to `<crate_name>.bin`
-                // post-link via a dedicated `-o` override so downstream
-                // consumers (`image()`, `${artifact:foo}`) get a stable,
-                // self-describing path.
-                //
-                // Rationale for `.bin` over the empty/exe suffix:
-                //   - Disambiguates from ELF binaries (Bin) at a glance.
-                //   - Matches the convention used by other build systems
-                //     for flat-binary outputs (e.g. Zephyr, U-Boot).
-                //   - Lets the analyzer (rust-project.json) treat the
-                //     two crate types differently if it ever needs to.
-                let final_dir = layout.cross_final_dir(target, &resolved.profile);
-                let artifact = final_dir.join(format!("{crate_name_rustc}.bin"));
-                let depfile = final_dir.join(format!("{crate_name_rustc}.d"));
-                (final_dir, artifact, depfile)
-            }
-            _ => {
-                let out_dir = layout.cross_artifact_dir(target, &resolved.profile, crate_def);
-                let artifact = out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib"));
-                let depfile = out_dir.join(format!("{crate_name_rustc}{extra_filename}.d"));
-                (out_dir, artifact, depfile)
-            }
-        }
-    };
+    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, crate_ref)?;
+    let out_dir = shape.out_dir;
+    let output_path = shape.output_path;
+    let depfile_path = shape.depfile_path;
 
     // --- Builder assembly ---
     //
