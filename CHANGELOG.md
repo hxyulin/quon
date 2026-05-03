@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Stage 8 — scheduler `ArtifactsSnapshot` abstraction)
+
+- **Per-node dispatch arms no longer see shared mutable state.**
+  Each `DagNode` variant runs through a free function
+  (`dispatch_sysroot`, `dispatch_config_crate`, `dispatch_crate`,
+  `dispatch_esp`, `dispatch_image`, `dispatch_rule`,
+  `dispatch_build_step`) that takes an immutable
+  `&ArtifactsSnapshot` and returns a `NodeOutput`. The dispatcher
+  arm acquires the state lock at most twice — once before the helper
+  to clone the snapshot, once after to merge the helper's output —
+  and per-node helpers themselves never touch a `Mutex`.
+- **The four output mutexes collapse into one.** The previous
+  `(Mutex<sysroots>, Mutex<artifacts>, Mutex<esps>, Mutex<images>)`
+  field set on `PipelineDispatcher` is replaced by a single
+  `Mutex<ArtifactsSnapshot>` bundling all four maps. `lock_or_poison`
+  hits in `scheduler/mod.rs` are now confined to snapshot
+  read-clone and merge sites — verified by `grep` per the Stage 8
+  acceptance criterion.
+- **Determinism guarantee at `-j1`.** A new
+  `execute_pipeline_j1_is_deterministic_across_runs` test (`#[ignore]`-
+  gated on `rust-src` like the existing e2e tests) asserts two
+  consecutive `-j1` builds over the same fixture produce
+  byte-identical artifact paths and binary contents.
+- **No behaviour or on-disk format changes.** The refactor preserves
+  every prior semantic — including the deliberate "snapshot before
+  helper, drop lock, merge after" pattern that keeps parallel
+  compilations from serialising on a single mutex.
+
 ### Changed (Stage 7 — post-compile layering)
 
 - **`PartitionFormatter` trait isolates per-partition filesystem
