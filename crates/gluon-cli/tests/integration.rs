@@ -125,7 +125,8 @@ fn require_rustc_or_skip(test_name: &str) -> Option<()> {
 /// Asserts:
 ///   1. First `gluon build` exits 0 and its "built N, cached M" summary
 ///      line has `cached 0` (everything was compiled fresh).
-///   2. The sysroot stamp exists under `build/sysroot/<target>/stamp`.
+///   2. The cache manifest contains a `sysroot:<target>` composite entry
+///      after a successful cold build.
 ///   3. The kernel binary exists under
 ///      `build/cross/<target>/<profile>/final/kernel`.
 ///   4. Second `gluon build` exits 0 and its summary has `built 0`
@@ -154,15 +155,13 @@ fn gluon_build_cold_then_cache_hit() {
         "first build summary should be 'built N, cached 0', got: {first_stderr}"
     );
 
-    // Sysroot stamp should exist after a successful cold build.
-    let stamp = fixture
-        .join("build")
-        .join("sysroot")
-        .join("x86_64-unknown-none")
-        .join("stamp");
+    // After Stage 5 the sysroot freshness signal lives in the cache
+    // manifest as a composite entry, not in a sidecar stamp file.
+    let manifest = std::fs::read_to_string(fixture.join("build").join("cache-manifest.json"))
+        .expect("read cache-manifest.json");
     assert!(
-        stamp.is_file(),
-        "sysroot stamp should exist at {stamp:?} after cold build"
+        manifest.contains("sysroot:x86_64-unknown-none"),
+        "expected sysroot composite entry in cache manifest after cold build"
     );
 
     // Kernel binary should exist at cross/<target>/<profile>/final/kernel.
@@ -359,24 +358,60 @@ fn gluon_clean_removes_build_dir() {
 }
 
 /// `gluon clean --keep-sysroot` must remove build state but leave the
-/// sysroot subtree intact. Runs without rustc because `clean` uses
-/// the layout-only context.
+/// sysroot subtree AND the cache manifest's `sysroot:*` entries intact.
+/// Runs without rustc because `clean` uses the layout-only context.
 #[test]
 fn gluon_clean_keep_sysroot_preserves_sysroot() {
     let (_tmp, fixture) = setup_fixture();
 
-    // Fabricate a fake pre-built state: a sysroot stamp plus some other
-    // build artifact. The sysroot subtree should survive; the other
-    // artifact should be deleted.
+    // Fabricate a fake pre-built state: a real sysroot rlib (the
+    // canonical post-Stage-5 sentinel that the cache layer's
+    // `output_path.exists()` check looks for), a cache manifest with
+    // both a sysroot:* and a non-sysroot composite entry, plus some
+    // other build artifact. The sysroot subtree should survive; the
+    // sysroot:* manifest entry should survive (filtered); the
+    // non-sysroot manifest entry and the other artifact should both
+    // be deleted.
     let build_dir = fixture.join("build");
-    let sysroot_dir = build_dir.join("sysroot").join("x86_64-unknown-none");
-    fs::create_dir_all(&sysroot_dir).expect("mkdir sysroot");
-    let stamp = sysroot_dir.join("stamp");
-    fs::write(&stamp, b"stamp").expect("write stamp");
+    let sysroot_lib_dir = build_dir
+        .join("sysroot")
+        .join("x86_64-unknown-none")
+        .join("lib");
+    fs::create_dir_all(&sysroot_lib_dir).expect("mkdir sysroot lib");
+    let core_rlib = sysroot_lib_dir.join("libcore-gluon-core.rlib");
+    fs::write(&core_rlib, b"fake rlib").expect("write rlib");
 
     let other = build_dir.join("cross").join("leftover");
     fs::create_dir_all(other.parent().unwrap()).expect("mkdir cross");
     fs::write(&other, b"junk").expect("write junk");
+
+    // Hand-write a v2 manifest with one sysroot:* and one non-sysroot
+    // composite entry. We avoid linking gluon-core just to construct
+    // it through the public API — the JSON shape is stable enough that
+    // a literal payload is the clearest expression of the test's
+    // intent.
+    let manifest_path = build_dir.join("cache-manifest.json");
+    let manifest_body = format!(
+        r#"{{
+            "version": 2,
+            "rustc": {{}},
+            "composite": {{
+                "sysroot:x86_64-unknown-none": {{
+                    "inputs": {{}},
+                    "output_path": "{}",
+                    "built_at": 0
+                }},
+                "image:boot": {{
+                    "inputs": {{}},
+                    "output_path": "{}",
+                    "built_at": 0
+                }}
+            }}
+        }}"#,
+        core_rlib.display(),
+        other.display(),
+    );
+    fs::write(&manifest_path, manifest_body).expect("write manifest");
 
     let output = gluon_command(&fixture)
         .arg("clean")
@@ -391,12 +426,28 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
     );
 
     assert!(
-        stamp.is_file(),
-        "sysroot stamp should be preserved by --keep-sysroot"
+        core_rlib.is_file(),
+        "sysroot rlib should be preserved by --keep-sysroot"
     );
     assert!(
         !other.exists(),
         "non-sysroot build state should have been removed"
+    );
+
+    // Manifest should still exist; sysroot:* entries retained,
+    // others removed. (The clean path filters via Cache::retain_sysroot_only.)
+    assert!(
+        manifest_path.exists(),
+        "cache manifest should be preserved (filtered) by --keep-sysroot"
+    );
+    let after = fs::read_to_string(&manifest_path).expect("read manifest");
+    assert!(
+        after.contains("sysroot:x86_64-unknown-none"),
+        "sysroot:* composite entry should survive --keep-sysroot, got: {after}"
+    );
+    assert!(
+        !after.contains("image:boot"),
+        "non-sysroot composite entry should be filtered out, got: {after}"
     );
 }
 
