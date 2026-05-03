@@ -51,7 +51,6 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use mbr::{ResolvedPartition, SECTOR_SIZE};
-use partition::PartitionWindow;
 use source::StampSource;
 
 /// Inputs the image dispatcher needs from the scheduler.
@@ -791,31 +790,12 @@ fn format_partition_in_place(
     let start_byte = rp.def.start_lba * SECTOR_SIZE;
     let len_bytes = (rp.end_lba - rp.def.start_lba + 1) * SECTOR_SIZE;
 
-    match rp.def.fs_type.as_str() {
-        "fat32" => {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(image_path)
-                .map_err(|e| Error::Io {
-                    path: image_path.to_path_buf(),
-                    source: e,
-                })?;
-            let window = PartitionWindow::new(file, start_byte, len_bytes);
-            // Decorate the image name so progress output and any
-            // hadris error attributes the failure to the partition.
-            let scoped_name = format!("{}::partition({})", image.name, rp.def.name);
-            fat::format_fat32_into(window, len_bytes, &scoped_name, resolved_entries, stdout)?;
-        }
-        other => {
-            return Err(Error::Compile(format!(
-                "image('{}') partition('{}'): fs_type '{other}' is not implemented. \
-                 Supported in Phase 3: \"fat32\".",
-                image.name, rp.def.name
-            )));
-        }
-    }
-    Ok(())
+    // Decorate the image name so progress output and any
+    // hadris error attributes the failure to the partition.
+    let scoped_name = format!("{}::partition({})", image.name, rp.def.name);
+
+    formatter::select_formatter(&rp.def.fs_type, &image.name, &rp.def.name)?
+        .format_in_place(image_path, start_byte, len_bytes, &scoped_name, resolved_entries, stdout)
 }
 
 fn describe_raw_source(s: &RawSource) -> String {
