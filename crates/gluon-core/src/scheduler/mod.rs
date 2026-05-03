@@ -14,7 +14,6 @@
 //! worker pool, and dispatches each node to the appropriate helper.
 
 pub mod dag;
-pub mod helpers;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
@@ -105,7 +104,7 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // Sysroot — build the custom sysroot for the target triple.
             // ------------------------------------------------------------------
             DagNode::Sysroot(target) => {
-                let (path, was_cached) = helpers::sysroot::ensure_sysroot_for_node(
+                let (path, was_cached) = crate::sysroot::ensure_sysroot_for_node(
                     self.ctx, self.model, target, stdout, stderr,
                 )?;
                 lock_or_poison(self.sysroots, "sysroots")?.insert(target, path);
@@ -222,7 +221,7 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
 
             // ------------------------------------------------------------------
             // Esp — assemble an EFI System Partition directory from
-            // built crate artifacts. See helpers::esp::ensure_esp.
+            // built crate artifacts. See generated::esp::ensure_esp.
             // ------------------------------------------------------------------
             DagNode::Esp(esp_handle) => {
                 // Snapshot the ArtifactMap so the helper can resolve

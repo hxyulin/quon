@@ -49,7 +49,7 @@
 use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
 use crate::compile::{CompileCtx, Emit, RustcCommandBuilder};
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{CrateType, TargetDef};
+use gluon_model::{BuildModel, CrateType, Handle, TargetDef};
 use std::path::{Path, PathBuf};
 
 /// Ensure a usable custom sysroot exists for `target` and return its
@@ -178,6 +178,31 @@ pub fn ensure_sysroot(
     }
 
     Ok((sysroot_dir, false))
+}
+
+/// Scheduler-side wrapper around [`ensure_sysroot`]. Looks up the
+/// target by handle and delegates. Used by the pipeline dispatcher
+/// (one DAG-node arm per scheduler operation), kept distinct from
+/// `ensure_sysroot` so the dispatcher's match stays flat.
+///
+/// `stderr_sink` receives rustc's stderr (warnings) from each of the
+/// three sysroot crate compiles; the worker pool flushes it to the
+/// user's stderr atomically per job. The `_stdout` parameter remains
+/// unused — the sysroot pipeline produces nothing of interest on
+/// stdout.
+pub fn ensure_sysroot_for_node(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    target: Handle<TargetDef>,
+    _stdout: &mut Vec<u8>,
+    stderr_sink: &mut Vec<u8>,
+) -> Result<(PathBuf, bool)> {
+    let target_def = model.targets.get(target).ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: Sysroot node references target handle {target:?} not found in build model"
+        ))
+    })?;
+    ensure_sysroot(ctx, target_def, stderr_sink)
 }
 
 /// Compile a single sysroot crate. Returns the absolute path of the
