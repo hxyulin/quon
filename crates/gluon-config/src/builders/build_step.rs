@@ -28,8 +28,9 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         }
     }
 
-    /// Set the runner crate name for this build step. The `runner_handle` is
-    /// populated later by the intern pass.
+    /// Set the runner crate name for this build step. The intern pass
+    /// resolves it to a `Handle<CrateDef>` (and drops the build step
+    /// entirely if the named crate does not exist).
     pub fn runner(mut self, crate_name: &str) -> Self {
         let n = crate_name.to_string();
         self.modify(|b| b.runner = n);

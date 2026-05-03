@@ -502,9 +502,9 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     // Each declared build step becomes one node. Edge sources:
     //   - The runner crate (must be a host bin) → BuildStep node. The
     //     runner has to be compiled before gluon can invoke it.
-    //   - Each `BuildStepInput::Crate { crate_handle, .. }` → BuildStep
-    //     node. The input artifact must exist on disk before the runner
-    //     can read it. `File` and `Literal` inputs add no edges.
+    //   - Each `BuildStepInput::Crate { handle }` → BuildStep node. The
+    //     input artifact must exist on disk before the runner can read
+    //     it. `File` and `Literal` inputs add no edges.
     //
     // Reachability filtering: today every declared build step is
     // inserted unconditionally. Profile-aware reachability filtering
@@ -516,32 +516,29 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     // behaviour for crates / images / esps that are similarly
     // unreferenced.
     //
-    // Unresolved runner / input handles are silently skipped — intern
-    // and validate have already pushed diagnostics for them, and the
-    // worker pool would error out the build at the diagnostics layer
-    // before reaching here.
+    // Build steps with unresolved runners/inputs do not reach this loop
+    // — intern drops the entire step or the dangling input, leaving
+    // post-intern handles always-resolved. The `resolved_handles` gate
+    // below still applies (a runner that exists in the model but isn't
+    // in the active resolved crate set, e.g. profile-gated, is treated
+    // as absent for DAG purposes).
     for (bs_handle, step) in model.build_steps.iter() {
         let bs_id = dag.insert_node(DagNode::BuildStep(bs_handle));
 
         // Runner crate → BuildStep edge.
-        if let Some(runner_handle) = step.runner_handle {
-            // Only add the edge when the runner is actually in the
-            // resolved crate set (e.g. not gated out by profile or
-            // config). Otherwise the edge would point at a Crate node
-            // that never runs, leaving the BuildStep deadlocked.
-            if resolved_handles.contains(&runner_handle) {
-                let runner_id = dag.insert_node(DagNode::Crate(runner_handle));
-                dag.add_edge(runner_id, bs_id);
-            }
+        //
+        // Only add the edge when the runner is actually in the resolved
+        // crate set (e.g. not gated out by profile or config).
+        // Otherwise the edge would point at a Crate node that never
+        // runs, leaving the BuildStep deadlocked.
+        if resolved_handles.contains(&step.runner) {
+            let runner_id = dag.insert_node(DagNode::Crate(step.runner));
+            dag.add_edge(runner_id, bs_id);
         }
 
         // Crate inputs → BuildStep edges.
         for input in step.inputs.values() {
-            if let BuildStepInput::Crate {
-                crate_handle: Some(input_handle),
-                ..
-            } = input
-            {
+            if let BuildStepInput::Crate { handle: input_handle } = input {
                 if resolved_handles.contains(input_handle) {
                     let input_id = dag.insert_node(DagNode::Crate(*input_handle));
                     dag.add_edge(input_id, bs_id);
@@ -1998,7 +1995,7 @@ mod tests {
     // BuildStep DAG ordering tests
     //
     // The BuildStep node must depend on:
-    //   1. The runner crate (Crate(runner_handle) → BuildStep).
+    //   1. The runner crate (Crate(step.runner) → BuildStep).
     //   2. Each Crate input listed in `inputs` (Crate(input) → BuildStep).
     // And the BuildStep must be reachable as an artifact source from
     // Image entries that name it.
@@ -2017,17 +2014,13 @@ mod tests {
         let mut inputs = BTreeMap::new();
         inputs.insert(
             "KERNEL_PATH".into(),
-            BuildStepInput::Crate {
-                crate_name: "kernel".into(),
-                crate_handle: Some(kernel_h),
-            },
+            BuildStepInput::Crate { handle: kernel_h },
         );
         let (bs_h, _) = model.build_steps.insert(
             "disk-image".into(),
             BuildStepDef {
                 name: "disk-image".into(),
-                runner: "image-builder".into(),
-                runner_handle: Some(runner_h),
+                runner: runner_h,
                 inputs,
                 env: BTreeMap::new(),
                 output: "disk.img".into(),
@@ -2097,8 +2090,7 @@ mod tests {
             "disk-image".into(),
             BuildStepDef {
                 name: "disk-image".into(),
-                runner: "image-builder".into(),
-                runner_handle: Some(runner_h),
+                runner: runner_h,
                 inputs: BTreeMap::new(),
                 env: BTreeMap::new(),
                 output: "disk.img".into(),

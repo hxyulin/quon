@@ -480,17 +480,11 @@ fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Hand
     // images are themselves not yet profile-filtered, so the per-profile
     // distinction would buy nothing today.)
     for (_h, step) in model.build_steps.iter() {
-        if let Some(rh) = step.runner_handle {
-            if visited.insert(rh) {
-                queue.push_back(rh);
-            }
+        if visited.insert(step.runner) {
+            queue.push_back(step.runner);
         }
         for input in step.inputs.values() {
-            if let BuildStepInput::Crate {
-                crate_handle: Some(ih),
-                ..
-            } = input
-            {
+            if let BuildStepInput::Crate { handle: ih } = input {
                 if visited.insert(*ih) {
                     queue.push_back(*ih);
                 }

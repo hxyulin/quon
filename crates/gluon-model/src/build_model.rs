@@ -852,15 +852,14 @@ pub struct EspEntry {
 /// enforced by validation and surfaced to the runner via
 /// `GLUON_OUTPUT_PATH`. When multi-output runners become a real need,
 /// this field can be widened without a model break.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildStepDef {
     pub name: String,
-    /// Name of the runner crate. Must resolve to a host `bin` crate in
-    /// the model. Populated as a string at parse time and resolved to
-    /// `runner_handle` during the intern pass.
-    pub runner: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runner_handle: Option<Handle<CrateDef>>,
+    /// Resolved runner crate (must be a host `bin`). Mandatory; intern
+    /// drops the entire build step (with a diagnostic) if the named
+    /// runner cannot be resolved, so consumers do not need to recheck
+    /// resolution.
+    pub runner: Handle<CrateDef>,
     /// Input env vars. Each entry maps an env-var name (e.g.
     /// `"KERNEL_PATH"`) to a [`BuildStepInput`] source describing what
     /// the value should be at invocation time.
@@ -881,19 +880,17 @@ pub struct BuildStepDef {
 /// Source of a single environment-variable input to a [`BuildStepDef`].
 ///
 /// `Crate` and `File` participate in the cache key by content hash;
-/// `Literal` participates as the literal string. The `CrateHandle`
-/// variant is populated during the intern pass alongside the unresolved
-/// `Crate` form, mirroring how [`DepDef`] tracks both.
+/// `Literal` participates as the literal string. The intern pass
+/// resolves crate references to a [`Handle<CrateDef>`]; entries whose
+/// crate cannot be resolved are dropped from the input map (mirroring
+/// the `EspDef` filter-on-intern pattern) so downstream consumers
+/// never see a dangling reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildStepInput {
-    /// Path to another crate's primary build artifact. Resolved at run
-    /// time from the [`Handle<CrateDef>`] populated during interning.
-    Crate {
-        crate_name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        crate_handle: Option<Handle<CrateDef>>,
-    },
+    /// Path to another crate's primary build artifact, resolved at run
+    /// time via `model.crates.get(handle)`.
+    Crate { handle: Handle<CrateDef> },
     /// Path to a file in the project tree, joined to `project_root` and
     /// canonicalised at invocation time.
     File { path: String },

@@ -506,14 +506,46 @@ mod tests {
         // build_step_paths map. Uses the unified artifact namespace —
         // user can boot directly from a build-step output without an
         // intermediate image() wrapper.
+        //
+        // BuildStepDef.runner is now a non-optional Handle<CrateDef>, so
+        // we mint a real runner crate up front and refer to it by handle
+        // rather than name string.
         let mut model = BuildModel::default();
+        let (group_h, _) = model
+            .groups
+            .insert("host".into(), gluon_model::GroupDef::default());
+        let (runner_h, _) = model.crates.insert(
+            "image-builder".into(),
+            gluon_model::CrateDef {
+                name: "image-builder".into(),
+                path: "tools/image-builder".into(),
+                edition: "2024".into(),
+                crate_type: gluon_model::CrateType::Bin,
+                target: gluon_model::TargetSpec::Host,
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group: group_h,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
+            },
+        );
         let (h, _) = model.build_steps.insert(
             "disk-image".into(),
             BuildStepDef {
                 name: "disk-image".into(),
-                runner: "image-builder".into(),
+                runner: runner_h,
+                inputs: BTreeMap::new(),
+                env: BTreeMap::new(),
                 output: "disk.img".into(),
-                ..Default::default()
+                span: None,
             },
         );
         let map: BTreeMap<Handle<ImageDef>, PathBuf> = BTreeMap::new();

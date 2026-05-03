@@ -73,18 +73,20 @@ pub fn execute_build_step(
     })?;
 
     // --- Resolve runner binary path ---
-    let runner_handle = step.runner_handle.ok_or_else(|| {
-        Error::Compile(format!(
-            "build_step('{}'): runner handle missing — intern must have rejected \
-             unresolved runner names; this is a scheduler/intern bug",
-            step.name
-        ))
-    })?;
-    let runner_path = artifacts.get(runner_handle).ok_or_else(|| {
+    //
+    // `step.runner` is a resolved handle post-intern; if the runner has
+    // not been built we surface the runner's name from the model rather
+    // than carrying a parallel string on `BuildStepDef`.
+    let runner_path = artifacts.get(step.runner).ok_or_else(|| {
+        let runner_name = model
+            .crates
+            .get(step.runner)
+            .map(|c| c.name.as_str())
+            .unwrap_or("<unknown>");
         Error::Compile(format!(
             "build_step('{}'): runner '{}' has not been built (DAG edge missing \
              or out-of-order dispatch)",
-            step.name, step.runner
+            step.name, runner_name
         ))
     })?;
 
@@ -252,23 +254,18 @@ fn resolve_input(
     step: &BuildStepDef,
     env_key: &str,
     input: &BuildStepInput,
-    _model: &BuildModel,
+    model: &BuildModel,
     resolved: &ResolvedConfig,
     artifacts: &ArtifactMap,
 ) -> Result<String> {
     match input {
-        BuildStepInput::Crate {
-            crate_name,
-            crate_handle,
-        } => {
-            let h = crate_handle.ok_or_else(|| {
-                Error::Compile(format!(
-                    "build_step('{}').input('{}'): crate '{}' has no resolved \
-                     handle (intern bug — should have surfaced as a diagnostic)",
-                    step.name, env_key, crate_name
-                ))
-            })?;
-            let path = artifacts.get(h).ok_or_else(|| {
+        BuildStepInput::Crate { handle } => {
+            let path = artifacts.get(*handle).ok_or_else(|| {
+                let crate_name = model
+                    .crates
+                    .get(*handle)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("<unknown>");
                 Error::Compile(format!(
                     "build_step('{}').input('{}'): producer crate '{}' has not been \
                      built (DAG edge missing or out-of-order dispatch)",
@@ -384,8 +381,7 @@ mod tests {
             "step".into(),
             BuildStepDef {
                 name: "step".into(),
-                runner: "runner".into(),
-                runner_handle: Some(runner_h),
+                runner: runner_h,
                 inputs: BTreeMap::new(),
                 env: BTreeMap::new(),
                 output: "out.txt".into(),

@@ -374,43 +374,56 @@ fn intern_build_steps(
     diags: &mut Vec<InternDiagnostic>,
 ) {
     for (_, s) in raw.iter() {
-        let runner_handle = if s.runner.is_empty() {
-            None
-        } else {
-            let h = crates.lookup(&s.runner);
-            if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
+        // Runner is mandatory: a build step without a resolved runner is
+        // unrunnable, so drop it entirely rather than carrying a partial
+        // entry forward. Mirrors how `intern_crates` skips crates with an
+        // unknown group.
+        let Some(runner) = crates.lookup(&s.runner) else {
+            diags.push(
+                InternDiagnostic::error(format!(
                     "build_step(\"{}\").runner references unknown crate '{}'",
                     s.name, s.runner
-                )).with_optional_span(s.span.clone()));
-            }
-            h
+                ))
+                .with_optional_span(s.span.clone()),
+            );
+            continue;
         };
-        let inputs = s.inputs.iter().map(|(env_key, inp)| {
-            let resolved = match inp {
-                RawBuildStepInput::Crate { crate_name } => {
-                    let h = crates.lookup(crate_name);
-                    if h.is_none() {
-                        diags.push(InternDiagnostic::error(format!(
-                            "build_step(\"{}\").input(\"{}\") references unknown crate '{}'",
-                            s.name, env_key, crate_name
-                        )).with_optional_span(s.span.clone()));
+        // Drop dangling crate-input entries instead of carrying a
+        // resolution-failure shape forward. Mirrors `intern_esps`. File
+        // and Literal inputs always succeed.
+        let inputs: BTreeMap<String, BuildStepInput> = s
+            .inputs
+            .iter()
+            .filter_map(|(env_key, inp)| {
+                let resolved = match inp {
+                    RawBuildStepInput::Crate { crate_name } => {
+                        let Some(h) = crates.lookup(crate_name) else {
+                            diags.push(
+                                InternDiagnostic::error(format!(
+                                    "build_step(\"{}\").input(\"{}\") references unknown crate '{}'",
+                                    s.name, env_key, crate_name
+                                ))
+                                .with_optional_span(s.span.clone()),
+                            );
+                            return None;
+                        };
+                        BuildStepInput::Crate { handle: h }
                     }
-                    BuildStepInput::Crate { crate_name: crate_name.clone(), crate_handle: h }
-                }
-                RawBuildStepInput::File { path } =>
-                    BuildStepInput::File { path: path.clone() },
-                RawBuildStepInput::Literal { value } =>
-                    BuildStepInput::Literal { value: value.clone() },
-            };
-            (env_key.clone(), resolved)
-        }).collect();
+                    RawBuildStepInput::File { path } => {
+                        BuildStepInput::File { path: path.clone() }
+                    }
+                    RawBuildStepInput::Literal { value } => {
+                        BuildStepInput::Literal { value: value.clone() }
+                    }
+                };
+                Some((env_key.clone(), resolved))
+            })
+            .collect();
         let _ = out.insert(
             s.name.clone(),
             BuildStepDef {
                 name: s.name.clone(),
-                runner: s.runner.clone(),
-                runner_handle,
+                runner,
                 inputs,
                 env: s.env.clone(),
                 output: s.output.clone(),
