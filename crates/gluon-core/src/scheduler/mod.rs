@@ -270,6 +270,11 @@ fn dispatch_image(
     })
 }
 
+// 8 args is one above clippy's default limit; bundling would obscure
+// the uniform `(ctx, model, resolved, snapshot, handle, stdout, stderr)`
+// shape shared with the other dispatch_* helpers. The extra arg here
+// is the `rules: &RuleRegistry` only Rule needs.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_rule(
     ctx: &CompileCtx,
     model: &BuildModel,
