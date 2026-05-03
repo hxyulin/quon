@@ -17,10 +17,15 @@
 
 use crate::error::{Error, Result};
 use crate::rule::{RuleCtx, RuleDef};
-use gluon_model::TargetDef;
+use gluon_model::{CrateDef, TargetDef};
 
 use super::KNOWN_VARS;
 
+/// Argument-string expander bound to a `(RuleCtx, RuleDef)` pair.
+///
+/// Constructed once per rule invocation, then reused for both
+/// `inputs` and `outputs` expansion so the borrow pair is plumbed
+/// in one place rather than threaded through every call.
 pub(crate) struct Substituter<'a> {
     ctx: &'a RuleCtx<'a>,
     rule: &'a RuleDef,
@@ -190,7 +195,7 @@ impl<'a> Substituter<'a> {
                 .model
                 .crates
                 .iter()
-                .map(|(_, c): (_, &gluon_model::CrateDef)| c.name.as_str())
+                .map(|(_, c): (_, &CrateDef)| c.name.as_str())
                 .collect();
             Error::Compile(format!(
                 "rule '{}': ${{artifact:{}}} references unknown crate; \

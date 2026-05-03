@@ -24,7 +24,7 @@ use gluon_model::{BuildModel, CrateDef, ResolvedConfig, RuleDef, RuleHandler, Ta
 use std::collections::BTreeMap;
 
 pub mod builtin;
-pub(crate) mod substitution;
+mod substitution;
 
 /// Execution context handed to a [`RuleFn`] when the scheduler invokes a rule.
 ///
