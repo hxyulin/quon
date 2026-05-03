@@ -806,15 +806,14 @@ pub struct EspDef {
     pub span: Option<SourceSpan>,
 }
 
-/// A single entry in an [`EspDef`]: the name of a sibling crate whose
+/// A single entry in an [`EspDef`]: a handle to a sibling crate whose
 /// primary build output should be copied to `dest_path` within the ESP
-/// directory. The `source_crate_handle` field is populated by the intern
-/// pass after the model is fully built.
+/// directory. The handle is resolved by the intern pass after the model
+/// is fully built; entries whose source crate does not exist are
+/// dropped (with a diagnostic) rather than carried forward.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EspEntry {
-    pub source_crate: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_crate_handle: Option<Handle<CrateDef>>,
+    pub source_crate: Handle<CrateDef>,
     pub dest_path: String,
 }
 
@@ -978,14 +977,39 @@ mod tests {
 
     #[test]
     fn esp_def_round_trips_through_json() {
+        // Mint a real CrateDef handle so EspEntry.source_crate (now a
+        // non-optional Handle<CrateDef>) round-trips through serde.
         let mut m = BuildModel::default();
+        let (group_h, _) = m.groups.insert("uefi".into(), GroupDef::default());
+        let (crate_h, _) = m.crates.insert(
+            "bootloader".into(),
+            CrateDef {
+                name: "bootloader".into(),
+                path: "crates/bootloader".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Host,
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group: group_h,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
+            },
+        );
         let (_, inserted) = m.esps.insert(
             "default".into(),
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: "bootloader".into(),
-                    source_crate_handle: None,
+                    source_crate: crate_h,
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,
@@ -998,7 +1022,7 @@ mod tests {
         let h = de.esps.lookup("default").expect("esp name index rebuilt");
         let esp = de.esps.get(h).unwrap();
         assert_eq!(esp.entries.len(), 1);
-        assert_eq!(esp.entries[0].source_crate, "bootloader");
+        assert_eq!(esp.entries[0].source_crate, crate_h);
         assert_eq!(esp.entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");
     }
 

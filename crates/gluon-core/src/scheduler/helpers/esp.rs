@@ -124,12 +124,13 @@ fn fingerprint_source(path: &Path) -> Result<(i128, u64)> {
 /// previous run's output was reused as-is.
 ///
 /// Caller invariants:
-/// - The `EspBuild` DAG node guarantees every `source_crate_handle` in
+/// - The `EspBuild` DAG node guarantees every `source_crate` handle in
 ///   `esp.entries` has already been compiled, so `artifacts.get(h)`
-///   must return `Some` for resolvable entries. A missing entry is
-///   a scheduler bug and produces a clear error.
-/// - `esp.entries` with `source_crate_handle == None` are silently
-///   skipped; intern has already pushed a diagnostic for them.
+///   must return `Some` for every entry. A missing entry is a scheduler
+///   bug and produces a clear error.
+/// - Entries whose source crate did not resolve at intern time were
+///   already dropped with a diagnostic, so every entry here carries a
+///   live handle.
 pub fn ensure_esp(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -159,11 +160,11 @@ pub fn ensure_esp(
     let esp_dir = ctx.layout.esp_dir(target, profile, &esp.name);
     let stamp_path = esp_dir.join(".esp-stamp.json");
 
-    // Collect the resolvable entries (those with source_crate_handle set
-    // AND whose handle resolves in the ArtifactMap). Entries with
-    // source_crate_handle == None were already reported by intern and
-    // are silently skipped. Entries with a handle but no artifact are a
-    // scheduler bug — we surface them loudly.
+    // Resolve every entry to its built artifact. Intern has already
+    // dropped any dangling references, so each entry's `source_crate`
+    // handle is live; a missing artifact here is a scheduler bug
+    // (DAG edge missing or nodes ran out of order) and we surface
+    // it loudly rather than silently producing a partial ESP.
     struct ResolvedEntry<'a> {
         dest_path: &'a str,
         source_path: PathBuf,
@@ -171,20 +172,23 @@ pub fn ensure_esp(
     }
     let mut entries: Vec<ResolvedEntry<'_>> = Vec::with_capacity(esp.entries.len());
     for entry in &esp.entries {
-        let Some(h) = entry.source_crate_handle else {
-            continue;
-        };
+        let h = entry.source_crate;
+        let source_name = model
+            .crates
+            .get(h)
+            .map(|c| c.name.as_str())
+            .unwrap_or("<unknown>");
         let art = artifacts.get(h).ok_or_else(|| {
             Error::Compile(format!(
                 "scheduler: EspBuild('{}') source crate '{}' has no entry in \
                  ArtifactMap (DAG edge missing or ran out of order?)",
-                esp.name, entry.source_crate
+                esp.name, source_name
             ))
         })?;
         entries.push(ResolvedEntry {
             dest_path: &entry.dest_path,
             source_path: art.to_path_buf(),
-            source_name: &entry.source_crate,
+            source_name,
         });
     }
 
@@ -339,8 +343,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: "bootloader".into(),
-                    source_crate_handle: Some(ch),
+                    source_crate: ch,
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,

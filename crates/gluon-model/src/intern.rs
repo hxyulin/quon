@@ -337,20 +337,29 @@ fn intern_esps(
     diags: &mut Vec<InternDiagnostic>,
 ) {
     for (_, e) in raw.iter() {
-        let entries = e.entries.iter().map(|en| {
-            let h = crates.lookup(&en.source_crate);
-            if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "esp(\"{}\").add: source crate '{}' does not exist in the model",
-                    e.name, en.source_crate
-                )).with_optional_span(e.span.clone()));
-            }
-            EspEntry {
-                source_crate: en.source_crate.clone(),
-                source_crate_handle: h,
-                dest_path: en.dest_path.clone(),
-            }
-        }).collect();
+        // Drop entries whose source crate does not exist instead of
+        // carrying a dangling reference forward — downstream consumers
+        // (DAG, ESP helper) shouldn't have to re-check resolution.
+        let entries: Vec<EspEntry> = e
+            .entries
+            .iter()
+            .filter_map(|en| {
+                let Some(h) = crates.lookup(&en.source_crate) else {
+                    diags.push(
+                        InternDiagnostic::error(format!(
+                            "esp(\"{}\").add: source crate '{}' does not exist in the model",
+                            e.name, en.source_crate
+                        ))
+                        .with_optional_span(e.span.clone()),
+                    );
+                    return None;
+                };
+                Some(EspEntry {
+                    source_crate: h,
+                    dest_path: en.dest_path.clone(),
+                })
+            })
+            .collect();
         let _ = out.insert(
             e.name.clone(),
             EspDef { name: e.name.clone(), entries, span: e.span.clone() },

@@ -394,20 +394,18 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
     // Step 3b: EspBuild nodes.
     // -----------------------------------------------------------------------
     // Each declared ESP becomes one node. The node depends on every source
-    // crate referenced by its entries. Entries whose source crate does not
-    // resolve (missing `source_crate_handle` because intern failed) are
-    // skipped — validate has already pushed a diagnostic for those.
-    // Entries whose source crate exists but is not in `resolved.crates`
-    // (e.g. gated behind a disabled config option) are also skipped, same
-    // policy as regular deps. An ESP with zero resolvable entries still
-    // gets a node — the helper will produce an empty directory, which
-    // is harmless and makes the failure mode observable.
+    // crate referenced by its entries. Entries whose source crate did not
+    // resolve at intern time were already dropped (with a diagnostic), so
+    // every entry here carries a real handle. Entries whose source crate
+    // exists but is not in `resolved.crates` (e.g. gated behind a disabled
+    // config option) are skipped, same policy as regular deps. An ESP
+    // with zero resolvable entries still gets a node — the helper will
+    // produce an empty directory, which is harmless and makes the
+    // failure mode observable.
     for (esp_handle, esp) in model.esps.iter() {
         let esp_id = dag.insert_node(DagNode::Esp(esp_handle));
         for entry in &esp.entries {
-            let Some(src_handle) = entry.source_crate_handle else {
-                continue; // intern-time dangling ref — diagnostic already pushed
-            };
+            let src_handle = entry.source_crate;
             if !resolved_handles.contains(&src_handle) {
                 continue;
             }
@@ -1477,8 +1475,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: "bootloader".into(),
-                    source_crate_handle: Some(bl_h),
+                    source_crate: bl_h,
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,
@@ -1614,8 +1611,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: "bootloader".into(),
-                    source_crate_handle: Some(bl_h),
+                    source_crate: bl_h,
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,
