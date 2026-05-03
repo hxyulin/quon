@@ -6,6 +6,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Stage 7 — post-compile layering)
+
+- **`PartitionFormatter` trait isolates per-partition filesystem
+  formatting.** A new `image::formatter::PartitionFormatter` trait
+  (one method: `format_in_place`) plus a `select_formatter(fs_type,
+  ...)` dispatch function replace the inline
+  `match rp.def.fs_type.as_str()` inside
+  `image::format_partition_in_place`. `Fat32Formatter` lives next
+  to the existing FAT32 formatting code in `image/fat.rs`. Adding
+  a new partition filesystem now means implementing the trait and
+  adding one arm to `select_formatter` — no edits to the
+  dispatcher or `build_partitioned_disk`. Behaviour is bit-identical
+  to Stage 6 for FAT32; the unknown-`fs_type` error message is
+  preserved verbatim.
+- **`BootModeAssembler` trait isolates per-mode QEMU argv wiring.**
+  A new `run::boot_mode::BootModeAssembler` trait + three
+  unit-struct impls (`DirectAssembler`, `UefiAssembler`,
+  `BiosAssembler`) + `assembler_for(mode)` dispatch replace the
+  100-LOC inline `match mode { ... }` in
+  `run::qemu_cmd::build_qemu_command`. The coordinator handles only
+  mode-agnostic concerns (memory, cores, display, serial, timeout,
+  test-mode exit, user extras, plus the upstream UEFI-without-OVMF
+  guard); per-mode argv lives in the assemblers. `qemu_cmd.rs`
+  shrinks from 991 → 569 LOC. The `push_pflash` helper moved with
+  `UefiAssembler`. Per-mode tests (Direct argv, UEFI pflash + ESP
+  variants, BIOS disk + IDE wiring) moved into `boot_mode.rs`'s
+  test module; coordinator-level tests (display, serial, timeout,
+  test-mode, user-extras, UEFI-OVMF guard) stayed in `qemu_cmd.rs`.
+- **`Substituter` value type collapses 3-arg substitution passing.**
+  A new `rule::substitution::Substituter<'a>` (a value type, not a
+  trait — there is one substitution implementation by design) holds
+  the borrowed `(&RuleCtx, &RuleDef)` pair once and exposes five
+  methods (`expand_args`, `expand_one`, `resolve_var`,
+  `resolve_image`, `resolve_artifact`). The five freestanding
+  functions in `rule/mod.rs` (`substitute_args`, `substitute_one`,
+  `resolve_var`, `resolve_image`, `resolve_artifact`) and their
+  3-arg `(ctx, rule, ...)` plumbing are gone. `rule/mod.rs` shrinks
+  from ~1390 → 419 LOC (substitution body + tests + helpers
+  relocated to `rule/substitution.rs`). The internal call sites in
+  `RuleRegistry::dispatch` now construct one `Substituter` per rule
+  invocation and reuse it for both `inputs` and `outputs`
+  expansion.
+- **No on-disk format / cache key changes.** `PartitionFormatter`
+  and `BootModeAssembler` are pure call-site refactors; the FAT32
+  on-disk layout, the QEMU argv shape per mode, and the rule
+  substitution outputs are all bit-identical to pre-Stage-7. No
+  cache invalidation is triggered by this stage.
+
 ### Changed (Stage 6 — compile pipeline tightening)
 
 - **`CrateArtifactShape` is the single source of truth for crate
