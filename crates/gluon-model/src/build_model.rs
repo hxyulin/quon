@@ -247,26 +247,22 @@ impl Default for GroupDef {
 }
 
 /// A crate definition.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrateDef {
     pub name: String,
     pub path: String,
     pub edition: String,
     pub crate_type: CrateType,
-    /// Target for this crate (inherited from group). `"host"` = host triple.
-    pub target: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_handle: Option<Handle<TargetDef>>,
+    /// Target for this crate (inherited from group).
+    pub target: TargetSpec,
     pub deps: BTreeMap<String, DepDef>,
     pub dev_deps: BTreeMap<String, DepDef>,
     pub features: Vec<String>,
     pub root: Option<String>,
     /// Per-crate linker script.
     pub linker_script: Option<String>,
-    /// The group this crate belongs to.
-    pub group: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group_handle: Option<Handle<GroupDef>>,
+    /// Resolved group. Mandatory; intern errors if absent.
+    pub group: Handle<GroupDef>,
     /// Whether this crate is a project crate (for clippy linting).
     pub is_project_crate: bool,
     /// Extra `--cfg` flags for this crate.
@@ -1016,12 +1012,29 @@ mod tests {
 
     #[test]
     fn crate_def_artifact_env_round_trips() {
+        // Construct a real GroupDef arena to mint a handle, since
+        // CrateDef.group is now a non-optional Handle<GroupDef>.
+        let mut groups: Arena<GroupDef> = Arena::new();
+        let (group, _) = groups.insert("host".into(), GroupDef::default());
         let mut c = CrateDef {
             name: "bootloader".into(),
             path: "crates/bootloader".into(),
             edition: "2021".into(),
             crate_type: CrateType::Bin,
-            ..Default::default()
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            group,
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
         };
         c.artifact_env.insert("KERNEL_PATH".into(), "kernel".into());
         c.artifact_deps.push("kernel".into());

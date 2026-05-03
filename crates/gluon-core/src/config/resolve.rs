@@ -317,10 +317,7 @@ pub fn resolve(
                 continue;
             }
         }
-        let Some(group_h) = krate.group_handle else {
-            continue;
-        };
-        let Some(group) = model.groups.get(group_h) else {
+        let Some(group) = model.groups.get(krate.group) else {
             continue;
         };
         let is_host = matches!(group.target, TargetSpec::Host);
@@ -331,7 +328,10 @@ pub fn resolve(
         let target = if is_host {
             effective_target
         } else {
-            krate.target_handle.unwrap_or(effective_target)
+            match krate.target {
+                TargetSpec::Cross(h) => h,
+                TargetSpec::Host => effective_target,
+            }
         };
         resolved_crates.push(ResolvedCrateRef {
             handle: crate_handle,

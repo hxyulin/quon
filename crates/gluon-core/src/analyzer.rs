@@ -335,8 +335,8 @@ pub fn generate_rust_project_json_with_script(
 mod tests {
     use super::*;
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, ProjectDef, ResolvedConfig, ResolvedCrateRef,
-        ResolvedProfile, TargetDef,
+        BuildModel, CrateDef, CrateType, DepDef, GroupDef, ProjectDef, ResolvedConfig,
+        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -355,7 +355,10 @@ mod tests {
         }
     }
 
-    fn make_fixture() -> (BuildModel, Handle<TargetDef>) {
+    /// Build a fixture model with a single cross target and a single
+    /// "g" group covering it. Returns the target handle plus the
+    /// group handle so callers can wire `CrateDef.group` explicitly.
+    fn make_fixture_full() -> (BuildModel, Handle<TargetDef>, Handle<GroupDef>) {
         let mut model = BuildModel::default();
         let (target_handle, _) = model.targets.insert(
             "x86_64-unknown-none".into(),
@@ -367,7 +370,52 @@ mod tests {
                 span: None,
             },
         );
-        (model, target_handle)
+        let (group_handle, _) = model.groups.insert(
+            "g".into(),
+            GroupDef {
+                name: "g".into(),
+                target: TargetSpec::Cross(target_handle),
+                ..Default::default()
+            },
+        );
+        (model, target_handle, group_handle)
+    }
+
+    /// Compatibility wrapper for tests that don't need the group
+    /// handle. Discards the group handle and returns just `(model, th)`.
+    fn make_fixture() -> (BuildModel, Handle<TargetDef>) {
+        let (model, th, _) = make_fixture_full();
+        (model, th)
+    }
+
+    /// Default values for newly-mandatory `CrateDef` fields.
+    /// `make_fixture()` always installs the "g" group as the first
+    /// element of `model.groups`, so its handle is `Handle::new(0)`.
+    /// Tests use `..test_crate_defaults()` instead of
+    /// `..Default::default()` since `CrateDef` no longer derives
+    /// `Default`. The placeholder `Handle::new(0)` only points at a
+    /// real group when `make_fixture()` was used.
+    fn test_crate_defaults() -> CrateDef {
+        CrateDef {
+            name: String::new(),
+            path: String::new(),
+            edition: "2024".into(),
+            crate_type: CrateType::Lib,
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            group: Handle::new(0),
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
+        }
     }
 
     fn make_resolved(
@@ -417,7 +465,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -468,7 +516,7 @@ mod tests {
                 path: "crates/build-tool".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -504,7 +552,7 @@ mod tests {
                 path: "crates/host-tool".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let (cross_h, _) = model.crates.insert(
@@ -514,7 +562,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -550,7 +598,7 @@ mod tests {
                 path: "crates/macros".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::ProcMacro,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -604,7 +652,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -639,7 +687,7 @@ mod tests {
                 path: "crates/host-tool".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -674,7 +722,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
                 cfg_flags: vec!["feature=\"smp\"".into()],
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -702,7 +750,7 @@ mod tests {
                 path: "crates/real-name".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         // Consumer crate has a dep keyed by "alias_name" pointing at
@@ -724,7 +772,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 deps,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -768,7 +816,7 @@ mod tests {
                 path: "vendor/phantom".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let mut deps = BTreeMap::new();
@@ -788,7 +836,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 deps,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(
@@ -827,10 +875,8 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                target: "x86_64-unknown-none".into(),
-                target_handle: Some(th),
-                group: "g".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults()
             },
         );
 
@@ -843,11 +889,9 @@ mod tests {
                 path: "crates/loader".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "x86_64-unknown-none".into(),
-                target_handle: Some(th),
-                group: "g".into(),
+                target: TargetSpec::Cross(th),
                 artifact_env,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 

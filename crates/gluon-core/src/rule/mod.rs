@@ -951,26 +951,33 @@ mod tests {
 
     #[test]
     fn substitution_resolves_artifact_by_crate_name() {
-        use gluon_model::CrateDef;
+        use gluon_model::{CrateDef, GroupDef, TargetSpec};
 
         let tmp = tempfile::tempdir().unwrap();
         let (layout, mut model, resolved, mut artifacts) = make_ctx_parts(tmp.path());
 
         // Register a crate in the model and record its artifact.
+        let target_h = model.targets.lookup("x86_64-test").expect("target");
+        let (group_h, _) = model.groups.insert(
+            "kernel_group".into(),
+            GroupDef {
+                name: "kernel_group".into(),
+                target: TargetSpec::Cross(target_h),
+                ..Default::default()
+            },
+        );
         let crate_def = CrateDef {
             name: "kernel".into(),
             path: "crates/kernel".into(),
             edition: "2021".into(),
             crate_type: gluon_model::CrateType::Bin,
-            target: "x86_64-test".into(),
-            target_handle: None,
+            target: TargetSpec::Cross(target_h),
             deps: Default::default(),
             dev_deps: Default::default(),
             features: vec![],
             root: None,
             linker_script: None,
-            group: "kernel_group".into(),
-            group_handle: None,
+            group: group_h,
             is_project_crate: true,
             cfg_flags: vec![],
             rustc_flags: vec![],

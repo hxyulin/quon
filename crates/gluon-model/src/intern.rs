@@ -133,25 +133,31 @@ fn intern_crates(
 ) {
     // Two passes: insert all crates first (so deps can resolve to
     // siblings), then re-walk to populate `deps`/`dev_deps` handles.
+    //
+    // CrateDef.group is mandatory, so a crate with an unknown group is
+    // skipped entirely (with a diagnostic). Pass 2 silently skips crates
+    // that didn't make it into `out`.
     for (_, c) in raw.iter() {
-        let group_handle = groups.lookup(&c.group);
-        if group_handle.is_none() {
+        let Some(group) = groups.lookup(&c.group) else {
             diags.push(InternDiagnostic::error(format!(
                 "crate '{}' references unknown group '{}'",
                 c.name, c.group
             )).with_optional_span(c.span.clone()));
-        }
-        let target_handle = if c.target.is_empty() || c.target == "host" {
-            None
+            continue;
+        };
+        let target = if c.target.is_empty() || c.target == "host" {
+            TargetSpec::Host
         } else {
-            let h = targets.lookup(&c.target);
-            if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "crate '{}' references unknown target '{}'",
-                    c.name, c.target
-                )).with_optional_span(c.span.clone()));
+            match targets.lookup(&c.target) {
+                Some(h) => TargetSpec::Cross(h),
+                None => {
+                    diags.push(InternDiagnostic::error(format!(
+                        "crate '{}' references unknown target '{}'",
+                        c.name, c.target
+                    )).with_optional_span(c.span.clone()));
+                    TargetSpec::Host
+                }
             }
-            h
         };
         let _ = out.insert(
             c.name.clone(),
@@ -160,15 +166,13 @@ fn intern_crates(
                 path: c.path.clone(),
                 edition: c.edition.clone(),
                 crate_type: c.crate_type,
-                target: c.target.clone(),
-                target_handle,
+                target,
                 deps: BTreeMap::new(),       // filled in pass 2
                 dev_deps: BTreeMap::new(),
                 features: c.features.clone(),
                 root: c.root.clone(),
                 linker_script: c.linker_script.clone(),
-                group: c.group.clone(),
-                group_handle,
+                group,
                 is_project_crate: c.is_project_crate,
                 cfg_flags: c.cfg_flags.clone(),
                 rustc_flags: c.rustc_flags.clone(),
@@ -182,7 +186,7 @@ fn intern_crates(
     // Pass 2: resolve deps now that all crates exist in `out`.
     let snapshot: Vec<(String, RawCrateDef)> = raw.iter().map(|(_, c)| (c.name.clone(), c.clone())).collect();
     for (name, c) in snapshot {
-        let h = out.lookup(&name).expect("inserted in pass 1");
+        let Some(h) = out.lookup(&name) else { continue; };
         let deps = resolve_dep_map(&c.deps, &c.name, "deps", out, external_deps, diags, c.span.clone());
         let dev_deps = resolve_dep_map(&c.dev_deps, &c.name, "dev-deps", out, external_deps, diags, c.span.clone());
         if let Some(slot) = out.get_mut(h) {

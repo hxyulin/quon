@@ -261,8 +261,10 @@ mod tests {
     use crate::cache::Cache;
     use crate::compile::{BuildLayout, RustcInfo};
     use gluon_model::{
-        BuildModel, CrateDef, EspEntry, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef,
+        BuildModel, CrateDef, CrateType, EspEntry, GroupDef, ProjectDef, ResolvedConfig,
+        ResolvedProfile, TargetDef, TargetSpec,
     };
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn fake_rustc_info() -> RustcInfo {
@@ -301,17 +303,35 @@ mod tests {
                 span: None,
             },
         );
+        let (group_h, _) = model.groups.insert(
+            "uefi".into(),
+            GroupDef {
+                name: "uefi".into(),
+                target: TargetSpec::Cross(th),
+                ..Default::default()
+            },
+        );
         let (ch, _) = model.crates.insert(
             "bootloader".into(),
             CrateDef {
                 name: "bootloader".into(),
                 path: "crates/bootloader".into(),
                 edition: "2021".into(),
-                crate_type: gluon_model::CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "uefi".into(),
-                ..Default::default()
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Cross(th),
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group: group_h,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
             },
         );
         let (eh, _) = model.esps.insert(

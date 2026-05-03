@@ -309,7 +309,7 @@ mod tests {
     use crate::compile::{BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, BuildStepDef, CrateDef, CrateType, GroupDef, ProjectDef, ResolvedConfig,
-        ResolvedCrateRef, ResolvedProfile, TargetDef,
+        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::path::Path;
     use std::sync::Arc;
@@ -364,11 +364,20 @@ mod tests {
                 path: "tools/runner".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "host".into(),
-                target_handle: Some(th),
-                group: "host".into(),
-                group_handle: Some(host_g),
-                ..Default::default()
+                target: TargetSpec::Host,
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group: host_g,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
             },
         );
         let (bs_h, _) = model.build_steps.insert(

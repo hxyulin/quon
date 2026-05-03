@@ -77,17 +77,61 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gluon_model::{BuildModel, CrateDef, CrateType};
+    use gluon_model::{
+        BuildModel, CrateDef, CrateType, GroupDef, Handle, TargetSpec,
+    };
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
-    fn crate_def_with_env(env: &[(&str, &str)]) -> CrateDef {
+    /// Ensure a "g" group exists in `model`, returning its handle.
+    fn ensure_group(model: &mut BuildModel) -> Handle<GroupDef> {
+        if let Some(h) = model.groups.lookup("g") {
+            return h;
+        }
+        let (h, _) = model.groups.insert(
+            "g".into(),
+            GroupDef {
+                name: "g".into(),
+                target: TargetSpec::Host,
+                ..Default::default()
+            },
+        );
+        h
+    }
+
+    /// Build the newly-mandatory `CrateDef` fields with safe defaults.
+    /// Tests use `..test_crate_defaults(group)` instead of
+    /// `..Default::default()`.
+    fn test_crate_defaults(group: Handle<GroupDef>) -> CrateDef {
+        CrateDef {
+            name: String::new(),
+            path: String::new(),
+            edition: "2024".into(),
+            crate_type: CrateType::Lib,
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            group,
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
+        }
+    }
+
+    fn crate_def_with_env(group: Handle<GroupDef>, env: &[(&str, &str)]) -> CrateDef {
         let mut c = CrateDef {
             name: "consumer".into(),
             path: "consumer".into(),
             edition: "2021".into(),
             crate_type: CrateType::Lib,
-            group: "g".into(),
-            ..Default::default()
+            ..test_crate_defaults(group)
         };
         for (k, v) in env {
             c.artifact_env.insert((*k).into(), (*v).into());
@@ -98,12 +142,13 @@ mod tests {
     #[test]
     fn resolves_in_btree_order() {
         let mut model = BuildModel::default();
+        let g = ensure_group(&mut model);
         let (h_a, _) = model.crates.insert(
             "alpha".into(),
             CrateDef {
                 name: "alpha".into(),
                 path: "alpha".into(),
-                ..Default::default()
+                ..test_crate_defaults(g)
             },
         );
         let (h_b, _) = model.crates.insert(
@@ -111,12 +156,12 @@ mod tests {
             CrateDef {
                 name: "bravo".into(),
                 path: "bravo".into(),
-                ..Default::default()
+                ..test_crate_defaults(g)
             },
         );
         // Insert env entries in non-alphabetic order; resolution must
         // still emit them in BTreeMap (alphabetic by key) order.
-        let consumer = crate_def_with_env(&[("Z_VAR", "alpha"), ("A_VAR", "bravo")]);
+        let consumer = crate_def_with_env(g, &[("Z_VAR", "alpha"), ("A_VAR", "bravo")]);
 
         let resolved = resolve_crate_env(&consumer, &model, |h| {
             if h == h_a {
@@ -137,8 +182,9 @@ mod tests {
 
     #[test]
     fn unknown_crate_name_errors() {
-        let model = BuildModel::default();
-        let consumer = crate_def_with_env(&[("KEY", "ghost")]);
+        let mut model = BuildModel::default();
+        let g = ensure_group(&mut model);
+        let consumer = crate_def_with_env(g, &[("KEY", "ghost")]);
         let err = resolve_crate_env(&consumer, &model, |_| None);
         assert!(err.is_err(), "missing crate name must error, not silently drop");
     }
@@ -146,15 +192,16 @@ mod tests {
     #[test]
     fn lookup_returning_none_errors() {
         let mut model = BuildModel::default();
+        let g = ensure_group(&mut model);
         let (h, _) = model.crates.insert(
             "produced".into(),
             CrateDef {
                 name: "produced".into(),
                 path: "produced".into(),
-                ..Default::default()
+                ..test_crate_defaults(g)
             },
         );
-        let consumer = crate_def_with_env(&[("KEY", "produced")]);
+        let consumer = crate_def_with_env(g, &[("KEY", "produced")]);
         let err = resolve_crate_env(&consumer, &model, |_| None);
         assert!(
             err.is_err(),
@@ -168,15 +215,16 @@ mod tests {
     #[test]
     fn canonicalize_falls_back_to_input_path_when_path_does_not_exist() {
         let mut model = BuildModel::default();
+        let g = ensure_group(&mut model);
         let (h, _) = model.crates.insert(
             "produced".into(),
             CrateDef {
                 name: "produced".into(),
                 path: "produced".into(),
-                ..Default::default()
+                ..test_crate_defaults(g)
             },
         );
-        let consumer = crate_def_with_env(&[("KEY", "produced")]);
+        let consumer = crate_def_with_env(g, &[("KEY", "produced")]);
         let phantom = PathBuf::from("/this/does/not/exist/anywhere.rlib");
         let resolved = resolve_crate_env(&consumer, &model, |_| Some(phantom.clone())).unwrap();
         assert_eq!(

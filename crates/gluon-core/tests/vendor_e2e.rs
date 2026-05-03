@@ -147,7 +147,11 @@ fn path_only_fixture_vendors_and_auto_registers() {
     let krate = model_for_reg.crates.get(crate_handle).unwrap();
     assert_eq!(krate.edition, "2021");
     assert_eq!(krate.crate_type, CrateType::Lib);
-    assert_eq!(krate.group, vendor::VENDORED_GROUP_NAME);
+    let vendored_group = model_for_reg
+        .groups
+        .lookup(vendor::VENDORED_GROUP_NAME)
+        .expect("vendored group present");
+    assert_eq!(krate.group, vendored_group);
     assert!(krate.path.contains("vendor-minimal-helper"));
 
     // And the synthetic group is registered.

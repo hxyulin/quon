@@ -123,10 +123,53 @@ pub fn expected_crate_artifact_path(
 mod tests {
     use super::*;
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, Handle, ProjectDef, ResolvedConfig, ResolvedCrateRef,
-        ResolvedProfile, TargetDef,
+        BuildModel, CrateDef, CrateType, GroupDef, Handle, ProjectDef, ResolvedConfig,
+        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+
+    /// Ensure a "g" group exists in `model`, returning its handle.
+    /// Required for CrateDef construction (group is now non-optional).
+    fn ensure_group(model: &mut BuildModel) -> Handle<GroupDef> {
+        if let Some(h) = model.groups.lookup("g") {
+            return h;
+        }
+        let (h, _) = model.groups.insert(
+            "g".into(),
+            GroupDef {
+                name: "g".into(),
+                target: TargetSpec::Host,
+                ..Default::default()
+            },
+        );
+        h
+    }
+
+    /// Default values for newly-mandatory `CrateDef` fields. Tests use
+    /// `..test_crate_defaults(group)` instead of `..Default::default()`.
+    fn test_crate_defaults(group: Handle<GroupDef>) -> CrateDef {
+        CrateDef {
+            name: String::new(),
+            path: String::new(),
+            edition: "2024".into(),
+            crate_type: CrateType::Lib,
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            group,
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
+        }
+    }
 
     fn layout() -> BuildLayout {
         BuildLayout::new(PathBuf::from("/tmp/build"), "demo")
@@ -183,6 +226,7 @@ mod tests {
     fn cross_lib_artifact_lands_under_cross_artifact_dir() {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "x86_64-unknown-none", "x86_64-unknown-none");
+        let g = ensure_group(&mut model);
         let (ch, _) = model.crates.insert(
             "kernel".into(),
             CrateDef {
@@ -190,10 +234,8 @@ mod tests {
                 path: "kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                target: "x86_64-unknown-none".into(),
-                target_handle: Some(th),
-                group: "g".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults(g)
             },
         );
         let resolved = make_resolved(
@@ -214,6 +256,7 @@ mod tests {
     fn cross_raw_binary_lands_under_cross_final_dir_with_bin_suffix() {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "i386-code16", "i386-unknown-none-code16");
+        let g = ensure_group(&mut model);
         let (ch, _) = model.crates.insert(
             "boot-sector".into(),
             CrateDef {
@@ -221,10 +264,8 @@ mod tests {
                 path: "boot-sector".into(),
                 edition: "2024".into(),
                 crate_type: CrateType::RawBinary,
-                target: "i386-code16".into(),
-                target_handle: Some(th),
-                group: "g".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults(g)
             },
         );
         let resolved = make_resolved(
@@ -250,6 +291,7 @@ mod tests {
             "host-target",
             "x86_64-unknown-linux-gnu",
         );
+        let g = ensure_group(&mut model);
         let (ch, _) = model.crates.insert(
             "tooling".into(),
             CrateDef {
@@ -257,10 +299,8 @@ mod tests {
                 path: "tools/tooling".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                target: "host".into(),
-                target_handle: None,
-                group: "g".into(),
-                ..Default::default()
+                target: TargetSpec::Host,
+                ..test_crate_defaults(g)
             },
         );
         let resolved = make_resolved(
@@ -284,14 +324,14 @@ mod tests {
         // surface this as an error rather than silently fabricating a path.
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "host-target", "x86_64-unknown-linux-gnu");
+        let g = ensure_group(&mut model);
         let (ch, _) = model.crates.insert(
             "orphan".into(),
             CrateDef {
                 name: "orphan".into(),
                 path: "orphan".into(),
                 crate_type: CrateType::Lib,
-                group: "g".into(),
-                ..Default::default()
+                ..test_crate_defaults(g)
             },
         );
         let resolved = make_resolved(th, Vec::new());

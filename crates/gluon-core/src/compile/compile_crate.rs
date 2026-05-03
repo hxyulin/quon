@@ -275,10 +275,11 @@ mod tests {
     use crate::compile::compile_utils::normalize_crate_name;
     use crate::compile::{ArtifactMap, BuildLayout, RustcCommandBuilder, RustcInfo};
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, Handle, ProjectDef, ResolvedConfig,
-        ResolvedCrateRef, ResolvedProfile, TargetDef,
+        BuildModel, CrateDef, CrateType, DepDef, GroupDef, Handle, ProjectDef, ResolvedConfig,
+        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::borrow::Cow;
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -365,10 +366,68 @@ mod tests {
     }
 
     /// Insert a crate into `model.crates` and return its handle.
-    fn insert_crate(model: &mut BuildModel, c: CrateDef) -> Handle<CrateDef> {
+    ///
+    /// Auto-creates a synthetic `host` group if `c.group` was not
+    /// pre-set to a real handle. Tests can construct `CrateDef` with a
+    /// trailing `..test_crate_defaults()` and rely on this helper to
+    /// substitute a real group handle before insertion. Honest tests
+    /// that build a real group + crate pair pass through unchanged.
+    fn insert_crate(model: &mut BuildModel, mut c: CrateDef) -> Handle<CrateDef> {
+        if model.groups.get(c.group).is_none() {
+            c.group = ensure_default_group(model);
+        }
         let name = c.name.clone();
         let (h, _) = model.crates.insert(name, c);
         h
+    }
+
+    /// Ensure a default `host` group exists in `model` and return its
+    /// handle. Required for CrateDef construction, which now demands a
+    /// non-optional `Handle<GroupDef>`.
+    fn ensure_default_group(model: &mut BuildModel) -> Handle<GroupDef> {
+        if let Some(h) = model.groups.lookup("host") {
+            return h;
+        }
+        let (h, _) = model.groups.insert(
+            "host".into(),
+            GroupDef {
+                name: "host".into(),
+                target: TargetSpec::Host,
+                ..Default::default()
+            },
+        );
+        h
+    }
+
+    /// Default values for the newly-mandatory fields on `CrateDef`.
+    /// Tests use `..test_crate_defaults()` instead of
+    /// `..Default::default()` since `CrateDef` no longer derives
+    /// `Default` (the new `group: Handle<GroupDef>` has no sensible
+    /// default). The `group` field here is a placeholder dangling
+    /// handle; `insert_crate` patches it to a real handle when the
+    /// crate goes into the model.
+    fn test_crate_defaults() -> CrateDef {
+        CrateDef {
+            name: String::new(),
+            path: String::new(),
+            edition: "2024".into(),
+            crate_type: CrateType::Lib,
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            // Placeholder handle; insert_crate substitutes the real one.
+            group: Handle::new(u32::MAX),
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
+        }
     }
 
     /// Make a minimal `ResolvedConfig` for the given project root.
@@ -467,7 +526,7 @@ mod tests {
                 path: "crates/my-lib".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -519,7 +578,7 @@ mod tests {
                 path: "crates/mylib".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -564,7 +623,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -624,7 +683,7 @@ mod tests {
                 path: "crates/mymacro".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::ProcMacro,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -673,7 +732,7 @@ mod tests {
                 path: "crates/myutil".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -694,7 +753,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 deps,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -750,7 +809,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -768,7 +827,7 @@ mod tests {
                 crate_type: CrateType::Bin,
                 artifact_deps: vec!["kernel".into()],
                 artifact_env,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -822,7 +881,7 @@ mod tests {
             CrateDef {
                 name: "kernel".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let mut artifact_env = std::collections::BTreeMap::new();
@@ -836,7 +895,7 @@ mod tests {
                 crate_type: CrateType::Bin,
                 artifact_deps: vec!["kernel".into()],
                 artifact_env,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -877,7 +936,7 @@ mod tests {
             &mut model,
             CrateDef {
                 name: "missing_dep".into(),
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -898,7 +957,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
                 deps,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
 
@@ -947,7 +1006,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -992,7 +1051,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1037,7 +1096,7 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1093,7 +1152,7 @@ mod tests {
                 path: "crates/cached_crate".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1188,7 +1247,7 @@ mod tests {
                 path: "crates/hello".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1273,7 +1332,7 @@ mod tests {
                 edition: "2021".into(),
                 crate_type: CrateType::RawBinary,
                 linker_script: Some("crates/boot-sector/boot.ld".into()),
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1392,10 +1451,9 @@ mod tests {
                 path: "crates/boot-sector".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::RawBinary,
-                target_handle: Some(th),
-                group: "bios-boot".into(),
-                group_handle: Some(group_h),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: group_h,
+                ..test_crate_defaults()
             },
         );
 
@@ -1473,7 +1531,7 @@ mod tests {
                 path: "crates/lib1".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1541,7 +1599,7 @@ mod tests {
                 path: "crates/lib1".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1606,7 +1664,7 @@ mod tests {
                 path: "crates/macro1".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::ProcMacro,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1650,7 +1708,7 @@ mod tests {
                 path: "crates/lib1".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());
@@ -1708,7 +1766,7 @@ mod tests {
                 path: "crates/trivial".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                ..Default::default()
+                ..test_crate_defaults()
             },
         );
         let resolved = make_resolved(th, tmp.path().to_path_buf());

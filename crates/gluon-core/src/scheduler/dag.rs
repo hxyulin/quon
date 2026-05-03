@@ -238,7 +238,7 @@ impl Default for Dag {
 ///    node (`PipelineStep::rule`); stages with `rule: None` are skipped.
 /// 6. **Rule → group crates**: For each `Some(group_handle)` in a stage's
 ///    `PipelineStep::inputs_handles`, the rule node depends on every crate
-///    in `resolved.crates` whose `CrateDef::group_handle` matches.
+///    in `resolved.crates` whose `CrateDef::group` matches.
 ///
 /// ### Empty crates list
 ///
@@ -263,13 +263,9 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
             Some(c) => c,
             None => return false,
         };
-        let group_handle = match crate_def.group_handle {
-            Some(h) => h,
-            None => return false,
-        };
         model
             .groups
-            .get(group_handle)
+            .get(crate_def.group)
             .map(|g| g.no_sysroot)
             .unwrap_or(false)
     };
@@ -603,7 +599,7 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
                             crate_ref.handle
                         ))
                     })?;
-                    if crate_def.group_handle == Some(group_handle) {
+                    if crate_def.group == group_handle {
                         let crate_id = dag.insert_node(DagNode::Crate(crate_ref.handle));
                         dag.add_edge(crate_id, rule_id);
                     }
@@ -690,11 +686,62 @@ mod tests {
             }
         }
 
+        /// Ensure a group named `group_name` exists in `model`. The
+        /// group's target is `Cross(target)` if `target.is_some()`,
+        /// otherwise `Host`. Returns the resolved handle.
+        pub fn ensure_group(
+            model: &mut BuildModel,
+            group_name: &str,
+            target: Option<Handle<TargetDef>>,
+        ) -> Handle<GroupDef> {
+            if let Some(h) = model.groups.lookup(group_name) {
+                return h;
+            }
+            let target_spec = match target {
+                Some(t) => TargetSpec::Cross(t),
+                None => TargetSpec::Host,
+            };
+            let (h, _) = model.groups.insert(
+                group_name.into(),
+                GroupDef {
+                    name: group_name.into(),
+                    target: target_spec,
+                    ..Default::default()
+                },
+            );
+            h
+        }
+
+        /// Default values for newly-mandatory `CrateDef` fields.
+        pub fn test_crate_defaults(group: Handle<GroupDef>) -> CrateDef {
+            CrateDef {
+                name: String::new(),
+                path: String::new(),
+                edition: "2024".into(),
+                crate_type: CrateType::Lib,
+                target: TargetSpec::Host,
+                deps: std::collections::BTreeMap::new(),
+                dev_deps: std::collections::BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: std::collections::BTreeMap::new(),
+                span: None,
+            }
+        }
+
         pub fn make_cross_crate(
             model: &mut BuildModel,
             name: &str,
             target_handle: Handle<TargetDef>,
         ) -> Handle<CrateDef> {
+            let group = ensure_group(model, "default", Some(target_handle));
             let (h, _) = model.crates.insert(
                 name.into(),
                 CrateDef {
@@ -702,16 +749,15 @@ mod tests {
                     path: name.into(),
                     edition: "2021".into(),
                     crate_type: CrateType::Lib,
-                    target: "cross".into(),
-                    target_handle: Some(target_handle),
-                    group: "default".into(),
-                    ..Default::default()
+                    target: TargetSpec::Cross(target_handle),
+                    ..test_crate_defaults(group)
                 },
             );
             h
         }
 
         pub fn make_host_crate(model: &mut BuildModel, name: &str) -> Handle<CrateDef> {
+            let group = ensure_group(model, "host-group", None);
             let (h, _) = model.crates.insert(
                 name.into(),
                 CrateDef {
@@ -719,9 +765,8 @@ mod tests {
                     path: name.into(),
                     edition: "2021".into(),
                     crate_type: CrateType::ProcMacro,
-                    target: "host".into(),
-                    group: "host-group".into(),
-                    ..Default::default()
+                    target: TargetSpec::Host,
+                    ..test_crate_defaults(group)
                 },
             );
             h
@@ -904,6 +949,7 @@ mod tests {
         // Host proc-macro crate.
         let host_h = make_host_crate(&mut model, "my-proc-macro");
         // Cross crate that depends on the proc-macro.
+        let __group_12 = ensure_group(&mut model, "default", Some(th));
         let cross_h = model
             .crates
             .insert(
@@ -913,9 +959,8 @@ mod tests {
                     path: "my-cross-crate".into(),
                     edition: "2021".into(),
                     crate_type: CrateType::Lib,
-                    target: "cross".into(),
-                    target_handle: Some(th),
-                    group: "default".into(),
+                    target: TargetSpec::Cross(th),
+                    group: __group_12,
                     deps: {
                         let mut m = BTreeMap::new();
                         m.insert(
@@ -928,7 +973,7 @@ mod tests {
                         );
                         m
                     },
-                    ..Default::default()
+                    ..test_crate_defaults(__group_12)
                 },
             )
             .0;
@@ -1002,6 +1047,7 @@ mod tests {
         let th = make_target(&mut model, "x86_64-test");
 
         let c_h = make_cross_crate(&mut model, "crate-c", th);
+        let __group_11 = ensure_group(&mut model, "default", Some(th));
         let b_h = model
             .crates
             .insert(
@@ -1011,9 +1057,8 @@ mod tests {
                     path: "crate-b".into(),
                     edition: "2021".into(),
                     crate_type: CrateType::Lib,
-                    target: "cross".into(),
-                    target_handle: Some(th),
-                    group: "default".into(),
+                    target: TargetSpec::Cross(th),
+                    group: __group_11,
                     deps: {
                         let mut m = BTreeMap::new();
                         m.insert(
@@ -1026,10 +1071,11 @@ mod tests {
                         );
                         m
                     },
-                    ..Default::default()
+                    ..test_crate_defaults(__group_11)
                 },
             )
             .0;
+        let __group_10 = ensure_group(&mut model, "default", Some(th));
         let a_h = model
             .crates
             .insert(
@@ -1039,9 +1085,8 @@ mod tests {
                     path: "crate-a".into(),
                     edition: "2021".into(),
                     crate_type: CrateType::Lib,
-                    target: "cross".into(),
-                    target_handle: Some(th),
-                    group: "default".into(),
+                    target: TargetSpec::Cross(th),
+                    group: __group_10,
                     deps: {
                         let mut m = BTreeMap::new();
                         m.insert(
@@ -1054,7 +1099,7 @@ mod tests {
                         );
                         m
                     },
-                    ..Default::default()
+                    ..test_crate_defaults(__group_10)
                 },
             )
             .0;
@@ -1202,11 +1247,9 @@ mod tests {
                 path: "crate-x".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "kernel-group".into(),
-                group_handle: Some(group_h),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: group_h,
+                ..test_crate_defaults(group_h)
             },
         );
         let (cy_h, _) = model.crates.insert(
@@ -1216,11 +1259,9 @@ mod tests {
                 path: "crate-y".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Lib,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "kernel-group".into(),
-                group_handle: Some(group_h),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: group_h,
+                ..test_crate_defaults(group_h)
             },
         );
 
@@ -1307,6 +1348,7 @@ mod tests {
         let uefi_target = make_target(&mut model, "x86_64-uefi");
 
         // Kernel crate in kernel-group / x86_64-kernel target.
+        let __group_9 = ensure_group(&mut model, "kernel-group", Some(kernel_target));
         let (kernel_h, _) = model.crates.insert(
             "kernel".into(),
             CrateDef {
@@ -1314,15 +1356,15 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(kernel_target),
-                group: "kernel-group".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(kernel_target),
+                group: __group_9,
+                ..test_crate_defaults(__group_9)
             },
         );
 
         // Bootloader crate in uefi-group / x86_64-uefi target, with an
         // artifact_dep on the kernel (no regular `deps` entry).
+        let __group_8 = ensure_group(&mut model, "uefi-group", Some(uefi_target));
         let (bootloader_h, _) = model.crates.insert(
             "bootloader".into(),
             CrateDef {
@@ -1330,11 +1372,10 @@ mod tests {
                 path: "crates/bootloader".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(uefi_target),
-                group: "uefi-group".into(),
+                target: TargetSpec::Cross(uefi_target),
+                group: __group_8,
                 artifact_deps: vec!["kernel".into()],
-                ..Default::default()
+                ..test_crate_defaults(__group_8)
             },
         );
 
@@ -1402,6 +1443,7 @@ mod tests {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "x86_64-uefi");
 
+        let __group_7 = ensure_group(&mut model, "uefi", Some(th));
         let (bl_h, _) = model.crates.insert(
             "bootloader".into(),
             CrateDef {
@@ -1409,10 +1451,9 @@ mod tests {
                 path: "crates/bootloader".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "uefi".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: __group_7,
+                ..test_crate_defaults(__group_7)
             },
         );
 
@@ -1472,6 +1513,7 @@ mod tests {
     fn artifact_dep_unknown_name_is_silently_skipped() {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "x86_64-test");
+        let __group_6 = ensure_group(&mut model, "default", Some(th));
         let (consumer_h, _) = model.crates.insert(
             "consumer".into(),
             CrateDef {
@@ -1479,11 +1521,10 @@ mod tests {
                 path: "consumer".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "default".into(),
+                target: TargetSpec::Cross(th),
+                group: __group_6,
                 artifact_deps: vec!["ghost".into()],
-                ..Default::default()
+                ..test_crate_defaults(__group_6)
             },
         );
 
@@ -1525,6 +1566,7 @@ mod tests {
         let th = make_target(&mut model, "x86_64-unknown-uefi");
 
         // Bootloader crate the ESP will host.
+        let __group_5 = ensure_group(&mut model, "uefi", Some(th));
         let (bl_h, _) = model.crates.insert(
             "bootloader".into(),
             CrateDef {
@@ -1532,14 +1574,14 @@ mod tests {
                 path: "crates/bootloader".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "uefi".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: __group_5,
+                ..test_crate_defaults(__group_5)
             },
         );
 
         // Kernel crate the image packs directly (no ESP indirection).
+        let __group_4 = ensure_group(&mut model, "uefi", Some(th));
         let (kernel_h, _) = model.crates.insert(
             "kernel".into(),
             CrateDef {
@@ -1547,10 +1589,9 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "uefi".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: __group_4,
+                ..test_crate_defaults(__group_4)
             },
         );
 
@@ -1651,6 +1692,7 @@ mod tests {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "x86_64-unknown-none");
 
+        let __group_3 = ensure_group(&mut model, "kernel", Some(th));
         let (kernel_h, _) = model.crates.insert(
             "kernel".into(),
             CrateDef {
@@ -1658,12 +1700,12 @@ mod tests {
                 path: "crates/kernel".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::Bin,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "kernel".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: __group_3,
+                ..test_crate_defaults(__group_3)
             },
         );
+        let __group_2 = ensure_group(&mut model, "kernel", Some(th));
         let (boot_h, _) = model.crates.insert(
             "boot-sector".into(),
             CrateDef {
@@ -1671,10 +1713,9 @@ mod tests {
                 path: "crates/boot-sector".into(),
                 edition: "2021".into(),
                 crate_type: CrateType::RawBinary,
-                target: "cross".into(),
-                target_handle: Some(th),
-                group: "kernel".into(),
-                ..Default::default()
+                target: TargetSpec::Cross(th),
+                group: __group_2,
+                ..test_crate_defaults(__group_2)
             },
         );
 
@@ -1789,6 +1830,7 @@ mod tests {
         );
 
         // Kernel crate (regular).
+        let __group_kernel = ensure_group(&mut model, "kernel", Some(kernel_target));
         let kernel_h = model
             .crates
             .insert(
@@ -1798,9 +1840,9 @@ mod tests {
                     path: "kernel".into(),
                     edition: "2021".into(),
                     crate_type: CrateType::Bin,
-                    target_handle: Some(kernel_target),
-                    group: "kernel".into(),
-                    ..Default::default()
+                    target: TargetSpec::Cross(kernel_target),
+                    group: __group_kernel,
+                    ..test_crate_defaults(__group_kernel)
                 },
             )
             .0;
@@ -1815,10 +1857,9 @@ mod tests {
                     path: "boot-sector".into(),
                     edition: "2021".into(),
                     crate_type: CrateType::RawBinary,
-                    target_handle: Some(bios_target),
-                    group: "bios-boot".into(),
-                    group_handle: Some(bios_group_h),
-                    ..Default::default()
+                    target: TargetSpec::Cross(bios_target),
+                    group: bios_group_h,
+                    ..test_crate_defaults(bios_group_h)
                 },
             )
             .0;

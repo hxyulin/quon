@@ -321,9 +321,29 @@ mod tests {
     }
 
     fn krate() -> CrateDef {
+        use gluon_model::{CrateType, TargetSpec};
+        use std::collections::BTreeMap;
         CrateDef {
             name: "kernel".into(),
-            ..Default::default()
+            path: String::new(),
+            edition: "2024".into(),
+            crate_type: CrateType::Lib,
+            target: TargetSpec::Host,
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
+            linker_script: None,
+            // The `layout` tests don't actually use `crate_def.group`,
+            // so a placeholder dangling handle is fine.
+            group: Handle::new(0),
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
         }
     }
 

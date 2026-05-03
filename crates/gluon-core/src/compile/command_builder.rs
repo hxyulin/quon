@@ -208,9 +208,9 @@ pub(crate) fn build_rustc_command(
     // `--target` (the target spec is needed to compile correctly), but
     // are responsible for declaring `#![no_core]` (or equivalent) and
     // providing their own runtime primitives.
-    let group_no_sysroot = crate_def
-        .group_handle
-        .and_then(|h| model.groups.get(h))
+    let group_no_sysroot = model
+        .groups
+        .get(crate_def.group)
         .map(|g| g.no_sysroot)
         .unwrap_or(false);
 

@@ -174,8 +174,7 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     .model
                     .crates
                     .get(crate_handle)
-                    .and_then(|c| c.group_handle)
-                    .and_then(|h| self.model.groups.get(h))
+                    .and_then(|c| self.model.groups.get(c.group))
                     .map(|g| g.no_sysroot)
                     .unwrap_or(false);
                 let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
@@ -647,7 +646,8 @@ mod tests {
         info: &RustcInfo,
         tmp: &std::path::Path,
     ) -> (CompileCtx, BuildModel, ResolvedConfig) {
-        use gluon_model::{CrateDef, CrateType};
+        use gluon_model::{CrateDef, CrateType, GroupDef, TargetSpec};
+        use std::collections::BTreeMap;
         use std::fs;
 
         // --- Write crate source ---
@@ -698,13 +698,40 @@ mod tests {
             .targets
             .insert("x86_64-unknown-none".into(), target_def);
 
+        let (group_handle, _) = model.groups.insert(
+            "kernel".into(),
+            GroupDef {
+                name: "kernel".into(),
+                target: TargetSpec::Cross(target_handle),
+                default_edition: "2021".into(),
+                crates: vec!["hello".into()],
+                shared_flags: Vec::new(),
+                is_project: true,
+                config: false,
+                no_sysroot: false,
+                span: None,
+            },
+        );
+
         let crate_def = CrateDef {
             name: "hello".into(),
             path: "crates/hello".into(),
             edition: "2021".into(),
             crate_type: CrateType::Bin,
+            target: TargetSpec::Cross(target_handle),
+            deps: BTreeMap::new(),
+            dev_deps: BTreeMap::new(),
+            features: Vec::new(),
+            root: None,
             linker_script: Some("crates/hello/gluon.ld".into()),
-            ..Default::default()
+            group: group_handle,
+            is_project_crate: true,
+            cfg_flags: Vec::new(),
+            rustc_flags: Vec::new(),
+            requires_config: Vec::new(),
+            artifact_deps: Vec::new(),
+            artifact_env: BTreeMap::new(),
+            span: None,
         };
         let (crate_handle, _) = model.crates.insert("hello".into(), crate_def);
 

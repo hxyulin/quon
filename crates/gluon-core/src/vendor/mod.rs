@@ -32,7 +32,8 @@ pub use lockfile::{VendorLock, VendorLockPackage};
 use crate::compile::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef, TargetSpec,
+    BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef, Handle,
+    TargetSpec,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -549,12 +550,12 @@ fn read_cargo_edition_and_type(manifest_path: &Path) -> Result<(String, bool)> {
 }
 
 /// Ensure the synthetic `__vendored` group exists in the model and
-/// return its name (which the caller stores on each new CrateDef).
+/// return its handle (which the caller stores on each new CrateDef).
 ///
 /// If a user-declared group already occupies the name (it shouldn't,
 /// per the `__`-prefix convention), we error loudly rather than
 /// silently overwriting.
-fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
+fn ensure_vendored_group(model: &mut BuildModel) -> Result<Handle<GroupDef>> {
     if let Some(h) = model.groups.lookup(VENDORED_GROUP_NAME) {
         // Sanity check: if a user somehow created this, make sure it
         // looks like our synthetic group before we start dropping
@@ -579,7 +580,7 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
                  this name is reserved for vendored dependencies"
             ))]));
         }
-        return Ok(VENDORED_GROUP_NAME.to_string());
+        return Ok(h);
     }
 
     let group = GroupDef {
@@ -593,8 +594,8 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
         no_sysroot: false,
         span: None,
     };
-    model.groups.insert(VENDORED_GROUP_NAME.into(), group);
-    Ok(VENDORED_GROUP_NAME.to_string())
+    let (handle, _) = model.groups.insert(VENDORED_GROUP_NAME.into(), group);
+    Ok(handle)
 }
 
 /// Walk `gluon.lock` and insert a synthetic [`CrateDef`] into
@@ -670,7 +671,7 @@ pub fn auto_register_vendored_deps(
         return Ok(());
     }
 
-    let group_name = ensure_vendored_group(model)?;
+    let group_handle = ensure_vendored_group(model)?;
 
     // Insert synthetic CrateDefs. We intentionally ignore the
     // `_inserted` flag from `Arena::insert` for the success path: a
@@ -750,7 +751,7 @@ pub fn auto_register_vendored_deps(
         // conflict.
         if let Some(existing_h) = model.crates.lookup(&pkg.name)
             && let Some(existing) = model.crates.get(existing_h)
-            && existing.group != VENDORED_GROUP_NAME
+            && existing.group != group_handle
         {
             diags.push(Diagnostic::error(format!(
                 "vendored crate '{}' collides with a user-declared crate",
@@ -769,15 +770,13 @@ pub fn auto_register_vendored_deps(
             } else {
                 CrateType::Lib
             },
-            target: "host".into(),
-            target_handle: None, // "host" sentinel
+            target: TargetSpec::Host,
             deps: Default::default(),
             dev_deps: Default::default(),
             features: Vec::new(),
             root: None,
             linker_script: None,
-            group: group_name.clone(),
-            group_handle: model.groups.lookup(&group_name),
+            group: group_handle,
             is_project_crate: false,
             cfg_flags: Vec::new(),
             rustc_flags: Vec::new(),
@@ -1141,10 +1140,8 @@ mod tests {
         // declared path.
         let crate_handle = model.crates.lookup("helper").expect("crate");
         let krate = model.crates.get(crate_handle).unwrap();
-        assert_eq!(krate.group, VENDORED_GROUP_NAME);
-        assert_eq!(krate.group_handle, Some(group_handle));
-        assert_eq!(krate.target, "host");
-        assert!(krate.target_handle.is_none());
+        assert_eq!(krate.group, group_handle);
+        assert_eq!(krate.target, TargetSpec::Host);
         assert_eq!(krate.crate_type, gluon_model::CrateType::Lib);
         assert_eq!(krate.edition, "2021");
         assert!(krate.path.ends_with("helper"));
@@ -1157,7 +1154,7 @@ mod tests {
         vendor_sync(&model, &layout, &project, VendorOptions::default()).unwrap();
 
         // Pre-insert a user crate named "helper" in a normal group.
-        model.groups.insert(
+        let (user_group_h, _) = model.groups.insert(
             "user-group".into(),
             GroupDef {
                 name: "user-group".into(),
@@ -1169,8 +1166,23 @@ mod tests {
             "helper".into(),
             CrateDef {
                 name: "helper".into(),
-                group: "user-group".into(),
-                ..Default::default()
+                path: String::new(),
+                edition: "2024".into(),
+                crate_type: CrateType::Lib,
+                target: TargetSpec::Host,
+                deps: Default::default(),
+                dev_deps: Default::default(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group: user_group_h,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: Default::default(),
+                span: None,
             },
         );
 
