@@ -441,20 +441,23 @@ fn intern_pipelines(
 ) {
     for (_, p) in raw.iter() {
         let stages = p.stages.iter().map(|s| {
-            let resolved: Vec<Option<Handle<GroupDef>>> = s.inputs.iter().map(|input| {
-                let h = groups.lookup(input);
-                if h.is_none() {
+            // Drop dangling group references instead of carrying an
+            // unresolved entry forward — mirrors the `intern_esps` /
+            // `intern_build_steps` filter-on-intern pattern so DAG
+            // builders never need to recheck resolution.
+            let inputs: Vec<Handle<GroupDef>> = s.inputs.iter().filter_map(|input| {
+                let Some(h) = groups.lookup(input) else {
                     diags.push(InternDiagnostic::error(format!(
                         "pipeline '{}' stage '{}' references unknown group '{}'",
                         p.name, s.name, input
                     )));
-                }
-                h
+                    return None;
+                };
+                Some(h)
             }).collect();
             PipelineStep {
                 name: s.name.clone(),
-                inputs: s.inputs.clone(),
-                inputs_handles: resolved,
+                inputs,
                 rule: s.rule.clone(),
             }
         }).collect();

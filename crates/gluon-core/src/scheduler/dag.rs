@@ -237,8 +237,8 @@ impl Default for Dag {
 ///    more rule nodes. Every node in stage N depends on every node in
 ///    stage N−1 (bipartite barrier). In MVP-M each stage has at most one rule
 ///    node (`PipelineStep::rule`); stages with `rule: None` are skipped.
-/// 6. **Rule → group crates**: For each `Some(group_handle)` in a stage's
-///    `PipelineStep::inputs_handles`, the rule node depends on every crate
+/// 6. **Rule → group crates**: For each group handle in a stage's
+///    `PipelineStep::inputs`, the rule node depends on every crate
 ///    in `resolved.crates` whose `CrateDef::group` matches.
 ///
 /// ### Empty crates list
@@ -585,11 +585,7 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
             }
 
             // Edge rule 6: rule depends on every crate in each referenced group.
-            for maybe_group in &step.inputs_handles {
-                let group_handle = match maybe_group {
-                    Some(h) => *h,
-                    None => continue,
-                };
+            for &group_handle in &step.inputs {
                 for crate_ref in &resolved.crates {
                     let crate_def = model.crates.get(crate_ref.handle).ok_or_else(|| {
                         Error::Compile(format!(
@@ -1192,13 +1188,11 @@ mod tests {
                     PipelineStep {
                         name: "stage0".into(),
                         inputs: vec![],
-                        inputs_handles: vec![],
                         rule: Some("stage0-rule".into()),
                     },
                     PipelineStep {
                         name: "stage1".into(),
                         inputs: vec![],
-                        inputs_handles: vec![],
                         rule: Some("stage1-rule".into()),
                     },
                 ],
@@ -1294,8 +1288,7 @@ mod tests {
                 name: "link-pipeline".into(),
                 stages: vec![PipelineStep {
                     name: "link".into(),
-                    inputs: vec!["kernel-group".into()],
-                    inputs_handles: vec![Some(group_h)],
+                    inputs: vec![group_h],
                     rule: Some("link-rule".into()),
                 }],
                 span: None,

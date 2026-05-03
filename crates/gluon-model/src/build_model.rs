@@ -399,11 +399,10 @@ pub struct PipelineDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStep {
     pub name: String,
-    /// String references to group names.
-    pub inputs: Vec<String>,
-    /// Sibling resolved handles, populated by the intern pass.
-    #[serde(default)]
-    pub inputs_handles: Vec<Option<Handle<GroupDef>>>,
+    /// Resolved group handles, populated by the intern pass. Dangling
+    /// references are dropped (with a diagnostic) at intern time so
+    /// downstream consumers never see an unresolved entry.
+    pub inputs: Vec<Handle<GroupDef>>,
     /// Optional rule to run for this stage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
