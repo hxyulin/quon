@@ -205,16 +205,20 @@ pub fn clippy_with_workers(
 
 /// Remove the gluon build directory.
 ///
-/// When `keep_sysroot` is `false`, the entire `layout.root()` is removed
-/// (including `cache-manifest.json`). When `true`, every entry under
-/// `layout.root()` is removed *except* the `sysroot/` subdirectory —
-/// the cache manifest is also removed in this mode because its records
-/// reference artefacts that are now gone, and the next run will re-
-/// verify the sysroot via its stamp file (which is independent of the
-/// manifest).
+/// When `keep_sysroot` is `false`, the entire `layout.root()` is
+/// removed (including `cache-manifest.json`).
 ///
-/// `NotFound` errors on the root are treated as success — "clean" of an
-/// already-clean tree is a no-op.
+/// When `true`, every entry under `layout.root()` is removed
+/// *except* the `sysroot/` subdirectory and the cache manifest. The
+/// manifest is loaded, filtered to retain only entries whose key
+/// starts with `"sysroot:"` (covers both rustc-side
+/// `sysroot:<target>:<crate>` per-crate keys and composite-side
+/// `sysroot:<target>` keys), and saved back. This preserves the
+/// sysroot fast-path so the next build doesn't need to re-spawn
+/// rustc just because clean wiped its cache state.
+///
+/// `NotFound` errors on the root are treated as success — "clean"
+/// of an already-clean tree is a no-op.
 pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
     let root = layout.root();
     if !root.exists() {
@@ -238,9 +242,12 @@ pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
         }
     } else {
         // Iterate every direct child and skip the literal `sysroot`
-        // entry. We deliberately do not recurse into the manifest's
-        // referenced paths — the entire build tree (minus sysroot) is
-        // wiped wholesale.
+        // entry AND the cache-manifest.json (which we filter in place
+        // below to retain sysroot:* entries).
+        let manifest_filename = layout
+            .cache_manifest()
+            .file_name()
+            .map(|n| n.to_os_string());
         let entries = std::fs::read_dir(root).map_err(|e| Error::Io {
             path: root.to_path_buf(),
             source: e,
@@ -251,6 +258,9 @@ pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
                 source: e,
             })?;
             if entry.file_name() == "sysroot" {
+                continue;
+            }
+            if manifest_filename.as_ref() == Some(&entry.file_name().to_os_string()) {
                 continue;
             }
             let path = entry.path();
@@ -274,6 +284,18 @@ pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
                 }
             }
         }
+
+        // Filter the cache manifest to retain only sysroot:* entries.
+        // Both rustc-side `sysroot:<target>:<crate>` keys (per-crate)
+        // and composite `sysroot:<target>` keys need preservation;
+        // everything else points at artifacts that no longer exist.
+        let manifest_path = layout.cache_manifest();
+        if manifest_path.exists() {
+            let mut cache = crate::cache::Cache::load(&manifest_path).0;
+            cache.retain_sysroot_only();
+            cache.save()?;
+        }
+
         Ok(())
     }
 }
@@ -440,9 +462,59 @@ mod tests {
         assert!(!build.join("cross").exists(), "cross must be gone");
         assert!(!build.join("host").exists(), "host must be gone");
         assert!(
-            !build.join("cache-manifest.json").exists(),
-            "cache manifest must be gone (records reference removed artefacts)"
+            build.join("cache-manifest.json").exists(),
+            "cache manifest must be preserved (filtered to sysroot:* entries)"
         );
+    }
+
+    #[test]
+    fn clean_keep_sysroot_retains_sysroot_cache_entries() {
+        use crate::cache::Cache;
+        use crate::cache::composite::CompositeRecord;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = BuildLayout::new(tmp.path(), "t");
+        std::fs::create_dir_all(layout.root()).expect("mkdir");
+        let manifest = layout.cache_manifest();
+
+        // Seed a sysroot composite entry plus a non-sysroot entry.
+        let sysroot_out = layout.root().join("sysroot/x86_64/lib/libcore.rlib");
+        std::fs::create_dir_all(sysroot_out.parent().unwrap()).expect("mkdir");
+        std::fs::write(&sysroot_out, b"fake rlib").expect("write");
+
+        let other_out = layout.root().join("crates/foo.rlib");
+        std::fs::create_dir_all(other_out.parent().unwrap()).expect("mkdir");
+        std::fs::write(&other_out, b"foo").expect("write");
+
+        let mut cache = Cache::load(&manifest).0;
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "sysroot:x86_64".into(),
+                inputs: vec![],
+                aux_hash: Some([1; 32]),
+                output_path: sysroot_out.clone(),
+            })
+            .unwrap();
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "image:boot".into(),
+                inputs: vec![],
+                aux_hash: None,
+                output_path: other_out.clone(),
+            })
+            .unwrap();
+        cache.save().unwrap();
+
+        // Clean with keep_sysroot=true.
+        crate::clean(&layout, true).unwrap();
+
+        // Manifest should still exist; sysroot:* entries retained,
+        // others removed.
+        assert!(manifest.exists(), "manifest deleted under keep_sysroot=true");
+        let cache2 = Cache::load(&manifest).0;
+        let composite_keys: Vec<_> = cache2.composite_keys().collect();
+        assert!(composite_keys.iter().any(|k| **k == *"sysroot:x86_64"));
+        assert!(!composite_keys.iter().any(|k| **k == *"image:boot"));
     }
 
     #[test]

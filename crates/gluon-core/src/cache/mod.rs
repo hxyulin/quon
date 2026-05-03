@@ -467,9 +467,28 @@ impl Cache {
         true
     }
 
+    /// Drop every entry whose key does not start with `"sysroot:"`.
+    /// Used by `clean(layout, keep_sysroot=true)` to retain just the
+    /// sysroot fast-path state. Marks the cache dirty if any entry
+    /// was removed (so the subsequent `save()` actually writes).
+    pub fn retain_sysroot_only(&mut self) {
+        let before = self.manifest.rustc.len() + self.manifest.composite.len();
+        self.manifest.rustc.retain(|k, _| k.starts_with("sysroot:"));
+        self.manifest.composite.retain(|k, _| k.starts_with("sysroot:"));
+        let after = self.manifest.rustc.len() + self.manifest.composite.len();
+        if after != before {
+            self.dirty = true;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn entry(&self, key: &str) -> Option<&RustcEntry> {
         self.manifest.rustc.get(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn composite_keys(&self) -> impl Iterator<Item = &String> {
+        self.manifest.composite.keys()
     }
 }
 
