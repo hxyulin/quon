@@ -32,9 +32,6 @@ pub(crate) struct ArtifactsSnapshot {
 /// dispatch arm folds this into the canonical `Mutex<ArtifactsSnapshot>`
 /// after the helper returns. Each variant carries `was_cached` so the
 /// `built`/`cached` counters can be incremented at merge time.
-// Each variant is constructed by a different dispatch_* helper; the
-// allow lifts in Task 9 once dispatch_build_step (the last) lands.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum NodeOutput {
     Sysroot {

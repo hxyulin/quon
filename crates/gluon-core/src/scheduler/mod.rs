@@ -26,7 +26,8 @@ use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
 use gluon_model::{
-    BuildModel, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef, TargetDef,
+    BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef,
+    TargetDef,
 };
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
@@ -296,6 +297,31 @@ fn dispatch_rule(
     Ok(NodeOutput::Rule)
 }
 
+fn dispatch_build_step(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    snapshot: &ArtifactsSnapshot,
+    handle: Handle<BuildStepDef>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let (out_path, was_cached) = crate::compile::build_step::execute_build_step(
+        ctx,
+        model,
+        resolved,
+        handle,
+        &snapshot.artifacts,
+        stdout,
+        stderr,
+    )?;
+    Ok(NodeOutput::BuildStep {
+        handle,
+        out_path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -412,24 +438,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // BuildStep — invoke a host-bin runner with curated env vars.
             // ------------------------------------------------------------------
             DagNode::BuildStep(handle) => {
-                // Snapshot the artifact map so the runner sees the
-                // runner crate's output and any crate_in inputs as
-                // already-produced paths. Same lock-and-clone pattern
-                // used by Crate / Rule / Image / Esp dispatch.
-                let artifacts_snapshot =
-                    lock_or_poison(self.state, "state")?.artifacts.clone();
-                let (out_path, was_cached) = crate::compile::build_step::execute_build_step(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    handle,
-                    &artifacts_snapshot,
-                    stdout,
-                    stderr,
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_build_step(
+                    self.ctx, self.model, self.resolved, &snapshot, handle, stdout, stderr,
                 )?;
-                lock_or_poison(self.state, "state")?
-                    .artifacts
-                    .set_build_step(handle, out_path);
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("BuildStep output is cacheable");
                 self.record(was_cached);
                 Ok(())
             }
