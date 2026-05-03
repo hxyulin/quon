@@ -18,5 +18,9 @@ pub use handle::{Arena, Handle};
 pub use intern::{intern, InternDiagnostic};
 pub use kconfig::*;
 pub use raw::RawBuildModel;
+pub use raw_defs::{
+    RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef, RawEspDef,
+    RawEspEntry, RawGroupDef, RawPipelineStep, RawProfileDef,
+};
 pub use resolved::*;
 pub use source::SourceSpan;
