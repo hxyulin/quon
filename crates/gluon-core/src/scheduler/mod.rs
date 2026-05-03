@@ -712,6 +712,65 @@ mod tests {
         );
     }
 
+    /// Stage 8 acceptance: two consecutive `-j1` runs produce
+    /// byte-identical artifact paths and binary contents. The second
+    /// run is a cache hit; this test asserts not just that it
+    /// succeeds (covered by `execute_pipeline_cache_hit_on_second_run`)
+    /// but that nothing about the *output set* changes between runs —
+    /// the snapshot-based dispatch must be deterministic.
+    #[test]
+    #[ignore]
+    fn execute_pipeline_j1_is_deterministic_across_runs() {
+        let info = match RustcInfo::probe() {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("e2e test skipped: rustc probe failed: {e}");
+                return;
+            }
+        };
+        if info.rust_src.is_none() {
+            eprintln!("e2e test skipped: rust-src component not installed");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let (ctx, model, resolved) = make_e2e_fixture(&info, tmp.path());
+        let rules = RuleRegistry::with_builtins();
+
+        let mut out1 = Vec::<u8>::new();
+        let mut err1 = Vec::<u8>::new();
+        let s1 = execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out1, &mut err1)
+            .expect("first run");
+
+        let target = model
+            .targets
+            .get(resolved.profile.target)
+            .expect("target");
+        let bin = ctx
+            .layout
+            .cross_final_dir(target, &resolved.profile)
+            .join("hello");
+        let bin1 = std::fs::read(&bin).expect("read first-run binary");
+
+        // Second run — same fixture, same scheduler; cache should hit.
+        let mut out2 = Vec::<u8>::new();
+        let mut err2 = Vec::<u8>::new();
+        let s2 = execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out2, &mut err2)
+            .expect("second run");
+        let bin2 = std::fs::read(&bin).expect("read second-run binary");
+
+        assert_eq!(s1.esp_dirs, s2.esp_dirs, "esp_dirs differ across runs");
+        assert_eq!(
+            s1.image_paths, s2.image_paths,
+            "image_paths differ across runs"
+        );
+        assert_eq!(
+            s1.build_step_paths, s2.build_step_paths,
+            "build_step_paths differ across runs"
+        );
+        assert_eq!(bin1, bin2, "binary contents differ across runs");
+    }
+
     // -----------------------------------------------------------------------
     // E2E fixture helpers
     // -----------------------------------------------------------------------
