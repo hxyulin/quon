@@ -326,10 +326,14 @@ impl Cache {
     /// manifest after every input has been successfully fingerprinted,
     /// so a mid-loop failure can never leave a half-populated entry
     /// behind.
-    pub fn mark_composite_built(
-        &mut self,
-        rec: crate::cache::composite::CompositeRecord,
-    ) -> Result<()> {
+    ///
+    /// Note: composite entries do not track parent-directory mtimes (the
+    /// rustc-entry equivalent of `parent_dir_mtimes`). Composite callers
+    /// supply explicit input lists — there is no glob discovery to make
+    /// "a new file appeared in this directory" a meaningful invalidation
+    /// signal. If a caller's input set changes, the caller passes a
+    /// different `inputs` list and the set-comparison check catches it.
+    pub fn mark_composite_built(&mut self, rec: CompositeRecord) -> Result<()> {
         let mut inputs: BTreeMap<PathBuf, FileFingerprint> = BTreeMap::new();
         for src in &rec.inputs {
             let meta = std::fs::metadata(src).map_err(|e| Error::Io {
@@ -366,7 +370,7 @@ impl Cache {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
 
-        let entry = crate::cache::composite::CompositeEntry {
+        let entry = CompositeEntry {
             inputs,
             aux_hash: rec.aux_hash,
             output_path: rec.output_path,
@@ -390,7 +394,7 @@ impl Cache {
     /// Takes `&mut self` for the same reason `is_fresh` does — the
     /// slow-path SHA-256 check can refresh a source's recorded mtime
     /// in place, marking the cache dirty.
-    pub fn is_composite_fresh(&mut self, q: &crate::cache::composite::CompositeQuery<'_>) -> bool {
+    pub fn is_composite_fresh(&mut self, q: &CompositeQuery<'_>) -> bool {
         let Some(entry) = self.manifest.composite.get(q.key) else {
             return false;
         };
@@ -882,6 +886,43 @@ mod tests {
             key: "k",
             inputs: &inputs,
             aux_hash: None,
+            output_path: &out,
+        };
+        assert!(!cache.is_composite_fresh(&q));
+    }
+
+    #[test]
+    fn composite_content_changed_invalidates() {
+        // Symmetric coverage to the rustc-half `content_changed_invalidates`.
+        // The composite slow-path SHA-256 fallback must reject a file whose
+        // bytes have actually changed, even if the cache key, aux_hash, and
+        // input set are otherwise identical.
+        use crate::cache::composite::{CompositeQuery, CompositeRecord};
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"original");
+        let out = fx.touch_output("out.img");
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "k".into(),
+                inputs: vec![a.clone()],
+                aux_hash: Some([7; 32]),
+                output_path: out.clone(),
+            })
+            .expect("mark");
+
+        // Overwrite with different bytes AND change size so the fast path
+        // definitely disagrees and we exercise the slow-path detecting a
+        // genuine content change.
+        std::fs::write(&a, b"different bytes here").expect("rewrite");
+
+        let inputs = vec![a];
+        let q = CompositeQuery {
+            key: "k",
+            inputs: &inputs,
+            aux_hash: Some([7; 32]),
             output_path: &out,
         };
         assert!(!cache.is_composite_fresh(&q));
