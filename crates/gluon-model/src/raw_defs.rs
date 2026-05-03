@@ -85,6 +85,44 @@ impl Named for RawProfileDef {
     }
 }
 
+/// Raw form of [`crate::build_model::GroupDef`]: target carried as
+/// the name string (or the `"host"` sentinel). Intern resolves to
+/// [`crate::build_model::TargetSpec`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawGroupDef {
+    pub name: String,
+    pub target: String,
+    pub default_edition: String,
+    pub crates: Vec<String>,
+    pub shared_flags: Vec<String>,
+    pub is_project: bool,
+    pub config: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sysroot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Default for RawGroupDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            target: "host".into(),
+            default_edition: "2024".into(),
+            crates: Vec::new(),
+            shared_flags: Vec::new(),
+            is_project: true,
+            config: false,
+            no_sysroot: false,
+            span: None,
+        }
+    }
+}
+
+impl Named for RawGroupDef {
+    fn name(&self) -> &str { &self.name }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +173,24 @@ mod tests {
         assert_eq!(de.boot_binary.as_deref(), Some("kernel"));
         assert_eq!(de.opt_level, Some(0));
         assert_eq!(de.qemu_memory, Some(512));
+    }
+
+    #[test]
+    fn raw_group_def_round_trips_through_json() {
+        let g = RawGroupDef {
+            name: "kernel".into(),
+            target: "x86_64".into(),
+            default_edition: "2024".into(),
+            crates: vec!["main".into()],
+            shared_flags: vec!["-O".into()],
+            is_project: true,
+            config: false,
+            no_sysroot: false,
+            span: None,
+        };
+        let json = serde_json::to_string(&g).unwrap();
+        let de: RawGroupDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.target, "x86_64");
+        assert_eq!(de.crates, vec!["main".to_string()]);
     }
 }
