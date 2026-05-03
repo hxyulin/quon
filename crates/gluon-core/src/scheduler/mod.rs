@@ -14,21 +14,19 @@
 //! worker pool, and dispatches each node to the appropriate helper.
 
 pub mod dag;
-// Task 2 wires these into PipelineDispatcher; until then the items
-// are referenced only by their unit tests. The allow lifts in Task 2.
-#[allow(dead_code)]
 mod snapshot;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
 pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
 
-use crate::compile::{ArtifactMap, CompileCrateInput, CompileCtx, compile_crate};
+use crate::compile::{CompileCrateInput, CompileCtx, compile_crate};
 use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, EspDef, Handle, ImageDef, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, ResolvedConfig};
+use snapshot::ArtifactsSnapshot;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -50,22 +48,13 @@ struct PipelineDispatcher<'a> {
     resolved: &'a ResolvedConfig,
     rules: &'a RuleRegistry,
     dag: &'a DagType,
-    /// Sysroot output paths keyed by target handle. Written by `Sysroot`
-    /// nodes; read by `ConfigCrate` and `Crate` nodes. The DAG guarantees
-    /// a sysroot is complete before any node that needs it runs.
-    sysroots: &'a Mutex<BTreeMap<Handle<TargetDef>, PathBuf>>,
-    /// Built crate artifact paths. Written by `ConfigCrate` and `Crate`
-    /// nodes; read (snapshotted) by each `Crate` node before compiling.
-    artifacts: &'a Mutex<ArtifactMap>,
-    /// Assembled ESP directories keyed by `EspDef` handle. Written by
-    /// `Esp` nodes; read by `run::entry` after the build completes to
-    /// auto-wire the ESP into QEMU's `-drive fat:rw:` flag.
-    esps: &'a Mutex<BTreeMap<Handle<EspDef>, PathBuf>>,
-    /// Built disk-image paths keyed by `ImageDef` handle. Written by
-    /// `Image` nodes; consumed by `Image` source resolution (when an
-    /// image references another via `${image:name}`) and by
-    /// `run::entry` to surface the path to QEMU.
-    images: &'a Mutex<BTreeMap<Handle<ImageDef>, PathBuf>>,
+    /// Single canonical-state mutex. Stage 8 collapses the four per-map
+    /// mutexes (sysroots, artifacts, esps, images) into this bundle so
+    /// per-node helpers see only `&ArtifactsSnapshot` clones — never
+    /// shared mutable state. The dispatch arms are the sole mutation
+    /// point: lock once to read-clone before the helper, lock once to
+    /// merge the helper's `NodeOutput` afterwards.
+    state: &'a Mutex<ArtifactsSnapshot>,
     /// Lock-free counter for nodes that ran rustc to completion.
     /// `Rule` nodes are not counted (they are not cacheable in MVP-M).
     built: &'a AtomicUsize,
@@ -111,7 +100,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 let (path, was_cached) = crate::sysroot::ensure_sysroot_for_node(
                     self.ctx, self.model, target, stdout, stderr,
                 )?;
-                lock_or_poison(self.sysroots, "sysroots")?.insert(target, path);
+                lock_or_poison(self.state, "state")?
+                    .sysroots
+                    .insert(target, path);
                 self.record(was_cached);
                 Ok(())
             }
@@ -124,8 +115,8 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // The DAG wires ConfigCrate(target) → Sysroot(target) so
                 // this lookup must always succeed.
                 let sysroot_dir = {
-                    let map = lock_or_poison(self.sysroots, "sysroots")?;
-                    map.get(&target).cloned().ok_or_else(|| {
+                    let guard = lock_or_poison(self.state, "state")?;
+                    guard.sysroots.get(&target).cloned().ok_or_else(|| {
                         Error::Compile(
                             "scheduler: ConfigCrate ran before its Sysroot dependency; \
                                  DAG edge missing?"
@@ -142,7 +133,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     stdout,
                     stderr,
                 )?;
-                lock_or_poison(self.artifacts, "artifacts")?.set_config_crate(target, rlib_path);
+                lock_or_poison(self.state, "state")?
+                    .artifacts
+                    .set_config_crate(target, rlib_path);
                 self.record(was_cached);
                 Ok(())
             }
@@ -183,14 +176,20 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
                     None
                 } else {
-                    let map = lock_or_poison(self.sysroots, "sysroots")?;
-                    Some(map.get(&crate_ref.target).cloned().ok_or_else(|| {
-                        Error::Compile(format!(
-                            "scheduler: Crate({:?}) ran before its Sysroot({:?}) dependency \
-                             completed; DAG edge missing?",
-                            crate_handle, crate_ref.target,
-                        ))
-                    })?)
+                    let guard = lock_or_poison(self.state, "state")?;
+                    Some(
+                        guard
+                            .sysroots
+                            .get(&crate_ref.target)
+                            .cloned()
+                            .ok_or_else(|| {
+                                Error::Compile(format!(
+                                    "scheduler: Crate({:?}) ran before its Sysroot({:?}) \
+                                     dependency completed; DAG edge missing?",
+                                    crate_handle, crate_ref.target,
+                                ))
+                            })?,
+                    )
                 };
 
                 // Snapshot the ArtifactMap before releasing the lock.
@@ -201,7 +200,8 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // would serialise all parallel compilations on this single
                 // mutex. Cloning a BTreeMap of a few dozen entries is cheap
                 // compared to a rustc invocation.
-                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                let artifacts_snapshot =
+                    lock_or_poison(self.state, "state")?.artifacts.clone();
 
                 let (out_path, was_cached) = compile_crate(
                     self.ctx,
@@ -215,7 +215,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     stderr,
                 )?;
 
-                lock_or_poison(self.artifacts, "artifacts")?.insert(crate_handle, out_path);
+                lock_or_poison(self.state, "state")?
+                    .artifacts
+                    .insert(crate_handle, out_path);
                 self.record(was_cached);
                 // Crate compiles never write to stdout — rustc emits everything
                 // to stderr, which the worker pool flushes per-job.
@@ -232,7 +234,8 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // source-crate handles to their artifact paths without
                 // holding the lock across the filesystem copy. Pattern
                 // mirrors the `Crate` arm above.
-                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                let artifacts_snapshot =
+                    lock_or_poison(self.state, "state")?.artifacts.clone();
                 let (path, was_cached) = crate::generated::esp::ensure_esp(
                     self.ctx,
                     self.model,
@@ -241,7 +244,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     &artifacts_snapshot,
                     stdout,
                 )?;
-                lock_or_poison(self.esps, "esps")?.insert(esp_handle, path);
+                lock_or_poison(self.state, "state")?
+                    .esps
+                    .insert(esp_handle, path);
                 self.record(was_cached);
                 let _ = stderr;
                 Ok(())
@@ -254,9 +259,12 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // Snapshot artifacts and esp_dirs so the helper can
                 // resolve sources without holding the locks across the
                 // FAT format + write loop (which can take 100s of ms
-                // for large images).
-                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
-                let esp_dirs_snapshot = lock_or_poison(self.esps, "esps")?.clone();
+                // for large images). One lock acquisition reads both
+                // since they live in the same `ArtifactsSnapshot`.
+                let (artifacts_snapshot, esp_dirs_snapshot) = {
+                    let guard = lock_or_poison(self.state, "state")?;
+                    (guard.artifacts.clone(), guard.esps.clone())
+                };
                 let ictx = ImageCtx {
                     ctx: self.ctx,
                     model: self.model,
@@ -265,7 +273,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     esp_dirs: &esp_dirs_snapshot,
                 };
                 let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
-                lock_or_poison(self.images, "images")?.insert(image_handle, path);
+                lock_or_poison(self.state, "state")?
+                    .images
+                    .insert(image_handle, path);
                 self.record(was_cached);
                 let _ = stderr;
                 Ok(())
@@ -282,14 +292,14 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                         rule_handle
                     ))
                 })?;
-                // Snapshot the artifact map so rules can reference compiled
-                // outputs via ${artifact:<crate_name>}. Same lock-and-clone
-                // pattern used by Esp nodes.
-                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
-                // Snapshot image_paths too so `${image:name}` substitution
-                // sees the up-to-date set without holding the lock for
-                // the rule's runtime.
-                let images_snapshot = lock_or_poison(self.images, "images")?.clone();
+                // Snapshot artifacts (for `${artifact:<crate>}`) and
+                // images (for `${image:<name>}`) so substitution sees a
+                // stable view without holding the lock across the
+                // rule's runtime. One lock acquisition for both.
+                let (artifacts_snapshot, images_snapshot) = {
+                    let guard = lock_or_poison(self.state, "state")?;
+                    (guard.artifacts.clone(), guard.images.clone())
+                };
                 let rule_ctx = RuleCtx {
                     layout: &self.ctx.layout,
                     resolved: self.resolved,
@@ -309,7 +319,8 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // runner crate's output and any crate_in inputs as
                 // already-produced paths. Same lock-and-clone pattern
                 // used by Crate / Rule / Image / Esp dispatch.
-                let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
+                let artifacts_snapshot =
+                    lock_or_poison(self.state, "state")?.artifacts.clone();
                 let (out_path, was_cached) = crate::compile::build_step::execute_build_step(
                     self.ctx,
                     self.model,
@@ -319,7 +330,9 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                     stdout,
                     stderr,
                 )?;
-                lock_or_poison(self.artifacts, "artifacts")?.set_build_step(handle, out_path);
+                lock_or_poison(self.state, "state")?
+                    .artifacts
+                    .set_build_step(handle, out_path);
                 self.record(was_cached);
                 Ok(())
             }
@@ -360,10 +373,7 @@ pub fn execute_pipeline(
 ) -> Result<BuildSummary> {
     let dag = build_dag(resolved, model)?;
 
-    let sysroots: Mutex<BTreeMap<Handle<TargetDef>, PathBuf>> = Mutex::new(BTreeMap::new());
-    let artifacts: Mutex<ArtifactMap> = Mutex::new(ArtifactMap::new());
-    let esps: Mutex<BTreeMap<Handle<EspDef>, PathBuf>> = Mutex::new(BTreeMap::new());
-    let images: Mutex<BTreeMap<Handle<ImageDef>, PathBuf>> = Mutex::new(BTreeMap::new());
+    let state: Mutex<ArtifactsSnapshot> = Mutex::new(ArtifactsSnapshot::default());
     // `Relaxed` is sufficient: we only need atomicity, not ordering
     // relative to other memory operations. The counters are read once
     // after `pool.execute` returns (a happens-before point already
@@ -377,10 +387,7 @@ pub fn execute_pipeline(
         resolved,
         rules,
         dag: &dag,
-        sysroots: &sysroots,
-        artifacts: &artifacts,
-        esps: &esps,
-        images: &images,
+        state: &state,
         built: &built,
         cached: &cached,
     };
@@ -388,19 +395,13 @@ pub fn execute_pipeline(
     let pool = WorkerPool::new(workers);
     pool.execute(&dag, &dispatcher, stdout, stderr)?;
 
-    // Drain the esps, images, and build-step output maps into the
-    // summary. The mutexes are uncontested at this point (the worker
-    // pool has joined), so `into_inner` is safe.
-    let esp_dirs = esps
+    // Drain the snapshot into the summary. The mutex is uncontested
+    // at this point (worker pool has joined), so `into_inner` is safe.
+    let final_state = state
         .into_inner()
-        .map_err(|_| Error::Config("scheduler: esps mutex poisoned".into()))?;
-    let image_paths = images
-        .into_inner()
-        .map_err(|_| Error::Config("scheduler: images mutex poisoned".into()))?;
-    let final_artifacts = artifacts
-        .into_inner()
-        .map_err(|_| Error::Config("scheduler: artifacts mutex poisoned".into()))?;
-    let build_step_paths: BTreeMap<_, _> = final_artifacts
+        .map_err(|_| Error::Config("scheduler: state mutex poisoned".into()))?;
+    let build_step_paths: BTreeMap<_, _> = final_state
+        .artifacts
         .build_steps_iter()
         .map(|(h, p)| (h, p.to_path_buf()))
         .collect();
@@ -408,8 +409,8 @@ pub fn execute_pipeline(
     Ok(BuildSummary {
         built: built.load(Ordering::Relaxed),
         cached: cached.load(Ordering::Relaxed),
-        esp_dirs,
-        image_paths,
+        esp_dirs: final_state.esps,
+        image_paths: final_state.images,
         build_step_paths,
     })
 }

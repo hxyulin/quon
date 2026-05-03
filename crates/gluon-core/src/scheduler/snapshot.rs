@@ -32,6 +32,8 @@ pub(crate) struct ArtifactsSnapshot {
 /// dispatch arm folds this into the canonical `Mutex<ArtifactsSnapshot>`
 /// after the helper returns. Each variant carries `was_cached` so the
 /// `built`/`cached` counters can be incremented at merge time.
+// Allow lifts in Task 3 once the first dispatch_* helper consumes it.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum NodeOutput {
     Sysroot {
@@ -76,6 +78,8 @@ impl ArtifactsSnapshot {
     /// — never by per-node helpers. Returns `was_cached` for cacheable
     /// variants so the caller can pick the right counter; `None` for
     /// `Rule` (uncounted in MVP-M).
+    // Allow lifts in Task 3 once the first dispatch_* arm calls merge().
+    #[allow(dead_code)]
     pub(crate) fn merge(&mut self, output: NodeOutput) -> Option<bool> {
         match output {
             NodeOutput::Sysroot { target, path, was_cached } => {
