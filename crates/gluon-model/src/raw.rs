@@ -1,27 +1,56 @@
-use crate::build_model::BuildModel;
+use crate::build_model::{
+    ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef,
+    TargetDef,
+};
+use crate::handle::Arena;
+use crate::kconfig::{ConfigOptionDef, PresetDef};
+use crate::raw_defs::{
+    RawBootloaderDef, RawBuildStepDef, RawCrateDef, RawEspDef, RawGroupDef,
+    RawPipelineDef, RawProfileDef,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// Pre-intern build model: the shape `gluon-config` emits.
+/// Pre-intern build model: the shape `gluon-config` emits and
+/// `gluon-core::script_runner` deserialises from `gluon.rs` stdout.
 ///
-/// Stage 1 wraps a `BuildModel` whose `*_handle` fields are uniformly
-/// `None`. Stage 4 will split this into a structurally distinct shape
-/// (no parallel string fields) per spec D4.1; the public API stays the
-/// same — `intern()` produces a `BuildModel` either way.
+/// Cross-references live as name strings inside the [`raw_defs`]
+/// types. [`crate::intern::intern`] is a total transform that
+/// resolves those strings against the relevant arenas, producing a
+/// [`crate::build_model::BuildModel`] with handles populated.
+///
+/// Types that hold no cross-references are reused verbatim: targets,
+/// rules, external deps, images, presets, project, qemu, config
+/// options. Singleton bootloader/qemu fields stay non-`Option` until
+/// Phase G makes them genuine `Option<...>` and drops the sidecar
+/// `*_was_set` flags.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RawBuildModel {
-    #[serde(flatten)]
-    pub model: BuildModel,
-    /// Paths recorded by `Config::include_kconfig`. The host-side
-    /// `script_runner` parses these *before* intern and merges loaded
-    /// options/presets into `model.config_options` / `model.presets`.
-    /// Not part of the final `BuildModel`.
+    pub project: Option<ProjectDef>,
+    pub targets: Arena<TargetDef>,
+    pub profiles: Arena<RawProfileDef>,
+    pub groups: Arena<RawGroupDef>,
+    pub crates: Arena<RawCrateDef>,
+    pub rules: Arena<RuleDef>,
+    pub pipelines: Arena<RawPipelineDef>,
+    pub external_deps: Arena<ExternalDepDef>,
+    #[serde(default)]
+    pub esps: Arena<RawEspDef>,
+    pub config_options: BTreeMap<String, ConfigOptionDef>,
+    pub presets: BTreeMap<String, PresetDef>,
+    #[serde(default)]
+    pub bootloader: RawBootloaderDef,
+    #[serde(default)]
+    pub images: Arena<ImageDef>,
+    #[serde(default)]
+    pub build_steps: Arena<RawBuildStepDef>,
+    #[serde(default)]
+    pub qemu: QemuDef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
-    /// Stage-1 sidecar. `qemu(...)` and `bootloader(...)` are singletons;
-    /// today's `BuildModel.qemu` / `.bootloader` are non-`Option` so we
-    /// track "user actually called this" out-of-band. Stage 4 (D4.3)
-    /// makes the model fields `Option<...>` and removes these flags.
+    /// Singleton-set sidecar — dies in Phase G when `qemu` becomes
+    /// `Option<QemuDef>`.
     #[serde(skip)]
     pub qemu_was_set: bool,
     #[serde(skip)]
@@ -31,37 +60,51 @@ pub struct RawBuildModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ProjectDef;
 
     #[test]
     fn raw_build_model_round_trips_empty() {
         let raw = RawBuildModel::default();
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert!(de.model.project.is_none());
+        assert!(de.project.is_none());
+        assert!(de.profiles.is_empty());
         assert!(de.kconfig_includes.is_empty());
     }
 
     #[test]
-    fn raw_build_model_round_trips_with_project_and_kconfig_path() {
+    fn raw_build_model_round_trips_with_data() {
         let mut raw = RawBuildModel::default();
-        raw.model.project = Some(ProjectDef {
+        raw.project = Some(ProjectDef {
             name: "demo".into(),
             version: "0.1.0".into(),
             ..Default::default()
         });
+        raw.profiles.insert(
+            "dev".into(),
+            RawProfileDef {
+                name: "dev".into(),
+                target: Some("x86_64".into()),
+                ..Default::default()
+            },
+        );
         raw.kconfig_includes.push(PathBuf::from("./options.kconfig"));
-        raw.qemu_was_set = true;
-        raw.bootloader_was_set = true;
 
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert_eq!(de.model.project.as_ref().unwrap().name, "demo");
-        assert_eq!(de.kconfig_includes, vec![PathBuf::from("./options.kconfig")]);
-        // Sanity-check the #[serde(skip)] contract: sidecar flags must NOT
-        // round-trip — even if `raw` has them set true before serialisation,
-        // the deserialised value sees them as false (the bool default).
-        assert!(!de.qemu_was_set, "qemu_was_set must be skipped on deserialize");
-        assert!(!de.bootloader_was_set, "bootloader_was_set must be skipped on deserialize");
+        assert_eq!(de.project.as_ref().unwrap().name, "demo");
+        let h = de.profiles.lookup("dev").expect("dev profile");
+        assert_eq!(de.profiles.get(h).unwrap().target.as_deref(), Some("x86_64"));
+        assert_eq!(de.kconfig_includes.len(), 1);
+    }
+
+    #[test]
+    fn sidecar_flags_skip_serde() {
+        let mut raw = RawBuildModel::default();
+        raw.qemu_was_set = true;
+        raw.bootloader_was_set = true;
+        let json = serde_json::to_string(&raw).expect("serde");
+        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
+        assert!(!de.qemu_was_set);
+        assert!(!de.bootloader_was_set);
     }
 }

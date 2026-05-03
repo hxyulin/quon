@@ -1,31 +1,26 @@
 //! Boundary between `RawBuildModel` (gluon-config emits) and
 //! `BuildModel` (gluon-core consumes).
 //!
-//! The actual cross-reference resolution is duplicated from
-//! `gluon-core/src/engine/intern.rs` (Rhai path) and lives here to keep
-//! gluon-config's emit → gluon-core's consume boundary serde-only.
-//! Stage 3 deletes the Rhai engine and this becomes the sole intern.
-//!
-//! # Borrow discipline
-//!
-//! Rust's borrow checker won't let us mutate an arena entry while holding
-//! a borrow on the same arena (`model.profiles.get_mut(h).inherits_handle =
-//! model.profiles.lookup(name)` is two simultaneous borrows). Each helper
-//! therefore runs in two passes: the first collects `(handle, resolved)`
-//! tuples into a scratch `Vec`, the second walks that `Vec` and performs
-//! the mutations. The scratch vectors are short-lived and bounded by the
-//! size of the arena being walked.
+//! After Phase C of Stage 4, intern is a total transform: it consumes
+//! a [`RawBuildModel`] (cross-refs as name strings) and produces a
+//! [`BuildModel`] (cross-refs as handles, name strings still present
+//! for the parallel-pair phase). Phase D removes the redundant name
+//! fields from BuildModel; Phase F moves config_options to an arena;
+//! Phase G makes qemu/bootloader Option.
 
 use crate::build_model::{
-    BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, GroupDef, PipelineDef, ProfileDef,
-    TargetDef,
+    BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, EspDef,
+    EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef,
 };
-use crate::handle::Handle;
+use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
+use crate::raw_defs::{
+    RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef, RawEspDef,
+    RawGroupDef, RawPipelineDef, RawProfileDef,
+};
 use crate::source::SourceSpan;
+use std::collections::BTreeMap;
 
-/// Diagnostic produced by `intern`. `gluon-core` translates these to its
-/// own `Diagnostic` type at the `script_runner` boundary.
 #[derive(Debug, Clone)]
 pub struct InternDiagnostic {
     pub message: String,
@@ -36,408 +31,419 @@ impl InternDiagnostic {
     pub fn error(message: impl Into<String>) -> Self {
         Self { message: message.into(), span: None }
     }
-    pub fn with_span(mut self, span: SourceSpan) -> Self {
-        self.span = Some(span);
-        self
-    }
+    pub fn with_span(mut self, span: SourceSpan) -> Self { self.span = Some(span); self }
     pub fn with_optional_span(mut self, span: Option<SourceSpan>) -> Self {
-        if let Some(s) = span {
-            self.span = Some(s);
-        }
+        if let Some(s) = span { self.span = Some(s); }
         self
     }
 }
 
-/// Resolve every cross-reference in `raw` and produce a fully-populated
-/// `BuildModel`. Dangling references accumulate into the returned
-/// `Vec<InternDiagnostic>`; the model is still returned (with `None`
-/// handles for the unresolved slots) so callers can choose whether to
-/// surface partial state or fail.
 pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
-    let mut model = raw.model;
     let mut diags = Vec::new();
-    intern_profiles(&mut model, &mut diags);
-    intern_groups(&mut model, &mut diags);
-    intern_crates(&mut model, &mut diags);
-    intern_pipelines(&mut model, &mut diags);
-    intern_esps(&mut model, &mut diags);
-    intern_build_steps(&mut model, &mut diags);
+    let mut model = BuildModel::default();
+
+    // Pass 1 — copy types that need no resolution.
+    model.project = raw.project;
+    model.targets = raw.targets;
+    model.rules = raw.rules;
+    model.external_deps = raw.external_deps;
+    model.images = raw.images;
+    model.config_options = raw.config_options;
+    model.presets = raw.presets;
+    model.qemu = raw.qemu;
+
+    // Pass 2 — resolve arenas in dependency order:
+    //   targets → groups → crates → profiles → bootloader → esps → build_steps → pipelines.
+    intern_groups(&raw.groups, &model.targets, &mut model.groups, &mut diags);
+    intern_crates(
+        &raw.crates,
+        &model.targets,
+        &model.groups,
+        &model.external_deps,
+        &mut model.crates,
+        &mut diags,
+    );
+    intern_profiles(&raw.profiles, &model.targets, &model.crates, &mut model.profiles, &mut diags);
+    model.bootloader = intern_bootloader(&raw.bootloader, &model.crates, &mut diags);
+    intern_esps(&raw.esps, &model.crates, &mut model.esps, &mut diags);
+    intern_build_steps(&raw.build_steps, &model.crates, &mut model.build_steps, &mut diags);
+    intern_pipelines(&raw.pipelines, &model.groups, &mut model.pipelines, &mut diags);
+
     (model, diags)
 }
 
-/// Per-profile resolution result. Each inner `Option` records whether the
-/// profile had a string ref in that slot at all; the inner `Option<Handle>`
-/// is the resolved handle (`None` if the lookup failed — the diagnostic has
-/// already been pushed in that case).
-type ProfileResolution = (
-    Handle<ProfileDef>,
-    Option<Option<Handle<ProfileDef>>>,
-    Option<Option<Handle<TargetDef>>>,
-    Option<Option<Handle<CrateDef>>>,
-);
+// One-helper-per-arena. Each helper iterates the raw arena, builds
+// the post-intern Def by looking up names in the dependency arenas,
+// and inserts into the destination arena. Names not found push a
+// diagnostic and leave the corresponding handle field `None` in
+// BuildModel (which is what `validate.rs` consumed in the old
+// engine path).
 
-fn intern_profiles(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    let mut updates: Vec<ProfileResolution> = Vec::with_capacity(model.profiles.len());
-
-    for (handle, profile) in model.profiles.iter() {
-        let inherits = profile.inherits.as_ref().map(|name| {
-            let h = model.profiles.lookup(name);
-            if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "profile '{}' inherits from unknown profile '{}'",
-                        profile.name, name
-                    ))
-                    .with_optional_span(profile.span.clone()),
-                );
-            }
-            h
-        });
-        let target = profile.target.as_ref().map(|name| {
-            let h = model.targets.lookup(name);
-            if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "profile '{}' references unknown target '{}'",
-                        profile.name, name
-                    ))
-                    .with_optional_span(profile.span.clone()),
-                );
-            }
-            h
-        });
-        let boot_binary = profile.boot_binary.as_ref().map(|name| {
-            let h = model.crates.lookup(name);
-            if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "profile '{}' references unknown boot binary crate '{}'",
-                        profile.name, name
-                    ))
-                    .with_optional_span(profile.span.clone()),
-                );
-            }
-            h
-        });
-        updates.push((handle, inherits, target, boot_binary));
-    }
-
-    for (handle, inherits, target, boot_binary) in updates {
-        if let Some(profile) = model.profiles.get_mut(handle) {
-            if let Some(v) = inherits {
-                profile.inherits_handle = v;
-            }
-            if let Some(v) = target {
-                profile.target_handle = v;
-            }
-            if let Some(v) = boot_binary {
-                profile.boot_binary_handle = v;
-            }
-        }
-    }
-}
-
-fn intern_groups(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    // Groups always carry a mandatory `target: String`. The literal string
-    // "host" is a sentinel meaning "use the host triple" and is not expected
-    // to be in `model.targets`; leaving its handle `None` is correct.
-    let mut updates: Vec<(Handle<GroupDef>, Option<Handle<TargetDef>>)> =
-        Vec::with_capacity(model.groups.len());
-
-    for (handle, group) in model.groups.iter() {
-        if group.target == "host" {
-            updates.push((handle, None));
-            continue;
-        }
-        let h = model.targets.lookup(&group.target);
-        if h.is_none() {
-            diags.push(
-                InternDiagnostic::error(format!(
-                    "group '{}' references unknown target '{}'",
-                    group.name, group.target
-                ))
-                .with_optional_span(group.span.clone()),
-            );
-        }
-        updates.push((handle, h));
-    }
-
-    for (handle, target) in updates {
-        if let Some(group) = model.groups.get_mut(handle) {
-            group.target_handle = target;
-        }
-    }
-}
-
-/// Per-crate resolution result.
-///
-/// `deps` is an ordered list of `(dep_key, resolved_handle)` matching the
-/// iteration order of `BTreeMap::iter` on the original `crate.deps`. Only
-/// project-crate resolutions land as `Some`; vendored external deps resolve
-/// to `None` with no diagnostic (that's not an error).
-type CrateResolution = (
-    Handle<CrateDef>,
-    Option<Handle<GroupDef>>,
-    Option<Option<Handle<TargetDef>>>,
-    Vec<(String, Option<Handle<CrateDef>>)>,
-    Vec<(String, Option<Handle<CrateDef>>)>,
-);
-
-fn intern_crates(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    let mut updates: Vec<CrateResolution> = Vec::with_capacity(model.crates.len());
-
-    for (handle, krate) in model.crates.iter() {
-        // Group ref is mandatory.
-        let group_h = model.groups.lookup(&krate.group);
-        if group_h.is_none() {
-            diags.push(
-                InternDiagnostic::error(format!(
-                    "crate '{}' references unknown group '{}'",
-                    krate.name, krate.group
-                ))
-                .with_optional_span(krate.span.clone()),
-            );
-        }
-
-        // Target ref is optional and uses the "host" sentinel convention.
-        let target_h = if krate.target.is_empty() || krate.target == "host" {
+fn intern_groups(
+    raw: &Arena<RawGroupDef>,
+    targets: &Arena<crate::build_model::TargetDef>,
+    out: &mut Arena<GroupDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, g) in raw.iter() {
+        let target_handle = if g.target == "host" {
             None
         } else {
-            let h = model.targets.lookup(&krate.target);
+            let h = targets.lookup(&g.target);
             if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "crate '{}' references unknown target '{}'",
-                        krate.name, krate.target
-                    ))
-                    .with_optional_span(krate.span.clone()),
-                );
+                diags.push(InternDiagnostic::error(format!(
+                    "group '{}' references unknown target '{}'",
+                    g.name, g.target
+                )).with_optional_span(g.span.clone()));
             }
-            Some(h)
+            h
         };
-
-        let deps = resolve_deps(model, krate, &krate.deps, diags, "deps");
-        let dev_deps = resolve_deps(model, krate, &krate.dev_deps, diags, "dev-deps");
-
-        updates.push((handle, group_h, target_h, deps, dev_deps));
+        let _ = out.insert(
+            g.name.clone(),
+            GroupDef {
+                name: g.name.clone(),
+                target: g.target.clone(),
+                target_handle,
+                default_edition: g.default_edition.clone(),
+                crates: g.crates.clone(),
+                shared_flags: g.shared_flags.clone(),
+                is_project: g.is_project,
+                config: g.config,
+                no_sysroot: g.no_sysroot,
+                span: g.span.clone(),
+            },
+        );
     }
+}
 
-    for (handle, group_h, target_h, deps, dev_deps) in updates {
-        if let Some(krate) = model.crates.get_mut(handle) {
-            krate.group_handle = group_h;
-            if let Some(v) = target_h {
-                krate.target_handle = v;
+fn intern_crates(
+    raw: &Arena<RawCrateDef>,
+    targets: &Arena<crate::build_model::TargetDef>,
+    groups: &Arena<GroupDef>,
+    external_deps: &Arena<crate::build_model::ExternalDepDef>,
+    out: &mut Arena<CrateDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    // Two passes: insert all crates first (so deps can resolve to
+    // siblings), then re-walk to populate `deps`/`dev_deps` handles.
+    for (_, c) in raw.iter() {
+        let group_handle = groups.lookup(&c.group);
+        if group_handle.is_none() {
+            diags.push(InternDiagnostic::error(format!(
+                "crate '{}' references unknown group '{}'",
+                c.name, c.group
+            )).with_optional_span(c.span.clone()));
+        }
+        let target_handle = if c.target.is_empty() || c.target == "host" {
+            None
+        } else {
+            let h = targets.lookup(&c.target);
+            if h.is_none() {
+                diags.push(InternDiagnostic::error(format!(
+                    "crate '{}' references unknown target '{}'",
+                    c.name, c.target
+                )).with_optional_span(c.span.clone()));
             }
-            for (key, resolved) in deps {
-                if let Some(dep) = krate.deps.get_mut(&key) {
-                    dep.crate_handle = resolved;
-                }
-            }
-            for (key, resolved) in dev_deps {
-                if let Some(dep) = krate.dev_deps.get_mut(&key) {
-                    dep.crate_handle = resolved;
-                }
-            }
+            h
+        };
+        let _ = out.insert(
+            c.name.clone(),
+            CrateDef {
+                name: c.name.clone(),
+                path: c.path.clone(),
+                edition: c.edition.clone(),
+                crate_type: c.crate_type,
+                target: c.target.clone(),
+                target_handle,
+                deps: BTreeMap::new(),       // filled in pass 2
+                dev_deps: BTreeMap::new(),
+                features: c.features.clone(),
+                root: c.root.clone(),
+                linker_script: c.linker_script.clone(),
+                group: c.group.clone(),
+                group_handle,
+                is_project_crate: c.is_project_crate,
+                cfg_flags: c.cfg_flags.clone(),
+                rustc_flags: c.rustc_flags.clone(),
+                requires_config: c.requires_config.clone(),
+                artifact_deps: c.artifact_deps.clone(),
+                artifact_env: c.artifact_env.clone(),
+                span: c.span.clone(),
+            },
+        );
+    }
+    // Pass 2: resolve deps now that all crates exist in `out`.
+    let snapshot: Vec<(String, RawCrateDef)> = raw.iter().map(|(_, c)| (c.name.clone(), c.clone())).collect();
+    for (name, c) in snapshot {
+        let h = out.lookup(&name).expect("inserted in pass 1");
+        let deps = resolve_dep_map(&c.deps, &c.name, "deps", out, external_deps, diags, c.span.clone());
+        let dev_deps = resolve_dep_map(&c.dev_deps, &c.name, "dev-deps", out, external_deps, diags, c.span.clone());
+        if let Some(slot) = out.get_mut(h) {
+            slot.deps = deps;
+            slot.dev_deps = dev_deps;
         }
     }
 }
 
-fn resolve_deps(
-    model: &BuildModel,
-    krate: &CrateDef,
-    deps: &std::collections::BTreeMap<String, crate::build_model::DepDef>,
-    diags: &mut Vec<InternDiagnostic>,
+fn resolve_dep_map(
+    raw: &BTreeMap<String, RawDepDef>,
+    crate_name: &str,
     kind: &str,
-) -> Vec<(String, Option<Handle<CrateDef>>)> {
-    let mut out = Vec::with_capacity(deps.len());
-    for (extern_name, dep) in deps.iter() {
-        // 1. Project-crate lookup.
-        if let Some(h) = model.crates.lookup(&dep.crate_name) {
-            out.push((extern_name.clone(), Some(h)));
-            continue;
-        }
-        // 2. External dep fallback — no handle populated, and no diagnostic.
-        if model.external_deps.lookup(&dep.crate_name).is_some() {
-            out.push((extern_name.clone(), None));
-            continue;
-        }
-        // 3. Dangling.
-        diags.push(
-            InternDiagnostic::error(format!(
+    crates: &Arena<CrateDef>,
+    external_deps: &Arena<crate::build_model::ExternalDepDef>,
+    diags: &mut Vec<InternDiagnostic>,
+    span: Option<SourceSpan>,
+) -> BTreeMap<String, DepDef> {
+    let mut out = BTreeMap::new();
+    for (extern_name, d) in raw.iter() {
+        let crate_handle = crates.lookup(&d.crate_name);
+        if crate_handle.is_none() && external_deps.lookup(&d.crate_name).is_none() {
+            diags.push(InternDiagnostic::error(format!(
                 "dep '{}' in crate '{}' ({}) references unknown crate '{}'",
-                extern_name, krate.name, kind, dep.crate_name
-            ))
-            .with_optional_span(dep.span.clone().or_else(|| krate.span.clone())),
+                extern_name, crate_name, kind, d.crate_name
+            )).with_optional_span(d.span.clone().or_else(|| span.clone())));
+        }
+        out.insert(
+            extern_name.clone(),
+            DepDef {
+                crate_name: d.crate_name.clone(),
+                crate_handle,
+                features: d.features.clone(),
+                version: d.version.clone(),
+                optional: d.optional,
+                default_features: d.default_features,
+                span: d.span.clone(),
+            },
         );
-        out.push((extern_name.clone(), None));
     }
     out
 }
 
-/// Outer per-pipeline, inner per-stage, innermost per-input resolved handle.
-type PipelineInputResolution = (Handle<PipelineDef>, Vec<Vec<Option<Handle<GroupDef>>>>);
-
-fn intern_pipelines(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    // For each pipeline, build a parallel Vec<Vec<Option<Handle>>>: outer
-    // per stage, inner per input.
-    let mut updates: Vec<PipelineInputResolution> = Vec::with_capacity(model.pipelines.len());
-
-    for (handle, pipeline) in model.pipelines.iter() {
-        let mut per_stage = Vec::with_capacity(pipeline.stages.len());
-        for stage in &pipeline.stages {
-            let mut resolved = Vec::with_capacity(stage.inputs.len());
-            for input in &stage.inputs {
-                let h = model.groups.lookup(input);
-                if h.is_none() {
-                    diags.push(InternDiagnostic::error(format!(
-                        "pipeline '{}' stage '{}' references unknown group '{}'",
-                        pipeline.name, stage.name, input
-                    )));
-                }
-                resolved.push(h);
-            }
-            per_stage.push(resolved);
-        }
-        updates.push((handle, per_stage));
-    }
-
-    for (handle, per_stage) in updates {
-        if let Some(pipeline) = model.pipelines.get_mut(handle) {
-            for (stage, resolved) in pipeline.stages.iter_mut().zip(per_stage) {
-                stage.inputs_handles = resolved;
-            }
-        }
-    }
-}
-
-/// Resolve `EspEntry::source_crate` names to crate handles. Dangling
-/// references push a diagnostic and leave the handle `None` — the DAG
-/// builder will then skip that entry, so a missing crate name is
-/// non-fatal (diagnostic-only) at this layer.
-fn intern_esps(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    type EspResolution = (Handle<EspDef>, Vec<Option<Handle<CrateDef>>>);
-    let mut updates: Vec<EspResolution> = Vec::with_capacity(model.esps.len());
-
-    for (handle, esp) in model.esps.iter() {
-        let mut resolved = Vec::with_capacity(esp.entries.len());
-        for entry in &esp.entries {
-            let h = model.crates.lookup(&entry.source_crate);
+fn intern_profiles(
+    raw: &Arena<RawProfileDef>,
+    targets: &Arena<crate::build_model::TargetDef>,
+    crates: &Arena<CrateDef>,
+    out: &mut Arena<ProfileDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    // Two passes: insert all profiles, then resolve `inherits` handles.
+    for (_, p) in raw.iter() {
+        let target_handle = p.target.as_deref().and_then(|name| {
+            let h = targets.lookup(name);
             if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "esp(\"{}\").add: source crate '{}' does not exist in the model",
-                        esp.name, entry.source_crate
-                    ))
-                    .with_optional_span(esp.span.clone()),
-                );
+                diags.push(InternDiagnostic::error(format!(
+                    "profile '{}' references unknown target '{}'",
+                    p.name, name
+                )).with_optional_span(p.span.clone()));
             }
-            resolved.push(h);
-        }
-        updates.push((handle, resolved));
+            h
+        });
+        let boot_binary_handle = p.boot_binary.as_deref().and_then(|name| {
+            let h = crates.lookup(name);
+            if h.is_none() {
+                diags.push(InternDiagnostic::error(format!(
+                    "profile '{}' references unknown boot binary crate '{}'",
+                    p.name, name
+                )).with_optional_span(p.span.clone()));
+            }
+            h
+        });
+        let _ = out.insert(
+            p.name.clone(),
+            ProfileDef {
+                name: p.name.clone(),
+                inherits: p.inherits.clone(),
+                inherits_handle: None,        // pass 2
+                target: p.target.clone(),
+                target_handle,
+                opt_level: p.opt_level,
+                debug_info: p.debug_info,
+                lto: p.lto.clone(),
+                boot_binary: p.boot_binary.clone(),
+                boot_binary_handle,
+                preset: p.preset.clone(),
+                config: p.config.clone(),
+                qemu_memory: p.qemu_memory,
+                qemu_cores: p.qemu_cores,
+                qemu_extra_args: p.qemu_extra_args.clone(),
+                qemu_boot_mode: p.qemu_boot_mode,
+                test_timeout: p.test_timeout,
+                span: p.span.clone(),
+            },
+        );
     }
-
-    for (handle, resolved) in updates {
-        if let Some(esp) = model.esps.get_mut(handle) {
-            for (entry, handle) in esp.entries.iter_mut().zip(resolved) {
-                entry.source_crate_handle = handle;
+    // Pass 2: resolve `inherits`.
+    let snapshot: Vec<(String, Option<String>, Option<SourceSpan>)> =
+        raw.iter().map(|(_, p)| (p.name.clone(), p.inherits.clone(), p.span.clone())).collect();
+    for (name, inherits, span) in snapshot {
+        let h = out.lookup(&name).expect("inserted in pass 1");
+        if let Some(parent_name) = inherits {
+            let parent_h = out.lookup(&parent_name);
+            if parent_h.is_none() {
+                diags.push(InternDiagnostic::error(format!(
+                    "profile '{}' inherits from unknown profile '{}'",
+                    name, parent_name
+                )).with_optional_span(span));
+            }
+            if let Some(slot) = out.get_mut(h) {
+                slot.inherits_handle = parent_h;
             }
         }
     }
 }
 
-/// Resolve [`BuildStepDef::runner`] (string crate name) and every
-/// [`BuildStepInput::Crate { crate_name, .. }`] into their corresponding
-/// [`Handle<CrateDef>`]. Dangling references push a diagnostic; the
-/// handle is left `None` and the validate pass surfaces structural
-/// issues (runner must be host bin, etc.) on the resolved handles.
-fn intern_build_steps(model: &mut BuildModel, diags: &mut Vec<InternDiagnostic>) {
-    /// One per build step: (handle, resolved_runner, resolved_inputs in
-    /// BTreeMap iteration order). The inputs vec parallels
-    /// `BuildStepDef::inputs.iter()` so we can apply the resolution
-    /// without re-keying.
-    type BuildStepResolution = (
-        Handle<BuildStepDef>,
-        Option<Handle<CrateDef>>,
-        Vec<Option<Handle<CrateDef>>>,
-    );
-    let mut updates: Vec<BuildStepResolution> = Vec::with_capacity(model.build_steps.len());
+fn intern_bootloader(
+    raw: &RawBootloaderDef,
+    crates: &Arena<CrateDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) -> BootloaderDef {
+    let entry_crate_handle = raw.entry_crate.as_deref().and_then(|name| {
+        let h = crates.lookup(name);
+        if h.is_none() {
+            diags.push(InternDiagnostic::error(format!(
+                "bootloader.entry_crate references unknown crate '{}'", name
+            )).with_optional_span(raw.span.clone()));
+        }
+        h
+    });
+    BootloaderDef {
+        kind: raw.kind.clone(),
+        protocol: raw.protocol.clone(),
+        entry_crate: raw.entry_crate.clone(),
+        entry_crate_handle,
+        config_file: raw.config_file.clone(),
+        extras: raw.extras.clone(),
+        span: raw.span.clone(),
+    }
+}
 
-    for (handle, step) in model.build_steps.iter() {
-        // Runner: empty string was already diagnosed at builder time.
-        // Skip the lookup for empty so we don't push a duplicate
-        // diagnostic that says "unknown runner ''".
-        let runner_handle = if step.runner.is_empty() {
+fn intern_esps(
+    raw: &Arena<RawEspDef>,
+    crates: &Arena<CrateDef>,
+    out: &mut Arena<EspDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, e) in raw.iter() {
+        let entries = e.entries.iter().map(|en| {
+            let h = crates.lookup(&en.source_crate);
+            if h.is_none() {
+                diags.push(InternDiagnostic::error(format!(
+                    "esp(\"{}\").add: source crate '{}' does not exist in the model",
+                    e.name, en.source_crate
+                )).with_optional_span(e.span.clone()));
+            }
+            EspEntry {
+                source_crate: en.source_crate.clone(),
+                source_crate_handle: h,
+                dest_path: en.dest_path.clone(),
+            }
+        }).collect();
+        let _ = out.insert(
+            e.name.clone(),
+            EspDef { name: e.name.clone(), entries, span: e.span.clone() },
+        );
+    }
+}
+
+fn intern_build_steps(
+    raw: &Arena<RawBuildStepDef>,
+    crates: &Arena<CrateDef>,
+    out: &mut Arena<BuildStepDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, s) in raw.iter() {
+        let runner_handle = if s.runner.is_empty() {
             None
         } else {
-            let h = model.crates.lookup(&step.runner);
+            let h = crates.lookup(&s.runner);
             if h.is_none() {
-                diags.push(
-                    InternDiagnostic::error(format!(
-                        "build_step(\"{}\").runner references unknown crate '{}'",
-                        step.name, step.runner
-                    ))
-                    .with_optional_span(step.span.clone()),
-                );
+                diags.push(InternDiagnostic::error(format!(
+                    "build_step(\"{}\").runner references unknown crate '{}'",
+                    s.name, s.runner
+                )).with_optional_span(s.span.clone()));
             }
             h
         };
-
-        let mut input_handles = Vec::with_capacity(step.inputs.len());
-        for (env_key, input) in &step.inputs {
-            let resolved = match input {
-                BuildStepInput::Crate { crate_name, .. } => {
-                    let h = model.crates.lookup(crate_name);
+        let inputs = s.inputs.iter().map(|(env_key, inp)| {
+            let resolved = match inp {
+                RawBuildStepInput::Crate { crate_name } => {
+                    let h = crates.lookup(crate_name);
                     if h.is_none() {
-                        diags.push(
-                            InternDiagnostic::error(format!(
-                                "build_step(\"{}\").input(\"{}\") references unknown \
-                                 crate '{}'",
-                                step.name, env_key, crate_name
-                            ))
-                            .with_optional_span(step.span.clone()),
-                        );
+                        diags.push(InternDiagnostic::error(format!(
+                            "build_step(\"{}\").input(\"{}\") references unknown crate '{}'",
+                            s.name, env_key, crate_name
+                        )).with_optional_span(s.span.clone()));
                     }
-                    h
+                    BuildStepInput::Crate { crate_name: crate_name.clone(), crate_handle: h }
                 }
-                // File and Literal inputs don't reference any sibling.
-                BuildStepInput::File { .. } | BuildStepInput::Literal { .. } => None,
+                RawBuildStepInput::File { path } =>
+                    BuildStepInput::File { path: path.clone() },
+                RawBuildStepInput::Literal { value } =>
+                    BuildStepInput::Literal { value: value.clone() },
             };
-            input_handles.push(resolved);
-        }
-        updates.push((handle, runner_handle, input_handles));
+            (env_key.clone(), resolved)
+        }).collect();
+        let _ = out.insert(
+            s.name.clone(),
+            BuildStepDef {
+                name: s.name.clone(),
+                runner: s.runner.clone(),
+                runner_handle,
+                inputs,
+                env: s.env.clone(),
+                output: s.output.clone(),
+                span: s.span.clone(),
+            },
+        );
     }
+}
 
-    for (handle, runner_handle, input_handles) in updates {
-        if let Some(step) = model.build_steps.get_mut(handle) {
-            step.runner_handle = runner_handle;
-            // Apply input handles in BTreeMap iteration order, matching
-            // the collection order above.
-            let mut iter = input_handles.into_iter();
-            for input in step.inputs.values_mut() {
-                if let BuildStepInput::Crate { crate_handle, .. } = input {
-                    *crate_handle = iter.next().flatten();
-                } else {
-                    // Advance past File/Literal placeholder.
-                    let _ = iter.next();
+fn intern_pipelines(
+    raw: &Arena<RawPipelineDef>,
+    groups: &Arena<GroupDef>,
+    out: &mut Arena<PipelineDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, p) in raw.iter() {
+        let stages = p.stages.iter().map(|s| {
+            let resolved: Vec<Option<Handle<GroupDef>>> = s.inputs.iter().map(|input| {
+                let h = groups.lookup(input);
+                if h.is_none() {
+                    diags.push(InternDiagnostic::error(format!(
+                        "pipeline '{}' stage '{}' references unknown group '{}'",
+                        p.name, s.name, input
+                    )));
                 }
+                h
+            }).collect();
+            PipelineStep {
+                name: s.name.clone(),
+                inputs: s.inputs.clone(),
+                inputs_handles: resolved,
+                rule: s.rule.clone(),
             }
-        }
+        }).collect();
+        let _ = out.insert(
+            p.name.clone(),
+            PipelineDef { name: p.name.clone(), stages, span: p.span.clone() },
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProfileDef, ProjectDef, TargetDef};
+    use crate::build_model::{ProjectDef, TargetDef};
+    use crate::raw_defs::RawProfileDef;
 
     fn fixture_with_target_and_profile() -> RawBuildModel {
         let mut raw = RawBuildModel::default();
-        raw.model.project = Some(ProjectDef {
+        raw.project = Some(ProjectDef {
             name: "demo".into(),
             version: "0.1.0".into(),
             ..Default::default()
         });
-        raw.model.targets.insert(
+        raw.targets.insert(
             "x86_64-unknown-none".into(),
             TargetDef {
                 name: "x86_64-unknown-none".into(),
@@ -447,9 +453,9 @@ mod tests {
                 span: None,
             },
         );
-        raw.model.profiles.insert(
+        raw.profiles.insert(
             "dev".into(),
-            ProfileDef {
+            RawProfileDef {
                 name: "dev".into(),
                 target: Some("x86_64-unknown-none".into()),
                 ..Default::default()
@@ -465,23 +471,20 @@ mod tests {
         assert!(diags.is_empty(), "no dangling refs: {diags:?}");
         let ph = model.profiles.lookup("dev").expect("dev profile");
         let p = model.profiles.get(ph).unwrap();
-        assert!(
-            p.target_handle.is_some(),
-            "intern must populate profile.target_handle"
-        );
+        assert!(p.target_handle.is_some());
     }
 
     #[test]
     fn intern_diagnoses_dangling_target() {
         let mut raw = RawBuildModel::default();
-        raw.model.project = Some(ProjectDef {
+        raw.project = Some(ProjectDef {
             name: "demo".into(),
             version: "0.1.0".into(),
             ..Default::default()
         });
-        raw.model.profiles.insert(
+        raw.profiles.insert(
             "dev".into(),
-            ProfileDef {
+            RawProfileDef {
                 name: "dev".into(),
                 target: Some("nonexistent".into()),
                 ..Default::default()
