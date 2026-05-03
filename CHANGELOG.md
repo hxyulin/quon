@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Stage 6 — compile pipeline tightening)
+
+- **`CrateArtifactShape` is the single source of truth for crate
+  path arithmetic.** A new `compile::CrateArtifactShape` struct holds
+  `(out_dir, output_path, depfile_path)` for any crate; both
+  `compile::command_builder::build_rustc_command` (write side) and
+  `compile::artifact_path::expected_crate_artifact_path` (read side
+  — analyzer-time) now consume it. The duplicated host/cross
+  dispatch (rlib / dylib / bin / `.bin` / depfile) is gone.
+- **`compile::compile_crate::compile()` decomposed.** The 160-LOC
+  body shrinks to ~68 LOC by extracting `build_cache_key` (cache-key
+  construction) and `prepare_compile_context` (everything before
+  the rustc spawn). The third copy of the host/cross dispatch
+  (previously inlined to compute `out_dir` for `mkdir -p`) is gone.
+- **`BuildLayout::cache_key_suffix()`.** New method centralising
+  the `""` / `":check"` / `":clippy"` suffix attached to per-crate
+  cache keys; the inline `match ctx.driver()` in `compile_crate.rs`
+  is replaced by a single call. No on-disk cache invalidation —
+  key shapes are byte-identical to Stage 5.
+- **`scheduler/helpers/` deleted.** The three per-node helpers were
+  promoted to their natural homes:
+  - `helpers::esp` → `generated::esp` (new top-level `generated/`
+    module for "produced from the model" outputs).
+  - `helpers::config_crate` → `generated::config_crate`.
+  - `helpers::sysroot::ensure_sysroot_for_node` folded into
+    `crate::sysroot` (32-LOC wrapper next to its delegate).
+
 ### Changed (Stage 5 — unified build-time freshness)
 
 - **Unified build-time freshness via the extended `Cache`.** Sysroot,
