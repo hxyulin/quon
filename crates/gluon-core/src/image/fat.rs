@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::ResolvedEntry;
-use super::stamp::StampSource;
+use super::source::StampSource;
 
 /// Format `image_path` as a flat FAT32 image (no partition table).
 ///

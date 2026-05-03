@@ -12,22 +12,7 @@ use std::io::Write;
 use std::path::Path;
 
 use super::ResolvedEntry;
-
-/// Tag identifying where a stamp's source came from. Stored in the
-/// stamp so that, e.g., a crate→file rename in `gluon.rs` is visible
-/// even if the resolved on-disk path happens to match.
-///
-/// Uses struct variants (rather than newtype-around-String) because
-/// serde_json's internally-tagged representation can't fold a tag into
-/// a primitive payload — the `name`/`path` field gives the JSON a
-/// place to land alongside `kind`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum StampSource {
-    Crate { name: String },
-    EspDir { name: String },
-    File { path: String },
-}
+use super::source::StampSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct StampEntry {

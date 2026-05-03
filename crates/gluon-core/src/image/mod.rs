@@ -31,6 +31,7 @@
 mod fat;
 mod mbr;
 mod partition;
+mod source;
 mod stamp;
 
 use crate::compile::extern_map::resolve_artifact_by_name;
@@ -46,7 +47,8 @@ use std::path::{Path, PathBuf};
 
 use mbr::{ResolvedPartition, SECTOR_SIZE};
 use partition::PartitionWindow;
-use stamp::{ImageStamp, StampSource};
+use source::StampSource;
+use stamp::ImageStamp;
 
 /// Inputs the image dispatcher needs from the scheduler.
 ///
