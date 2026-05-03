@@ -130,7 +130,7 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                         )
                     })?
                 };
-                let (_name, rlib_path, was_cached) = helpers::config_crate::ensure_config_crate(
+                let (_name, rlib_path, was_cached) = crate::generated::config_crate::ensure_config_crate(
                     self.ctx,
                     self.model,
                     self.resolved,

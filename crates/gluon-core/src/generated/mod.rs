@@ -14,4 +14,5 @@
 //! distinction between "compile is rustc invocation" and "generate
 //! these artifacts from the model" explicit at module-tree level.
 
+pub mod config_crate;
 pub mod esp;
