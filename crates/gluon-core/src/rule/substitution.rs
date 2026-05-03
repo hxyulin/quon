@@ -1,0 +1,814 @@
+//! `Substituter` — argument-string expansion for rule invocations.
+//!
+//! Holds a borrowed `(RuleCtx, RuleDef)` pair so call sites stop
+//! threading three arguments through every layer. Five entry
+//! points:
+//!
+//! - `expand_args` — top-level: maps `expand_one` over a slice.
+//! - `expand_one` — scans a single string for `${...}` tokens and
+//!   replaces them.
+//! - `resolve_var` — handles `${var_name}` lookups, dispatching
+//!   `${artifact:...}` / `${image:...}` to the resolvers below.
+//! - `resolve_artifact` — `${artifact:<crate>}` lookup.
+//! - `resolve_image` — `${image:<name>}` lookup.
+//!
+//! See the Stage 7 plan's "Decisions baked in" §7 for why this is
+//! a struct, not a trait.
+
+use crate::error::{Error, Result};
+use crate::rule::{RuleCtx, RuleDef};
+use gluon_model::TargetDef;
+
+use super::KNOWN_VARS;
+
+pub(crate) struct Substituter<'a> {
+    ctx: &'a RuleCtx<'a>,
+    rule: &'a RuleDef,
+}
+
+impl<'a> Substituter<'a> {
+    pub(crate) fn new(ctx: &'a RuleCtx<'a>, rule: &'a RuleDef) -> Self {
+        Self { ctx, rule }
+    }
+
+    /// Expand `${...}` tokens in every arg.
+    pub(crate) fn expand_args(&self, args: &[String]) -> Result<Vec<String>> {
+        args.iter().map(|a| self.expand_one(a)).collect()
+    }
+
+    /// Expand `${...}` tokens in a single string.
+    pub(crate) fn expand_one(&self, s: &str) -> Result<String> {
+        // Fast path: no substitution needed.
+        if !s.contains('$') {
+            return Ok(s.to_owned());
+        }
+
+        let mut out = String::with_capacity(s.len() + 32);
+        let bytes = s.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'$' {
+                // `$$` → literal `$` (escape).
+                if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                    out.push('$');
+                    i += 2;
+                } else if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                    // Opening `${` found — scan forward for `}`.
+                    let var_start = i + 2; // first byte of variable name
+                    let var_end = bytes[var_start..]
+                        .iter()
+                        .position(|&b| b == b'}')
+                        .map(|pos| var_start + pos)
+                        .ok_or_else(|| {
+                            Error::Compile(format!(
+                                "rule '{}': unterminated '${{...}}' sequence in argument: '{}'",
+                                self.rule.name, s
+                            ))
+                        })?;
+
+                    let var_name = &s[var_start..var_end];
+                    let replacement = self.resolve_var(var_name)?;
+                    out.push_str(&replacement);
+                    // Advance past the closing `}`.
+                    i = var_end + 1;
+                } else {
+                    // Bare `$` not followed by `{` — emit literally.
+                    out.push('$');
+                    i += 1;
+                }
+            } else {
+                // Decode the next UTF-8 codepoint at `i`. A naive `bytes[i] as
+                // char` cast would silently split multi-byte characters (e.g.
+                // 'é' = [0xC3, 0xA9]) into two invalid chars. `{` / `}` / `$`
+                // are all ASCII so the brace-scanning branches above are safe
+                // on byte indices; only this literal-copy branch needs to
+                // advance by a full codepoint's worth of bytes.
+                let ch = s[i..]
+                    .chars()
+                    .next()
+                    .expect("index is within &str bounds so at least one char follows");
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Resolve a single `${var_name}` token.
+    pub(crate) fn resolve_var(&self, var_name: &str) -> Result<String> {
+        // Prefixed variables: ${artifact:<crate_name>}
+        if let Some(crate_name) = var_name.strip_prefix("artifact:") {
+            return self.resolve_artifact(crate_name);
+        }
+        // Prefixed variables: ${image:<image_name>}
+        if let Some(image_name) = var_name.strip_prefix("image:") {
+            return self.resolve_image(image_name);
+        }
+
+        match var_name {
+            "build_dir" => Ok(self.ctx.layout.root().display().to_string()),
+            "project_name" => Ok(self.ctx.resolved.project.name.clone()),
+            "project_root" => Ok(self.ctx.resolved.project_root.display().to_string()),
+            "profile" => Ok(self.ctx.resolved.profile.name.clone()),
+            "target" => {
+                let target: &TargetDef = self
+                    .ctx
+                    .model
+                    .targets
+                    .get(self.ctx.resolved.profile.target)
+                    .ok_or_else(|| {
+                        Error::Compile(format!(
+                            "rule '{}': internal error — target handle {:?} not found in \
+                                 build model (this is a bug in gluon, not in your configuration)",
+                            self.rule.name, self.ctx.resolved.profile.target
+                        ))
+                    })?;
+                Ok(target.name.clone())
+            }
+            unknown => Err(Error::Compile(format!(
+                "rule '{}': unknown substitution variable '${{{}}}'; \
+                 known variables: [{}], or use ${{artifact:<crate_name>}} / \
+                 ${{image:<image_name>}}",
+                self.rule.name,
+                unknown,
+                KNOWN_VARS.join(", ")
+            ))),
+        }
+    }
+
+    /// Resolve `${image:<image_name>}`.
+    pub(crate) fn resolve_image(&self, image_name: &str) -> Result<String> {
+        if image_name.is_empty() {
+            return Err(Error::Compile(format!(
+                "rule '{}': empty image name in ${{image:}}",
+                self.rule.name
+            )));
+        }
+
+        let handle = self.ctx.model.images.lookup(image_name).ok_or_else(|| {
+            let available: Vec<&str> = self
+                .ctx
+                .model
+                .images
+                .iter()
+                .map(|(_, i): (_, &gluon_model::ImageDef)| i.name.as_str())
+                .collect();
+            Error::Compile(format!(
+                "rule '{}': ${{image:{}}} references unknown image; available: [{}]",
+                self.rule.name,
+                image_name,
+                available.join(", ")
+            ))
+        })?;
+
+        let path = self.ctx.image_paths.get(&handle).ok_or_else(|| {
+            Error::Compile(format!(
+                "rule '{}': ${{image:{}}} — image is declared but no output path is \
+                 registered yet (ensure the rule's pipeline stage runs after the image \
+                 scheduler node)",
+                self.rule.name, image_name
+            ))
+        })?;
+
+        Ok(path.display().to_string())
+    }
+
+    /// Resolve `${artifact:<crate_name>}`.
+    pub(crate) fn resolve_artifact(&self, crate_name: &str) -> Result<String> {
+        if crate_name.is_empty() {
+            return Err(Error::Compile(format!(
+                "rule '{}': empty crate name in ${{artifact:}}",
+                self.rule.name
+            )));
+        }
+
+        let handle = self.ctx.model.crates.lookup(crate_name).ok_or_else(|| {
+            let available: Vec<&str> = self
+                .ctx
+                .model
+                .crates
+                .iter()
+                .map(|(_, c): (_, &gluon_model::CrateDef)| c.name.as_str())
+                .collect();
+            Error::Compile(format!(
+                "rule '{}': ${{artifact:{}}} references unknown crate; \
+                 available crates: [{}]",
+                self.rule.name,
+                crate_name,
+                available.join(", ")
+            ))
+        })?;
+
+        let path = self.ctx.artifacts.get(handle).ok_or_else(|| {
+            Error::Compile(format!(
+                "rule '{}': ${{artifact:{}}} — crate exists but has no compiled \
+                 artifact (ensure the rule's pipeline stage depends on the crate's group)",
+                self.rule.name, crate_name
+            ))
+        })?;
+
+        Ok(path.display().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compile::{ArtifactMap, BuildLayout};
+    use crate::rule::RuleCtx;
+    use gluon_model::{
+        BuildModel, Handle, ProjectDef, RuleDef, RuleHandler, TargetDef, ResolvedConfig,
+        ResolvedProfile,
+    };
+    use std::path::PathBuf;
+
+    // -----------------------------------------------------------------------
+    // Test fixtures (copied from rule/mod.rs test_support; must stay in sync
+    // with the originals — see "copy, don't centralise" project precedent)
+    // -----------------------------------------------------------------------
+
+    fn make_target(name: &str) -> TargetDef {
+        TargetDef {
+            name: name.into(),
+            spec: format!("{}-unknown-none", name),
+            builtin: true,
+            panic_strategy: None,
+            span: None,
+        }
+    }
+
+    fn make_model_with_target(target_name: &str) -> (BuildModel, Handle<TargetDef>) {
+        let mut model = BuildModel::default();
+        let t = make_target(target_name);
+        let (handle, _) = model.targets.insert(target_name.into(), t);
+        (model, handle)
+    }
+
+    fn make_profile(target: Handle<TargetDef>) -> ResolvedProfile {
+        ResolvedProfile {
+            name: "debug".into(),
+            target,
+            opt_level: 0,
+            debug_info: false,
+            lto: None,
+            boot_binary: None,
+            qemu_memory: None,
+            qemu_cores: None,
+            qemu_extra_args: Vec::new(),
+            qemu_boot_mode: None,
+            test_timeout: None,
+        }
+    }
+
+    fn make_resolved(target_handle: Handle<TargetDef>, build_dir: PathBuf) -> ResolvedConfig {
+        ResolvedConfig {
+            project: ProjectDef {
+                name: "testproject".into(),
+                version: "0.1.0".into(),
+                config_crate_name: None,
+                cfg_prefix: None,
+                config_override_file: None,
+                default_profile: None,
+            },
+            profile: make_profile(target_handle),
+            options: Default::default(),
+            crates: Vec::new(),
+            build_dir: build_dir.clone(),
+            project_root: build_dir.parent().unwrap_or(&build_dir).to_path_buf(),
+        }
+    }
+
+    /// Build a `(BuildLayout, BuildModel, ResolvedConfig, ArtifactMap)` tuple
+    /// for testing.
+    ///
+    /// `tmp` should be a `tempfile::TempDir` base; the build dir is
+    /// `tmp/build`.
+    fn make_ctx_parts(
+        tmp: &std::path::Path,
+    ) -> (BuildLayout, BuildModel, ResolvedConfig, ArtifactMap) {
+        let build_dir = tmp.join("build");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        let (model, target_handle) = make_model_with_target("x86_64-test");
+        let resolved = make_resolved(target_handle, build_dir.clone());
+        let layout = BuildLayout::new(build_dir, "testproject");
+        let artifacts = ArtifactMap::new();
+        (layout, model, resolved, artifacts)
+    }
+
+    fn make_rule(name: &str, inputs: Vec<String>) -> RuleDef {
+        RuleDef {
+            name: name.into(),
+            inputs,
+            outputs: vec![],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Substitution tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn substitution_expands_known_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule(
+            "testrule",
+            vec![
+                "${build_dir}/foo".into(),
+                "${project_name}".into(),
+                "${profile}".into(),
+                "${target}".into(),
+            ],
+        );
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args.len(), 4);
+        assert_eq!(
+            args[0],
+            format!("{}/foo", tmp.path().join("build").display())
+        );
+        assert_eq!(args[1], "testproject");
+        assert_eq!(args[2], "debug");
+        assert_eq!(args[3], "x86_64-test");
+    }
+
+    /// Regression guard: two `${...}` tokens in a single argument must
+    /// both substitute correctly. A broken loop-advance after the first
+    /// substitution would either duplicate or drop bytes around the
+    /// second token.
+    #[test]
+    fn substitution_expands_multiple_vars_in_one_arg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["${project_name}-${profile}-${target}".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args, vec!["testproject-debug-x86_64-test".to_string()]);
+    }
+
+    /// Regression guard: non-ASCII characters must survive the slow
+    /// path. Earlier drafts used `bytes[i] as char` which silently split
+    /// multi-byte UTF-8 sequences into invalid scalar values.
+    #[test]
+    fn substitution_preserves_non_ascii_literal_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["café-${profile}-naïve".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args, vec!["café-debug-naïve".to_string()]);
+    }
+
+    #[test]
+    fn substitution_unknown_var_errors_with_rule_name_and_var_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("badrule", vec!["${nope}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        match err {
+            crate::error::Error::Compile(msg) => {
+                assert!(msg.contains("badrule"), "should name rule: {msg}");
+                assert!(msg.contains("nope"), "should name unknown var: {msg}");
+                // Should also mention the list of known vars.
+                assert!(msg.contains("build_dir"), "should list known vars: {msg}");
+            }
+            other => panic!("expected Error::Compile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn substitution_unterminated_brace_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("badrule", vec!["${unterminated".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        match err {
+            crate::error::Error::Compile(msg) => {
+                assert!(msg.contains("badrule"), "should name rule: {msg}");
+                // The message should hint about the unterminated sequence.
+                assert!(
+                    msg.contains("unterminated") || msg.contains("${"),
+                    "should hint at unterminated sequence: {msg}"
+                );
+            }
+            other => panic!("expected Error::Compile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn substitution_literal_dollar_is_preserved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["$HOME/no_brace".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(
+            args[0], "$HOME/no_brace",
+            "literal $ must pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn substitution_handles_outputs_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = RuleDef {
+            name: "testrule".into(),
+            inputs: vec!["cmd".into()],
+            outputs: vec!["${build_dir}/out".into()],
+            depends_on: vec![],
+            handler: RuleHandler::Builtin("capture".into()),
+            working_dir: None,
+            span: None,
+        };
+
+        let out_args = Substituter::new(&ctx, &rule).expand_args(&rule.outputs).unwrap();
+        assert_eq!(out_args.len(), 1);
+        assert_eq!(
+            out_args[0],
+            format!("{}/out", tmp.path().join("build").display())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Artifact substitution tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn substitution_resolves_artifact_by_crate_name() {
+        use gluon_model::{CrateDef, GroupDef, TargetSpec};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, mut artifacts) = make_ctx_parts(tmp.path());
+
+        // Register a crate in the model and record its artifact.
+        let target_h = model.targets.lookup("x86_64-test").expect("target");
+        let (group_h, _) = model.groups.insert(
+            "kernel_group".into(),
+            GroupDef {
+                name: "kernel_group".into(),
+                target: TargetSpec::Cross(target_h),
+                ..Default::default()
+            },
+        );
+        let crate_def = CrateDef {
+            name: "kernel".into(),
+            path: "crates/kernel".into(),
+            edition: "2021".into(),
+            crate_type: gluon_model::CrateType::Bin,
+            target: TargetSpec::Cross(target_h),
+            deps: Default::default(),
+            dev_deps: Default::default(),
+            features: vec![],
+            root: None,
+            linker_script: None,
+            group: group_h,
+            is_project_crate: true,
+            cfg_flags: vec![],
+            rustc_flags: vec![],
+            requires_config: vec![],
+            artifact_deps: vec![],
+            artifact_env: Default::default(),
+            span: None,
+        };
+        let (handle, _) = model.crates.insert("kernel".into(), crate_def);
+        let artifact_path = tmp.path().join("build/cross/x86_64-test/debug/kernel");
+        artifacts.insert(handle, artifact_path.clone());
+
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule(
+            "strip",
+            vec!["objcopy".into(), "${artifact:kernel}".into()],
+        );
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args[1], artifact_path.display().to_string());
+    }
+
+    #[test]
+    fn substitution_artifact_unknown_crate_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("badrule", vec!["${artifact:nonexistent}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        match err {
+            crate::error::Error::Compile(msg) => {
+                assert!(msg.contains("nonexistent"), "should name crate: {msg}");
+                assert!(msg.contains("badrule"), "should name rule: {msg}");
+            }
+            other => panic!("expected Error::Compile, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Image substitution tests
+    // -----------------------------------------------------------------------
+    //
+    // ${image:name} mirrors ${artifact:crate} but resolves through the
+    // scheduler's image_paths map instead of the per-crate ArtifactMap.
+    // The shape parallels the artifact tests above.
+
+    #[test]
+    fn substitution_resolves_image_by_name() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+
+        let (image_h, _) = model.images.insert(
+            "boot-disk".into(),
+            ImageDef {
+                name: "boot-disk".into(),
+                ..Default::default()
+            },
+        );
+        let image_path = tmp.path().join("build/images/boot-disk.img");
+        let mut image_paths = std::collections::BTreeMap::new();
+        image_paths.insert(image_h, image_path.clone());
+
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: &image_paths,
+        };
+
+        let rule = make_rule(
+            "checksum",
+            vec!["sha256sum".into(), "${image:boot-disk}".into()],
+        );
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args[1], image_path.display().to_string());
+    }
+
+    #[test]
+    fn substitution_image_unknown_name_lists_available() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+
+        model.images.insert(
+            "alpha".into(),
+            ImageDef {
+                name: "alpha".into(),
+                ..Default::default()
+            },
+        );
+        model.images.insert(
+            "beta".into(),
+            ImageDef {
+                name: "beta".into(),
+                ..Default::default()
+            },
+        );
+
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("checksum", vec!["${image:gamma}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gamma"), "{msg}");
+        assert!(msg.contains("alpha") && msg.contains("beta"), "{msg}");
+    }
+
+    #[test]
+    fn substitution_image_known_but_no_path_diagnoses_ordering() {
+        use gluon_model::ImageDef;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        model.images.insert(
+            "boot-disk".into(),
+            ImageDef {
+                name: "boot-disk".into(),
+                ..Default::default()
+            },
+        );
+
+        // image_paths is empty: simulates a rule that fires before the
+        // image scheduler node has produced any output.
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("checksum", vec!["${image:boot-disk}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("scheduler") || msg.contains("pipeline stage"),
+            "diagnostic should hint at the ordering bug, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn substitution_image_empty_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("badrule", vec!["${image:}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "{msg}");
+    }
+
+    #[test]
+    fn substitution_artifact_empty_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("badrule", vec!["${artifact:}".into()]);
+
+        let err = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap_err();
+        match err {
+            crate::error::Error::Compile(msg) => {
+                assert!(msg.contains("empty"), "should mention empty: {msg}");
+            }
+            other => panic!("expected Error::Compile, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // project_root and $$ escape tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn substitution_expands_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["${project_root}/keys/sign.key".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(
+            args[0],
+            format!("{}/keys/sign.key", resolved.project_root.display())
+        );
+    }
+
+    #[test]
+    fn substitution_double_dollar_produces_literal_dollar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["echo $${HOME}".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args[0], "echo ${HOME}");
+    }
+
+    #[test]
+    fn substitution_double_dollar_standalone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let ctx = RuleCtx {
+            layout: &layout,
+            resolved: &resolved,
+            model: &model,
+            artifacts: &artifacts,
+            image_paths: RuleCtx::empty_image_paths(),
+        };
+
+        let rule = make_rule("testrule", vec!["cost: $$5".into()]);
+
+        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        assert_eq!(args[0], "cost: $5");
+    }
+}
