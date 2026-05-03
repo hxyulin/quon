@@ -29,6 +29,26 @@
 //!     + fsync + rename pattern as
 //!     [`crate::cache::manifest::CacheManifest::save_atomic`], for the same
 //!     reasons.
+//!
+//! # Why vendor freshness is not in the unified cache
+//!
+//! Stage 5 collapsed the build-time freshness systems (rustc cache,
+//! sysroot stamp, image stamp, ESP stamp) onto a single
+//! `cache::Cache`. Vendor's `gluon.lock`-fingerprint check was
+//! deliberately *not* migrated. The reason is the time horizon:
+//! `gluon.lock` is committed to source control and travels with the
+//! repository; the build cache is per-machine and `.gitignore`d.
+//!
+//! Migrating vendor into the cache would mean: after `git clone`,
+//! machine B has a valid `gluon.lock` + `vendor/` tree but a cold
+//! cache, so the cache would report "stale" and trigger a re-vendor
+//! on every fresh checkout. The lockfile-fingerprint check correctly
+//! says "nothing to do" in that case.
+//!
+//! The vendor freshness question — *"is the on-disk vendor tree
+//! consistent with what `gluon.rs` declares?"* — is fundamentally
+//! cross-machine, not build-time per-machine. It belongs here,
+//! not in `cache/`.
 
 use crate::error::{Diagnostic, Error, Result};
 use serde::{Deserialize, Serialize};
