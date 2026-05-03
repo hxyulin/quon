@@ -20,7 +20,7 @@
 
 use crate::compile::{ArtifactMap, BuildLayout};
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, CrateDef, ResolvedConfig, RuleDef, RuleHandler, TargetDef};
+use gluon_model::{BuildModel, ResolvedConfig, RuleDef, RuleHandler};
 use std::collections::BTreeMap;
 
 pub mod builtin;
@@ -190,16 +190,13 @@ impl RuleRegistry {
 
         // Substitute ${var} tokens in inputs and outputs separately so the
         // handler can tell them apart (see RuleFn doc comment).
-        let inputs = substitute_args(ctx, rule, &rule.inputs)?;
-        let outputs = substitute_args(ctx, rule, &rule.outputs)?;
+        let s = substitution::Substituter::new(ctx, rule);
+        let inputs = s.expand_args(&rule.inputs)?;
+        let outputs = s.expand_args(&rule.outputs)?;
 
         handler.execute(ctx, rule, &inputs, &outputs, stdout, stderr)
     }
 }
-
-// ---------------------------------------------------------------------------
-// ${var} substitution
-// ---------------------------------------------------------------------------
 
 /// The set of simple variable names recognised by the substitution engine.
 /// Kept as a sorted slice so error messages are deterministic.
@@ -213,218 +210,6 @@ const KNOWN_VARS: &[&str] = &[
     "project_root",
     "target",
 ];
-
-/// Substitute all `${var}` tokens in a list of argument strings.
-///
-/// Returns a fresh `Vec<String>` — one element per input string — with all
-/// recognised `${var}` tokens replaced. Unknown variables and unterminated
-/// `${...}` sequences are reported as `Error::Compile` naming the offending
-/// rule.
-fn substitute_args(ctx: &RuleCtx<'_>, rule: &RuleDef, args: &[String]) -> Result<Vec<String>> {
-    args.iter()
-        .map(|arg| substitute_one(ctx, rule, arg))
-        .collect()
-}
-
-/// Substitute `${var}` tokens in a single string.
-///
-/// ### Substitution behaviour
-///
-/// - `$$` produces a literal `$` (escape mechanism).
-/// - `$${foo}` produces a literal `${foo}`.
-/// - A bare `$` not followed by `$` or `{` is emitted literally.
-/// - `${build_dir}` → the build output directory
-/// - `${project_name}` → the project name from config
-/// - `${project_root}` → the project root directory
-/// - `${profile}` → the active profile name
-/// - `${target}` → the target triple name
-/// - `${artifact:<name>}` → the compiled output path for the named crate
-fn substitute_one(ctx: &RuleCtx<'_>, rule: &RuleDef, s: &str) -> Result<String> {
-    // Fast path: no substitution needed.
-    if !s.contains('$') {
-        return Ok(s.to_owned());
-    }
-
-    let mut out = String::with_capacity(s.len() + 32);
-    let bytes = s.as_bytes();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'$' {
-            // `$$` → literal `$` (escape).
-            if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-                out.push('$');
-                i += 2;
-            } else if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-                // Opening `${` found — scan forward for `}`.
-                let var_start = i + 2; // first byte of variable name
-                let var_end = bytes[var_start..]
-                    .iter()
-                    .position(|&b| b == b'}')
-                    .map(|pos| var_start + pos)
-                    .ok_or_else(|| {
-                        Error::Compile(format!(
-                            "rule '{}': unterminated '${{...}}' sequence in argument: '{}'",
-                            rule.name, s
-                        ))
-                    })?;
-
-                let var_name = &s[var_start..var_end];
-                let replacement = resolve_var(ctx, rule, var_name)?;
-                out.push_str(&replacement);
-                // Advance past the closing `}`.
-                i = var_end + 1;
-            } else {
-                // Bare `$` not followed by `{` — emit literally.
-                out.push('$');
-                i += 1;
-            }
-        } else {
-            // Decode the next UTF-8 codepoint at `i`. A naive `bytes[i] as
-            // char` cast would silently split multi-byte characters (e.g.
-            // 'é' = [0xC3, 0xA9]) into two invalid chars. `{` / `}` / `$`
-            // are all ASCII so the brace-scanning branches above are safe
-            // on byte indices; only this literal-copy branch needs to
-            // advance by a full codepoint's worth of bytes.
-            let ch = s[i..]
-                .chars()
-                .next()
-                .expect("index is within &str bounds so at least one char follows");
-            out.push(ch);
-            i += ch.len_utf8();
-        }
-    }
-
-    Ok(out)
-}
-
-/// Resolve a single variable name to its string value.
-///
-/// Handles simple variables (`build_dir`, `profile`, etc.) and the prefixed
-/// form `artifact:<crate_name>` which resolves to a compiled artifact path.
-///
-/// Returns `Error::Compile` for unknown variables, naming the rule and
-/// listing known variables for discoverability.
-fn resolve_var(ctx: &RuleCtx<'_>, rule: &RuleDef, var_name: &str) -> Result<String> {
-    // Prefixed variables: ${artifact:<crate_name>}
-    if let Some(crate_name) = var_name.strip_prefix("artifact:") {
-        return resolve_artifact(ctx, rule, crate_name);
-    }
-    // Prefixed variables: ${image:<image_name>}
-    if let Some(image_name) = var_name.strip_prefix("image:") {
-        return resolve_image(ctx, rule, image_name);
-    }
-
-    match var_name {
-        "build_dir" => Ok(ctx.layout.root().display().to_string()),
-        "project_name" => Ok(ctx.resolved.project.name.clone()),
-        "project_root" => Ok(ctx.resolved.project_root.display().to_string()),
-        "profile" => Ok(ctx.resolved.profile.name.clone()),
-        "target" => {
-            let target: &TargetDef = ctx
-                .model
-                .targets
-                .get(ctx.resolved.profile.target)
-                .ok_or_else(|| {
-                    Error::Compile(format!(
-                        "rule '{}': internal error — target handle {:?} not found in \
-                             build model (this is a bug in gluon, not in your configuration)",
-                        rule.name, ctx.resolved.profile.target
-                    ))
-                })?;
-            Ok(target.name.clone())
-        }
-        unknown => Err(Error::Compile(format!(
-            "rule '{}': unknown substitution variable '${{{}}}'; \
-             known variables: [{}], or use ${{artifact:<crate_name>}} / \
-             ${{image:<image_name>}}",
-            rule.name,
-            unknown,
-            KNOWN_VARS.join(", ")
-        ))),
-    }
-}
-
-/// Resolve `${image:<image_name>}` to the built image's output path.
-///
-/// Mirrors [`resolve_artifact`]: validates the name resolves in the
-/// model first (so an unknown image name produces a discoverable error
-/// listing the available images), then looks up the actual output path
-/// in the scheduler's `image_paths` snapshot.
-fn resolve_image(ctx: &RuleCtx<'_>, rule: &RuleDef, image_name: &str) -> Result<String> {
-    if image_name.is_empty() {
-        return Err(Error::Compile(format!(
-            "rule '{}': empty image name in ${{image:}}",
-            rule.name
-        )));
-    }
-
-    let handle = ctx.model.images.lookup(image_name).ok_or_else(|| {
-        let available: Vec<&str> = ctx
-            .model
-            .images
-            .iter()
-            .map(|(_, i): (_, &gluon_model::ImageDef)| i.name.as_str())
-            .collect();
-        Error::Compile(format!(
-            "rule '{}': ${{image:{}}} references unknown image; available: [{}]",
-            rule.name,
-            image_name,
-            available.join(", ")
-        ))
-    })?;
-
-    let path = ctx.image_paths.get(&handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "rule '{}': ${{image:{}}} — image is declared but no output path is \
-             registered yet (ensure the rule's pipeline stage runs after the image \
-             scheduler node)",
-            rule.name, image_name
-        ))
-    })?;
-
-    Ok(path.display().to_string())
-}
-
-/// Resolve `${artifact:<crate_name>}` to the compiled output path.
-///
-/// Looks up the crate by name in the build model, then retrieves its artifact
-/// path from the snapshot. Returns clear errors if the crate doesn't exist or
-/// hasn't been compiled yet.
-fn resolve_artifact(ctx: &RuleCtx<'_>, rule: &RuleDef, crate_name: &str) -> Result<String> {
-    if crate_name.is_empty() {
-        return Err(Error::Compile(format!(
-            "rule '{}': empty crate name in ${{artifact:}}",
-            rule.name
-        )));
-    }
-
-    let handle = ctx.model.crates.lookup(crate_name).ok_or_else(|| {
-        let available: Vec<&str> = ctx
-            .model
-            .crates
-            .iter()
-            .map(|(_, c): (_, &CrateDef)| c.name.as_str())
-            .collect();
-        Error::Compile(format!(
-            "rule '{}': ${{artifact:{}}} references unknown crate; \
-             available crates: [{}]",
-            rule.name,
-            crate_name,
-            available.join(", ")
-        ))
-    })?;
-
-    let path = ctx.artifacts.get(handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "rule '{}': ${{artifact:{}}} — crate exists but has no compiled \
-             artifact (ensure the rule's pipeline stage depends on the crate's group)",
-            rule.name, crate_name
-        ))
-    })?;
-
-    Ok(path.display().to_string())
-}
 
 // ---------------------------------------------------------------------------
 // Tests
