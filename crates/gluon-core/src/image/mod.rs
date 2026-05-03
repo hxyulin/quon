@@ -33,6 +33,7 @@
 //! composite-cache layer itself; see `crate::cache` for the algorithm.
 
 mod fat;
+mod formatter;
 mod mbr;
 mod partition;
 mod source;

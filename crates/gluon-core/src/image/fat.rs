@@ -294,6 +294,34 @@ fn fat_to_compile(image_name: &str, dest_path: &str, err: hadris_fat::FatError) 
     ))
 }
 
+/// `PartitionFormatter` impl for FAT32. Thin adapter: opens the
+/// image read+write, constructs a `PartitionWindow` over the
+/// requested byte range, and delegates to `format_fat32_into`.
+pub(super) struct Fat32Formatter;
+
+impl crate::image::formatter::PartitionFormatter for Fat32Formatter {
+    fn format_in_place(
+        &self,
+        image_path: &std::path::Path,
+        start_byte: u64,
+        len_bytes: u64,
+        scoped_name: &str,
+        entries: &[ResolvedEntry],
+        stdout: &mut Vec<u8>,
+    ) -> crate::error::Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(image_path)
+            .map_err(|e| crate::error::Error::Io {
+                path: image_path.to_path_buf(),
+                source: e,
+            })?;
+        let window = super::partition::PartitionWindow::new(file, start_byte, len_bytes);
+        format_fat32_into(window, len_bytes, scoped_name, entries, stdout)
+    }
+}
+
 // Suppress unused-import warning if hadris-fat ever changes its
 // re-export surface and one of these imports stops being needed.
 #[allow(dead_code)]
