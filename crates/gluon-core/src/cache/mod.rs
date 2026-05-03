@@ -48,7 +48,7 @@ pub mod manifest;
 pub use depinfo::parse_depfile;
 pub use hash::{hash_argv, sha256_bytes, sha256_file};
 pub use lock::CacheLock;
-pub use manifest::{CacheEntry, CacheManifest, FileFingerprint};
+pub use manifest::{CacheManifest, FileFingerprint, RustcEntry};
 
 use crate::error::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -304,7 +304,7 @@ impl Cache {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
 
-        let entry = CacheEntry {
+        let entry = RustcEntry {
             argv_hash: rec.argv_hash,
             source_files,
             parent_dir_mtimes,
@@ -317,7 +317,7 @@ impl Cache {
     }
 
     #[cfg(test)]
-    pub(crate) fn entry(&self, key: &str) -> Option<&CacheEntry> {
+    pub(crate) fn entry(&self, key: &str) -> Option<&RustcEntry> {
         self.manifest.entries.get(key)
     }
 }

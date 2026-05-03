@@ -64,7 +64,7 @@ pub struct FileFingerprint {
 /// One cached build. Keyed in the manifest by a caller-chosen string
 /// (typically the crate id in chunk A4's sysroot builder).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CacheEntry {
+pub struct RustcEntry {
     /// SHA-256 of the rustc invocation that produced `output_path` — see
     /// [`crate::cache::hash::hash_argv`]. Mismatch ⇒ stale.
     pub argv_hash: [u8; 32],
@@ -96,7 +96,7 @@ pub struct CacheEntry {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CacheManifest {
     pub version: u32,
-    pub entries: BTreeMap<String, CacheEntry>,
+    pub entries: BTreeMap<String, RustcEntry>,
 }
 
 impl CacheManifest {
@@ -266,7 +266,7 @@ impl CacheManifest {
 mod tests {
     use super::*;
 
-    fn sample_entry() -> CacheEntry {
+    fn sample_entry() -> RustcEntry {
         let mut files = BTreeMap::new();
         files.insert(
             PathBuf::from("src/a.rs"),
@@ -276,7 +276,7 @@ mod tests {
                 sha256: Some([0x11; 32]),
             },
         );
-        CacheEntry {
+        RustcEntry {
             argv_hash: [0xAB; 32],
             source_files: files,
             parent_dir_mtimes: BTreeMap::new(),
