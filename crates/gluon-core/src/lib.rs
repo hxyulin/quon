@@ -13,6 +13,7 @@ pub mod compile;
 pub mod config;
 pub mod error;
 pub mod fmt;
+pub mod generated;
 pub mod image;
 pub mod kconfig;
 pub mod project_root;

@@ -230,7 +230,7 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 // holding the lock across the filesystem copy. Pattern
                 // mirrors the `Crate` arm above.
                 let artifacts_snapshot = lock_or_poison(self.artifacts, "artifacts")?.clone();
-                let (path, was_cached) = helpers::esp::ensure_esp(
+                let (path, was_cached) = crate::generated::esp::ensure_esp(
                     self.ctx,
                     self.model,
                     self.resolved,

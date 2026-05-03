@@ -4,11 +4,9 @@
 //!
 //! - [`sysroot`] — wraps [`crate::sysroot::ensure_sysroot`] for the DAG-node case.
 //! - [`config_crate`] — generates + compiles the `<project>_config` rlib.
-//! - [`esp`] — assembles an EFI System Partition directory from built artifacts.
 //!
-//! Separating the helpers from the dispatch loop in `execute_pipeline` keeps
-//! the top-level match flat and each unit of work independently testable.
+//! ESP assembly moved to [`crate::generated::esp`] in Stage 6;
+//! `config_crate` and `sysroot` are scheduled to follow.
 
 pub mod config_crate;
-pub mod esp;
 pub mod sysroot;
