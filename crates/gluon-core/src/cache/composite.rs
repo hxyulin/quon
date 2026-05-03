@@ -34,6 +34,38 @@ pub struct CompositeEntry {
     pub built_at: u128,
 }
 
+use std::path::Path;
+
+/// Input for [`crate::cache::Cache::is_composite_fresh`]. Grouped into
+/// a struct because the four fields must stay in sync — passing them
+/// positionally invited bugs in the rustc-entry equivalent.
+#[derive(Debug)]
+pub struct CompositeQuery<'a> {
+    /// Caller-chosen manifest key.
+    pub key: &'a str,
+    /// File inputs whose fingerprints participate in freshness.
+    /// Iteration order is irrelevant (compared as a set), but the
+    /// slice's order is used when refreshing fingerprints on the
+    /// slow path.
+    pub inputs: &'a [PathBuf],
+    /// Optional opaque digest of non-file inputs (def bytes, tool
+    /// versions). `None` means "no aux state to compare"; in that
+    /// case the entry's stored `aux_hash` must also be `None`.
+    pub aux_hash: Option<[u8; 32]>,
+    /// Artefact the caller expects to find; absence ⇒ stale.
+    pub output_path: &'a Path,
+}
+
+/// Input for [`crate::cache::Cache::mark_composite_built`]. Same
+/// rationale as [`CompositeQuery`].
+#[derive(Debug)]
+pub struct CompositeRecord {
+    pub key: String,
+    pub inputs: Vec<PathBuf>,
+    pub aux_hash: Option<[u8; 32]>,
+    pub output_path: PathBuf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +116,31 @@ mod tests {
         let m_pos = json.find("/m.bin").unwrap();
         let z_pos = json.find("/z.bin").unwrap();
         assert!(a_pos < m_pos && m_pos < z_pos, "keys not sorted: {json}");
+    }
+
+    #[test]
+    fn composite_query_construction() {
+        let inputs = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let out = PathBuf::from("/out");
+        let q = CompositeQuery {
+            key: "esp:default:EFI/BOOT/X.EFI",
+            inputs: &inputs,
+            aux_hash: Some([0; 32]),
+            output_path: &out,
+        };
+        assert_eq!(q.key, "esp:default:EFI/BOOT/X.EFI");
+        assert_eq!(q.inputs.len(), 2);
+    }
+
+    #[test]
+    fn composite_record_construction() {
+        let r = CompositeRecord {
+            key: "image:boot".into(),
+            inputs: vec![PathBuf::from("/a")],
+            aux_hash: None,
+            output_path: PathBuf::from("/out.img"),
+        };
+        assert_eq!(r.key, "image:boot");
+        assert!(r.aux_hash.is_none());
     }
 }
