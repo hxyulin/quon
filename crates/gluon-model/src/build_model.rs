@@ -33,9 +33,10 @@ pub struct BuildModel {
     /// `arena.lookup(name)` to obtain a handle.
     pub config_options: Arena<ConfigOptionDef>,
     pub presets: BTreeMap<String, PresetDef>,
-    /// Bootloader configuration (singleton per project).
-    #[serde(default)]
-    pub bootloader: BootloaderDef,
+    /// Bootloader configuration (singleton per project). `None` when the
+    /// `gluon.rs` did not declare a `cfg.bootloader(...)` block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootloader: Option<BootloaderDef>,
     /// Disk image definitions. Zero or more named images describing how
     /// to assemble bootable disk images from build artifacts.
     #[serde(default)]

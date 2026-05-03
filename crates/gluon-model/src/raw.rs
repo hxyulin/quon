@@ -22,9 +22,12 @@ use std::path::PathBuf;
 ///
 /// Types that hold no cross-references are reused verbatim: targets,
 /// rules, external deps, images, presets, project, qemu, config
-/// options. Singleton bootloader/qemu fields stay non-`Option` until
-/// Phase G makes them genuine `Option<...>` and drops the sidecar
-/// `*_was_set` flags.
+/// options. Singleton `bootloader` is now `Option<RawBootloaderDef>`
+/// — `Some` means the user wrote a `cfg.bootloader(...)` block, `None`
+/// means they didn't. Duplicate detection at the builder layer reads
+/// `field.is_some()` rather than a sidecar `*_was_set` flag (Phase G
+/// of Stage 4 retired the bootloader sidecar). The `qemu` field is
+/// next on the chopping block.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RawBuildModel {
     pub project: Option<ProjectDef>,
@@ -39,8 +42,8 @@ pub struct RawBuildModel {
     pub esps: Arena<RawEspDef>,
     pub config_options: Arena<ConfigOptionDef>,
     pub presets: BTreeMap<String, PresetDef>,
-    #[serde(default)]
-    pub bootloader: RawBootloaderDef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootloader: Option<RawBootloaderDef>,
     #[serde(default)]
     pub images: Arena<ImageDef>,
     #[serde(default)]
@@ -49,12 +52,10 @@ pub struct RawBuildModel {
     pub qemu: QemuDef,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
-    /// Singleton-set sidecar — dies in Phase G when `qemu` becomes
-    /// `Option<QemuDef>`.
+    /// Singleton-set sidecar for `qemu` — dies in the next sub-task when
+    /// `qemu` becomes `Option<QemuDef>`.
     #[serde(skip)]
     pub qemu_was_set: bool,
-    #[serde(skip)]
-    pub bootloader_was_set: bool,
 }
 
 #[cfg(test)]
@@ -101,14 +102,16 @@ mod tests {
 
     #[test]
     fn sidecar_flags_skip_serde() {
+        // Only `qemu_was_set` remains — `bootloader_was_set` was retired in
+        // the first half of Phase G when `bootloader` became
+        // `Option<RawBootloaderDef>`. This test will collapse entirely when
+        // `qemu` follows the same path.
         let raw = RawBuildModel {
             qemu_was_set: true,
-            bootloader_was_set: true,
             ..Default::default()
         };
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert!(!de.qemu_was_set);
-        assert!(!de.bootloader_was_set);
     }
 }

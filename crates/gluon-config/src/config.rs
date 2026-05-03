@@ -1,7 +1,7 @@
 use gluon_model::{
     BootloaderKind, ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef,
-    PresetDef, ProjectDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef, RawProfileDef,
-    RuleDef, RuleHandler, TargetDef, TristateVal,
+    PresetDef, ProjectDef, RawBootloaderDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef,
+    RawProfileDef, RuleDef, RuleHandler, TargetDef, TristateVal,
 };
 use crate::builders::{
     BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
@@ -252,18 +252,22 @@ impl Config {
     /// This mirrors the engine's exact diagnostic string:
     /// `"bootloader is defined more than once"`.
     pub fn bootloader(&mut self, kind: &str) -> BootloaderBuilder<'_> {
-        let state = if self.raw.bootloader_was_set {
+        let state = if self.raw.bootloader.is_some() {
             // Mirror engine wording verbatim.
             self.diagnostics
                 .push(ConfigError::new("bootloader is defined more than once".to_string()));
             BuilderState::Duplicate { name: kind.into(), span: None }
         } else {
-            self.raw.bootloader_was_set = true;
             // Typed wire format: parse the user's &str into BootloaderKind
             // here so the raw model and the resolved model stay symmetric.
             // Unknown values flow through as Custom(s) (still useful — e.g.
-            // limine).
-            self.raw.bootloader.kind = BootloaderKind::from_str(kind);
+            // limine). Allocating the `Some(...)` payload here means the
+            // builder's chained methods can `.as_mut().unwrap()` safely
+            // (see `BootloaderBuilder::modify`).
+            self.raw.bootloader = Some(RawBootloaderDef {
+                kind: BootloaderKind::from_str(kind),
+                ..Default::default()
+            });
             BuilderState::Valid { state: (), name: kind.into(), span: None }
         };
         BootloaderBuilder { cfg: self, state }

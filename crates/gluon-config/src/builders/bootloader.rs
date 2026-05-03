@@ -15,10 +15,21 @@ pub struct BootloaderBuilder<'cfg> {
 }
 
 impl<'cfg> BootloaderBuilder<'cfg> {
-    /// Apply `f` to the `BootloaderDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawBootloaderDef` if this builder is `Valid`.
+    ///
+    /// `cfg.raw.bootloader` is `Option<RawBootloaderDef>`. The `Valid`
+    /// arm of `Config::bootloader` always populates `Some(...)` before
+    /// returning the builder, so the `as_mut().unwrap()` here is the
+    /// safe shape for the singleton: `Duplicate` short-circuits and
+    /// never touches the field, `Valid` is guaranteed to have a payload.
     fn modify<F: FnOnce(&mut gluon_model::RawBootloaderDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
-            f(&mut self.cfg.raw.bootloader);
+            f(self
+                .cfg
+                .raw
+                .bootloader
+                .as_mut()
+                .expect("Valid bootloader builder always has Some(RawBootloaderDef)"));
         }
     }
 
@@ -66,7 +77,7 @@ mod tests {
     fn bootloader_chain_sets_typed_fields() {
         let mut cfg = Config::new();
         cfg.bootloader("uefi").entry_crate("loader").config_file("boot.cfg");
-        let bl = &cfg.raw.bootloader;
+        let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
         assert_eq!(bl.kind, BootloaderKind::Uefi);
         assert_eq!(bl.entry_crate.as_deref(), Some("loader"));
         assert_eq!(bl.config_file.as_deref(), Some("boot.cfg"));
@@ -78,13 +89,14 @@ mod tests {
         let mut cfg = Config::new();
         cfg.bootloader("a").entry_crate("loader_a");
         cfg.bootloader("b").entry_crate("loader_b");
+        let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
         // Unknown kinds round-trip through BootloaderKind::Custom.
         assert_eq!(
-            cfg.raw.bootloader.kind,
+            bl.kind,
             BootloaderKind::Custom("a".into()),
             "first kind preserved",
         );
-        assert_eq!(cfg.raw.bootloader.entry_crate.as_deref(), Some("loader_a"));
+        assert_eq!(bl.entry_crate.as_deref(), Some("loader_a"));
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
     }
@@ -93,17 +105,22 @@ mod tests {
     fn bootloader_extras_are_recorded() {
         let mut cfg = Config::new();
         cfg.bootloader("custom").extra("flavor", "limine").extra("strict", "true");
-        let bl = &cfg.raw.bootloader;
+        let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
         assert_eq!(bl.extras.get("flavor").map(String::as_str), Some("limine"));
         assert_eq!(bl.extras.get("strict").map(String::as_str), Some("true"));
     }
 
     #[test]
-    fn bootloader_was_set_does_not_serialize() {
-        let mut cfg = Config::new();
-        cfg.bootloader("uefi");
+    fn unset_bootloader_is_none() {
+        // Singleton-set is now "field is Some(...)". A fresh config that
+        // never called `bootloader(...)` round-trips with `bootloader: null`
+        // (omitted, courtesy of skip_serializing_if).
+        let cfg = Config::new();
+        assert!(cfg.raw.bootloader.is_none());
         let json = serde_json::to_string(&cfg.raw).unwrap();
-        assert!(!json.contains("bootloader_was_set"),
-            "bootloader_was_set must be #[serde(skip)] — not serialized");
+        assert!(
+            !json.contains("\"bootloader\""),
+            "absent bootloader must not be serialized, got: {json}"
+        );
     }
 }

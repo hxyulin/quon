@@ -65,7 +65,10 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         &mut diags,
     );
     intern_profiles(&raw.profiles, &model.targets, &model.crates, &mut model.profiles, &mut diags);
-    model.bootloader = intern_bootloader(&raw.bootloader, &model.crates, &mut diags);
+    model.bootloader = raw
+        .bootloader
+        .as_ref()
+        .map(|b| intern_bootloader(b, &model.crates, &mut diags));
     intern_esps(&raw.esps, &model.crates, &mut model.esps, &mut diags);
     intern_build_steps(&raw.build_steps, &model.crates, &mut model.build_steps, &mut diags);
     intern_pipelines(&raw.pipelines, &model.groups, &mut model.pipelines, &mut diags);

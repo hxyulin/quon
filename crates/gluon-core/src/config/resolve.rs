@@ -1439,14 +1439,17 @@ mod tests {
                 .entry_crate("boot")
                 .protocol("gop");
         });
-        assert_eq!(model.bootloader.kind, BootloaderKind::Uefi);
-        let entry = model
+        let bl = model
             .bootloader
+            .as_ref()
+            .expect("bootloader populated by builder");
+        assert_eq!(bl.kind, BootloaderKind::Uefi);
+        let entry = bl
             .entry_crate
             .and_then(|h| model.crates.get(h))
             .map(|c| c.name.as_str());
         assert_eq!(entry, Some("boot"));
-        assert_eq!(model.bootloader.protocol.as_deref(), Some("gop"));
+        assert_eq!(bl.protocol.as_deref(), Some("gop"));
     }
 
     #[test]
