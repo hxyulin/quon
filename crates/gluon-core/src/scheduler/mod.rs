@@ -14,6 +14,10 @@
 //! worker pool, and dispatches each node to the appropriate helper.
 
 pub mod dag;
+// Task 2 wires these into PipelineDispatcher; until then the items
+// are referenced only by their unit tests. The allow lifts in Task 2.
+#[allow(dead_code)]
+mod snapshot;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
