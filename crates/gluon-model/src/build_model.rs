@@ -151,20 +151,19 @@ impl CrateType {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileDef {
     pub name: String,
-    pub inherits: Option<String>,
+    /// Resolved parent profile. `None` when the profile does not inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inherits_handle: Option<Handle<ProfileDef>>,
-    /// `None` when the profile inherits a target from its parent via `inherits_handle`.
-    pub target: Option<String>,
+    pub inherits: Option<Handle<ProfileDef>>,
+    /// Resolved target. `None` when the profile inherits its target from
+    /// a parent (resolution walks the chain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_handle: Option<Handle<TargetDef>>,
+    pub target: Option<Handle<TargetDef>>,
     pub opt_level: Option<u8>,
     pub debug_info: Option<bool>,
     pub lto: Option<String>,
-    pub boot_binary: Option<String>,
+    /// Resolved boot binary. `None` means "use the profile's preset/default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boot_binary_handle: Option<Handle<CrateDef>>,
-    /// Named preset to apply.
+    pub boot_binary: Option<Handle<CrateDef>>,
     pub preset: Option<String>,
     pub config: BTreeMap<String, ConfigValue>,
     pub qemu_memory: Option<u32>,

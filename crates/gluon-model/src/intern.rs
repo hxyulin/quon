@@ -253,15 +253,12 @@ fn intern_profiles(
             p.name.clone(),
             ProfileDef {
                 name: p.name.clone(),
-                inherits: p.inherits.clone(),
-                inherits_handle: None,        // pass 2
-                target: p.target.clone(),
-                target_handle,
+                inherits: None,                  // populated in pass 2
+                target: target_handle,
                 opt_level: p.opt_level,
                 debug_info: p.debug_info,
                 lto: p.lto.clone(),
-                boot_binary: p.boot_binary.clone(),
-                boot_binary_handle,
+                boot_binary: boot_binary_handle,
                 preset: p.preset.clone(),
                 config: p.config.clone(),
                 qemu_memory: p.qemu_memory,
@@ -287,7 +284,7 @@ fn intern_profiles(
                 )).with_optional_span(span));
             }
             if let Some(slot) = out.get_mut(h) {
-                slot.inherits_handle = parent_h;
+                slot.inherits = parent_h;
             }
         }
     }
@@ -474,7 +471,7 @@ mod tests {
         assert!(diags.is_empty(), "no dangling refs: {diags:?}");
         let ph = model.profiles.lookup("dev").expect("dev profile");
         let p = model.profiles.get(ph).unwrap();
-        assert!(p.target_handle.is_some());
+        assert!(p.target.is_some());
     }
 
     #[test]

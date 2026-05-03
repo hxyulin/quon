@@ -68,7 +68,7 @@ pub fn resolve(
                 None
             }
         },
-        None => flattened.target_handle,
+        None => flattened.target,
     };
     let Some(effective_target) = effective_target else {
         diags.push(Diagnostic::error(format!(
@@ -86,7 +86,7 @@ pub fn resolve(
     }
     let debug_info = flattened.debug_info.unwrap_or(false);
     let lto = flattened.lto.clone();
-    let boot_binary = flattened.boot_binary_handle;
+    let boot_binary = flattened.boot_binary;
 
     // 5. Resolve config options (defaults → preset → overrides).
     let mut resolved_options: BTreeMap<String, ResolvedValue> = BTreeMap::new();
@@ -373,7 +373,7 @@ pub fn resolve(
     })
 }
 
-/// Walk the `inherits_handle` chain depth-first and produce a synthetic
+/// Walk the `inherits` chain depth-first and produce a synthetic
 /// [`ProfileDef`] where each `Option` field is filled by the nearest
 /// descendant that set it.
 ///
@@ -401,7 +401,7 @@ fn flatten_profile(
         let Some(p) = model.profiles.get(h) else {
             break;
         };
-        cur = p.inherits_handle;
+        cur = p.inherits;
     }
 
     // Walk from root → child so child fields overwrite parent fields.
@@ -414,8 +414,7 @@ fn flatten_profile(
             acc.name = p.name.clone();
         }
         if p.target.is_some() {
-            acc.target = p.target.clone();
-            acc.target_handle = p.target_handle;
+            acc.target = p.target;
         }
         if p.opt_level.is_some() {
             acc.opt_level = p.opt_level;
@@ -427,8 +426,7 @@ fn flatten_profile(
             acc.lto = p.lto.clone();
         }
         if p.boot_binary.is_some() {
-            acc.boot_binary = p.boot_binary.clone();
-            acc.boot_binary_handle = p.boot_binary_handle;
+            acc.boot_binary = p.boot_binary;
         }
         if p.preset.is_some() {
             acc.preset = p.preset.clone();
