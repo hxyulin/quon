@@ -109,7 +109,7 @@ impl RuleFn for ExecRule {
 #[cfg(test)]
 mod tests {
     use crate::error::Error;
-    use crate::rule::tests::test_support::make_ctx_parts;
+    use crate::rule::test_support::make_ctx_parts;
     use crate::rule::{RuleCtx, RuleRegistry};
     use gluon_model::{RuleDef, RuleHandler};
 

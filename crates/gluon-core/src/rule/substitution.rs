@@ -19,7 +19,17 @@ use crate::error::{Error, Result};
 use crate::rule::{RuleCtx, RuleDef};
 use gluon_model::{CrateDef, TargetDef};
 
-use super::KNOWN_VARS;
+/// Simple variable names recognised by [`Substituter::resolve_var`]. Sorted
+/// so the diagnostic in the unknown-variable error is deterministic. Prefixed
+/// forms (`${artifact:<crate>}`, `${image:<name>}`) are handled separately
+/// and are intentionally not in this list.
+const KNOWN_VARS: &[&str] = &[
+    "build_dir",
+    "profile",
+    "project_name",
+    "project_root",
+    "target",
+];
 
 /// Argument-string expander bound to a `(RuleCtx, RuleDef)` pair.
 ///
@@ -221,86 +231,9 @@ impl<'a> Substituter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::{ArtifactMap, BuildLayout};
     use crate::rule::RuleCtx;
-    use gluon_model::{
-        BuildModel, Handle, ProjectDef, ResolvedConfig, ResolvedProfile, RuleDef, RuleHandler,
-        TargetDef,
-    };
-    use std::path::PathBuf;
-
-    // -----------------------------------------------------------------------
-    // Test fixtures (copied from rule/mod.rs test_support; must stay in sync
-    // with the originals — see "copy, don't centralise" project precedent)
-    // -----------------------------------------------------------------------
-
-    fn make_target(name: &str) -> TargetDef {
-        TargetDef {
-            name: name.into(),
-            spec: format!("{}-unknown-none", name),
-            builtin: true,
-            panic_strategy: None,
-            span: None,
-        }
-    }
-
-    fn make_model_with_target(target_name: &str) -> (BuildModel, Handle<TargetDef>) {
-        let mut model = BuildModel::default();
-        let t = make_target(target_name);
-        let (handle, _) = model.targets.insert(target_name.into(), t);
-        (model, handle)
-    }
-
-    fn make_profile(target: Handle<TargetDef>) -> ResolvedProfile {
-        ResolvedProfile {
-            name: "debug".into(),
-            target,
-            opt_level: 0,
-            debug_info: false,
-            lto: None,
-            boot_binary: None,
-            qemu_memory: None,
-            qemu_cores: None,
-            qemu_extra_args: Vec::new(),
-            qemu_boot_mode: None,
-            test_timeout: None,
-        }
-    }
-
-    fn make_resolved(target_handle: Handle<TargetDef>, build_dir: PathBuf) -> ResolvedConfig {
-        ResolvedConfig {
-            project: ProjectDef {
-                name: "testproject".into(),
-                version: "0.1.0".into(),
-                config_crate_name: None,
-                cfg_prefix: None,
-                config_override_file: None,
-                default_profile: None,
-            },
-            profile: make_profile(target_handle),
-            options: Default::default(),
-            crates: Vec::new(),
-            build_dir: build_dir.clone(),
-            project_root: build_dir.parent().unwrap_or(&build_dir).to_path_buf(),
-        }
-    }
-
-    /// Build a `(BuildLayout, BuildModel, ResolvedConfig, ArtifactMap)` tuple
-    /// for testing.
-    ///
-    /// `tmp` should be a `tempfile::TempDir` base; the build dir is
-    /// `tmp/build`.
-    fn make_ctx_parts(
-        tmp: &std::path::Path,
-    ) -> (BuildLayout, BuildModel, ResolvedConfig, ArtifactMap) {
-        let build_dir = tmp.join("build");
-        std::fs::create_dir_all(&build_dir).unwrap();
-        let (model, target_handle) = make_model_with_target("x86_64-test");
-        let resolved = make_resolved(target_handle, build_dir.clone());
-        let layout = BuildLayout::new(build_dir, "testproject");
-        let artifacts = ArtifactMap::new();
-        (layout, model, resolved, artifacts)
-    }
+    use crate::rule::test_support::*;
+    use gluon_model::{RuleDef, RuleHandler};
 
     fn make_rule(name: &str, inputs: Vec<String>) -> RuleDef {
         RuleDef {
