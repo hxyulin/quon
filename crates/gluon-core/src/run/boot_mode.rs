@@ -38,6 +38,9 @@ pub trait BootModeAssembler: Send + Sync {
     ) -> Result<()>;
 }
 
+/// Direct-kernel boot: emit `-kernel <path>`. No firmware wiring,
+/// no disk wiring — direct boot expects QEMU to load the kernel and
+/// jump to its entry point itself.
 pub struct DirectAssembler;
 
 impl BootModeAssembler for DirectAssembler {
@@ -55,6 +58,7 @@ impl BootModeAssembler for DirectAssembler {
     }
 }
 
+/// UEFI boot via OVMF pflash + a hybrid disk or ESP dir/image.
 pub struct UefiAssembler;
 
 impl BootModeAssembler for UefiAssembler {
@@ -121,6 +125,9 @@ impl BootModeAssembler for UefiAssembler {
     }
 }
 
+/// SeaBIOS boot: no `-kernel`, no pflash. Disk attaches as IDE0.
+/// VVFAT (`EspSource::Dir`) is rejected — see the impl body for
+/// the rationale.
 pub struct BiosAssembler;
 
 impl BootModeAssembler for BiosAssembler {
