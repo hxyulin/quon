@@ -20,6 +20,7 @@
 //! [`run`] itself: the test harness will call `build_qemu_command`
 //! directly per test binary and interpret exit codes.
 
+pub mod boot_mode;
 mod entry;
 pub mod ovmf;
 pub mod qemu_cmd;
