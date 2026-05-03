@@ -167,10 +167,13 @@ pub fn ensure_esp(
             e.source_name, esp.name, e.dest_path
         );
 
-        // Mark this entry built. Persist after each per-entry write so
-        // a mid-loop crash leaves the cache consistent with what's
-        // already on disk — the next run will re-evaluate the still-
-        // unmarked entries and skip the ones already recorded.
+        // Mark this entry built (in-memory only). The single
+        // `cache.save()` after the loop persists everything atomically;
+        // a mid-loop crash forfeits the run, mirroring the rustc-half
+        // all-or-nothing semantics. The per-entry mark vs deferred
+        // save split keeps the per-entry path cheap (no fsync per copy)
+        // while preserving the "stamp written after the work" invariant
+        // at the granularity of the whole `ensure_esp` call.
         {
             let mut cache = ctx
                 .cache

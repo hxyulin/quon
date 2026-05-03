@@ -948,6 +948,65 @@ mod tests {
     }
 
     #[test]
+    fn composite_mtime_touch_does_not_invalidate() {
+        // Symmetric coverage to the rustc-half `mtime_changed_same_content_stays_fresh`.
+        // A `touch` on a composite input (mtime advances, content unchanged)
+        // must not bust the cache: the slow-path SHA-256 fallback should
+        // confirm freshness AND refresh the recorded mtime in place so
+        // subsequent reads stay on the fast path.
+        use crate::cache::composite::{CompositeQuery, CompositeRecord};
+        use std::fs::File;
+        use std::time::Duration;
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"unchanged content");
+        let out = fx.touch_output("out.img");
+        let aux = Some([0xCC; 32]);
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "k".into(),
+                inputs: vec![a.clone()],
+                aux_hash: aux,
+                output_path: out.clone(),
+            })
+            .expect("mark");
+
+        // Bump mtime via File::set_modified (Rust 1.75+). Content
+        // untouched — the slow-path SHA fallback should keep the entry
+        // fresh.
+        let new_mtime = SystemTime::now() + Duration::from_secs(10);
+        let f = File::options().write(true).open(&a).expect("reopen");
+        f.set_modified(new_mtime).expect("set mtime");
+        drop(f);
+
+        let inputs = vec![a.clone()];
+        let q = CompositeQuery {
+            key: "k",
+            inputs: &inputs,
+            aux_hash: aux,
+            output_path: &out,
+        };
+        assert!(cache.is_composite_fresh(&q));
+
+        // The cache should have refreshed the recorded mtime in place so
+        // the next call hits the fast path without re-hashing.
+        let stored = cache
+            .manifest
+            .composite
+            .get("k")
+            .expect("entry")
+            .inputs[&a]
+            .mtime_ns;
+        let expected = new_mtime
+            .duration_since(UNIX_EPOCH)
+            .expect("since epoch")
+            .as_nanos();
+        assert_eq!(stored, expected);
+    }
+
+    #[test]
     fn save_leaves_no_temp_files_behind() {
         let fx = Fixture::new();
         let a = fx.write("a.rs", b"hello");
