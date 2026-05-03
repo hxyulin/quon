@@ -70,6 +70,42 @@ pub struct ResolvedCrateRef {
     pub host: bool,
 }
 
+impl ResolvedProfile {
+    /// Inherit unset fields from `parent`. "Unset" means `None` for
+    /// `Option`s and empty for collections. Fields the child has
+    /// already set keep their values.
+    ///
+    /// `target` is mandatory on both sides — never inherited here
+    /// (target inheritance is handled at the chain-walk in
+    /// `config/resolve.rs::flatten_profile` because it must produce
+    /// a single concrete handle).
+    pub fn merge_inherited(&mut self, parent: &Self) {
+        if self.lto.is_none() {
+            self.lto = parent.lto.clone();
+        }
+        if self.boot_binary.is_none() {
+            self.boot_binary = parent.boot_binary;
+        }
+        if self.qemu_memory.is_none() {
+            self.qemu_memory = parent.qemu_memory;
+        }
+        if self.qemu_cores.is_none() {
+            self.qemu_cores = parent.qemu_cores;
+        }
+        if self.qemu_extra_args.is_empty() {
+            self.qemu_extra_args = parent.qemu_extra_args.clone();
+        }
+        if self.qemu_boot_mode.is_none() {
+            self.qemu_boot_mode = parent.qemu_boot_mode;
+        }
+        if self.test_timeout.is_none() {
+            self.test_timeout = parent.test_timeout;
+        }
+        // opt_level and debug_info have concrete defaults from
+        // resolve_with_defaults — never inherited via this helper.
+    }
+}
+
 /// A fully-resolved build configuration, consumed by scheduler/compile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedConfig {
@@ -82,4 +118,64 @@ pub struct ResolvedConfig {
     /// `gluon.rs`). Used by `compile_crate` to resolve `CrateDef::path`
     /// and `CrateDef::linker_script` against the project tree.
     pub project_root: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handle::Handle;
+
+    #[test]
+    fn merge_inherited_fills_none_slots_only() {
+        let parent = ResolvedProfile {
+            name: "parent".into(),
+            target: Handle::new(0),
+            opt_level: 2,
+            debug_info: false,
+            lto: Some("fat".into()),
+            boot_binary: None,
+            qemu_memory: Some(512),
+            qemu_cores: Some(4),
+            qemu_extra_args: vec!["-cpu".into(), "max".into()],
+            qemu_boot_mode: Some(crate::build_model::BootMode::Uefi),
+            test_timeout: Some(60),
+        };
+        let mut child = ResolvedProfile {
+            name: "child".into(),
+            target: Handle::new(0),
+            opt_level: 0, // child overrides
+            debug_info: true,
+            lto: None,               // child inherits
+            boot_binary: None,
+            qemu_memory: None,       // child inherits
+            qemu_cores: None,
+            qemu_extra_args: vec![], // empty inherits
+            qemu_boot_mode: None,
+            test_timeout: None,
+        };
+        child.merge_inherited(&parent);
+        assert_eq!(
+            child.opt_level, 0,
+            "child's value preserved (already non-default)"
+        );
+        assert!(child.debug_info, "child's value preserved");
+        assert_eq!(
+            child.lto,
+            Some("fat".to_string()),
+            "lto inherited from parent"
+        );
+        assert_eq!(child.qemu_memory, Some(512), "inherited from parent");
+        assert_eq!(child.qemu_cores, Some(4), "inherited");
+        assert_eq!(
+            child.qemu_extra_args,
+            vec!["-cpu".to_string(), "max".to_string()],
+            "empty Vec inherited"
+        );
+        assert_eq!(
+            child.qemu_boot_mode,
+            Some(crate::build_model::BootMode::Uefi),
+            "inherited"
+        );
+        assert_eq!(child.test_timeout, Some(60), "inherited");
+    }
 }
