@@ -392,6 +392,22 @@ pub fn resolve(
     })
 }
 
+/// Local convenience for the per-field merge inside [`flatten_profile`]:
+/// for each named `Option<_>` field, copy from `$p` to `$acc` when the
+/// source has a value. Intentionally not exported — it folds the
+/// repetitive `if p.<f>.is_some() { acc.<f> = p.<f>.clone(); }` chain
+/// into a single call site so adding a new profile field touches one
+/// list, not a dozen `if` blocks.
+macro_rules! inherit_if_set {
+    ($acc:ident, $p:ident, $($field:ident),* $(,)?) => {
+        $(
+            if $p.$field.is_some() {
+                $acc.$field = $p.$field.clone();
+            }
+        )*
+    };
+}
+
 /// Walk the `inherits` chain depth-first and produce a synthetic
 /// [`ProfileDef`] where each `Option` field is filled by the nearest
 /// descendant that set it.
@@ -432,39 +448,21 @@ fn flatten_profile(
         if !p.name.is_empty() {
             acc.name = p.name.clone();
         }
-        if p.target.is_some() {
-            acc.target = p.target;
-        }
-        if p.opt_level.is_some() {
-            acc.opt_level = p.opt_level;
-        }
-        if p.debug_info.is_some() {
-            acc.debug_info = p.debug_info;
-        }
-        if p.lto.is_some() {
-            acc.lto = p.lto.clone();
-        }
-        if p.boot_binary.is_some() {
-            acc.boot_binary = p.boot_binary;
-        }
-        if p.preset.is_some() {
-            acc.preset = p.preset.clone();
-        }
-        if p.qemu_memory.is_some() {
-            acc.qemu_memory = p.qemu_memory;
-        }
-        if p.qemu_cores.is_some() {
-            acc.qemu_cores = p.qemu_cores;
-        }
-        if p.qemu_extra_args.is_some() {
-            acc.qemu_extra_args = p.qemu_extra_args.clone();
-        }
-        if p.qemu_boot_mode.is_some() {
-            acc.qemu_boot_mode = p.qemu_boot_mode;
-        }
-        if p.test_timeout.is_some() {
-            acc.test_timeout = p.test_timeout;
-        }
+        inherit_if_set!(
+            acc,
+            p,
+            target,
+            opt_level,
+            debug_info,
+            lto,
+            boot_binary,
+            preset,
+            qemu_memory,
+            qemu_cores,
+            qemu_extra_args,
+            qemu_boot_mode,
+            test_timeout,
+        );
         for (k, v) in &p.config {
             acc.config.insert(k.clone(), v.clone());
         }
