@@ -5,7 +5,8 @@ use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
 use gluon_model::{
-    ImageDef, ImageEntry, ImageSource, Handle, PartitionDef, PartitionTable, RawSource, RawWrite,
+    Handle, ImageDef, ImageEntry, ImageFormat, ImageSource, PartitionDef, PartitionTable, RawSource,
+    RawWrite,
 };
 
 /// Chainable builder returned by [`Config::image`].
@@ -24,13 +25,33 @@ impl<'cfg> ImageBuilder<'cfg> {
         }
     }
 
-    /// Set the image format string (e.g. `"fat32"`, `"raw"`).
+    /// Set the image filesystem flavour. The user-facing API stays
+    /// `&str` so call sites read like the old form
+    /// (`.format("fat32")`); we parse into [`ImageFormat`] here so the
+    /// raw and resolved models both carry the typed enum.
     ///
-    /// Stage 4 will introduce a typed `ImageFormat` enum; for now a bare
-    /// string is accepted and validated at image-build time.
-    pub fn format(mut self, format: &str) -> Self {
-        let s = format.to_string();
-        self.modify(|img| img.format = Some(s));
+    /// Unknown values are surfaced as a [`ConfigError`] diagnostic and
+    /// the field is left unset — the alternative (silently storing a
+    /// `Custom(String)` escape hatch like `BootloaderKind`) was
+    /// rejected because the format set is closed: the dispatch site in
+    /// `gluon-core::image` can't *do* anything with an unrecognised
+    /// flavour, so the failure should be visible at config time, not
+    /// at image-build time.
+    pub fn format(mut self, name: &str) -> Self {
+        match ImageFormat::parse(name) {
+            Some(f) => {
+                self.modify(|img| img.format = Some(f));
+            }
+            None => {
+                // Don't gate on `is_duplicate`: a bad format string is
+                // worth surfacing even when the image itself is a dup
+                // — the user wrote it, they should see the typo.
+                self.cfg.diagnostics.push(ConfigError::new(format!(
+                    "image format '{name}' is not recognised \
+                     (expected fat12|fat16|fat32|raw|iso9660)"
+                )));
+            }
+        }
         self
     }
 
@@ -191,7 +212,7 @@ impl<'cfg> ImageBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
-    use gluon_model::{ImageSource, PartitionTable};
+    use gluon_model::{ImageFormat, ImageSource, PartitionTable};
 
     #[test]
     fn image_with_entries_chain() {
@@ -204,7 +225,7 @@ mod tests {
 
         let h = cfg.raw.images.lookup("disk").unwrap();
         let img = cfg.raw.images.get(h).unwrap();
-        assert_eq!(img.format.as_deref(), Some("fat32"));
+        assert_eq!(img.format, Some(ImageFormat::Fat32));
         assert_eq!(img.size_mb, Some(64));
         assert_eq!(img.entries.len(), 2);
         match &img.entries[0].source {

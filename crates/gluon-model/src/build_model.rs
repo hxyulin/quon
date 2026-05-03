@@ -509,6 +509,44 @@ pub struct BootloaderDef {
     pub span: Option<SourceSpan>,
 }
 
+/// Filesystem flavour for a flat-FS image. The wire format is the
+/// lowercase mnemonic so existing JSON model dumps round-trip
+/// unchanged. Adding a new format is an additive enum-variant change
+/// (no model break) — the dispatch sites in `gluon-core::image`
+/// already match exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    Fat12,
+    Fat16,
+    Fat32,
+    Raw,
+    Iso9660,
+}
+
+impl ImageFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fat12 => "fat12",
+            Self::Fat16 => "fat16",
+            Self::Fat32 => "fat32",
+            Self::Raw => "raw",
+            Self::Iso9660 => "iso9660",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "fat12" => Self::Fat12,
+            "fat16" => Self::Fat16,
+            "fat32" => Self::Fat32,
+            "raw" => Self::Raw,
+            "iso9660" => Self::Iso9660,
+            _ => return None,
+        })
+    }
+}
+
 /// Disk image configuration. Describes how to assemble a bootable image
 /// from build artifacts.
 ///
@@ -526,11 +564,10 @@ pub struct BootloaderDef {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImageDef {
     pub name: String,
-    /// Image format: `"fat12"`, `"fat16"`, `"fat32"`, `"raw"`, `"iso9660"`.
-    /// Ignored when `partition_table` is set (the format is implicitly
-    /// `"raw"` — a partitioned disk container).
+    /// Image filesystem flavour. Ignored when `partition_table` is set
+    /// (the format is implicitly `Raw` — a partitioned disk container).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
+    pub format: Option<ImageFormat>,
     /// Optional image size in MiB. When `None`, the builder determines
     /// the minimum size from the entries (flat-FS) or from the largest
     /// LBA written by raw_writes/partitions (partitioned disk).
@@ -1216,7 +1253,7 @@ mod tests {
             "disk".into(),
             ImageDef {
                 name: "disk".into(),
-                format: Some("fat32".into()),
+                format: Some(ImageFormat::Fat32),
                 size_mb: Some(64),
                 entries: vec![ImageEntry {
                     source: ImageSource::Crate("bootloader".into()),
@@ -1235,7 +1272,7 @@ mod tests {
         let de: BuildModel = serde_json::from_str(&json).unwrap();
         let h = de.images.lookup("disk").expect("image name index rebuilt");
         let img = de.images.get(h).unwrap();
-        assert_eq!(img.format.as_deref(), Some("fat32"));
+        assert_eq!(img.format, Some(ImageFormat::Fat32));
         assert_eq!(img.size_mb, Some(64));
         assert_eq!(img.entries.len(), 1);
         assert_eq!(img.entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");

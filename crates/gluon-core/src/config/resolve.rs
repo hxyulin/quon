@@ -763,7 +763,7 @@ fn _crate_handle_marker(_: Handle<CrateDef>, _: Handle<TargetDef>) {}
 mod tests {
     use super::*;
     use gluon_config::Config;
-    use gluon_model::{intern, BootloaderKind, BuildModel, ConfigValue, CrateType};
+    use gluon_model::{intern, BootloaderKind, BuildModel, ConfigValue, CrateType, ImageFormat};
 
     /// Build a `BuildModel` in-process via the gluon-config builder
     /// and the gluon-model intern pass. Replaces the Stage 1/2
@@ -1445,7 +1445,7 @@ mod tests {
         });
         let h = model.images.lookup("disk").expect("image must exist");
         let img = model.images.get(h).unwrap();
-        assert_eq!(img.format.as_deref(), Some("fat32"));
+        assert_eq!(img.format, Some(ImageFormat::Fat32));
         assert_eq!(img.size_mb, Some(64));
         assert_eq!(img.entries.len(), 3);
     }

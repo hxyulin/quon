@@ -1613,7 +1613,7 @@ mod tests {
             "boot-disk".into(),
             gluon_model::ImageDef {
                 name: "boot-disk".into(),
-                format: Some("fat32".into()),
+                format: Some(gluon_model::ImageFormat::Fat32),
                 size_mb: Some(64),
                 entries: vec![
                     ImageEntry {

@@ -37,8 +37,8 @@ use crate::compile::extern_map::resolve_artifact_by_name;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Error, Result};
 use gluon_model::{
-    BuildModel, EspDef, Handle, ImageDef, ImageSource, PartitionDef, PartitionTable, RawSource,
-    RawWrite, ResolvedConfig,
+    BuildModel, EspDef, Handle, ImageDef, ImageFormat, ImageSource, PartitionDef, PartitionTable,
+    RawSource, RawWrite, ResolvedConfig,
 };
 use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
@@ -165,14 +165,17 @@ pub fn build_image(
         // Flat-FS path. Format dispatch defaults to FAT32 — that's the
         // realistic case (every UEFI ESP). `raw` without a partition
         // table makes no sense (no FS, no LBA layout — what would it
-        // mean?), so we still reject it here.
-        let format = image.format.as_deref().unwrap_or("fat32");
+        // mean?), so we still reject it here. The other variants
+        // (FAT12/FAT16/ISO9660) aren't implemented yet; they round-trip
+        // through the model but error out at build time so the user
+        // gets a clear "supported flat-FS: fat32" message.
+        let format = image.format.unwrap_or(ImageFormat::Fat32);
         match format {
-            "fat32" => {
+            ImageFormat::Fat32 => {
                 let size_bytes = compute_size_bytes(image, &flat_entries)?;
                 fat::format_fat32(&image_path, size_bytes, &image.name, &flat_entries, stdout)?;
             }
-            "raw" => {
+            ImageFormat::Raw => {
                 return Err(Error::Config(format!(
                     "image(\"{}\").format(\"raw\") without a partition table has no \
                      well-defined layout. To produce a partitioned raw disk, call \
@@ -183,10 +186,11 @@ pub fn build_image(
             }
             other => {
                 return Err(Error::Config(format!(
-                    "image(\"{}\").format(\"{other}\"): unsupported format. \
+                    "image(\"{}\").format(\"{}\"): unsupported format. \
                      Supported flat-FS: \"fat32\". For partitioned disks, set \
                      .partition_table(\"mbr\") instead of .format.",
                     image.name,
+                    other.as_str(),
                 )));
             }
         }
@@ -919,7 +923,7 @@ mod tests {
             "boot".into(),
             ImageDef {
                 name: "boot".into(),
-                format: Some("fat32".into()),
+                format: Some(ImageFormat::Fat32),
                 size_mb: Some(64),
                 entries: vec![ImageEntry {
                     source: ImageSource::File("hello.txt".into()),
@@ -992,7 +996,7 @@ mod tests {
             "img".into(),
             ImageDef {
                 name: "img".into(),
-                format: Some("fat32".into()),
+                format: Some(ImageFormat::Fat32),
                 size_mb: Some(64),
                 entries: vec![ImageEntry {
                     source: ImageSource::File("data.bin".into()),
@@ -1042,7 +1046,7 @@ mod tests {
             "img".into(),
             ImageDef {
                 name: "img".into(),
-                format: Some("fat32".into()),
+                format: Some(ImageFormat::Fat32),
                 size_mb: Some(64),
                 entries: vec![ImageEntry {
                     source: ImageSource::File("data.bin".into()),
@@ -1087,7 +1091,7 @@ mod tests {
             "raw".into(),
             ImageDef {
                 name: "raw".into(),
-                format: Some("raw".into()),
+                format: Some(ImageFormat::Raw),
                 ..Default::default()
             },
         );
