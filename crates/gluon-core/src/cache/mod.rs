@@ -471,7 +471,7 @@ impl Cache {
     /// Used by `clean(layout, keep_sysroot=true)` to retain just the
     /// sysroot fast-path state. Marks the cache dirty if any entry
     /// was removed (so the subsequent `save()` actually writes).
-    pub fn retain_sysroot_only(&mut self) {
+    pub(crate) fn retain_sysroot_only(&mut self) {
         let before = self.manifest.rustc.len() + self.manifest.composite.len();
         self.manifest.rustc.retain(|k, _| k.starts_with("sysroot:"));
         self.manifest.composite.retain(|k, _| k.starts_with("sysroot:"));
