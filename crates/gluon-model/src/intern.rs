@@ -10,7 +10,7 @@
 
 use crate::build_model::{
     BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, EspDef,
-    EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef,
+    EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
@@ -87,24 +87,30 @@ fn intern_groups(
     diags: &mut Vec<InternDiagnostic>,
 ) {
     for (_, g) in raw.iter() {
-        let target_handle = if g.target == "host" {
-            None
+        let target = if g.target == "host" {
+            TargetSpec::Host
         } else {
-            let h = targets.lookup(&g.target);
-            if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "group '{}' references unknown target '{}'",
-                    g.name, g.target
-                )).with_optional_span(g.span.clone()));
+            match targets.lookup(&g.target) {
+                Some(h) => TargetSpec::Cross(h),
+                None => {
+                    diags.push(
+                        InternDiagnostic::error(format!(
+                            "group '{}' references unknown target '{}'",
+                            g.name, g.target
+                        ))
+                        .with_optional_span(g.span.clone()),
+                    );
+                    // Fall back so the Def is well-formed; the diagnostic
+                    // is the signal that something was wrong.
+                    TargetSpec::Host
+                }
             }
-            h
         };
         let _ = out.insert(
             g.name.clone(),
             GroupDef {
                 name: g.name.clone(),
-                target: g.target.clone(),
-                target_handle,
+                target,
                 default_edition: g.default_edition.clone(),
                 crates: g.crates.clone(),
                 shared_flags: g.shared_flags.clone(),

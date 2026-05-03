@@ -354,7 +354,6 @@ mod tests {
             "host".into(),
             GroupDef {
                 name: "host".into(),
-                target: "host".into(),
                 ..Default::default()
             },
         );

@@ -31,7 +31,9 @@ pub use lockfile::{VendorLock, VendorLockPackage};
 
 use crate::compile::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef};
+use gluon_model::{
+    BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef, TargetSpec,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -558,12 +560,23 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
         // looks like our synthetic group before we start dropping
         // crates into it.
         if let Some(g) = model.groups.get(h)
-            && g.target != "host"
+            && !matches!(g.target, TargetSpec::Host)
         {
+            // Resolve the cross target's name for the diagnostic. We
+            // don't know what handle it points at, so go through the
+            // arena; if the handle is dangling (shouldn't happen on a
+            // well-interned model), fall back to a placeholder.
+            let target_name = match g.target {
+                TargetSpec::Host => "host".to_string(),
+                TargetSpec::Cross(h) => model
+                    .targets
+                    .get(h)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string()),
+            };
             return Err(Error::Diagnostics(vec![Diagnostic::error(format!(
-                "group '{VENDORED_GROUP_NAME}' already exists with target '{}' — \
-                 this name is reserved for vendored dependencies",
-                g.target
+                "group '{VENDORED_GROUP_NAME}' already exists with target '{target_name}' — \
+                 this name is reserved for vendored dependencies"
             ))]));
         }
         return Ok(VENDORED_GROUP_NAME.to_string());
@@ -571,8 +584,7 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<String> {
 
     let group = GroupDef {
         name: VENDORED_GROUP_NAME.into(),
-        target: "host".into(),
-        target_handle: None, // "host" is a sentinel, no handle
+        target: TargetSpec::Host,
         default_edition: "2021".into(),
         crates: Vec::new(),
         shared_flags: Vec::new(),
@@ -1123,7 +1135,7 @@ mod tests {
         // The synthetic __vendored group must exist.
         let group_handle = model.groups.lookup(VENDORED_GROUP_NAME).expect("group");
         let group = model.groups.get(group_handle).unwrap();
-        assert_eq!(group.target, "host");
+        assert_eq!(group.target, TargetSpec::Host);
 
         // And the synthetic crate must be registered and point at the
         // declared path.
@@ -1149,7 +1161,7 @@ mod tests {
             "user-group".into(),
             GroupDef {
                 name: "user-group".into(),
-                target: "host".into(),
+                target: TargetSpec::Host,
                 ..Default::default()
             },
         );

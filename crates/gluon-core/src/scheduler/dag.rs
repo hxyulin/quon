@@ -626,7 +626,7 @@ mod tests {
     use super::*;
     use gluon_model::{
         BuildModel, CrateDef, CrateType, DepDef, GroupDef, PipelineDef, PipelineStep, ProjectDef,
-        ResolvedCrateRef, RuleDef, RuleHandler, TargetDef,
+        ResolvedCrateRef, RuleDef, RuleHandler, TargetDef, TargetSpec,
     };
 
     // -----------------------------------------------------------------------
@@ -1187,8 +1187,7 @@ mod tests {
             "kernel-group".into(),
             GroupDef {
                 name: "kernel-group".into(),
-                target: "cross".into(),
-                target_handle: Some(th),
+                target: TargetSpec::Cross(th),
                 default_edition: "2021".into(),
                 crates: vec!["crate-x".into(), "crate-y".into()],
                 ..Default::default()
@@ -1772,8 +1771,7 @@ mod tests {
             "kernel".into(),
             GroupDef {
                 name: "kernel".into(),
-                target: "x86_64-unknown-none".into(),
-                target_handle: Some(kernel_target),
+                target: TargetSpec::Cross(kernel_target),
                 no_sysroot: false,
                 ..Default::default()
             },
@@ -1784,8 +1782,7 @@ mod tests {
             "bios-boot".into(),
             GroupDef {
                 name: "bios-boot".into(),
-                target: "i386-code16-boot-sector".into(),
-                target_handle: Some(bios_target),
+                target: TargetSpec::Cross(bios_target),
                 no_sysroot: true,
                 ..Default::default()
             },

@@ -181,15 +181,27 @@ pub struct ProfileDef {
     pub span: Option<SourceSpan>,
 }
 
+/// Resolved target binding for a group or crate.
+///
+/// `Host` is the build-machine triple, populated by gluon-core at
+/// resolve time from `rustc -vV`. `Cross(Handle<TargetDef>)` is a
+/// user-defined target whose name resolves to a handle in the
+/// `targets` arena.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "handle")]
+pub enum TargetSpec {
+    #[default]
+    Host,
+    Cross(Handle<TargetDef>),
+}
+
 /// A group of crates with shared compilation behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupDef {
     pub name: String,
-    /// Target for all crates in this group. `"host"` = host triple.
-    /// Required at the group level; groups always pin a target triple or `"host"`.
-    pub target: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_handle: Option<Handle<TargetDef>>,
+    /// Target for all crates in this group. `TargetSpec::Host` = host triple.
+    /// Required at the group level; groups always pin a target triple or host.
+    pub target: TargetSpec,
     pub default_edition: String,
     pub crates: Vec<String>,
     pub shared_flags: Vec<String>,
@@ -222,8 +234,7 @@ impl Default for GroupDef {
     fn default() -> Self {
         Self {
             name: String::new(),
-            target: "host".into(),
-            target_handle: None,
+            target: TargetSpec::Host,
             default_edition: "2024".into(),
             crates: Vec::new(),
             shared_flags: Vec::new(),

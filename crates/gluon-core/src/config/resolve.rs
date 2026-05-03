@@ -5,7 +5,7 @@ use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
     BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, Expr, Handle,
     ImageSource, ProfileDef, RawSource, ResolvedConfig, ResolvedCrateRef, ResolvedProfile,
-    ResolvedValue, TargetDef, TristateVal,
+    ResolvedValue, TargetDef, TargetSpec, TristateVal,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
@@ -323,7 +323,7 @@ pub fn resolve(
         let Some(group) = model.groups.get(group_h) else {
             continue;
         };
-        let is_host = group.target == "host";
+        let is_host = matches!(group.target, TargetSpec::Host);
         // For host crates, the target field is just a placeholder — the
         // scheduler keys off `host: bool`. We use `effective_target` as a
         // safe placeholder so the field is always populated with a valid

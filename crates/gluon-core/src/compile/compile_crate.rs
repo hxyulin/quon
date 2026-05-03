@@ -1364,7 +1364,7 @@ mod tests {
     // sysroot lookup for no_sysroot crates.
     #[test]
     fn flag_assembly_no_sysroot_group_omits_sysroot_and_implicit_externs() {
-        use gluon_model::GroupDef;
+        use gluon_model::{GroupDef, TargetSpec};
 
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
@@ -1380,8 +1380,7 @@ mod tests {
             "bios-boot".into(),
             GroupDef {
                 name: "bios-boot".into(),
-                target: "x86-real".into(),
-                target_handle: Some(th),
+                target: TargetSpec::Cross(th),
                 no_sysroot: true,
                 ..Default::default()
             },
