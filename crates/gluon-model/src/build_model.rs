@@ -291,16 +291,25 @@ pub struct CrateDef {
     pub span: Option<SourceSpan>,
 }
 
+/// Resolved dependency target. Project deps point to a sibling
+/// crate; external deps point to an [`ExternalDepDef`] in the
+/// workspace's `external_deps` arena.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "handle")]
+pub enum DepResolution {
+    Project(Handle<CrateDef>),
+    External(Handle<ExternalDepDef>),
+}
+
 /// A dependency specification within a crate definition.
 ///
 /// This is the strict single-form representation. The map key on
-/// `CrateDef::deps` is the extern name; this struct holds the referenced
-/// crate name and resolution metadata.
+/// `CrateDef::deps` is the extern name; the [`resolution`](Self::resolution)
+/// field discriminates between a sibling project crate and an external
+/// dep entry in the workspace's `external_deps` arena.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepDef {
-    pub crate_name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crate_handle: Option<Handle<CrateDef>>,
+    pub resolution: DepResolution,
     pub features: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
@@ -314,20 +323,6 @@ pub struct DepDef {
     pub default_features: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
-}
-
-impl Default for DepDef {
-    fn default() -> Self {
-        Self {
-            crate_name: String::new(),
-            crate_handle: None,
-            features: Vec::new(),
-            version: None,
-            optional: false,
-            default_features: true,
-            span: None,
-        }
-    }
 }
 
 /// Source location for an external dependency.

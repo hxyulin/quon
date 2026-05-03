@@ -9,8 +9,8 @@
 //! Phase G makes qemu/bootloader Option.
 
 use crate::build_model::{
-    BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, EspDef,
-    EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
+    BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, DepResolution,
+    EspDef, EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
@@ -207,18 +207,24 @@ fn resolve_dep_map(
 ) -> BTreeMap<String, DepDef> {
     let mut out = BTreeMap::new();
     for (extern_name, d) in raw.iter() {
-        let crate_handle = crates.lookup(&d.crate_name);
-        if crate_handle.is_none() && external_deps.lookup(&d.crate_name).is_none() {
-            diags.push(InternDiagnostic::error(format!(
-                "dep '{}' in crate '{}' ({}) references unknown crate '{}'",
-                extern_name, crate_name, kind, d.crate_name
-            )).with_optional_span(d.span.clone().or_else(|| span.clone())));
-        }
+        let resolution = match crates.lookup(&d.crate_name) {
+            Some(h) => DepResolution::Project(h),
+            None => match external_deps.lookup(&d.crate_name) {
+                Some(h) => DepResolution::External(h),
+                None => {
+                    diags.push(InternDiagnostic::error(format!(
+                        "dep '{}' in crate '{}' ({}) references unknown crate '{}'",
+                        extern_name, crate_name, kind, d.crate_name
+                    )).with_optional_span(d.span.clone().or_else(|| span.clone())));
+                    // Skip this dep — downstream errors surface elsewhere.
+                    continue;
+                }
+            },
+        };
         out.insert(
             extern_name.clone(),
             DepDef {
-                crate_name: d.crate_name.clone(),
-                crate_handle,
+                resolution,
                 features: d.features.clone(),
                 version: d.version.clone(),
                 optional: d.optional,

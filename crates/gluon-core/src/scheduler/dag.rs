@@ -30,8 +30,8 @@
 
 use crate::error::{Error, Result};
 use gluon_model::{
-    BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, Handle, ImageDef, ImageSource,
-    ResolvedConfig, RuleDef, TargetDef,
+    BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepResolution, EspDef, Handle, ImageDef,
+    ImageSource, ResolvedConfig, RuleDef, TargetDef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -211,10 +211,11 @@ impl Default for Dag {
 /// 3. **ConfigCrate → Sysroot**: The config crate is compiled for the
 ///    profile's cross target, so it also depends on the sysroot.
 /// 4. **Crate → Crate (deps)**: Every crate depends on every entry in its
-///    `CrateDef::deps` map whose `crate_handle` is `Some` AND whose
-///    referenced crate appears in `resolved.crates`. Dangling handles are
-///    silently skipped — this function's contract is to build edges for
-///    resolvable deps; surfacing missing handles is the resolver's job.
+///    `CrateDef::deps` map whose `resolution` is `DepResolution::Project`
+///    AND whose referenced crate appears in `resolved.crates`. External
+///    deps and resolutions to crates not in `resolved.crates` are silently
+///    skipped — this function's contract is to build edges for resolvable
+///    project deps; surfacing missing handles is the resolver's job.
 ///    Both host→host and cross→cross (and host→cross for proc-macros) are
 ///    modelled here; cross→host is architecturally nonsensical but not
 ///    explicitly rejected.
@@ -356,9 +357,12 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
         })?;
 
         for dep in crate_def.deps.values() {
-            let dep_handle = match dep.crate_handle {
-                Some(h) => h,
-                None => continue, // unresolved dep — resolver bug, not our problem
+            // External deps don't participate in the crate-DAG: their
+            // build artifacts come out of the vendor pipeline rather
+            // than being scheduled as `DagNode::Crate` nodes here.
+            let dep_handle = match dep.resolution {
+                DepResolution::Project(h) => h,
+                DepResolution::External(_) => continue,
             };
             // Skip deps that are not part of this build (dangling handles).
             if !resolved_handles.contains(&dep_handle) {
@@ -966,9 +970,12 @@ mod tests {
                         m.insert(
                             "my_proc_macro".into(),
                             DepDef {
-                                crate_name: "my-proc-macro".into(),
-                                crate_handle: Some(host_h),
-                                ..Default::default()
+                                resolution: DepResolution::Project(host_h),
+                                features: Vec::new(),
+                                version: None,
+                                optional: false,
+                                default_features: true,
+                                span: None,
                             },
                         );
                         m
@@ -1064,9 +1071,12 @@ mod tests {
                         m.insert(
                             "crate_c".into(),
                             DepDef {
-                                crate_name: "crate-c".into(),
-                                crate_handle: Some(c_h),
-                                ..Default::default()
+                                resolution: DepResolution::Project(c_h),
+                                features: Vec::new(),
+                                version: None,
+                                optional: false,
+                                default_features: true,
+                                span: None,
                             },
                         );
                         m
@@ -1092,9 +1102,12 @@ mod tests {
                         m.insert(
                             "crate_b".into(),
                             DepDef {
-                                crate_name: "crate-b".into(),
-                                crate_handle: Some(b_h),
-                                ..Default::default()
+                                resolution: DepResolution::Project(b_h),
+                                features: Vec::new(),
+                                version: None,
+                                optional: false,
+                                default_features: true,
+                                span: None,
                             },
                         );
                         m

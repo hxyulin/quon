@@ -26,7 +26,7 @@
 use crate::compile::artifact_path::expected_crate_artifact_path;
 use crate::compile::env::resolve_crate_env;
 use crate::compile::{BuildLayout, RustcInfo};
-use gluon_model::{BuildModel, CrateDef, CrateType, Handle, ResolvedConfig};
+use gluon_model::{BuildModel, CrateDef, CrateType, DepResolution, Handle, ResolvedConfig};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -136,9 +136,11 @@ pub fn generate_rust_project_json(
             }));
         }
         for (extern_name, dep) in &krate.deps {
-            let Some(target_handle) = dep.crate_handle else {
-                // Unresolved dep (resolver did not assign a handle) —
-                // probably a vendor dep, out of scope for MVP-M.
+            // Only project-resolved deps participate in the
+            // rust-project.json crate graph — external (vendored) deps
+            // surface to rust-analyzer through a different path and are
+            // out of scope for MVP-M.
+            let DepResolution::Project(target_handle) = dep.resolution else {
                 continue;
             };
             let Some(&idx) = handle_to_index.get(&target_handle) else {
@@ -759,9 +761,12 @@ mod tests {
         deps.insert(
             "alias_name".to_string(),
             DepDef {
-                crate_name: "real-name".into(),
-                crate_handle: Some(target_ch),
-                ..Default::default()
+                resolution: DepResolution::Project(target_ch),
+                features: Vec::new(),
+                version: None,
+                optional: false,
+                default_features: true,
+                span: None,
             },
         );
         let (consumer_ch, _) = model.crates.insert(
@@ -823,9 +828,12 @@ mod tests {
         deps.insert(
             "phantom".to_string(),
             DepDef {
-                crate_name: "phantom".into(),
-                crate_handle: Some(phantom),
-                ..Default::default()
+                resolution: DepResolution::Project(phantom),
+                features: Vec::new(),
+                version: None,
+                optional: false,
+                default_features: true,
+                span: None,
             },
         );
         let (consumer_ch, _) = model.crates.insert(

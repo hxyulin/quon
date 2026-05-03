@@ -9,7 +9,7 @@ use super::compile_crate::CompileCrateInput;
 use super::compile_utils::{exe_suffix_for_target, normalize_crate_name, sanitise_crate_name};
 use super::{CompileCtx, Emit, RustcCommandBuilder};
 use crate::error::{Error, Result};
-use gluon_model::{CrateDef, CrateType};
+use gluon_model::{CrateDef, CrateType, DepResolution};
 use std::path::PathBuf;
 
 /// Assemble a [`RustcCommandBuilder`] for the given crate without spawning
@@ -322,14 +322,18 @@ pub(crate) fn build_rustc_command(
     builder.emit_with_dep_info_path(emit_kinds, &depfile_path);
 
     // Explicit dependencies (BTreeMap order = deterministic argv order).
+    //
+    // Only project-resolved deps (`DepResolution::Project`) participate
+    // in the compile-time `--extern` wiring here — their artifacts are
+    // produced by sibling crate compiles and recorded in `artifacts`.
+    // External deps (`DepResolution::External`) are linked through the
+    // vendor pipeline and surface to rustc via the sysroot search path
+    // rather than this loop.
     for (extern_name, dep_def) in &crate_def.deps {
-        let dep_handle = dep_def.crate_handle.ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}' has dep '{}' (crate_name='{}') with no resolved handle; \
-                 the intern/resolve pass should have populated crate_handle before compile",
-                crate_name, extern_name, dep_def.crate_name,
-            ))
-        })?;
+        let dep_handle = match dep_def.resolution {
+            DepResolution::Project(h) => h,
+            DepResolution::External(_) => continue,
+        };
         let artifact_path = artifacts.get(dep_handle).ok_or_else(|| {
             Error::Compile(format!(
                 "crate '{}' depends on '{}' but its artifact is not yet available in \

@@ -764,7 +764,15 @@ fn multi_profile_fixture_model() {
         .deps
         .get("mylib")
         .expect("app should have a dep named 'mylib'");
-    assert_eq!(dep.crate_name, "mylib");
+    let mylib_h = model
+        .crates
+        .lookup("mylib")
+        .expect("mylib crate should be present");
+    assert_eq!(
+        dep.resolution,
+        gluon_core::model::DepResolution::Project(mylib_h),
+        "app's mylib dep should resolve to the mylib project crate"
+    );
     assert_eq!(
         dep.features,
         vec!["logging".to_string()],

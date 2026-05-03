@@ -275,8 +275,8 @@ mod tests {
     use crate::compile::compile_utils::normalize_crate_name;
     use crate::compile::{ArtifactMap, BuildLayout, RustcCommandBuilder, RustcInfo};
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, GroupDef, Handle, ProjectDef, ResolvedConfig,
-        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
+        BuildModel, CrateDef, CrateType, DepDef, DepResolution, GroupDef, Handle, ProjectDef,
+        ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::borrow::Cow;
     use std::collections::BTreeMap;
@@ -740,9 +740,12 @@ mod tests {
         deps.insert(
             "myutil".to_string(),
             DepDef {
-                crate_name: "myutil".into(),
-                crate_handle: Some(dep_handle),
-                ..Default::default()
+                resolution: DepResolution::Project(dep_handle),
+                features: Vec::new(),
+                version: None,
+                optional: false,
+                default_features: true,
+                span: None,
             },
         );
         let ch = insert_crate(
@@ -944,9 +947,12 @@ mod tests {
         deps.insert(
             "missing_dep".to_string(),
             DepDef {
-                crate_name: "missing_dep".into(),
-                crate_handle: Some(dep_handle),
-                ..Default::default()
+                resolution: DepResolution::Project(dep_handle),
+                features: Vec::new(),
+                version: None,
+                optional: false,
+                default_features: true,
+                span: None,
             },
         );
         let ch = insert_crate(

@@ -3,9 +3,9 @@
 use crate::config::interpolate::interpolate;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, Expr, Handle,
-    ImageSource, ProfileDef, RawSource, ResolvedConfig, ResolvedCrateRef, ResolvedProfile,
-    ResolvedValue, TargetDef, TargetSpec, TristateVal,
+    BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, DepResolution,
+    Expr, Handle, ImageSource, ProfileDef, RawSource, ResolvedConfig, ResolvedCrateRef,
+    ResolvedProfile, ResolvedValue, TargetDef, TargetSpec, TristateVal,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
@@ -539,8 +539,13 @@ fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Hand
             continue;
         };
         // Follow regular deps (--extern edges).
+        //
+        // Only project-resolved deps contribute crate-arena reachability
+        // here. External deps point into `external_deps` and never need
+        // a `Handle<CrateDef>` for selection — they are pulled in via the
+        // vendor pipeline, not via the crate-graph BFS.
         for dep in krate.deps.values() {
-            if let Some(dh) = dep.crate_handle {
+            if let DepResolution::Project(dh) = dep.resolution {
                 if visited.insert(dh) {
                     queue.push_back(dh);
                 }
