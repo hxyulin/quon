@@ -16,29 +16,26 @@
 //!
 //! ## Caching
 //!
-//! Image builds are cached via a sidecar stamp file at
-//! `<build>/images/<name>.stamp.json`, keyed by:
+//! Image builds are cached via the unified composite cache under key
+//! `image:<name>`. The composite entry's inputs are every source path
+//! that contributes bytes to the final image (flat entries + partition
+//! entries + raw writes). Its `aux_hash` folds in:
 //!
 //! - The serialised [`ImageDef`] (any change to format/size/entries
 //!   busts the cache).
-//! - Each input source's mtime + size.
 //! - The hadris-fat crate version (so library bumps invalidate
 //!   correctly even when the user's config and inputs haven't changed).
+//! - Per-entry source-kind tags, so a crate→file rename in `gluon.rs`
+//!   busts the cache even when the resolved on-disk path happens to
+//!   match.
 //!
-//! Same pattern as `scheduler::helpers::esp` — see that module's docs
-//! for the rationale.
+//! Per-input mtime + size + sha256 freshness is handled by the
+//! composite-cache layer itself; see `crate::cache` for the algorithm.
 
 mod fat;
 mod mbr;
 mod partition;
 mod source;
-// Stamp file machinery is being removed by Stage 5 D.4 — its consumers
-// in this module were already replaced with composite-cache calls in
-// D.3, so every item inside is now dead code. The file is deleted in
-// the immediately-following commit; the allow keeps the intermediate
-// commit clippy-clean.
-#[allow(dead_code)]
-mod stamp;
 
 use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
 use crate::compile::extern_map::resolve_artifact_by_name;
