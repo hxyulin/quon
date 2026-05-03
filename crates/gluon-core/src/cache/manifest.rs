@@ -91,18 +91,52 @@ pub struct RustcEntry {
     pub built_at: u128,
 }
 
-/// Top-level manifest persisted as JSON. Keys are strings so the file is
-/// stable across [`BTreeMap`] internal representation changes.
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+/// Top-level manifest persisted as JSON. Keys are strings so the file
+/// is stable across [`BTreeMap`] internal representation changes.
+///
+/// The manifest holds two parallel maps:
+/// - `rustc`: per-crate compile cache entries (argv hash + source set).
+/// - `composite`: non-rustc artifacts whose freshness is determined by
+///   input fingerprints + an opaque `aux_hash` (sysroot, image, ESP).
+///
+/// Splitting them keeps each entry shape minimal — composite entries
+/// have no meaningful `argv_hash`, rustc entries have no `aux_hash` —
+/// and lets [`crate::cache::Cache`] expose two type-safe APIs without
+/// runtime tag checking on every read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheManifest {
     pub version: u32,
-    pub entries: BTreeMap<String, RustcEntry>,
+    /// Rustc-shaped entries (per-crate compile cache).
+    #[serde(default)]
+    pub rustc: BTreeMap<String, RustcEntry>,
+    /// Composite-shaped entries (sysroot, image, ESP).
+    #[serde(default)]
+    pub composite: BTreeMap<String, crate::cache::composite::CompositeEntry>,
+}
+
+impl Default for CacheManifest {
+    /// Hand-rolled rather than derived so `default()` stamps
+    /// `CURRENT_VERSION` instead of `0`. A manifest with `version: 0`
+    /// would be treated as a stale older-schema document by `load`,
+    /// which makes `Default` a footgun for callers who construct
+    /// in-memory manifests directly. Equivalent to [`Self::fresh`].
+    fn default() -> Self {
+        Self::fresh()
+    }
 }
 
 impl CacheManifest {
     /// The only version gluon currently understands. Bump (and add a
-    /// migration path) if the on-disk layout ever changes.
-    pub const CURRENT_VERSION: u32 = 1;
+    /// migration path) if the on-disk layout ever changes incompatibly.
+    ///
+    /// History:
+    /// - v1: single `entries: BTreeMap<String, CacheEntry>` map.
+    /// - v2: split into `rustc` + `composite` maps; `CacheEntry`
+    ///   renamed to `RustcEntry`. v1 manifests are *discarded* on
+    ///   load (cold-cache fallback) — the rustc-side schema didn't
+    ///   change in shape, but writing a converter wasn't worth the
+    ///   complexity for a build cache that re-populates on next run.
+    pub const CURRENT_VERSION: u32 = 2;
 
     /// Load a manifest from disk.
     ///
@@ -181,7 +215,8 @@ impl CacheManifest {
         // hidden side-effects.
         let to_write = CacheManifest {
             version: Self::CURRENT_VERSION,
-            entries: self.entries.clone(),
+            rustc: self.rustc.clone(),
+            composite: self.composite.clone(),
         };
 
         // Build `<path>.tmp.<pid>.<nonce>`. We avoid `with_extension`
@@ -257,7 +292,8 @@ impl CacheManifest {
     fn fresh() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
-            entries: BTreeMap::new(),
+            rustc: BTreeMap::new(),
+            composite: BTreeMap::new(),
         }
     }
 }
@@ -291,12 +327,12 @@ mod tests {
         let p = tmp.path().join("cache-manifest.json");
 
         let mut m = CacheManifest::fresh();
-        m.entries.insert("foo".into(), sample_entry());
+        m.rustc.insert("foo".into(), sample_entry());
         m.save_atomic(&p).expect("save");
 
         let loaded = CacheManifest::load(&p).0;
         assert_eq!(loaded.version, CacheManifest::CURRENT_VERSION);
-        assert_eq!(loaded.entries.get("foo"), Some(&sample_entry()));
+        assert_eq!(loaded.rustc.get("foo"), Some(&sample_entry()));
     }
 
     #[test]
@@ -305,7 +341,7 @@ mod tests {
         let p = tmp.path().join("nope.json");
         let loaded = CacheManifest::load(&p).0;
         assert_eq!(loaded.version, CacheManifest::CURRENT_VERSION);
-        assert!(loaded.entries.is_empty());
+        assert!(loaded.rustc.is_empty());
     }
 
     #[test]
@@ -314,7 +350,7 @@ mod tests {
         let p = tmp.path().join("bad.json");
         std::fs::write(&p, b"not json at all").expect("seed");
         let (loaded, warnings) = CacheManifest::load(&p);
-        assert!(loaded.entries.is_empty());
+        assert!(loaded.rustc.is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("corrupted"));
     }
@@ -323,9 +359,9 @@ mod tests {
     fn wrong_version_returns_default_with_warning() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("v99.json");
-        std::fs::write(&p, br#"{"version": 99, "entries": {}}"#).expect("seed");
+        std::fs::write(&p, br#"{"version": 99, "rustc": {}, "composite": {}}"#).expect("seed");
         let (loaded, warnings) = CacheManifest::load(&p);
-        assert!(loaded.entries.is_empty());
+        assert!(loaded.rustc.is_empty());
         assert_eq!(loaded.version, CacheManifest::CURRENT_VERSION);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("version"));
@@ -339,7 +375,8 @@ mod tests {
         // Construct with a bogus version; save should overwrite it.
         let m = CacheManifest {
             version: 42,
-            entries: BTreeMap::new(),
+            rustc: BTreeMap::new(),
+            composite: BTreeMap::new(),
         };
         m.save_atomic(&p).expect("save");
 
@@ -437,12 +474,47 @@ mod tests {
 
         let mut m = CacheManifest::fresh();
         for k in ["z", "a", "m"] {
-            m.entries.insert(k.into(), sample_entry());
+            m.rustc.insert(k.into(), sample_entry());
         }
         m.save_atomic(&p).expect("save");
 
         let loaded = CacheManifest::load(&p).0;
-        let keys: Vec<_> = loaded.entries.keys().cloned().collect();
+        let keys: Vec<_> = loaded.rustc.keys().cloned().collect();
         assert_eq!(keys, vec!["a".to_string(), "m".into(), "z".into()]);
+    }
+
+    #[test]
+    fn manifest_has_separate_rustc_and_composite_maps() {
+        let m = CacheManifest::default();
+        assert_eq!(m.version, CacheManifest::CURRENT_VERSION);
+        assert!(m.rustc.is_empty());
+        assert!(m.composite.is_empty());
+    }
+
+    #[test]
+    fn manifest_round_trip_with_both_maps_populated() {
+        use crate::cache::composite::CompositeEntry;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("cache.json");
+
+        let mut m = CacheManifest::default();
+        m.rustc.insert("crate-foo".into(), sample_entry());
+        m.composite.insert(
+            "image:boot".into(),
+            CompositeEntry {
+                inputs: BTreeMap::new(),
+                aux_hash: Some([0xAA; 32]),
+                output_path: PathBuf::from("/build/boot.img"),
+                built_at: 0,
+            },
+        );
+        m.save_atomic(&p).expect("save");
+
+        let loaded = CacheManifest::load(&p).0;
+        assert_eq!(loaded.rustc.len(), 1);
+        assert_eq!(loaded.composite.len(), 1);
+        assert!(loaded.rustc.contains_key("crate-foo"));
+        assert!(loaded.composite.contains_key("image:boot"));
     }
 }

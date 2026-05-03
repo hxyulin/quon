@@ -135,7 +135,7 @@ impl Cache {
     /// Takes `&mut self` because the slow-path SHA-256 check can refresh
     /// a source's recorded mtime in place, marking the cache dirty.
     pub fn is_fresh(&mut self, q: &FreshnessQuery<'_>) -> bool {
-        let Some(entry) = self.manifest.entries.get(q.key) else {
+        let Some(entry) = self.manifest.rustc.get(q.key) else {
             return false;
         };
 
@@ -226,7 +226,7 @@ impl Cache {
         }
 
         if !refreshes.is_empty()
-            && let Some(entry_mut) = self.manifest.entries.get_mut(q.key)
+            && let Some(entry_mut) = self.manifest.rustc.get_mut(q.key)
         {
             for (src, mtime_ns, size) in refreshes {
                 if let Some(fp) = entry_mut.source_files.get_mut(&src) {
@@ -311,14 +311,14 @@ impl Cache {
             output_path: rec.output_path,
             built_at,
         };
-        self.manifest.entries.insert(rec.key, entry);
+        self.manifest.rustc.insert(rec.key, entry);
         self.dirty = true;
         Ok(())
     }
 
     #[cfg(test)]
     pub(crate) fn entry(&self, key: &str) -> Option<&RustcEntry> {
-        self.manifest.entries.get(key)
+        self.manifest.rustc.get(key)
     }
 }
 
