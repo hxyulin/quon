@@ -9,7 +9,7 @@ use std::path::PathBuf;
 /// Chainable builder returned by [`Config::qemu`].
 ///
 /// There is no arena for the singleton `QemuDef`; the handle type
-/// parameter is `()`. All chained methods access `cfg.raw.model.qemu`
+/// parameter is `()`. All chained methods access `cfg.raw.qemu`
 /// directly via [`modify`].
 pub struct QemuBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
@@ -24,7 +24,7 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// call's values are never overwritten by a second call.
     fn modify<F: FnOnce(&mut gluon_model::QemuDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
-            f(&mut self.cfg.raw.model.qemu);
+            f(&mut self.cfg.raw.qemu);
         }
     }
 
@@ -129,14 +129,14 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// second pushes a diagnostic (mirroring the engine's behaviour).
     pub fn esp_dir(self, path: impl Into<PathBuf>) -> Self {
         if !self.state.is_duplicate() {
-            if self.cfg.raw.model.qemu.esp.is_some() {
+            if self.cfg.raw.qemu.esp.is_some() {
                 // Mirror engine wording verbatim.
                 self.cfg.diagnostics.push(ConfigError::new(
                     "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
                 ));
             } else {
                 let p = path.into();
-                self.cfg.raw.model.qemu.esp = Some(EspSource::Dir(p));
+                self.cfg.raw.qemu.esp = Some(EspSource::Dir(p));
             }
         }
         self
@@ -148,14 +148,14 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// second pushes a diagnostic.
     pub fn esp_image(self, path: impl Into<PathBuf>) -> Self {
         if !self.state.is_duplicate() {
-            if self.cfg.raw.model.qemu.esp.is_some() {
+            if self.cfg.raw.qemu.esp.is_some() {
                 // Mirror engine wording verbatim.
                 self.cfg.diagnostics.push(ConfigError::new(
                     "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
                 ));
             } else {
                 let p = path.into();
-                self.cfg.raw.model.qemu.esp = Some(EspSource::Image(p));
+                self.cfg.raw.qemu.esp = Some(EspSource::Image(p));
             }
         }
         self
@@ -196,7 +196,7 @@ mod tests {
             .ovmf_vars("/opt/ovmf/VARS.fd")
             .esp_dir("./build/esp");
 
-        let q = &cfg.raw.model.qemu;
+        let q = &cfg.raw.qemu;
         assert_eq!(q.binary.as_deref(), Some("qemu-system-x86_64"));
         assert_eq!(q.machine.as_deref(), Some("q35"));
         assert_eq!(q.memory_mb, Some(512));
@@ -214,12 +214,12 @@ mod tests {
         cfg.qemu("a").machine("q35");
         cfg.qemu("b").machine("pc");
         assert_eq!(
-            cfg.raw.model.qemu.binary.as_deref(),
+            cfg.raw.qemu.binary.as_deref(),
             Some("a"),
             "first call's binary preserved"
         );
         assert_eq!(
-            cfg.raw.model.qemu.machine.as_deref(),
+            cfg.raw.qemu.machine.as_deref(),
             Some("q35"),
             "second call's machine must NOT clobber the first"
         );
@@ -233,7 +233,7 @@ mod tests {
         cfg.qemu("a").boot_mode("legacy");
         assert!(cfg.diagnostics.iter().any(|d| d.message.contains("legacy")));
         assert_eq!(
-            cfg.raw.model.qemu.boot_mode,
+            cfg.raw.qemu.boot_mode,
             None,
             "unknown boot_mode must NOT be silently ignored AND must not be set"
         );
@@ -244,7 +244,7 @@ mod tests {
         let mut cfg = Config::new();
         cfg.qemu("a").esp_dir("a").esp_image("b.img");
         // First call wins.
-        match &cfg.raw.model.qemu.esp {
+        match &cfg.raw.qemu.esp {
             Some(EspSource::Dir(p)) => assert_eq!(p, &PathBuf::from("a")),
             other => panic!("expected EspSource::Dir(\"a\"), got {other:?}"),
         }
@@ -261,7 +261,7 @@ mod tests {
             .extra_args(&["-display", "none"])
             .extra_args(&["-no-reboot"]);
         assert_eq!(
-            cfg.raw.model.qemu.extra_args,
+            cfg.raw.qemu.extra_args,
             vec!["-display".to_string(), "none".to_string(), "-no-reboot".to_string()],
         );
         assert!(cfg.diagnostics.is_empty());

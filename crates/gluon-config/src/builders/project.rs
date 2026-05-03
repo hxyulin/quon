@@ -23,7 +23,7 @@ impl<'cfg> ProjectBuilder<'cfg> {
     /// raw string and the validator catches dangling references.
     pub fn default_profile(self, name: &str) -> Self {
         if !self.state.is_duplicate() {
-            if let Some(p) = self.cfg.raw.model.project.as_mut() {
+            if let Some(p) = self.cfg.raw.project.as_mut() {
                 p.default_profile = Some(name.into());
             }
         }
@@ -39,7 +39,7 @@ mod tests {
     fn project_default_profile_records_string() {
         let mut cfg = Config::new();
         cfg.project("demo", "0.1.0").default_profile("dev");
-        let p = cfg.raw.model.project.as_ref().unwrap();
+        let p = cfg.raw.project.as_ref().unwrap();
         assert_eq!(p.default_profile.as_deref(), Some("dev"));
     }
 }

@@ -1,7 +1,7 @@
 use gluon_model::{
-    BuildStepDef, ConfigOptionDef, ConfigType, ConfigValue, EspDef, GroupDef, Handle, ImageDef,
-    PresetDef, ProfileDef, ProjectDef, RawBuildModel, RuleDef, RuleHandler, TargetDef,
-    TristateVal,
+    ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef,
+    PresetDef, ProjectDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef, RawProfileDef,
+    RuleDef, RuleHandler, TargetDef, TristateVal,
 };
 use crate::builders::{
     BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
@@ -78,7 +78,7 @@ impl Config {
         // exactly one project; duplicate detection here would just
         // complicate the legitimate "I overwrote it" pattern in test
         // fixtures. The engine path has the same semantic.
-        self.raw.model.project = Some(ProjectDef {
+        self.raw.project = Some(ProjectDef {
             name: name.into(),
             version: version.into(),
             ..Default::default()
@@ -95,7 +95,7 @@ impl Config {
     /// `emit()` can surface the error; the handle remains valid for chaining.
     #[must_use = "pass this handle to profile().target() / group().target() / etc."]
     pub fn target(&mut self, name: &str) -> Handle<TargetDef> {
-        let (h, inserted) = self.raw.model.targets.insert(name.into(), TargetDef {
+        let (h, inserted) = self.raw.targets.insert(name.into(), TargetDef {
             name: name.into(),
             spec: name.into(),
             builtin: true,
@@ -115,7 +115,7 @@ impl Config {
     /// diagnostic is accumulated so `emit()` can surface the error.
     #[must_use = "pass this handle to profile().target() / group().target() / etc."]
     pub fn target_spec(&mut self, name: &str, spec: &str) -> Handle<TargetDef> {
-        let (h, inserted) = self.raw.model.targets.insert(name.into(), TargetDef {
+        let (h, inserted) = self.raw.targets.insert(name.into(), TargetDef {
             name: name.into(),
             spec: spec.into(),
             builtin: false,
@@ -139,9 +139,9 @@ impl Config {
     /// definition is preserved. A [`ConfigError`] is pushed into
     /// `self.diagnostics` so [`Config::emit`] can surface the problem.
     pub fn group(&mut self, name: &str) -> GroupBuilder<'_> {
-        let (handle, inserted) = self.raw.model.groups.insert(
+        let (handle, inserted) = self.raw.groups.insert(
             name.into(),
-            GroupDef { name: name.into(), ..Default::default() },
+            RawGroupDef { name: name.into(), ..Default::default() },
         );
         let state = if inserted {
             BuilderState::Valid { state: handle, name: name.into(), span: None }
@@ -169,7 +169,7 @@ impl Config {
     /// Mirrors the engine's exact diagnostic string:
     /// `"image(\"{name}\") is defined more than once"`.
     pub fn image(&mut self, name: &str) -> ImageBuilder<'_> {
-        let (handle, inserted) = self.raw.model.images.insert(
+        let (handle, inserted) = self.raw.images.insert(
             name.into(),
             ImageDef { name: name.into(), ..Default::default() },
         );
@@ -195,9 +195,9 @@ impl Config {
     /// definition is preserved. A [`ConfigError`] is pushed into
     /// `self.diagnostics` so [`Config::emit`] can surface the problem.
     pub fn profile(&mut self, name: &str) -> ProfileBuilder<'_> {
-        let (handle, inserted) = self.raw.model.profiles.insert(
+        let (handle, inserted) = self.raw.profiles.insert(
             name.into(),
-            ProfileDef { name: name.into(), ..Default::default() },
+            RawProfileDef { name: name.into(), ..Default::default() },
         );
         let state = if inserted {
             BuilderState::Valid { state: handle, name: name.into(), span: None }
@@ -235,7 +235,7 @@ impl Config {
             BuilderState::Duplicate { name: program.into(), span: None }
         } else {
             self.raw.qemu_was_set = true;
-            self.raw.model.qemu.binary = Some(program.into());
+            self.raw.qemu.binary = Some(program.into());
             BuilderState::Valid { state: (), name: program.into(), span: None }
         };
         QemuBuilder { cfg: self, state }
@@ -259,7 +259,7 @@ impl Config {
             BuilderState::Duplicate { name: kind.into(), span: None }
         } else {
             self.raw.bootloader_was_set = true;
-            self.raw.model.bootloader.kind = kind.into();
+            self.raw.bootloader.kind = kind.into();
             BuilderState::Valid { state: (), name: kind.into(), span: None }
         };
         BootloaderBuilder { cfg: self, state }
@@ -276,7 +276,7 @@ impl Config {
     /// Mirrors the engine's exact diagnostic string:
     /// `"rule '{name}' is defined more than once"` (single quotes, engine line 166).
     pub fn rule(&mut self, name: &str) -> RuleBuilder<'_> {
-        let (handle, inserted) = self.raw.model.rules.insert(
+        let (handle, inserted) = self.raw.rules.insert(
             name.into(),
             RuleDef {
                 name: name.into(),
@@ -319,7 +319,7 @@ impl Config {
         // Check for crate-name collision before insert, mirroring the engine
         // validator (validate.rs:103). We still insert regardless — the
         // validator does too.
-        if self.raw.model.crates.lookup(name).is_some() {
+        if self.raw.crates.lookup(name).is_some() {
             self.diagnostics.push(ConfigError::new(format!(
                 "build_step(\"{name}\") collides with a crate of the same name. \
                  Pick a different build-step name; the unified artifact \
@@ -327,9 +327,9 @@ impl Config {
             )));
         }
 
-        let (handle, inserted) = self.raw.model.build_steps.insert(
+        let (handle, inserted) = self.raw.build_steps.insert(
             name.into(),
-            BuildStepDef { name: name.into(), ..Default::default() },
+            RawBuildStepDef { name: name.into(), ..Default::default() },
         );
         let state = if inserted {
             BuilderState::Valid { state: handle, name: name.into(), span: None }
@@ -354,9 +354,9 @@ impl Config {
     /// Mirrors the engine's exact diagnostic string:
     /// `"esp(\"{name}\") is defined more than once"`.
     pub fn esp(&mut self, name: &str) -> EspBuilder<'_> {
-        let (handle, inserted) = self.raw.model.esps.insert(
+        let (handle, inserted) = self.raw.esps.insert(
             name.into(),
-            EspDef { name: name.into(), entries: Vec::new(), span: None },
+            RawEspDef { name: name.into(), entries: Vec::new(), span: None },
         );
         let state = if inserted {
             BuilderState::Valid { state: handle, name: name.into(), span: None }
@@ -386,7 +386,7 @@ impl Config {
         ty: ConfigType,
         default: ConfigValue,
     ) -> ConfigOptionBuilder<'_> {
-        if self.raw.model.config_options.contains_key(name) {
+        if self.raw.config_options.contains_key(name) {
             self.diagnostics.push(ConfigError::new(format!(
                 "config option '{name}' is defined more than once"
             )));
@@ -395,7 +395,7 @@ impl Config {
                 state: BuilderState::Duplicate { name: name.into(), span: None },
             };
         }
-        self.raw.model.config_options.insert(
+        self.raw.config_options.insert(
             name.into(),
             ConfigOptionDef {
                 name: name.into(),
@@ -474,7 +474,7 @@ impl Config {
     /// Mirrors the engine's exact diagnostic string:
     /// `"preset '{name}' is defined more than once"`.
     pub fn preset(&mut self, name: &str) -> PresetBuilder<'_> {
-        if self.raw.model.presets.contains_key(name) {
+        if self.raw.presets.contains_key(name) {
             self.diagnostics.push(ConfigError::new(format!(
                 "preset '{name}' is defined more than once"
             )));
@@ -483,7 +483,7 @@ impl Config {
                 state: BuilderState::Duplicate { name: name.into(), span: None },
             };
         }
-        self.raw.model.presets.insert(
+        self.raw.presets.insert(
             name.into(),
             PresetDef { name: name.into(), ..Default::default() },
         );
@@ -504,7 +504,7 @@ impl Config {
     /// Mirrors the engine's exact diagnostic string:
     /// `"dependency \"{name}\" is defined more than once"`.
     pub fn dependency(&mut self, name: &str) -> crate::builders::DependencyBuilder<'_> {
-        let (handle, inserted) = self.raw.model.external_deps.insert(
+        let (handle, inserted) = self.raw.external_deps.insert(
             name.into(),
             gluon_model::ExternalDepDef {
                 name: name.into(),
@@ -558,7 +558,7 @@ mod tests {
         assert!(cfg.diagnostics.is_empty(), "fresh Config has no diagnostics");
         let json = serde_json::to_string(&cfg.raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert!(de.model.project.is_none());
+        assert!(de.project.is_none());
         assert!(de.kconfig_includes.is_empty());
     }
 }
@@ -572,7 +572,7 @@ mod project_target_tests {
     fn project_sets_name_and_version() {
         let mut cfg = Config::new();
         cfg.project("demo", "0.1.0");
-        let p = cfg.raw.model.project.as_ref().expect("project set");
+        let p = cfg.raw.project.as_ref().expect("project set");
         assert_eq!(p.name, "demo");
         assert_eq!(p.version, "0.1.0");
     }
@@ -581,7 +581,7 @@ mod project_target_tests {
     fn target_inserts_builtin() {
         let mut cfg = Config::new();
         let h: Handle<gluon_model::TargetDef> = cfg.target("x86_64-unknown-none");
-        let t = cfg.raw.model.targets.get(h).unwrap();
+        let t = cfg.raw.targets.get(h).unwrap();
         assert_eq!(t.name, "x86_64-unknown-none");
         assert_eq!(t.spec, "x86_64-unknown-none");
         assert!(t.builtin);
@@ -591,7 +591,7 @@ mod project_target_tests {
     fn target_spec_inserts_custom() {
         let mut cfg = Config::new();
         let h = cfg.target_spec("custom", "targets/custom.json");
-        let t = cfg.raw.model.targets.get(h).unwrap();
+        let t = cfg.raw.targets.get(h).unwrap();
         assert_eq!(t.name, "custom");
         assert_eq!(t.spec, "targets/custom.json");
         assert!(!t.builtin);
@@ -603,7 +603,7 @@ mod project_target_tests {
         let h1 = cfg.target("foo");
         let h2 = cfg.target("foo");
         assert_eq!(h1, h2, "second target() with same name must return same handle");
-        assert_eq!(cfg.raw.model.targets.len(), 1);
+        assert_eq!(cfg.raw.targets.len(), 1);
     }
 
     #[test]
@@ -671,16 +671,16 @@ mod accessor_tests {
 
         // Borrow the raw model.
         assert_eq!(
-            cfg.raw().model.project.as_ref().unwrap().name,
+            cfg.raw().project.as_ref().unwrap().name,
             "acc-test"
         );
-        assert!(cfg.raw().model.targets.lookup("x").is_some());
+        assert!(cfg.raw().targets.lookup("x").is_some());
 
         // No diagnostics for this minimal sequence.
         assert!(cfg.diagnostics().is_empty());
 
         // Consume into raw.
         let raw = cfg.into_raw();
-        assert_eq!(raw.model.project.unwrap().name, "acc-test");
+        assert_eq!(raw.project.unwrap().name, "acc-test");
     }
 }

@@ -18,7 +18,7 @@ impl<'cfg> ImageBuilder<'cfg> {
     /// Apply `f` to the [`ImageDef`] if this builder is `Valid`.
     fn modify<F: FnOnce(&mut ImageDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(img) = self.cfg.raw.model.images.get_mut(*handle) {
+            if let Some(img) = self.cfg.raw.images.get_mut(*handle) {
                 f(img);
             }
         }
@@ -153,7 +153,7 @@ impl<'cfg> ImageBuilder<'cfg> {
 
         // Append the new partition and note its index.
         let partition_index = {
-            if let Some(img) = self.cfg.raw.model.images.get_mut(handle) {
+            if let Some(img) = self.cfg.raw.images.get_mut(handle) {
                 let idx = img.partitions.len();
                 img.partitions.push(PartitionDef {
                     name: name.into(),
@@ -202,8 +202,8 @@ mod tests {
             .add_entry_crate("kernel", "boot/kernel.bin")
             .add_entry_file("README.txt", "docs/readme.txt");
 
-        let h = cfg.raw.model.images.lookup("disk").unwrap();
-        let img = cfg.raw.model.images.get(h).unwrap();
+        let h = cfg.raw.images.lookup("disk").unwrap();
+        let img = cfg.raw.images.get(h).unwrap();
         assert_eq!(img.format.as_deref(), Some("fat32"));
         assert_eq!(img.size_mb, Some(64));
         assert_eq!(img.entries.len(), 2);
@@ -220,8 +220,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.image("disk").size_mb(64);
         cfg.image("disk").size_mb(128);
-        let h = cfg.raw.model.images.lookup("disk").unwrap();
-        let img = cfg.raw.model.images.get(h).unwrap();
+        let h = cfg.raw.images.lookup("disk").unwrap();
+        let img = cfg.raw.images.get(h).unwrap();
         assert_eq!(img.size_mb, Some(64), "first definition preserved");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("disk"));
@@ -244,8 +244,8 @@ mod tests {
                 .end()
             .size_mb(1024);
 
-        let h = cfg.raw.model.images.lookup("hybrid").unwrap();
-        let img = cfg.raw.model.images.get(h).unwrap();
+        let h = cfg.raw.images.lookup("hybrid").unwrap();
+        let img = cfg.raw.images.get(h).unwrap();
         assert_eq!(img.partition_table, Some(PartitionTable::Mbr));
         assert_eq!(img.size_mb, Some(1024));
         assert_eq!(img.raw_writes.len(), 1);
@@ -274,8 +274,8 @@ mod tests {
             .partition("oops", 0, "fat32")
                 .end();
 
-        let h = cfg.raw.model.images.lookup("flat").unwrap();
-        let img = cfg.raw.model.images.get(h).unwrap();
+        let h = cfg.raw.images.lookup("flat").unwrap();
+        let img = cfg.raw.images.get(h).unwrap();
         // Partition was recorded.
         assert_eq!(img.partitions.len(), 1);
         assert_eq!(img.partitions[0].name, "oops");

@@ -40,17 +40,18 @@ impl InternDiagnostic {
 
 pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
     let mut diags = Vec::new();
-    let mut model = BuildModel::default();
-
     // Pass 1 — copy types that need no resolution.
-    model.project = raw.project;
-    model.targets = raw.targets;
-    model.rules = raw.rules;
-    model.external_deps = raw.external_deps;
-    model.images = raw.images;
-    model.config_options = raw.config_options;
-    model.presets = raw.presets;
-    model.qemu = raw.qemu;
+    let mut model = BuildModel {
+        project: raw.project,
+        targets: raw.targets,
+        rules: raw.rules,
+        external_deps: raw.external_deps,
+        images: raw.images,
+        config_options: raw.config_options,
+        presets: raw.presets,
+        qemu: raw.qemu,
+        ..Default::default()
+    };
 
     // Pass 2 — resolve arenas in dependency order:
     //   targets → groups → crates → profiles → bootloader → esps → build_steps → pipelines.
@@ -437,12 +438,14 @@ mod tests {
     use crate::raw_defs::RawProfileDef;
 
     fn fixture_with_target_and_profile() -> RawBuildModel {
-        let mut raw = RawBuildModel::default();
-        raw.project = Some(ProjectDef {
-            name: "demo".into(),
-            version: "0.1.0".into(),
+        let mut raw = RawBuildModel {
+            project: Some(ProjectDef {
+                name: "demo".into(),
+                version: "0.1.0".into(),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         raw.targets.insert(
             "x86_64-unknown-none".into(),
             TargetDef {
@@ -476,12 +479,14 @@ mod tests {
 
     #[test]
     fn intern_diagnoses_dangling_target() {
-        let mut raw = RawBuildModel::default();
-        raw.project = Some(ProjectDef {
-            name: "demo".into(),
-            version: "0.1.0".into(),
+        let mut raw = RawBuildModel {
+            project: Some(ProjectDef {
+                name: "demo".into(),
+                version: "0.1.0".into(),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         raw.profiles.insert(
             "dev".into(),
             RawProfileDef {

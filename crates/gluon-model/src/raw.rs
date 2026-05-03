@@ -73,12 +73,14 @@ mod tests {
 
     #[test]
     fn raw_build_model_round_trips_with_data() {
-        let mut raw = RawBuildModel::default();
-        raw.project = Some(ProjectDef {
-            name: "demo".into(),
-            version: "0.1.0".into(),
+        let mut raw = RawBuildModel {
+            project: Some(ProjectDef {
+                name: "demo".into(),
+                version: "0.1.0".into(),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         raw.profiles.insert(
             "dev".into(),
             RawProfileDef {
@@ -99,9 +101,11 @@ mod tests {
 
     #[test]
     fn sidecar_flags_skip_serde() {
-        let mut raw = RawBuildModel::default();
-        raw.qemu_was_set = true;
-        raw.bootloader_was_set = true;
+        let raw = RawBuildModel {
+            qemu_was_set: true,
+            bootloader_was_set: true,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert!(!de.qemu_was_set);

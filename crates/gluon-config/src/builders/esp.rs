@@ -3,21 +3,21 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{EspDef, EspEntry, Handle};
+use gluon_model::{Handle, RawEspDef, RawEspEntry};
 
 /// Chainable builder returned by [`Config::esp`].
 pub struct EspBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    pub(crate) state: BuilderState<Handle<EspDef>>,
+    pub(crate) state: BuilderState<Handle<RawEspDef>>,
 }
 
 impl<'cfg> EspBuilder<'cfg> {
-    /// Apply `f` to the `EspDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawEspDef` if this builder is `Valid`.
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
-    fn modify<F: FnOnce(&mut EspDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut RawEspDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(e) = self.cfg.raw.model.esps.get_mut(*handle) {
+            if let Some(e) = self.cfg.raw.esps.get_mut(*handle) {
                 f(e);
             }
         }
@@ -30,9 +30,6 @@ impl<'cfg> EspBuilder<'cfg> {
     /// An absolute `dest_path` is rejected with an engine-parity diagnostic
     /// and the entry is **not** inserted — mirroring the engine check at
     /// `register_esp` (pipeline.rs line 961).
-    ///
-    /// The `source_crate_handle` field is intentionally left `None` here;
-    /// the intern pass populates it after the model is fully built.
     pub fn add(mut self, source_crate: &str, dest_path: &str) -> Self {
         if self.state.is_duplicate() {
             return self;
@@ -46,9 +43,8 @@ impl<'cfg> EspBuilder<'cfg> {
             )));
             return self;
         }
-        let entry = EspEntry {
+        let entry = RawEspEntry {
             source_crate: source_crate.into(),
-            source_crate_handle: None,
             dest_path: dest_path.into(),
         };
         self.modify(|e| e.entries.push(entry));
@@ -66,12 +62,11 @@ mod tests {
         cfg.esp("default")
             .add("bootloader", "EFI/BOOT/BOOTX64.EFI")
             .add("kernel", "kernel.elf");
-        let h = cfg.raw.model.esps.lookup("default").unwrap();
-        let e = cfg.raw.model.esps.get(h).unwrap();
+        let h = cfg.raw.esps.lookup("default").unwrap();
+        let e = cfg.raw.esps.get(h).unwrap();
         assert_eq!(e.entries.len(), 2);
         assert_eq!(e.entries[0].source_crate, "bootloader");
         assert_eq!(e.entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");
-        assert!(e.entries[0].source_crate_handle.is_none(), "intern populates handle");
         assert!(cfg.diagnostics.is_empty());
     }
 
@@ -80,8 +75,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.esp("default").add("bl", "/EFI/BOOT/BOOTX64.EFI");
         assert!(cfg.diagnostics.iter().any(|d| d.message.contains("relative to the ESP root")));
-        let h = cfg.raw.model.esps.lookup("default").unwrap();
-        let e = cfg.raw.model.esps.get(h).unwrap();
+        let h = cfg.raw.esps.lookup("default").unwrap();
+        let e = cfg.raw.esps.get(h).unwrap();
         assert!(e.entries.is_empty(), "rejected entry must NOT be inserted");
     }
 
@@ -92,8 +87,8 @@ mod tests {
         cfg.esp("default").add("bl2", "EFI/BOOT/BOOTIA32.EFI");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("default"));
-        let h = cfg.raw.model.esps.lookup("default").unwrap();
-        let e = cfg.raw.model.esps.get(h).unwrap();
+        let h = cfg.raw.esps.lookup("default").unwrap();
+        let e = cfg.raw.esps.get(h).unwrap();
         assert_eq!(e.entries.len(), 1, "first esp's entry preserved; second's add no-op");
         assert_eq!(e.entries[0].source_crate, "bl");
     }

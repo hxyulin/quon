@@ -3,7 +3,7 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{BuildStepDef, BuildStepInput, Handle};
+use gluon_model::{Handle, RawBuildStepDef, RawBuildStepInput};
 
 /// Reserved env-var name used by the gluon runtime to communicate the
 /// absolute output path to a build-step runner. Mirrors
@@ -13,16 +13,16 @@ const RESERVED_OUTPUT_ENV: &str = "GLUON_OUTPUT_PATH";
 /// Chainable builder returned by [`Config::build_step`].
 pub struct BuildStepBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    pub(crate) state: BuilderState<Handle<BuildStepDef>>,
+    pub(crate) state: BuilderState<Handle<RawBuildStepDef>>,
 }
 
 impl<'cfg> BuildStepBuilder<'cfg> {
-    /// Apply `f` to the `BuildStepDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawBuildStepDef` if this builder is `Valid`.
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
-    fn modify<F: FnOnce(&mut BuildStepDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut RawBuildStepDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(b) = self.cfg.raw.model.build_steps.get_mut(*handle) {
+            if let Some(b) = self.cfg.raw.build_steps.get_mut(*handle) {
                 f(b);
             }
         }
@@ -46,7 +46,7 @@ impl<'cfg> BuildStepBuilder<'cfg> {
             return self;
         }
         let key = env_var.to_string();
-        let val = BuildStepInput::Crate { crate_name: crate_name.into(), crate_handle: None };
+        let val = RawBuildStepInput::Crate { crate_name: crate_name.into() };
         self.modify(|b| { b.inputs.insert(key, val); });
         self
     }
@@ -61,7 +61,7 @@ impl<'cfg> BuildStepBuilder<'cfg> {
             return self;
         }
         let key = env_var.to_string();
-        let val = BuildStepInput::File { path: path.into() };
+        let val = RawBuildStepInput::File { path: path.into() };
         self.modify(|b| { b.inputs.insert(key, val); });
         self
     }
@@ -76,7 +76,7 @@ impl<'cfg> BuildStepBuilder<'cfg> {
             return self;
         }
         let key = env_var.to_string();
-        let val = BuildStepInput::Literal { value: value.into() };
+        let val = RawBuildStepInput::Literal { value: value.into() };
         self.modify(|b| { b.inputs.insert(key, val); });
         self
     }
@@ -186,8 +186,8 @@ mod tests {
             .input_literal("VERSION", "1.0")
             .env("TARGET_SIZE_MB", "64")
             .output("disk.img");
-        let h = cfg.raw.model.build_steps.lookup("disk-image").unwrap();
-        let bs = cfg.raw.model.build_steps.get(h).unwrap();
+        let h = cfg.raw.build_steps.lookup("disk-image").unwrap();
+        let bs = cfg.raw.build_steps.get(h).unwrap();
         assert_eq!(bs.runner, "image-builder");
         assert_eq!(bs.output, "disk.img");
         assert_eq!(bs.env.get("TARGET_SIZE_MB").map(String::as_str), Some("64"));
@@ -204,8 +204,8 @@ mod tests {
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("dup"));
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
-        let h = cfg.raw.model.build_steps.lookup("dup").unwrap();
-        assert_eq!(cfg.raw.model.build_steps.get(h).unwrap().runner, "a");
+        let h = cfg.raw.build_steps.lookup("dup").unwrap();
+        assert_eq!(cfg.raw.build_steps.get(h).unwrap().runner, "a");
     }
 
     #[test]

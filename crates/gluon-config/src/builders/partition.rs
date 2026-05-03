@@ -30,7 +30,7 @@ impl<'cfg> PartitionBuilder<'cfg> {
     /// and the image/partition are reachable.
     fn modify<F: FnOnce(&mut PartitionDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
-            if let Some(img) = self.cfg.raw.model.images.get_mut(self.image_handle) {
+            if let Some(img) = self.cfg.raw.images.get_mut(self.image_handle) {
                 if let Some(p) = img.partitions.get_mut(self.partition_index) {
                     f(p);
                 }
@@ -78,7 +78,6 @@ impl<'cfg> PartitionBuilder<'cfg> {
         let name = self
             .cfg
             .raw
-            .model
             .images
             .get(self.image_handle)
             .map(|i| i.name.clone())

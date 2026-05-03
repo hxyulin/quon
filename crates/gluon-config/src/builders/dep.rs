@@ -7,7 +7,7 @@
 //! the parent [`CrateBuilder`], which only invokes the closure on
 //! the dep it just inserted.
 
-use gluon_model::DepDef;
+use gluon_model::RawDepDef;
 
 /// Mutator handed to the closure passed to
 /// [`crate::builders::CrateBuilder::dep_with`].
@@ -16,11 +16,11 @@ use gluon_model::DepDef;
 /// from the parent `CrateBuilder`'s arena slot, so the lifetime
 /// stays simple.
 pub struct DepBuilder<'a> {
-    dep: &'a mut DepDef,
+    dep: &'a mut RawDepDef,
 }
 
 impl<'a> DepBuilder<'a> {
-    pub(crate) fn new(dep: &'a mut DepDef) -> Self {
+    pub(crate) fn new(dep: &'a mut RawDepDef) -> Self {
         Self { dep }
     }
 

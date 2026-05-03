@@ -15,7 +15,7 @@ impl<'cfg> PresetBuilder<'cfg> {
     fn modify<F: FnOnce(&mut PresetDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
             let name = self.state.name().to_string();
-            if let Some(p) = self.cfg.raw.model.presets.get_mut(&name) {
+            if let Some(p) = self.cfg.raw.presets.get_mut(&name) {
                 f(p);
             }
         }
@@ -56,7 +56,7 @@ mod tests {
         cfg.preset("debug")
             .set("CONFIG_FOO", ConfigValue::Bool(true))
             .set("CONFIG_SIZE", ConfigValue::U64(4096));
-        let p = cfg.raw.model.presets.get("debug").unwrap();
+        let p = cfg.raw.presets.get("debug").unwrap();
         assert_eq!(p.overrides.len(), 2);
         match p.overrides.get("CONFIG_FOO").unwrap() {
             ConfigValue::Bool(true) => {}
@@ -70,7 +70,7 @@ mod tests {
         let mut cfg = Config::new();
         cfg.preset("a").set("X", ConfigValue::Bool(true));
         cfg.preset("a").set("Y", ConfigValue::Bool(false));
-        let p = cfg.raw.model.presets.get("a").unwrap();
+        let p = cfg.raw.presets.get("a").unwrap();
         assert_eq!(p.overrides.len(), 1, "second preset's set must NOT mutate first");
         assert_eq!(cfg.diagnostics.len(), 1);
     }
@@ -79,7 +79,7 @@ mod tests {
     fn preset_inherits_sets_parent() {
         let mut cfg = Config::new();
         cfg.preset("child").inherits("parent").set("X", ConfigValue::Bool(true));
-        let p = cfg.raw.model.presets.get("child").unwrap();
+        let p = cfg.raw.presets.get("child").unwrap();
         assert_eq!(p.inherits.as_deref(), Some("parent"));
         assert!(cfg.diagnostics.is_empty());
     }
@@ -88,7 +88,7 @@ mod tests {
     fn preset_help_sets_text() {
         let mut cfg = Config::new();
         cfg.preset("p").help("some help text");
-        let p = cfg.raw.model.presets.get("p").unwrap();
+        let p = cfg.raw.presets.get("p").unwrap();
         assert_eq!(p.help.as_deref(), Some("some help text"));
     }
 }

@@ -3,36 +3,35 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{Handle, ProfileDef, TargetDef};
+use gluon_model::{Handle, RawProfileDef, TargetDef};
 
 /// Chainable builder returned by [`Config::profile`].
 pub struct ProfileBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    pub(crate) state: BuilderState<Handle<ProfileDef>>,
+    pub(crate) state: BuilderState<Handle<RawProfileDef>>,
 }
 
 impl<'cfg> ProfileBuilder<'cfg> {
-    /// Apply `f` to the `ProfileDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawProfileDef` if this builder is `Valid`.
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
-    fn modify<F: FnOnce(&mut ProfileDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut RawProfileDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(p) = self.cfg.raw.model.profiles.get_mut(*handle) {
+            if let Some(p) = self.cfg.raw.profiles.get_mut(*handle) {
                 f(p);
             }
         }
     }
 
     /// Set the target triple for this profile. The handle is resolved to a
-    /// name string immediately; `target_handle` is populated later by the
-    /// intern pass.
+    /// name string immediately; intern resolves names against arenas.
     ///
     /// A diagnostic is pushed if `target` is a stale handle that doesn't
     /// index into this `Config`'s target arena (e.g. a handle minted by a
     /// different `Config` instance). The profile's `target` field is left
     /// `None` in that case rather than silently recording an incorrect name.
     pub fn target(mut self, target: Handle<TargetDef>) -> Self {
-        let target_name = self.cfg.raw.model.targets.get(target).map(|t| t.name.clone());
+        let target_name = self.cfg.raw.targets.get(target).map(|t| t.name.clone());
         if target_name.is_none() && !self.state.is_duplicate() {
             // The handle isn't in this Config's target arena — likely a stale
             // handle from a previous Config or a different sibling. Surface it
@@ -106,8 +105,8 @@ mod tests {
             .debug_info(true)
             .boot_binary("kernel");
 
-        let h = cfg.raw.model.profiles.lookup("dev").expect("dev profile");
-        let p = cfg.raw.model.profiles.get(h).unwrap();
+        let h = cfg.raw.profiles.lookup("dev").expect("dev profile");
+        let p = cfg.raw.profiles.get(h).unwrap();
         assert_eq!(p.target.as_deref(), Some("x86_64-unknown-none"));
         assert_eq!(p.opt_level, Some(0));
         assert_eq!(p.debug_info, Some(true));
@@ -121,14 +120,14 @@ mod tests {
         cfg.profile("dev").opt_level(0);
         cfg.profile("dev").opt_level(3);
 
-        let h = cfg.raw.model.profiles.lookup("dev").unwrap();
-        let p = cfg.raw.model.profiles.get(h).unwrap();
+        let h = cfg.raw.profiles.lookup("dev").unwrap();
+        let p = cfg.raw.profiles.get(h).unwrap();
         assert_eq!(
             p.opt_level,
             Some(0),
             "first definition's opt_level must be preserved"
         );
-        assert_eq!(cfg.raw.model.profiles.len(), 1);
+        assert_eq!(cfg.raw.profiles.len(), 1);
         assert_eq!(
             cfg.diagnostics.len(),
             1,
@@ -140,18 +139,13 @@ mod tests {
 
     #[test]
     fn inherits_chain_records_string_only() {
-        // intern_handle is populated by the intern pass; the builder
-        // only writes the string. Stage 4 will replace the parallel field.
+        // The builder only writes the string; intern resolves it against arenas.
         let mut cfg = Config::new();
         cfg.profile("base").opt_level(0);
         cfg.profile("debug").inherits("base").opt_level(0);
-        let h = cfg.raw.model.profiles.lookup("debug").unwrap();
-        let p = cfg.raw.model.profiles.get(h).unwrap();
+        let h = cfg.raw.profiles.lookup("debug").unwrap();
+        let p = cfg.raw.profiles.get(h).unwrap();
         assert_eq!(p.inherits.as_deref(), Some("base"));
-        assert!(
-            p.inherits_handle.is_none(),
-            "intern populates handle, not the builder"
-        );
     }
 
     #[test]
@@ -176,8 +170,8 @@ mod tests {
             "got: {}", cfg_b.diagnostics[0].message,
         );
         // Profile's target should be unset (not silently set to a wrong name).
-        let h = cfg_b.raw.model.profiles.lookup("dev").unwrap();
-        let p = cfg_b.raw.model.profiles.get(h).unwrap();
+        let h = cfg_b.raw.profiles.lookup("dev").unwrap();
+        let p = cfg_b.raw.profiles.get(h).unwrap();
         assert!(p.target.is_none());
     }
 }

@@ -2,21 +2,21 @@
 
 use crate::builders::BuilderState;
 use crate::config::Config;
-use gluon_model::{CrateDef, CrateType, DepDef, Handle};
+use gluon_model::{CrateType, Handle, RawCrateDef, RawDepDef};
 
 /// Chainable builder returned by [`crate::builders::GroupBuilder::add`].
 pub struct CrateBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    pub(crate) state: BuilderState<Handle<CrateDef>>,
+    pub(crate) state: BuilderState<Handle<RawCrateDef>>,
 }
 
 impl<'cfg> CrateBuilder<'cfg> {
-    /// Apply `f` to the `CrateDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawCrateDef` if this builder is `Valid`.
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
-    fn modify<F: FnOnce(&mut CrateDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut RawCrateDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(c) = self.cfg.raw.model.crates.get_mut(*handle) {
+            if let Some(c) = self.cfg.raw.crates.get_mut(*handle) {
                 f(c);
             }
         }
@@ -60,7 +60,7 @@ impl<'cfg> CrateBuilder<'cfg> {
     /// Add a dependency edge. `extern_name` is the key used in `--extern`
     /// flags; `crate_name` is the crate that provides the rlib.
     pub fn dep(mut self, extern_name: &str, crate_name: &str) -> Self {
-        let dep = DepDef { crate_name: crate_name.into(), ..Default::default() };
+        let dep = RawDepDef { crate_name: crate_name.into(), ..Default::default() };
         let key = extern_name.to_string();
         self.modify(|c| {
             c.deps.insert(key, dep);
@@ -71,7 +71,7 @@ impl<'cfg> CrateBuilder<'cfg> {
     /// Add a dependency edge with optional feature/version overrides.
     ///
     /// The closure receives a [`crate::builders::DepBuilder`] and is
-    /// invoked synchronously on the just-inserted [`DepDef`]. For
+    /// invoked synchronously on the just-inserted [`RawDepDef`]. For
     /// dependencies with no extra options, prefer the simpler
     /// [`Self::dep`] form.
     pub fn dep_with<F: FnOnce(&mut crate::builders::DepBuilder<'_>)>(
@@ -83,7 +83,7 @@ impl<'cfg> CrateBuilder<'cfg> {
         let key = extern_name.to_string();
         let cn = crate_name.to_string();
         self.modify(|c| {
-            let dep = c.deps.entry(key).or_insert_with(|| DepDef {
+            let dep = c.deps.entry(key).or_insert_with(|| RawDepDef {
                 crate_name: cn,
                 ..Default::default()
             });
@@ -151,8 +151,8 @@ mod tests {
             .rustc_flag("-C")
             .rustc_flag("opt-level=2");
 
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert_eq!(
             k.cfg_flags,
             vec!["feature_a".to_string(), "feature_b".to_string()]
@@ -175,8 +175,8 @@ mod tests {
                 b.features(&["logging", "fancy"]).version("1.2");
             },
         );
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         let dep = k.deps.get("mylib").unwrap();
         assert_eq!(dep.crate_name, "mylib");
         assert_eq!(dep.features, vec!["logging".to_string(), "fancy".to_string()]);
@@ -195,8 +195,8 @@ mod tests {
                 b.optional(true).no_default_features();
             },
         );
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         let dep = k.deps.get("bitflags").unwrap();
         assert!(dep.optional);
         assert!(!dep.default_features);
@@ -212,8 +212,8 @@ mod tests {
             .add("bootloader", "crates/bootloader")
             .artifact_env("KERNEL_PATH", "kernel");
 
-        let h = cfg.raw.model.crates.lookup("bootloader").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("bootloader").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert_eq!(
             k.artifact_env.get("KERNEL_PATH").map(|s| s.as_str()),
             Some("kernel"),
@@ -233,8 +233,8 @@ mod tests {
             .add("bootloader", "crates/bootloader")
             .artifact_env("KERNEL_A", "kernel")
             .artifact_env("KERNEL_B", "kernel");
-        let h = cfg.raw.model.crates.lookup("bootloader").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("bootloader").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert_eq!(k.artifact_deps, vec!["kernel".to_string()]);
         assert_eq!(k.artifact_env.len(), 2);
     }
@@ -259,8 +259,8 @@ mod tests {
             "got: {}",
             cfg.diagnostics[0].message
         );
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert!(k.artifact_env.is_empty());
         assert!(k.artifact_deps.is_empty());
     }
@@ -281,8 +281,8 @@ mod tests {
             "got: {}",
             cfg.diagnostics[0].message
         );
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert!(k.artifact_env.is_empty());
         assert!(k.artifact_deps.is_empty());
     }

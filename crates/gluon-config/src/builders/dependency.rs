@@ -15,7 +15,7 @@ pub struct DependencyBuilder<'cfg> {
 impl<'cfg> DependencyBuilder<'cfg> {
     fn modify<F: FnOnce(&mut ExternalDepDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(d) = self.cfg.raw.model.external_deps.get_mut(*handle) {
+            if let Some(d) = self.cfg.raw.external_deps.get_mut(*handle) {
                 f(d);
             }
         }
@@ -67,7 +67,7 @@ impl<'cfg> DependencyBuilder<'cfg> {
         }
         let name = self.state.name().to_string();
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(d) = self.cfg.raw.model.external_deps.get_mut(*handle) {
+            if let Some(d) = self.cfg.raw.external_deps.get_mut(*handle) {
                 if let DepSource::Git { reference, .. } = &mut d.source {
                     *reference = new_ref;
                     return self;
@@ -119,8 +119,8 @@ mod tests {
     fn dependency_path_records_path_source() {
         let mut cfg = Config::new();
         cfg.dependency("helper").path("../helper");
-        let h = cfg.raw.model.external_deps.lookup("helper").unwrap();
-        let d = cfg.raw.model.external_deps.get(h).unwrap();
+        let h = cfg.raw.external_deps.lookup("helper").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
         match &d.source {
             DepSource::Path { path } => assert_eq!(path, "../helper"),
             other => panic!("expected Path, got {other:?}"),
@@ -132,8 +132,8 @@ mod tests {
     fn dependency_version_records_crates_io() {
         let mut cfg = Config::new();
         cfg.dependency("bitflags").version("2.11");
-        let h = cfg.raw.model.external_deps.lookup("bitflags").unwrap();
-        let d = cfg.raw.model.external_deps.get(h).unwrap();
+        let h = cfg.raw.external_deps.lookup("bitflags").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
         match &d.source {
             DepSource::CratesIo { version } => assert_eq!(version, "2.11"),
             other => panic!("expected CratesIo, got {other:?}"),
@@ -144,8 +144,8 @@ mod tests {
     fn dependency_git_with_rev() {
         let mut cfg = Config::new();
         cfg.dependency("foo").git("https://example.com/foo.git").rev("abcdef");
-        let h = cfg.raw.model.external_deps.lookup("foo").unwrap();
-        let d = cfg.raw.model.external_deps.get(h).unwrap();
+        let h = cfg.raw.external_deps.lookup("foo").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
         match &d.source {
             DepSource::Git { url, reference: GitRef::Rev(r) } => {
                 assert_eq!(url, "https://example.com/foo.git");
@@ -171,8 +171,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.dependency("a").version("1.0");
         cfg.dependency("a").version("2.0");
-        let h = cfg.raw.model.external_deps.lookup("a").unwrap();
-        let d = cfg.raw.model.external_deps.get(h).unwrap();
+        let h = cfg.raw.external_deps.lookup("a").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
         match &d.source {
             DepSource::CratesIo { version } => assert_eq!(version, "1.0"),
             other => panic!("expected CratesIo from first definition, got {other:?}"),

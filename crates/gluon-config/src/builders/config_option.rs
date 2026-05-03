@@ -24,7 +24,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
     fn modify<F: FnOnce(&mut ConfigOptionDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
             let name = self.state.name().to_string();
-            if let Some(opt) = self.cfg.raw.model.config_options.get_mut(&name) {
+            if let Some(opt) = self.cfg.raw.config_options.get_mut(&name) {
                 f(opt);
             }
         }
@@ -39,7 +39,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
     pub fn default(self, value: ConfigValue) -> Self {
         if !self.state.is_duplicate() {
             let name = self.state.name().to_string();
-            if let Some(opt) = self.cfg.raw.model.config_options.get(&name) {
+            if let Some(opt) = self.cfg.raw.config_options.get(&name) {
                 let ty = opt.ty;
                 // Type-compatibility check: mirror the engine's conversions.rs
                 // `dynamic_to_config_value` logic. In the Rust API we receive a
@@ -57,7 +57,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
                 );
 
                 if compatible {
-                    if let Some(opt) = self.cfg.raw.model.config_options.get_mut(&name) {
+                    if let Some(opt) = self.cfg.raw.config_options.get_mut(&name) {
                         opt.default = value;
                     }
                 } else {
@@ -108,7 +108,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
             return self;
         }
         let name = self.state.name().to_string();
-        let ty = self.cfg.raw.model.config_options.get(&name).map(|o| o.ty);
+        let ty = self.cfg.raw.config_options.get(&name).map(|o| o.ty);
         match ty {
             Some(ConfigType::U32) | Some(ConfigType::U64) => {
                 if lo > hi {
@@ -138,7 +138,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
             return self;
         }
         let name = self.state.name().to_string();
-        let ty = self.cfg.raw.model.config_options.get(&name).map(|o| o.ty);
+        let ty = self.cfg.raw.config_options.get(&name).map(|o| o.ty);
         match ty {
             Some(ConfigType::Choice) => {
                 let v: Vec<String> = values.iter().map(|s| s.to_string()).collect();
@@ -216,7 +216,7 @@ mod tests {
     fn config_bool_chain() {
         let mut cfg = Config::new();
         cfg.config_bool("CONFIG_FOO").default(ConfigValue::Bool(true)).help("helpful");
-        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_FOO").unwrap();
         assert_eq!(opt.ty, ConfigType::Bool);
         match opt.default {
             ConfigValue::Bool(true) => {}
@@ -230,7 +230,7 @@ mod tests {
     fn config_u32_with_range() {
         let mut cfg = Config::new();
         cfg.config_u32("CONFIG_SIZE").default(ConfigValue::U32(4096)).range(0, 65536);
-        let opt = cfg.raw.model.config_options.get("CONFIG_SIZE").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_SIZE").unwrap();
         assert_eq!(opt.ty, ConfigType::U32);
         assert_eq!(opt.range, Some((0, 65536)));
     }
@@ -241,7 +241,7 @@ mod tests {
         cfg.config_choice("CONFIG_MODE")
             .choices(&["debug", "release"])
             .default(ConfigValue::Choice("debug".into()));
-        let opt = cfg.raw.model.config_options.get("CONFIG_MODE").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_MODE").unwrap();
         assert_eq!(opt.ty, ConfigType::Choice);
         match &opt.default {
             ConfigValue::Choice(s) if s == "debug" => {}
@@ -254,7 +254,7 @@ mod tests {
         let mut cfg = Config::new();
         cfg.config_bool("CONFIG_FOO").help("first");
         cfg.config_bool("CONFIG_FOO").help("second");
-        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_FOO").unwrap();
         assert_eq!(opt.help.as_deref(), Some("first"), "first definition preserved");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("CONFIG_FOO"));
@@ -278,7 +278,7 @@ mod tests {
     fn config_tristate_seeds_no_default() {
         let mut cfg = Config::new();
         cfg.config_tristate("CONFIG_TRI");
-        let opt = cfg.raw.model.config_options.get("CONFIG_TRI").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_TRI").unwrap();
         assert_eq!(opt.ty, ConfigType::Tristate);
         assert_eq!(opt.default, ConfigValue::Tristate(TristateVal::No));
     }
@@ -287,7 +287,7 @@ mod tests {
     fn config_str_seeds_empty_default() {
         let mut cfg = Config::new();
         cfg.config_str("CONFIG_S");
-        let opt = cfg.raw.model.config_options.get("CONFIG_S").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_S").unwrap();
         assert_eq!(opt.ty, ConfigType::Str);
         assert_eq!(opt.default, ConfigValue::Str(String::new()));
     }
@@ -296,7 +296,7 @@ mod tests {
     fn config_u64_seeds_zero_default() {
         let mut cfg = Config::new();
         cfg.config_u64("CONFIG_BIG");
-        let opt = cfg.raw.model.config_options.get("CONFIG_BIG").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_BIG").unwrap();
         assert_eq!(opt.ty, ConfigType::U64);
         assert_eq!(opt.default, ConfigValue::U64(0));
     }
@@ -305,7 +305,7 @@ mod tests {
     fn config_list_seeds_empty_default() {
         let mut cfg = Config::new();
         cfg.config_list("CONFIG_L");
-        let opt = cfg.raw.model.config_options.get("CONFIG_L").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_L").unwrap();
         assert_eq!(opt.ty, ConfigType::List);
         assert_eq!(opt.default, ConfigValue::List(vec![]));
     }
@@ -315,7 +315,7 @@ mod tests {
         use gluon_model::ConfigValue;
         let mut cfg = Config::new();
         cfg.config_bool("CONFIG_FOO").default_value(ConfigValue::Bool(true));
-        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_FOO").unwrap();
         match opt.default {
             ConfigValue::Bool(true) => {}
             ref other => panic!("got {other:?}"),
@@ -328,7 +328,7 @@ mod tests {
         use gluon_model::Expr;
         let mut cfg = Config::new();
         cfg.config_u32("LOG_LEVEL").depends_on(Expr::Ident("LOG_ENABLED".into()));
-        let opt = cfg.raw.model.config_options.get("LOG_LEVEL").unwrap();
+        let opt = cfg.raw.config_options.get("LOG_LEVEL").unwrap();
         match opt.depends_on_expr.as_ref() {
             Some(Expr::Ident(s)) if s == "LOG_ENABLED" => {}
             other => panic!("expected Ident(\"LOG_ENABLED\"), got {other:?}"),
@@ -343,7 +343,7 @@ mod tests {
             Expr::Ident("A".into()),
             Expr::Not(Box::new(Expr::Ident("B".into()))),
         ]));
-        let opt = cfg.raw.model.config_options.get("FANCY").unwrap();
+        let opt = cfg.raw.config_options.get("FANCY").unwrap();
         match opt.depends_on_expr.as_ref() {
             Some(Expr::And(xs)) => {
                 assert_eq!(xs.len(), 2);
@@ -364,7 +364,7 @@ mod tests {
         cfg.config_bool("FANCY")
             .depends_on(Expr::Ident("A".into()))
             .depends_on(Expr::Ident("B".into()));
-        let opt = cfg.raw.model.config_options.get("FANCY").unwrap();
+        let opt = cfg.raw.config_options.get("FANCY").unwrap();
         match opt.depends_on_expr.as_ref() {
             Some(Expr::Ident(s)) if s == "B" => {}
             other => panic!("expected Ident(\"B\"), got {other:?}"),
@@ -390,7 +390,7 @@ mod tests {
         assert!(cfg.diagnostics.iter().any(|d| {
             d.message.contains("range") && d.message.contains("CONFIG_FOO")
         }));
-        let opt = cfg.raw.model.config_options.get("CONFIG_FOO").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_FOO").unwrap();
         assert!(opt.range.is_none(), "range must NOT be set on Bool option");
     }
 
@@ -401,7 +401,7 @@ mod tests {
         assert!(cfg.diagnostics.iter().any(|d| {
             d.message.contains("choices") && d.message.contains("CONFIG_NAME")
         }));
-        let opt = cfg.raw.model.config_options.get("CONFIG_NAME").unwrap();
+        let opt = cfg.raw.config_options.get("CONFIG_NAME").unwrap();
         assert!(opt.choices.is_none(), "choices must NOT be set on Str option");
     }
 }

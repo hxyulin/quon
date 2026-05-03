@@ -16,7 +16,7 @@ impl<'cfg> RuleBuilder<'cfg> {
     /// allocation.
     fn modify<F: FnOnce(&mut RuleDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(r) = self.cfg.raw.model.rules.get_mut(*handle) {
+            if let Some(r) = self.cfg.raw.rules.get_mut(*handle) {
                 f(r);
             }
         }
@@ -92,8 +92,8 @@ mod tests {
             .outputs(&["out.bin"])
             .depends_on(&["other_rule"])
             .working_dir("project_root");
-        let h = cfg.raw.model.rules.lookup("my_rule").unwrap();
-        let r = cfg.raw.model.rules.get(h).unwrap();
+        let h = cfg.raw.rules.lookup("my_rule").unwrap();
+        let r = cfg.raw.rules.get(h).unwrap();
         match &r.handler {
             gluon_model::RuleHandler::Builtin(s) if s == "exec" => {}
             other => panic!("expected Builtin(\"exec\"), got {other:?}"),
@@ -110,8 +110,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.rule("dup").handler("exec");
         cfg.rule("dup").handler("script");
-        let h = cfg.raw.model.rules.lookup("dup").unwrap();
-        let r = cfg.raw.model.rules.get(h).unwrap();
+        let h = cfg.raw.rules.lookup("dup").unwrap();
+        let r = cfg.raw.rules.get(h).unwrap();
         match &r.handler {
             gluon_model::RuleHandler::Builtin(s) if s == "exec" => {}
             other => panic!("first handler must be preserved, got {other:?}"),
@@ -125,8 +125,8 @@ mod tests {
     fn rule_on_execute_records_script_handler() {
         let mut cfg = Config::new();
         cfg.rule("scripted").on_execute("echo hi");
-        let h = cfg.raw.model.rules.lookup("scripted").unwrap();
-        let r = cfg.raw.model.rules.get(h).unwrap();
+        let h = cfg.raw.rules.lookup("scripted").unwrap();
+        let r = cfg.raw.rules.get(h).unwrap();
         match &r.handler {
             gluon_model::RuleHandler::Script(s) if s == "echo hi" => {}
             other => panic!("expected Script handler, got {other:?}"),

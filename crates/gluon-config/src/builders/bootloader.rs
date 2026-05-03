@@ -7,7 +7,7 @@ use crate::config::Config;
 ///
 /// There is no arena for the singleton `BootloaderDef`; the handle type
 /// parameter is `()`. All chained methods access
-/// `cfg.raw.model.bootloader` directly via [`modify`].
+/// `cfg.raw.bootloader` directly via [`modify`].
 pub struct BootloaderBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
     /// Singleton: no arena handle to capture — `state` carries `()`.
@@ -16,9 +16,9 @@ pub struct BootloaderBuilder<'cfg> {
 
 impl<'cfg> BootloaderBuilder<'cfg> {
     /// Apply `f` to the `BootloaderDef` if this builder is `Valid`.
-    fn modify<F: FnOnce(&mut gluon_model::BootloaderDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut gluon_model::RawBootloaderDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
-            f(&mut self.cfg.raw.model.bootloader);
+            f(&mut self.cfg.raw.bootloader);
         }
     }
 
@@ -64,11 +64,10 @@ mod tests {
     fn bootloader_chain_sets_typed_fields() {
         let mut cfg = Config::new();
         cfg.bootloader("uefi").entry_crate("loader").config_file("boot.cfg");
-        let bl = &cfg.raw.model.bootloader;
+        let bl = &cfg.raw.bootloader;
         assert_eq!(bl.kind, "uefi");
         assert_eq!(bl.entry_crate.as_deref(), Some("loader"));
         assert_eq!(bl.config_file.as_deref(), Some("boot.cfg"));
-        assert!(bl.entry_crate_handle.is_none(), "intern populates handle");
         assert!(cfg.diagnostics.is_empty());
     }
 
@@ -77,8 +76,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.bootloader("a").entry_crate("loader_a");
         cfg.bootloader("b").entry_crate("loader_b");
-        assert_eq!(cfg.raw.model.bootloader.kind, "a", "first kind preserved");
-        assert_eq!(cfg.raw.model.bootloader.entry_crate.as_deref(), Some("loader_a"));
+        assert_eq!(cfg.raw.bootloader.kind, "a", "first kind preserved");
+        assert_eq!(cfg.raw.bootloader.entry_crate.as_deref(), Some("loader_a"));
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
     }
@@ -87,7 +86,7 @@ mod tests {
     fn bootloader_extras_are_recorded() {
         let mut cfg = Config::new();
         cfg.bootloader("custom").extra("flavor", "limine").extra("strict", "true");
-        let bl = &cfg.raw.model.bootloader;
+        let bl = &cfg.raw.bootloader;
         assert_eq!(bl.extras.get("flavor").map(String::as_str), Some("limine"));
         assert_eq!(bl.extras.get("strict").map(String::as_str), Some("true"));
     }

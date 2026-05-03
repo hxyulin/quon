@@ -4,36 +4,35 @@ use crate::builders::crate_::CrateBuilder;
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{CrateDef, CrateType, GroupDef, Handle, TargetDef};
+use gluon_model::{CrateType, Handle, RawCrateDef, RawGroupDef, TargetDef};
 
 /// Chainable builder returned by [`Config::group`].
 pub struct GroupBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    pub(crate) state: BuilderState<Handle<GroupDef>>,
+    pub(crate) state: BuilderState<Handle<RawGroupDef>>,
 }
 
 impl<'cfg> GroupBuilder<'cfg> {
-    /// Apply `f` to the `GroupDef` if this builder is `Valid`.
+    /// Apply `f` to the `RawGroupDef` if this builder is `Valid`.
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
-    fn modify<F: FnOnce(&mut GroupDef)>(&mut self, f: F) {
+    fn modify<F: FnOnce(&mut RawGroupDef)>(&mut self, f: F) {
         if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(g) = self.cfg.raw.model.groups.get_mut(*handle) {
+            if let Some(g) = self.cfg.raw.groups.get_mut(*handle) {
                 f(g);
             }
         }
     }
 
     /// Set the target triple for this group. The handle is resolved to a name
-    /// string immediately; `target_handle` is populated later by the intern
-    /// pass.
+    /// string immediately; intern resolves names against arenas.
     ///
     /// A diagnostic is pushed if `target` is a stale handle that doesn't
     /// index into this `Config`'s target arena (e.g. a handle minted by a
     /// different `Config` instance). The group's `target` field is left as
     /// its default in that case.
     pub fn target(mut self, target: Handle<TargetDef>) -> Self {
-        let target_name = self.cfg.raw.model.targets.get(target).map(|t| t.name.clone());
+        let target_name = self.cfg.raw.targets.get(target).map(|t| t.name.clone());
         if target_name.is_none() && !self.state.is_duplicate() {
             // The handle isn't in this Config's target arena — likely a stale
             // handle from a previous Config or a different sibling. Surface it
@@ -92,10 +91,10 @@ impl<'cfg> GroupBuilder<'cfg> {
             return CrateBuilder { cfg: &mut *self.cfg, state };
         }
 
-        // Resolve group-level defaults for the new CrateDef.
+        // Resolve group-level defaults for the new RawCrateDef.
         let (edition, target, group_name) = {
             if let BuilderState::Valid { state: handle, .. } = &self.state {
-                if let Some(g) = self.cfg.raw.model.groups.get(*handle) {
+                if let Some(g) = self.cfg.raw.groups.get(*handle) {
                     (g.default_edition.clone(), g.target.clone(), g.name.clone())
                 } else {
                     ("2024".to_string(), "host".to_string(), self.state.name().to_string())
@@ -105,20 +104,18 @@ impl<'cfg> GroupBuilder<'cfg> {
             }
         };
 
-        let new_crate = CrateDef {
+        let new_crate = RawCrateDef {
             name: crate_name.into(),
             path: path.into(),
             edition,
             crate_type: CrateType::Lib,
             target,
-            target_handle: None,
             deps: Default::default(),
             dev_deps: Default::default(),
             features: Vec::new(),
             root: None,
             linker_script: None,
             group: group_name.clone(),
-            group_handle: None,
             is_project_crate: true,
             cfg_flags: Vec::new(),
             rustc_flags: Vec::new(),
@@ -129,7 +126,7 @@ impl<'cfg> GroupBuilder<'cfg> {
         };
 
         let (crate_handle, inserted) =
-            self.cfg.raw.model.crates.insert(crate_name.into(), new_crate);
+            self.cfg.raw.crates.insert(crate_name.into(), new_crate);
         if !inserted {
             self.cfg.diagnostics.push(ConfigError::new(format!(
                 "crate \"{crate_name}\" is defined more than once"
@@ -140,7 +137,7 @@ impl<'cfg> GroupBuilder<'cfg> {
 
         // Record the crate under its group for later resolution.
         if let BuilderState::Valid { state: group_handle, .. } = &self.state {
-            if let Some(g) = self.cfg.raw.model.groups.get_mut(*group_handle) {
+            if let Some(g) = self.cfg.raw.groups.get_mut(*group_handle) {
                 g.crates.push(crate_name.to_string());
             }
         }
@@ -169,8 +166,8 @@ mod tests {
             .linker_script("crates/kernel/kernel.ld")
             .dep("foo", "foo");
 
-        let kh = cfg.raw.model.crates.lookup("kernel").unwrap();
-        let k = cfg.raw.model.crates.get(kh).unwrap();
+        let kh = cfg.raw.crates.lookup("kernel").unwrap();
+        let k = cfg.raw.crates.get(kh).unwrap();
         assert_eq!(k.path, "crates/kernel");
         assert_eq!(k.crate_type, CrateType::Bin);
         assert_eq!(k.root.as_deref(), Some("src/main.rs"));
@@ -186,8 +183,8 @@ mod tests {
     fn target_host_sets_sentinel() {
         let mut cfg = Config::new();
         cfg.group("host_tools").target_host().edition("2021");
-        let h = cfg.raw.model.groups.lookup("host_tools").unwrap();
-        let g = cfg.raw.model.groups.get(h).unwrap();
+        let h = cfg.raw.groups.lookup("host_tools").unwrap();
+        let g = cfg.raw.groups.get(h).unwrap();
         assert_eq!(g.target, "host");
     }
 
@@ -196,8 +193,8 @@ mod tests {
         let mut cfg = Config::new();
         cfg.group("k").edition("2021");
         cfg.group("k").edition("2024");
-        let g = cfg.raw.model.groups.lookup("k").unwrap();
-        assert_eq!(cfg.raw.model.groups.get(g).unwrap().default_edition, "2021");
+        let g = cfg.raw.groups.lookup("k").unwrap();
+        assert_eq!(cfg.raw.groups.get(g).unwrap().default_edition, "2021");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("k"));
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
@@ -209,8 +206,8 @@ mod tests {
         let t = cfg.target("x");
         cfg.group("a").target(t).add("foo", "crates/foo").crate_type(CrateType::Bin);
         cfg.group("b").target(t).add("foo", "crates/other").crate_type(CrateType::Lib);
-        let h = cfg.raw.model.crates.lookup("foo").unwrap();
-        let k = cfg.raw.model.crates.get(h).unwrap();
+        let h = cfg.raw.crates.lookup("foo").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
         assert_eq!(k.path, "crates/foo");
         assert_eq!(k.crate_type, CrateType::Bin);
         assert_eq!(
@@ -232,10 +229,10 @@ mod tests {
 
         // Both crates should be inserted, and both should be recorded
         // under the group.
-        assert!(cfg.raw.model.crates.lookup("a").is_some());
-        assert!(cfg.raw.model.crates.lookup("b").is_some());
-        let h = cfg.raw.model.groups.lookup("kernel").unwrap();
-        let group = cfg.raw.model.groups.get(h).unwrap();
+        assert!(cfg.raw.crates.lookup("a").is_some());
+        assert!(cfg.raw.crates.lookup("b").is_some());
+        let h = cfg.raw.groups.lookup("kernel").unwrap();
+        let group = cfg.raw.groups.get(h).unwrap();
         assert_eq!(group.crates, vec!["a".to_string(), "b".to_string()]);
         assert!(cfg.diagnostics.is_empty());
     }

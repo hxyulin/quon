@@ -1418,6 +1418,9 @@ mod tests {
             cfg.project("t", "1");
             let t = cfg.target_spec("x", "t.json");
             cfg.profile("default").target(t);
+            cfg.group("bootloader_group")
+                .target(t)
+                .add("boot", "crates/boot");
             cfg.bootloader("uefi")
                 .entry_crate("boot")
                 .protocol("gop");
