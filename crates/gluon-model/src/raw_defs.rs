@@ -230,6 +230,21 @@ pub struct RawPipelineStep {
     pub rule: Option<String>,
 }
 
+/// Raw form of [`crate::build_model::PipelineDef`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawPipelineDef {
+    pub name: String,
+    pub stages: Vec<RawPipelineStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawPipelineDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +425,22 @@ mod tests {
         assert_eq!(de.group, "kernel");
         assert_eq!(de.deps.len(), 1);
         assert_eq!(de.deps["log"].crate_name, "log");
+    }
+
+    #[test]
+    fn raw_pipeline_def_round_trips() {
+        let p = RawPipelineDef {
+            name: "default".into(),
+            stages: vec![RawPipelineStep {
+                name: "compile".into(),
+                inputs: vec!["kernel".into()],
+                rule: None,
+            }],
+            span: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let de: RawPipelineDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.stages.len(), 1);
+        assert_eq!(de.stages[0].inputs, vec!["kernel".to_string()]);
     }
 }
