@@ -1316,4 +1316,34 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn target_spec_serde_externally_tagged() {
+        let host_json = serde_json::to_string(&TargetSpec::Host).unwrap();
+        assert_eq!(host_json, r#"{"kind":"host"}"#);
+        let cross_json = serde_json::to_string(&TargetSpec::Cross(Handle::new(7))).unwrap();
+        assert_eq!(cross_json, r#"{"kind":"cross","handle":7}"#);
+
+        let de_host: TargetSpec = serde_json::from_str(r#"{"kind":"host"}"#).unwrap();
+        assert_eq!(de_host, TargetSpec::Host);
+        let de_cross: TargetSpec = serde_json::from_str(r#"{"kind":"cross","handle":42}"#).unwrap();
+        assert_eq!(de_cross, TargetSpec::Cross(Handle::new(42)));
+    }
+
+    #[test]
+    fn dep_resolution_serde_externally_tagged() {
+        let project_json =
+            serde_json::to_string(&DepResolution::Project(Handle::new(3))).unwrap();
+        assert_eq!(project_json, r#"{"kind":"project","handle":3}"#);
+        let external_json =
+            serde_json::to_string(&DepResolution::External(Handle::new(11))).unwrap();
+        assert_eq!(external_json, r#"{"kind":"external","handle":11}"#);
+
+        let de_project: DepResolution =
+            serde_json::from_str(r#"{"kind":"project","handle":1}"#).unwrap();
+        assert_eq!(de_project, DepResolution::Project(Handle::new(1)));
+        let de_external: DepResolution =
+            serde_json::from_str(r#"{"kind":"external","handle":2}"#).unwrap();
+        assert_eq!(de_external, DepResolution::External(Handle::new(2)));
+    }
 }

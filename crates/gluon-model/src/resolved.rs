@@ -79,6 +79,13 @@ impl ResolvedProfile {
     /// (target inheritance is handled at the chain-walk in
     /// `config/resolve.rs::flatten_profile` because it must produce
     /// a single concrete handle).
+    ///
+    /// No production caller today: `flatten_profile` operates on
+    /// pre-defaults `ProfileDef` via the `inherit_if_set!` macro.
+    /// Retained for prospective consumers that hold already-resolved
+    /// profiles (e.g. a future `gluon profile show <name>` or LSP
+    /// hover that needs to flatten an inherited chain without
+    /// re-running resolve). Drop this method if no caller materialises.
     pub fn merge_inherited(&mut self, parent: &Self) {
         if self.lto.is_none() {
             self.lto = parent.lto.clone();
