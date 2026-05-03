@@ -32,6 +32,7 @@
 use super::command_builder::build_rustc_command;
 #[cfg(test)]
 use crate::cache::BuildRecord;
+use crate::compile::layout::BuildLayout;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateDef, ResolvedConfig, ResolvedCrateRef};
@@ -92,6 +93,37 @@ pub(crate) fn collect_artifact_env_sources(
     Ok(out)
 }
 
+/// Build the cache key for a single crate compilation.
+///
+/// The key shape — `"crate:host:<name>[:driver]"` for host crates and
+/// `"crate:cross:<name>:<profile>:<target>[:driver]"` for cross-compiled
+/// — is part of the on-disk cache contract: changing it invalidates all
+/// existing cache entries. The `<driver>` suffix gives `gluon build`,
+/// `gluon check`, and `gluon clippy` their own slots so they cannot
+/// race over a single `BuildRecord`.
+fn build_cache_key(
+    layout: &BuildLayout,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    crate_def: &CrateDef,
+    cref: &ResolvedCrateRef,
+) -> Result<String> {
+    let suffix = layout.cache_key_suffix();
+    if cref.host {
+        return Ok(format!("crate:host:{}{suffix}", crate_def.name));
+    }
+    let target = model.targets.get(cref.target).ok_or_else(|| {
+        Error::Compile(format!(
+            "crate '{}': target handle {:?} not found in build model",
+            crate_def.name, cref.target
+        ))
+    })?;
+    Ok(format!(
+        "crate:cross:{}:{}:{}{}",
+        crate_def.name, resolved.profile.name, target.name, suffix
+    ))
+}
+
 /// Compile a single crate. Returns the absolute path of the produced
 /// artifact and a boolean indicating whether the result came from the
 /// cache (`true` = freshness check short-circuited rustc). Cached via
@@ -128,26 +160,7 @@ pub fn compile(
 
     let argv_hash = builder.hash();
 
-    // Derive the cache key. The key encodes enough context to avoid
-    // collisions between crates with the same name in different
-    // targets, profiles, or drivers. `cache_key_suffix` gives each
-    // driver its own slot (without it `gluon build` and `gluon check`
-    // would race over a single BuildRecord).
-    let driver_suffix = ctx.layout.cache_key_suffix();
-    let cache_key = if crate_ref.host {
-        format!("crate:host:{crate_name}{driver_suffix}")
-    } else {
-        let target = model.targets.get(crate_ref.target).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle {:?} not found in build model",
-                crate_name, crate_ref.target
-            ))
-        })?;
-        format!(
-            "crate:cross:{}:{}:{}{}",
-            crate_name, resolved.profile.name, target.name, driver_suffix
-        )
-    };
+    let cache_key = build_cache_key(&ctx.layout, model, resolved, crate_def, crate_ref)?;
 
     // Derive the out-dir that must exist on the slow path before rustc
     // writes its artifact. This used to live in the body of the
@@ -462,6 +475,107 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    // ---------------------------------------------------------------------------
+    // build_cache_key
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn build_cache_key_host_crate_uses_host_namespace() {
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("host-tgt", "x86_64-unknown-linux-gnu", true));
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "demo".into(),
+                path: "demo".into(),
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
+        let layout = BuildLayout::new("/tmp/build", "demo");
+        let crate_def = model.crates.get(ch).unwrap();
+        let cref = host_ref(ch, th);
+        let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
+        assert_eq!(key, "crate:host:demo");
+    }
+
+    #[test]
+    fn build_cache_key_host_crate_with_check_driver_appends_suffix() {
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("host-tgt", "x86_64-unknown-linux-gnu", true));
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "demo".into(),
+                path: "demo".into(),
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
+        let layout = BuildLayout::with_driver(
+            "/tmp/build",
+            "demo",
+            crate::compile::DriverKind::Check,
+        );
+        let crate_def = model.crates.get(ch).unwrap();
+        let cref = host_ref(ch, th);
+        let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
+        assert_eq!(key, "crate:host:demo:check");
+    }
+
+    #[test]
+    fn build_cache_key_cross_crate_includes_profile_and_target() {
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("x86_64-unknown-none", "x86_64-unknown-none", true),
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
+        let layout = BuildLayout::new("/tmp/build", "demo");
+        let crate_def = model.crates.get(ch).unwrap();
+        let cref = cross_ref(ch, th);
+        let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
+        // Profile name comes from `make_profile` -> "debug".
+        assert_eq!(key, "crate:cross:kernel:debug:x86_64-unknown-none");
+    }
+
+    #[test]
+    fn build_cache_key_cross_crate_with_clippy_driver_appends_suffix() {
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("x86_64-unknown-none", "x86_64-unknown-none", true),
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
+        let layout = BuildLayout::with_driver(
+            "/tmp/build",
+            "demo",
+            crate::compile::DriverKind::Clippy,
+        );
+        let crate_def = model.crates.get(ch).unwrap();
+        let cref = cross_ref(ch, th);
+        let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
+        assert_eq!(key, "crate:cross:kernel:debug:x86_64-unknown-none:clippy");
     }
 
     // ---------------------------------------------------------------------------
