@@ -107,9 +107,19 @@ pub struct RustcEntry {
 pub struct CacheManifest {
     pub version: u32,
     /// Rustc-shaped entries (per-crate compile cache).
+    ///
+    /// `#[serde(default)]` is load-bearing for the v1→v2 migration UX:
+    /// a v1 manifest has only `entries: {...}` and no `rustc` key. Without
+    /// the attribute, serde would reject the document with a parse error
+    /// and the user would see "cache manifest is corrupted" instead of the
+    /// cleaner "cache schema upgraded; rebuilt clean" message. With it,
+    /// serde parses v1 successfully (silently dropping `entries`,
+    /// defaulting `rustc`/`composite` to empty), then the version check
+    /// fires and routes to the upgrade branch.
     #[serde(default)]
     pub rustc: BTreeMap<String, RustcEntry>,
-    /// Composite-shaped entries (sysroot, image, ESP).
+    /// Composite-shaped entries (sysroot, image, ESP). Same `#[serde(default)]`
+    /// rationale as `rustc`.
     #[serde(default)]
     pub composite: BTreeMap<String, crate::cache::composite::CompositeEntry>,
 }
