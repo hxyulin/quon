@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Stage 5 — unified build-time freshness)
+
+- **Unified build-time freshness via the extended `Cache`.** Sysroot,
+  image, and ESP freshness records moved from sidecar stamp files
+  (`<sysroot>/stamp`, `<image>.stamp.json`,
+  `<esp_dir>/.esp-stamp.json`) into the cache manifest as
+  `Composite` entries. The sidecar files are no longer produced.
+- **`clean --keep-sysroot` now retains the sysroot fast-path.** The
+  cache manifest is filtered (rather than deleted) so the next build
+  reports the sysroot as cached. Both rustc-side
+  `sysroot:<target>:<crate>` per-crate keys and composite-side
+  `sysroot:<target>` keys are preserved.
+- **Vendor freshness intentionally not migrated.** `gluon.lock`
+  remains the source of truth for vendor consistency — see
+  `crates/gluon-core/src/vendor/lockfile.rs` module docs for the
+  rationale (cross-machine state, would force re-vendor on every
+  fresh checkout).
+- **Renamed `cache::CacheEntry` → `cache::RustcEntry`.** Internal
+  rename to make the symmetry with the new `cache::CompositeEntry`
+  explicit. No public-API consumers expected (gluon-core's `pub`
+  surface is internal-use-only).
+- **`BuildLayout::sysroot_stamp` removed.** The sysroot stamp file
+  no longer exists; the layout method that produced its path is gone.
+
+### Cache impact (Stage 5)
+
+- Cache manifest schema bumped 1 → 2. The first build after upgrading
+  logs `cache schema upgraded; rebuilt clean` and rebuilds from
+  scratch. Subsequent builds are fully cached as before.
+
 ### Changed (breaking — model wire format)
 
 - `BuildModel`: cross-references are handle-only. Parallel
