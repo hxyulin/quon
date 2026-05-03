@@ -18,7 +18,7 @@
 use super::ovmf::ResolvedOvmf;
 use super::resolve::ResolvedQemu;
 use crate::error::{Error, Result};
-use gluon_model::{BootMode, DisplayMode, EspSource, SerialMode};
+use gluon_model::{BootMode, DisplayMode, SerialMode};
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
@@ -128,113 +128,8 @@ pub fn build_qemu_command(
     }
 
     // 6. Mode-specific boot wiring.
-    match mode {
-        BootMode::Direct => {
-            args.push("-kernel".into());
-            args.push(kernel.as_os_str().to_os_string());
-        }
-        BootMode::Uefi => {
-            // Safety: checked above.
-            let ovmf = ovmf.expect("uefi + ovmf invariant");
-            push_pflash(&mut args, &ovmf.code, true);
-            push_pflash(&mut args, &ovmf.vars, false);
-
-            // Hybrid disk: a single raw drive that contains its own ESP
-            // partition. OVMF probes attached drives for an EFI System
-            // Partition automatically, so a generic `-drive` (no
-            // `if=ide`) suffices. `disk` takes precedence over `esp` —
-            // the user has named the disk explicitly, so any
-            // auto-wired ESP from `model.esps` is intentionally
-            // bypassed.
-            if let Some(disk) = &resolved.disk {
-                if !skip_path_checks && !disk.exists() {
-                    return Err(Error::EspMissing { path: disk.clone() });
-                }
-                args.push("-drive".into());
-                let mut spec = OsString::from("format=raw,file=");
-                spec.push(disk.as_os_str());
-                args.push(spec);
-            } else if let Some(esp) = &resolved.esp {
-                // `skip_path_checks` is set by the runner when it's
-                // in `--dry-run` or `--no-build` mode. In those modes
-                // the ESP path may legitimately not exist yet (dry-run
-                // skips the build; `--no-build` trusts the user), and
-                // QEMU itself will produce a better error at spawn
-                // time than we can from here.
-                match esp {
-                    EspSource::Dir(dir) => {
-                        if !skip_path_checks && !dir.exists() {
-                            return Err(Error::EspMissing { path: dir.clone() });
-                        }
-                        args.push("-drive".into());
-                        let mut spec = OsString::from("format=raw,file=fat:rw:");
-                        spec.push(dir.as_os_str());
-                        args.push(spec);
-                    }
-                    EspSource::Image(img) => {
-                        if !skip_path_checks && !img.exists() {
-                            return Err(Error::EspMissing { path: img.clone() });
-                        }
-                        args.push("-drive".into());
-                        let mut spec = OsString::from("format=raw,file=");
-                        spec.push(img.as_os_str());
-                        args.push(spec);
-                    }
-                }
-            }
-        }
-        BootMode::Bios => {
-            // No `-kernel` (SeaBIOS won't use it), no pflash (no OVMF).
-            // QEMU's default firmware for `pc`/`q35` is SeaBIOS; we
-            // deliberately do NOT emit `-bios` so users on machines
-            // with a different default (or a non-x86 host) aren't
-            // forced into a path that doesn't apply.
-            //
-            // The boot disk comes from `resolved.disk` first (the
-            // mode-agnostic surface). Falls back to `resolved.esp` for
-            // back-compat — the BIOS-mode `EspSource::Image` path
-            // predates `DiskSource` and is kept to avoid breaking
-            // existing configs.
-            //
-            // VVFAT (`EspSource::Dir`) is rejected: the VVFAT driver
-            // synthesises a FAT filesystem at the partition level and
-            // doesn't expose an MBR / boot sector, so SeaBIOS can't
-            // find anything to boot. The user must build a real disk
-            // image via image() or pre-supply one via disk_image().
-            if let Some(disk) = &resolved.disk {
-                if !skip_path_checks && !disk.exists() {
-                    return Err(Error::EspMissing { path: disk.clone() });
-                }
-                args.push("-drive".into());
-                let mut spec = OsString::from("format=raw,file=");
-                spec.push(disk.as_os_str());
-                spec.push(",if=ide,index=0");
-                args.push(spec);
-            } else if let Some(esp) = &resolved.esp {
-                match esp {
-                    EspSource::Dir(_) => {
-                        return Err(Error::Config(
-                            "qemu.boot_mode = \"bios\" with esp_dir(...) is not supported: \
-                             QEMU's VVFAT driver does not expose an MBR/boot-sector for \
-                             SeaBIOS to read. Use esp_image(<raw disk path>) or build a \
-                             hybrid disk via image()."
-                                .into(),
-                        ));
-                    }
-                    EspSource::Image(img) => {
-                        if !skip_path_checks && !img.exists() {
-                            return Err(Error::EspMissing { path: img.clone() });
-                        }
-                        args.push("-drive".into());
-                        let mut spec = OsString::from("format=raw,file=");
-                        spec.push(img.as_os_str());
-                        spec.push(",if=ide,index=0");
-                        args.push(spec);
-                    }
-                }
-            }
-        }
-    }
+    crate::run::boot_mode::assembler_for(mode)
+        .assemble(&mut args, resolved, kernel, ovmf, skip_path_checks)?;
 
     // 7. Test-mode exit device. Wired in here (before user extras)
     //    so the user can still override or suppress via `extra_args`
@@ -269,17 +164,6 @@ pub fn build_qemu_command(
         args,
         timeout: resolved.timeout,
     })
-}
-
-fn push_pflash(args: &mut Vec<OsString>, file: &Path, readonly: bool) {
-    args.push("-drive".into());
-    let mut spec = OsString::from(if readonly {
-        "if=pflash,format=raw,readonly=on,file="
-    } else {
-        "if=pflash,format=raw,file="
-    });
-    spec.push(file.as_os_str());
-    args.push(spec);
 }
 
 /// Whether any of the user-provided argument lists contain `flag`.
