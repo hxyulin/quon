@@ -6,7 +6,7 @@
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
-use crate::build_model::{default_true, BootMode, CrateType};
+use crate::build_model::{default_true, BootMode, BootloaderKind, CrateType};
 use crate::handle::Named;
 use crate::kconfig::ConfigValue;
 use crate::source::SourceSpan;
@@ -156,10 +156,13 @@ impl Named for RawCrateDef {
     fn name(&self) -> &str { &self.name }
 }
 
-/// Raw form of [`crate::build_model::BootloaderDef`].
+/// Raw form of [`crate::build_model::BootloaderDef`]. `kind` already
+/// uses the typed [`BootloaderKind`] — `gluon-config` builders parse
+/// the user-supplied `&str` via [`BootloaderKind::from_str`] before
+/// writing, so the wire format is symmetric with the resolved model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawBootloaderDef {
-    pub kind: String,
+    pub kind: BootloaderKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,7 +322,7 @@ mod tests {
     #[test]
     fn raw_bootloader_def_round_trips() {
         let b = RawBootloaderDef {
-            kind: "uefi".into(),
+            kind: BootloaderKind::Uefi,
             protocol: Some("gop".into()),
             entry_crate: Some("boot".into()),
             config_file: Some("limine.cfg".into()),
@@ -328,7 +331,7 @@ mod tests {
         };
         let json = serde_json::to_string(&b).unwrap();
         let de: RawBootloaderDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(de.kind, "uefi");
+        assert_eq!(de.kind, BootloaderKind::Uefi);
         assert_eq!(de.entry_crate.as_deref(), Some("boot"));
     }
 

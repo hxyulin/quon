@@ -427,6 +427,57 @@ pub struct PipelineStep {
     pub rule: Option<String>,
 }
 
+/// Bootloader protocol identifier. Common protocols (`uefi`,
+/// `multiboot`, `multiboot2`) are typed; everything else is preserved
+/// verbatim via [`BootloaderKind::Custom`] so projects with bespoke
+/// bootloaders keep working without code changes here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BootloaderKind {
+    Uefi,
+    Multiboot,
+    Multiboot2,
+    /// Escape hatch — preserves the raw protocol identifier for
+    /// projects with custom bootloaders.
+    Custom(String),
+}
+
+impl Default for BootloaderKind {
+    fn default() -> Self {
+        Self::Custom(String::new())
+    }
+}
+
+impl BootloaderKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Uefi => "uefi",
+            Self::Multiboot => "multiboot",
+            Self::Multiboot2 => "multiboot2",
+            Self::Custom(s) => s.as_str(),
+        }
+    }
+
+    /// Parse a kind string into the typed enum. Unknown strings map
+    /// to `Custom(s)` so existing configs keep working without
+    /// gluon-model code changes.
+    ///
+    /// We expose this as an inherent (infallible) `from_str` rather than
+    /// `std::str::FromStr` because the conversion never fails — every
+    /// input maps to *some* variant via the `Custom` escape hatch — and
+    /// the trait would force callers through `Result<_, !>` for no
+    /// benefit.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "uefi" => Self::Uefi,
+            "multiboot" => Self::Multiboot,
+            "multiboot2" => Self::Multiboot2,
+            other => Self::Custom(other.to_string()),
+        }
+    }
+}
+
 /// Bootloader configuration. Describes the boot protocol and links the
 /// bootloader entry crate so tools can reason about boot-time dependencies.
 ///
@@ -434,9 +485,10 @@ pub struct PipelineStep {
 /// protocol-specific metadata that does not yet have a typed field.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BootloaderDef {
-    /// Boot protocol identifier: `"uefi"`, `"multiboot"`, `"multiboot2"`,
-    /// `"custom"`, etc.
-    pub kind: String,
+    /// Boot protocol identifier. Common values are typed via
+    /// [`BootloaderKind`]; bespoke protocols round-trip via
+    /// [`BootloaderKind::Custom`].
+    pub kind: BootloaderKind,
     /// Optional protocol sub-variant or version (e.g. `"gop"` for UEFI
     /// with GOP-only graphics).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,7 +1193,7 @@ mod tests {
         );
 
         let bl = BootloaderDef {
-            kind: "uefi".into(),
+            kind: BootloaderKind::Uefi,
             protocol: Some("gop".into()),
             entry_crate: Some(entry_handle),
             config_file: Some("boot.cfg".into()),
@@ -1150,7 +1202,7 @@ mod tests {
         };
         let json = serde_json::to_string(&bl).unwrap();
         let de: BootloaderDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(de.kind, "uefi");
+        assert_eq!(de.kind, BootloaderKind::Uefi);
         assert_eq!(de.protocol.as_deref(), Some("gop"));
         assert_eq!(de.entry_crate, Some(entry_handle));
         assert_eq!(de.config_file.as_deref(), Some("boot.cfg"));

@@ -322,6 +322,8 @@ fn intern_bootloader(
     });
     BootloaderDef {
         kind: raw.kind.clone(),
+        // ^ already typed; gluon-config builders parse the user-supplied
+        // `&str` via BootloaderKind::from_str at write time.
         protocol: raw.protocol.clone(),
         entry_crate: entry_crate_handle,
         config_file: raw.config_file.clone(),

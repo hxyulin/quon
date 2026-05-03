@@ -1,5 +1,5 @@
 use gluon_model::{
-    ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef,
+    BootloaderKind, ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef,
     PresetDef, ProjectDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef, RawProfileDef,
     RuleDef, RuleHandler, TargetDef, TristateVal,
 };
@@ -259,7 +259,11 @@ impl Config {
             BuilderState::Duplicate { name: kind.into(), span: None }
         } else {
             self.raw.bootloader_was_set = true;
-            self.raw.bootloader.kind = kind.into();
+            // Typed wire format: parse the user's &str into BootloaderKind
+            // here so the raw model and the resolved model stay symmetric.
+            // Unknown values flow through as Custom(s) (still useful — e.g.
+            // limine).
+            self.raw.bootloader.kind = BootloaderKind::from_str(kind);
             BuilderState::Valid { state: (), name: kind.into(), span: None }
         };
         BootloaderBuilder { cfg: self, state }

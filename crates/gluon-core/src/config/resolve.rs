@@ -763,7 +763,7 @@ fn _crate_handle_marker(_: Handle<CrateDef>, _: Handle<TargetDef>) {}
 mod tests {
     use super::*;
     use gluon_config::Config;
-    use gluon_model::{intern, BuildModel, ConfigValue, CrateType};
+    use gluon_model::{intern, BootloaderKind, BuildModel, ConfigValue, CrateType};
 
     /// Build a `BuildModel` in-process via the gluon-config builder
     /// and the gluon-model intern pass. Replaces the Stage 1/2
@@ -1420,7 +1420,7 @@ mod tests {
                 .entry_crate("boot")
                 .protocol("gop");
         });
-        assert_eq!(model.bootloader.kind, "uefi");
+        assert_eq!(model.bootloader.kind, BootloaderKind::Uefi);
         let entry = model
             .bootloader
             .entry_crate

@@ -60,13 +60,14 @@ impl<'cfg> BootloaderBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
+    use gluon_model::BootloaderKind;
 
     #[test]
     fn bootloader_chain_sets_typed_fields() {
         let mut cfg = Config::new();
         cfg.bootloader("uefi").entry_crate("loader").config_file("boot.cfg");
         let bl = &cfg.raw.bootloader;
-        assert_eq!(bl.kind, "uefi");
+        assert_eq!(bl.kind, BootloaderKind::Uefi);
         assert_eq!(bl.entry_crate.as_deref(), Some("loader"));
         assert_eq!(bl.config_file.as_deref(), Some("boot.cfg"));
         assert!(cfg.diagnostics.is_empty());
@@ -77,7 +78,12 @@ mod tests {
         let mut cfg = Config::new();
         cfg.bootloader("a").entry_crate("loader_a");
         cfg.bootloader("b").entry_crate("loader_b");
-        assert_eq!(cfg.raw.bootloader.kind, "a", "first kind preserved");
+        // Unknown kinds round-trip through BootloaderKind::Custom.
+        assert_eq!(
+            cfg.raw.bootloader.kind,
+            BootloaderKind::Custom("a".into()),
+            "first kind preserved",
+        );
         assert_eq!(cfg.raw.bootloader.entry_crate.as_deref(), Some("loader_a"));
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
