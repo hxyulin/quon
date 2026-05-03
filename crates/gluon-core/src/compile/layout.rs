@@ -83,6 +83,22 @@ impl BuildLayout {
         self.driver
     }
 
+    /// The cache-key suffix for the active driver. Cache keys must be
+    /// disambiguated across `rustc` / `check` / `clippy` because each
+    /// driver produces a distinct on-disk artifact set; without the
+    /// suffix `gluon build` and `gluon check` would race over a single
+    /// `BuildRecord` slot.
+    ///
+    /// Returns `""` for [`DriverKind::Rustc`], `":check"` for
+    /// [`DriverKind::Check`], `":clippy"` for [`DriverKind::Clippy`].
+    pub fn cache_key_suffix(&self) -> &'static str {
+        match self.driver {
+            DriverKind::Rustc => "",
+            DriverKind::Check => ":check",
+            DriverKind::Clippy => ":clippy",
+        }
+    }
+
     /// The build root.
     pub fn root(&self) -> &Path {
         &self.root
@@ -344,6 +360,24 @@ mod tests {
     #[test]
     fn root_returned_verbatim() {
         assert_eq!(layout().root(), Path::new("/tmp/fake"));
+    }
+
+    #[test]
+    fn cache_key_suffix_returns_empty_for_rustc_driver() {
+        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Rustc);
+        assert_eq!(l.cache_key_suffix(), "");
+    }
+
+    #[test]
+    fn cache_key_suffix_returns_check_for_check_driver() {
+        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Check);
+        assert_eq!(l.cache_key_suffix(), ":check");
+    }
+
+    #[test]
+    fn cache_key_suffix_returns_clippy_for_clippy_driver() {
+        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Clippy);
+        assert_eq!(l.cache_key_suffix(), ":clippy");
     }
 
     #[test]

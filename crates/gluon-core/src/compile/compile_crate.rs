@@ -130,21 +130,10 @@ pub fn compile(
 
     // Derive the cache key. The key encodes enough context to avoid
     // collisions between crates with the same name in different
-    // targets, profiles, or drivers.
-    //
-    // The driver suffix matters because `gluon build` and `gluon check`
-    // share the same crate name, target, and profile but produce
-    // different rustc invocations (different `--out-dir`, different
-    // `--emit`, possibly different program). Without the suffix the
-    // two would race over a single `BuildRecord`: each invocation
-    // would invalidate the other's cache, and the second `build` after
-    // an interleaved `check` would re-spawn rustc unnecessarily.
-    // Including the driver in the key gives each tool its own slot.
-    let driver_suffix = match ctx.driver() {
-        crate::compile::DriverKind::Rustc => "",
-        crate::compile::DriverKind::Check => ":check",
-        crate::compile::DriverKind::Clippy => ":clippy",
-    };
+    // targets, profiles, or drivers. `cache_key_suffix` gives each
+    // driver its own slot (without it `gluon build` and `gluon check`
+    // would race over a single BuildRecord).
+    let driver_suffix = ctx.layout.cache_key_suffix();
     let cache_key = if crate_ref.host {
         format!("crate:host:{crate_name}{driver_suffix}")
     } else {
