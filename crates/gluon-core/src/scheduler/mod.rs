@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, CrateDef, Handle, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, CrateDef, EspDef, Handle, ResolvedConfig, TargetDef};
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -221,6 +221,29 @@ fn dispatch_crate(
     })
 }
 
+fn dispatch_esp(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    snapshot: &ArtifactsSnapshot,
+    esp_handle: Handle<EspDef>,
+    stdout: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let (path, was_cached) = crate::generated::esp::ensure_esp(
+        ctx,
+        model,
+        resolved,
+        esp_handle,
+        &snapshot.artifacts,
+        stdout,
+    )?;
+    Ok(NodeOutput::Esp {
+        handle: esp_handle,
+        path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -284,23 +307,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // built crate artifacts. See generated::esp::ensure_esp.
             // ------------------------------------------------------------------
             DagNode::Esp(esp_handle) => {
-                // Snapshot the ArtifactMap so the helper can resolve
-                // source-crate handles to their artifact paths without
-                // holding the lock across the filesystem copy. Pattern
-                // mirrors the `Crate` arm above.
-                let artifacts_snapshot =
-                    lock_or_poison(self.state, "state")?.artifacts.clone();
-                let (path, was_cached) = crate::generated::esp::ensure_esp(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    esp_handle,
-                    &artifacts_snapshot,
-                    stdout,
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_esp(
+                    self.ctx, self.model, self.resolved, &snapshot, esp_handle, stdout,
                 )?;
-                lock_or_poison(self.state, "state")?
-                    .esps
-                    .insert(esp_handle, path);
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("Esp output is cacheable");
                 self.record(was_cached);
                 let _ = stderr;
                 Ok(())
