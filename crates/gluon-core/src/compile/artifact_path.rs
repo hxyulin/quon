@@ -5,12 +5,9 @@
 //! incremental build). The result is layout-derived and identical across
 //! runs — it does not require the build to have happened.
 //!
-//! This is the read-only inverse of the path arithmetic that
-//! [`crate::compile::command_builder::build_rustc_command`] performs
-//! when assembling the rustc invocation. The two implementations must
-//! stay in lockstep — if you change one, you must change the other, or
-//! analyzer-time and build-time consumers will see different paths for
-//! the same crate.
+//! Delegates to [`crate::compile::CrateArtifactShape`] — the single
+//! source of truth for crate path arithmetic, also used by
+//! `command_builder` when assembling rustc invocations.
 //!
 //! The primary consumer today is [`crate::analyzer`], which needs to
 //! emit `env!("KERNEL_PATH") → /path/to/kernel` mappings into
@@ -18,10 +15,9 @@
 //! `env!()` macros resolve under rust-analyzer to the same path rustc
 //! will eventually use.
 
-use crate::compile::BuildLayout;
-use crate::compile::compile_utils::{exe_suffix_for_target, normalize_crate_name};
+use crate::compile::{BuildLayout, CrateArtifactShape};
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, CrateDef, CrateType, Handle, ResolvedConfig};
+use gluon_model::{BuildModel, CrateDef, Handle, ResolvedConfig};
 use std::path::PathBuf;
 
 /// Compute the deterministic on-disk path of the primary artifact
@@ -56,67 +52,8 @@ pub fn expected_crate_artifact_path(
             ))
         })?;
 
-    let crate_name_rustc = normalize_crate_name(&crate_def.name);
-    let extra_filename = format!("-gluon-{crate_name_rustc}");
-
-    if cref.host {
-        // Mirror command_builder.rs:81-113. Host crates land under
-        // `<root>/host/<crate>/`. The artifact filename varies by
-        // crate-type because rustc's default naming convention does.
-        let dir = layout.host_artifact_dir(crate_def);
-        let path = match crate_def.crate_type {
-            CrateType::Bin => dir.join(format!("{crate_name_rustc}{extra_filename}")),
-            CrateType::ProcMacro => {
-                let ext = std::env::consts::DLL_EXTENSION;
-                dir.join(format!(
-                    "{}{}{}{}",
-                    std::env::consts::DLL_PREFIX,
-                    crate_name_rustc,
-                    extra_filename,
-                    if ext.is_empty() {
-                        String::new()
-                    } else {
-                        format!(".{ext}")
-                    }
-                ))
-            }
-            _ => dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib")),
-        };
-        return Ok(path);
-    }
-
-    // Cross crates: dispatch on crate-type for output location and naming.
-    // Mirrors command_builder.rs:114-183.
-    let target = model.targets.get(cref.target).ok_or_else(|| {
-        Error::Compile(format!(
-            "expected_crate_artifact_path: crate '{}' references target handle \
-             {:?} which is not in the build model",
-            crate_def.name, cref.target,
-        ))
-    })?;
-
-    let path = match crate_def.crate_type {
-        CrateType::Bin => {
-            // Cross binaries land directly in `cross_final_dir`. No
-            // extra-filename suffix; the canonical name is just the
-            // crate name with a target-specific exe suffix appended.
-            let final_dir = layout.cross_final_dir(target, &resolved.profile);
-            let suffix = exe_suffix_for_target(&target.spec);
-            final_dir.join(format!("{crate_name_rustc}{suffix}"))
-        }
-        CrateType::RawBinary => {
-            // `--oformat=binary` flat output renamed to `.bin`.
-            let final_dir = layout.cross_final_dir(target, &resolved.profile);
-            final_dir.join(format!("{crate_name_rustc}.bin"))
-        }
-        _ => {
-            // Libs and proc-macros: per-crate dir under the cross tree
-            // with the standard `lib<name>-gluon-<name>.rlib` shape.
-            let dir = layout.cross_artifact_dir(target, &resolved.profile, crate_def);
-            dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib"))
-        }
-    };
-    Ok(path)
+    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, cref)?;
+    Ok(shape.output_path)
 }
 
 #[cfg(test)]
