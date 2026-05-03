@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, Handle, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, CrateDef, Handle, ResolvedConfig, TargetDef};
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -152,6 +152,75 @@ fn dispatch_config_crate(
     })
 }
 
+fn dispatch_crate(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    snapshot: &ArtifactsSnapshot,
+    crate_handle: Handle<CrateDef>,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let crate_ref = resolved
+        .crates
+        .iter()
+        .find(|r| r.handle == crate_handle)
+        .ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: Crate node references handle {:?} not in resolved.crates",
+                crate_handle
+            ))
+        })?;
+
+    // For cross crates, look up the pre-built sysroot. The DAG
+    // ensures the Sysroot node for this target completed before this
+    // Crate node was dispatched. Crates whose group sets
+    // `no_sysroot=true` skip this — they have no Sysroot DAG edge,
+    // no sysroot was built for their target, and `compile_crate` is
+    // configured to omit `--sysroot` and the implicit core/alloc/
+    // compiler_builtins externs.
+    let group_no_sysroot = model
+        .crates
+        .get(crate_handle)
+        .and_then(|c| model.groups.get(c.group))
+        .map(|g| g.no_sysroot)
+        .unwrap_or(false);
+    let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
+        None
+    } else {
+        Some(
+            snapshot
+                .sysroots
+                .get(&crate_ref.target)
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: Crate({:?}) ran before its Sysroot({:?}) dependency \
+                         completed; DAG edge missing?",
+                        crate_handle, crate_ref.target,
+                    ))
+                })?,
+        )
+    };
+
+    let (out_path, was_cached) = compile_crate(
+        ctx,
+        CompileCrateInput {
+            model,
+            resolved,
+            crate_ref,
+            artifacts: &snapshot.artifacts,
+            sysroot_dir: sysroot_dir.as_deref(),
+        },
+        stderr,
+    )?;
+
+    Ok(NodeOutput::Crate {
+        handle: crate_handle,
+        out_path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -196,80 +265,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // Crate — compile a user-declared crate (host or cross).
             // ------------------------------------------------------------------
             DagNode::Crate(crate_handle) => {
-                // Resolve the ResolvedCrateRef for this handle.
-                let crate_ref = self
-                    .resolved
-                    .crates
-                    .iter()
-                    .find(|r| r.handle == crate_handle)
-                    .ok_or_else(|| {
-                        Error::Compile(format!(
-                            "scheduler: Crate node references handle {:?} not in resolved.crates",
-                            crate_handle
-                        ))
-                    })?;
-
-                // For cross crates, look up the pre-built sysroot. The DAG
-                // ensures the Sysroot node for this target completed before
-                // this Crate node was dispatched.
-                //
-                // Crates whose group sets `no_sysroot=true` skip this:
-                // they have no Sysroot DAG edge, no sysroot was built for
-                // their target, and `compile_crate` is configured to omit
-                // `--sysroot` and the implicit core/alloc/compiler_builtins
-                // externs.
-                let group_no_sysroot = self
-                    .model
-                    .crates
-                    .get(crate_handle)
-                    .and_then(|c| self.model.groups.get(c.group))
-                    .map(|g| g.no_sysroot)
-                    .unwrap_or(false);
-                let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
-                    None
-                } else {
-                    let guard = lock_or_poison(self.state, "state")?;
-                    Some(
-                        guard
-                            .sysroots
-                            .get(&crate_ref.target)
-                            .cloned()
-                            .ok_or_else(|| {
-                                Error::Compile(format!(
-                                    "scheduler: Crate({:?}) ran before its Sysroot({:?}) \
-                                     dependency completed; DAG edge missing?",
-                                    crate_handle, crate_ref.target,
-                                ))
-                            })?,
-                    )
-                };
-
-                // Snapshot the ArtifactMap before releasing the lock.
-                //
-                // Rationale: we need a point-in-time view of all built
-                // artifacts so compile_crate can wire --extern flags for the
-                // crate's dependencies. Holding the lock across compile_crate
-                // would serialise all parallel compilations on this single
-                // mutex. Cloning a BTreeMap of a few dozen entries is cheap
-                // compared to a rustc invocation.
-                let artifacts_snapshot =
-                    lock_or_poison(self.state, "state")?.artifacts.clone();
-
-                let (out_path, was_cached) = compile_crate(
-                    self.ctx,
-                    CompileCrateInput {
-                        model: self.model,
-                        resolved: self.resolved,
-                        crate_ref,
-                        artifacts: &artifacts_snapshot,
-                        sysroot_dir: sysroot_dir.as_deref(),
-                    },
-                    stderr,
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_crate(
+                    self.ctx, self.model, self.resolved, &snapshot, crate_handle, stderr,
                 )?;
-
-                lock_or_poison(self.state, "state")?
-                    .artifacts
-                    .insert(crate_handle, out_path);
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("Crate output is cacheable");
                 self.record(was_cached);
                 // Crate compiles never write to stdout — rustc emits everything
                 // to stderr, which the worker pool flushes per-job.
