@@ -96,6 +96,12 @@ pub struct ConfigOptionDef {
     pub visible_if_expr: Option<Expr>,
 }
 
+impl crate::handle::Named for ConfigOptionDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// A named configuration preset.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PresetDef {
