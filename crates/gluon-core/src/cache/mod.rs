@@ -317,6 +317,66 @@ impl Cache {
         Ok(())
     }
 
+    /// Record a completed composite build. Eagerly computes per-input
+    /// `sha256` for the same reasons [`Cache::mark_built`] does — see
+    /// the module-level "eager fingerprint population" note.
+    ///
+    /// On error, the entry under `rec.key` is left unchanged; the
+    /// fingerprint map is built up locally and only inserted into the
+    /// manifest after every input has been successfully fingerprinted,
+    /// so a mid-loop failure can never leave a half-populated entry
+    /// behind.
+    pub fn mark_composite_built(
+        &mut self,
+        rec: crate::cache::composite::CompositeRecord,
+    ) -> Result<()> {
+        let mut inputs: BTreeMap<PathBuf, FileFingerprint> = BTreeMap::new();
+        for src in &rec.inputs {
+            let meta = std::fs::metadata(src).map_err(|e| Error::Io {
+                path: src.clone(),
+                source: e,
+            })?;
+            let mtime = meta.modified().map_err(|e| Error::Io {
+                path: src.clone(),
+                source: e,
+            })?;
+            let mtime_ns = mtime
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| {
+                    Error::Config(format!(
+                        "mtime of {} predates UNIX_EPOCH: {}",
+                        src.display(),
+                        e
+                    ))
+                })?
+                .as_nanos();
+            let sha = sha256_file(src)?;
+            inputs.insert(
+                src.clone(),
+                FileFingerprint {
+                    mtime_ns,
+                    size: meta.len(),
+                    sha256: Some(sha),
+                },
+            );
+        }
+
+        let built_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        let entry = crate::cache::composite::CompositeEntry {
+            inputs,
+            aux_hash: rec.aux_hash,
+            output_path: rec.output_path,
+            built_at,
+        };
+        self.manifest.composite.insert(rec.key, entry);
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Check whether the composite entry (if any) for `q.key` is still
     /// valid given the current filesystem and the query's expected
     /// inputs / aux state.
@@ -732,6 +792,96 @@ mod tests {
             key: "image:boot",
             inputs: &inputs,
             aux_hash: Some([0xAA; 32]),
+            output_path: &out,
+        };
+        assert!(!cache.is_composite_fresh(&q));
+    }
+
+    #[test]
+    fn composite_cold_miss_then_fresh_after_mark_built() {
+        use crate::cache::composite::{CompositeQuery, CompositeRecord};
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"hello");
+        let out = fx.touch_output("out.img");
+        let aux = Some([0xAA; 32]);
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        let inputs = vec![a.clone()];
+        let q = || CompositeQuery {
+            key: "image:boot",
+            inputs: &inputs,
+            aux_hash: aux,
+            output_path: &out,
+        };
+        assert!(!cache.is_composite_fresh(&q()));
+
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "image:boot".into(),
+                inputs: vec![a.clone()],
+                aux_hash: aux,
+                output_path: out.clone(),
+            })
+            .expect("mark");
+        cache.save().expect("save");
+
+        let mut cache2 = Cache::load(&fx.manifest_path).0;
+        assert!(cache2.is_composite_fresh(&q()));
+    }
+
+    #[test]
+    fn composite_aux_hash_change_invalidates() {
+        use crate::cache::composite::{CompositeQuery, CompositeRecord};
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"x");
+        let out = fx.touch_output("out.img");
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "k".into(),
+                inputs: vec![a.clone()],
+                aux_hash: Some([1; 32]),
+                output_path: out.clone(),
+            })
+            .expect("mark");
+
+        let inputs = vec![a];
+        let q = CompositeQuery {
+            key: "k",
+            inputs: &inputs,
+            aux_hash: Some([2; 32]), // changed
+            output_path: &out,
+        };
+        assert!(!cache.is_composite_fresh(&q));
+    }
+
+    #[test]
+    fn composite_input_added_invalidates() {
+        use crate::cache::composite::{CompositeQuery, CompositeRecord};
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"x");
+        let b = fx.write("b.bin", b"y");
+        let out = fx.touch_output("out.img");
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: "k".into(),
+                inputs: vec![a.clone()],
+                aux_hash: None,
+                output_path: out.clone(),
+            })
+            .expect("mark");
+
+        let inputs = vec![a, b];
+        let q = CompositeQuery {
+            key: "k",
+            inputs: &inputs,
+            aux_hash: None,
             output_path: &out,
         };
         assert!(!cache.is_composite_fresh(&q));
