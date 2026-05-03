@@ -118,6 +118,40 @@ fn dispatch_sysroot(
     })
 }
 
+fn dispatch_config_crate(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    snapshot: &ArtifactsSnapshot,
+    target: Handle<TargetDef>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    // The DAG wires ConfigCrate(target) → Sysroot(target) so this
+    // lookup must always succeed.
+    let sysroot_dir = snapshot.sysroots.get(&target).cloned().ok_or_else(|| {
+        Error::Compile(
+            "scheduler: ConfigCrate ran before its Sysroot dependency; \
+             DAG edge missing?"
+                .into(),
+        )
+    })?;
+    let (_name, rlib_path, was_cached) = crate::generated::config_crate::ensure_config_crate(
+        ctx,
+        model,
+        resolved,
+        target,
+        &sysroot_dir,
+        stdout,
+        stderr,
+    )?;
+    Ok(NodeOutput::ConfigCrate {
+        target,
+        rlib_path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -141,31 +175,19 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // ConfigCrate — generate + compile `<project>_config` for a target.
             // ------------------------------------------------------------------
             DagNode::ConfigCrate(target) => {
-                // Look up the sysroot for this config crate's target.
-                // The DAG wires ConfigCrate(target) → Sysroot(target) so
-                // this lookup must always succeed.
-                let sysroot_dir = {
-                    let guard = lock_or_poison(self.state, "state")?;
-                    guard.sysroots.get(&target).cloned().ok_or_else(|| {
-                        Error::Compile(
-                            "scheduler: ConfigCrate ran before its Sysroot dependency; \
-                                 DAG edge missing?"
-                                .into(),
-                        )
-                    })?
-                };
-                let (_name, rlib_path, was_cached) = crate::generated::config_crate::ensure_config_crate(
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_config_crate(
                     self.ctx,
                     self.model,
                     self.resolved,
+                    &snapshot,
                     target,
-                    &sysroot_dir,
                     stdout,
                     stderr,
                 )?;
-                lock_or_poison(self.state, "state")?
-                    .artifacts
-                    .set_config_crate(target, rlib_path);
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("ConfigCrate output is cacheable");
                 self.record(was_cached);
                 Ok(())
             }
