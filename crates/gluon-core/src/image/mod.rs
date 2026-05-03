@@ -32,8 +32,15 @@ mod fat;
 mod mbr;
 mod partition;
 mod source;
+// Stamp file machinery is being removed by Stage 5 D.4 — its consumers
+// in this module were already replaced with composite-cache calls in
+// D.3, so every item inside is now dead code. The file is deleted in
+// the immediately-following commit; the allow keeps the intermediate
+// commit clippy-clean.
+#[allow(dead_code)]
 mod stamp;
 
+use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
 use crate::compile::extern_map::resolve_artifact_by_name;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Error, Result};
@@ -48,7 +55,6 @@ use std::path::{Path, PathBuf};
 use mbr::{ResolvedPartition, SECTOR_SIZE};
 use partition::PartitionWindow;
 use source::StampSource;
-use stamp::ImageStamp;
 
 /// Inputs the image dispatcher needs from the scheduler.
 ///
@@ -99,33 +105,77 @@ pub fn build_image(
     })?;
 
     let image_path = ictx.ctx.layout.image_path(&image.name);
-    let stamp_path = image_path.with_extension("stamp.json");
 
     // Resolve every input. The two image shapes (flat-FS vs
     // partitioned disk) have different resolution surfaces, so each
-    // gets its own resolved-entries vec — but both feed the same stamp
-    // so cache invalidation is uniform.
+    // gets its own resolved-entries vec — but both feed the same
+    // composite cache key so invalidation is uniform.
     let flat_entries = resolve_entries(image, ictx)?;
     let partition_resolutions = resolve_partition_entries(image, ictx)?;
     let raw_resolutions = resolve_raw_writes(image, ictx)?;
 
-    // Stamp inputs include flat entries, partition entries, and raw
-    // writes — every byte that contributes to the final image needs a
-    // fingerprint or a `touch` on the relevant source won't invalidate.
-    // We materialise into one `Vec<ResolvedEntry>` because that's the
-    // shape `ImageStamp::compute` expects; raw writes get a synthetic
-    // dest_path keyed on their LBA so they show up distinctly.
+    // Composite inputs include flat entries, partition entries, and
+    // raw writes — every byte that contributes to the final image
+    // needs a fingerprint or a `touch` on the relevant source won't
+    // invalidate. We materialise into one `Vec<ResolvedEntry>` so the
+    // per-entry source-kind tags (used for the aux_hash) and the
+    // source paths (used for the cache's input set) come from a
+    // single iteration. Raw writes get a synthetic dest_path keyed on
+    // their LBA so they show up distinctly.
     let mut stamp_inputs: Vec<ResolvedEntry> = flat_entries.clone();
     for partition in &partition_resolutions {
         stamp_inputs.extend(partition.entries.iter().cloned());
     }
     stamp_inputs.extend(raw_resolutions.iter().filter_map(|r| r.as_resolved_entry()));
-    let fresh_stamp = ImageStamp::compute(image, &stamp_inputs, hadris_fat_version())?;
 
-    // Fast path: stamp matches AND the image file exists on disk.
-    let prev_stamp = ImageStamp::load(&stamp_path);
-    if prev_stamp.as_ref() == Some(&fresh_stamp) && image_path.exists() {
-        return Ok((image_path, true));
+    // Compute the composite aux_hash from (serialised ImageDef without
+    // span) + hadris-fat version + per-entry source kinds. Source kinds
+    // are folded in so a crate→file rename in `gluon.rs` invalidates
+    // even when the resolved on-disk path happens to match.
+    let mut def_for_hash = image.clone();
+    def_for_hash.span = None;
+    let def_bytes = serde_json::to_vec(&def_for_hash).map_err(|e| {
+        Error::Compile(format!(
+            "image('{}'): failed to serialise ImageDef for cache key: {e}",
+            image.name
+        ))
+    })?;
+    let mut source_kind_bytes = Vec::new();
+    for e in &stamp_inputs {
+        source_kind_bytes.extend_from_slice(&e.source_kind.aux_bytes());
+        source_kind_bytes.push(0);
+    }
+    let aux = composite_aux_hash(&[
+        &def_bytes,
+        hadris_fat_version().as_bytes(),
+        &source_kind_bytes,
+    ]);
+
+    // Composite inputs: every source path that contributes to the
+    // final image. Sort + dedup for deterministic query ordering and
+    // to defeat duplicate-entry input lists.
+    let mut input_paths: Vec<PathBuf> =
+        stamp_inputs.iter().map(|e| e.source_path.clone()).collect();
+    input_paths.sort();
+    input_paths.dedup();
+
+    let cache_key = format!("image:{}", image.name);
+
+    {
+        let mut cache = ictx
+            .ctx
+            .cache
+            .lock()
+            .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
+        let q = CompositeQuery {
+            key: &cache_key,
+            inputs: &input_paths,
+            aux_hash: Some(aux),
+            output_path: &image_path,
+        };
+        if cache.is_composite_fresh(&q) {
+            return Ok((image_path, true));
+        }
     }
 
     // Slow path. Make sure the parent dir exists.
@@ -198,9 +248,25 @@ pub fn build_image(
         }
     }
 
-    // Persist the stamp only after the write succeeds — an interrupted
-    // run that's left a half-written image must rebuild on the next go.
-    fresh_stamp.save(&stamp_path)?;
+    // Persist the cache entry only after the write succeeds — an
+    // interrupted run that's left a half-written image must rebuild on
+    // the next go. We hold the lock across both `mark_composite_built`
+    // and `save` so a concurrent reader can't observe a freshness
+    // claim that hasn't been flushed.
+    {
+        let mut cache = ictx
+            .ctx
+            .cache
+            .lock()
+            .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
+        cache.mark_composite_built(CompositeRecord {
+            key: cache_key,
+            inputs: input_paths,
+            aux_hash: Some(aux),
+            output_path: image_path.clone(),
+        })?;
+        cache.save()?;
+    }
 
     Ok((image_path, false))
 }
@@ -1266,6 +1332,56 @@ mod tests {
         assert!(
             msg.contains("overlaps") && msg.contains("partition('esp')"),
             "expected an overlap diagnostic naming the partition, got: {msg}"
+        );
+    }
+
+    /// Stage 5: image freshness lives in the unified cache manifest, not
+    /// in a sidecar file. Building an image must NOT leave a
+    /// `<image>.stamp.json` next to the output — that data now belongs
+    /// to the composite cache entry under key `image:<name>`.
+    #[test]
+    fn build_image_writes_no_stamp_json_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let ctx = make_ctx(tmp.path());
+
+        let host_file = project_root.join("hello.txt");
+        std::fs::write(&host_file, b"hello, world!\n").unwrap();
+
+        let mut model = BuildModel::default();
+        let resolved = make_resolved(&mut model, &project_root);
+        let (image_h, _) = model.images.insert(
+            "boot".into(),
+            ImageDef {
+                name: "boot".into(),
+                format: Some(ImageFormat::Fat32),
+                size_mb: Some(64),
+                entries: vec![ImageEntry {
+                    source: ImageSource::File("hello.txt".into()),
+                    dest_path: "/boot/hello.txt".into(),
+                }],
+                ..Default::default()
+            },
+        );
+
+        let artifacts = ArtifactMap::new();
+        let esp_dirs = BTreeMap::new();
+        let ictx = ImageCtx {
+            ctx: &ctx,
+            model: &model,
+            resolved: &resolved,
+            artifacts: &artifacts,
+            esp_dirs: &esp_dirs,
+        };
+
+        let mut stdout = Vec::<u8>::new();
+        let (image_path, _was_cached) = build_image(image_h, &ictx, &mut stdout).unwrap();
+
+        let stamp_path = image_path.with_extension("stamp.json");
+        assert!(
+            !stamp_path.exists(),
+            "build_image must not write {}; that data lives in the cache manifest now",
+            stamp_path.display()
         );
     }
 

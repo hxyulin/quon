@@ -30,12 +30,6 @@ impl StampSource {
     /// length-prefixing happens at the `composite_aux_hash` level.
     /// Used by `image/mod.rs` when building the image's composite
     /// aux_hash from the per-entry source kinds.
-    ///
-    /// Currently unused — added ahead of D.2, which will fold it
-    /// into the image's composite cache entry. Kept here (rather
-    /// than added in D.2) so the next task's diff stays focused on
-    /// the cache wiring, not on enum methods.
-    #[allow(dead_code)]
     pub fn aux_bytes(&self) -> Vec<u8> {
         match self {
             StampSource::Crate { name } => {
