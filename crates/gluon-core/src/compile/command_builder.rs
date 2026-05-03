@@ -293,7 +293,9 @@ pub(crate) fn build_rustc_command(
             ))
         })?;
         if let Some(s) = target.panic_strategy {
-            builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
+            builder
+                .raw_arg("-C")
+                .raw_arg(format!("panic={}", s.as_str()));
         }
     }
 

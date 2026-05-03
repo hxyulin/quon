@@ -126,10 +126,7 @@ mod tests {
         h
     }
 
-    fn make_resolved(
-        target: Handle<TargetDef>,
-        crates: Vec<ResolvedCrateRef>,
-    ) -> ResolvedConfig {
+    fn make_resolved(target: Handle<TargetDef>, crates: Vec<ResolvedCrateRef>) -> ResolvedConfig {
         ResolvedConfig {
             project: ProjectDef {
                 name: "demo".into(),
@@ -223,11 +220,7 @@ mod tests {
     #[test]
     fn host_lib_artifact_uses_host_dir() {
         let mut model = BuildModel::default();
-        let th = make_target(
-            &mut model,
-            "host-target",
-            "x86_64-unknown-linux-gnu",
-        );
+        let th = make_target(&mut model, "host-target", "x86_64-unknown-linux-gnu");
         let g = ensure_group(&mut model);
         let (ch, _) = model.crates.insert(
             "tooling".into(),

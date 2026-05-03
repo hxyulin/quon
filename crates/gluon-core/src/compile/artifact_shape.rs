@@ -60,9 +60,7 @@ impl CrateArtifactShape {
         if cref.host {
             let out_dir = layout.host_artifact_dir(crate_def);
             let output_path = match crate_def.crate_type {
-                CrateType::Bin => {
-                    out_dir.join(format!("{crate_name_rustc}{extra_filename}"))
-                }
+                CrateType::Bin => out_dir.join(format!("{crate_name_rustc}{extra_filename}")),
                 CrateType::ProcMacro => {
                     let ext = std::env::consts::DLL_EXTENSION;
                     out_dir.join(format!(
@@ -130,7 +128,8 @@ impl CrateArtifactShape {
                 // tree with the standard `lib<name>-gluon-<name>.rlib`
                 // shape.
                 let out_dir = layout.cross_artifact_dir(target, &resolved.profile, crate_def);
-                let output_path = out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib"));
+                let output_path =
+                    out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib"));
                 let depfile_path = out_dir.join(format!("{crate_name_rustc}{extra_filename}.d"));
                 Ok(Self {
                     out_dir,
@@ -214,10 +213,7 @@ mod tests {
         h
     }
 
-    fn make_resolved(
-        target: Handle<TargetDef>,
-        crates: Vec<ResolvedCrateRef>,
-    ) -> ResolvedConfig {
+    fn make_resolved(target: Handle<TargetDef>, crates: Vec<ResolvedCrateRef>) -> ResolvedConfig {
         ResolvedConfig {
             project: ProjectDef {
                 name: "demo".into(),
@@ -317,7 +313,10 @@ mod tests {
         } else {
             format!("{prefix}macros-gluon-macros.{ext}")
         };
-        assert!(s.ends_with(&expected_filename), "{s} vs {expected_filename}");
+        assert!(
+            s.ends_with(&expected_filename),
+            "{s} vs {expected_filename}"
+        );
         assert!(s.contains("/host/macros/"), "{s}");
     }
 
@@ -423,7 +422,10 @@ mod tests {
         // Depfile has no extra-filename for cross executables.
         let d = shape.depfile_path.to_string_lossy().replace('\\', "/");
         assert!(d.ends_with("/kernel.d"), "{d}");
-        assert!(!d.contains("-gluon-"), "depfile should have no extra-filename: {d}");
+        assert!(
+            !d.contains("-gluon-"),
+            "depfile should have no extra-filename: {d}"
+        );
     }
 
     #[test]
@@ -458,5 +460,4 @@ mod tests {
         // Hyphenated names normalise to underscores for rustc.
         assert!(s.ends_with("/boot_sector.bin"), "{s}");
     }
-
 }

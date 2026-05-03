@@ -505,7 +505,10 @@ mod tests {
     #[test]
     fn build_cache_key_host_crate_uses_host_namespace() {
         let mut model = BuildModel::default();
-        let th = insert_target(&mut model, make_target("host-tgt", "x86_64-unknown-linux-gnu", true));
+        let th = insert_target(
+            &mut model,
+            make_target("host-tgt", "x86_64-unknown-linux-gnu", true),
+        );
         let ch = insert_crate(
             &mut model,
             CrateDef {
@@ -525,7 +528,10 @@ mod tests {
     #[test]
     fn build_cache_key_host_crate_with_check_driver_appends_suffix() {
         let mut model = BuildModel::default();
-        let th = insert_target(&mut model, make_target("host-tgt", "x86_64-unknown-linux-gnu", true));
+        let th = insert_target(
+            &mut model,
+            make_target("host-tgt", "x86_64-unknown-linux-gnu", true),
+        );
         let ch = insert_crate(
             &mut model,
             CrateDef {
@@ -535,11 +541,8 @@ mod tests {
             },
         );
         let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
-        let layout = BuildLayout::with_driver(
-            "/tmp/build",
-            "demo",
-            crate::compile::DriverKind::Check,
-        );
+        let layout =
+            BuildLayout::with_driver("/tmp/build", "demo", crate::compile::DriverKind::Check);
         let crate_def = model.crates.get(ch).unwrap();
         let cref = host_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
@@ -588,11 +591,8 @@ mod tests {
             },
         );
         let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
-        let layout = BuildLayout::with_driver(
-            "/tmp/build",
-            "demo",
-            crate::compile::DriverKind::Clippy,
-        );
+        let layout =
+            BuildLayout::with_driver("/tmp/build", "demo", crate::compile::DriverKind::Clippy);
         let crate_def = model.crates.get(ch).unwrap();
         let cref = cross_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
