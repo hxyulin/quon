@@ -66,6 +66,30 @@ pub struct CompositeRecord {
     pub output_path: PathBuf,
 }
 
+use sha2::{Digest, Sha256};
+
+/// Domain-separated SHA-256 over (tag, len-prefixed segments...).
+///
+/// Callers use this to roll non-file inputs (model def bytes, tool
+/// version strings) into a single 32-byte `aux_hash`. The domain tag
+/// is `gluon.cache.composite.v1\0`. Each segment is length-prefixed
+/// with `u64::to_le_bytes` so concatenation ambiguity (`"foo"+"bar"`
+/// vs `"foob"+"ar"`) cannot collide.
+///
+/// The algorithm is frozen. Bumping the domain tag would invalidate
+/// every existing composite cache entry's `aux_hash` and force a
+/// full rebuild for that entry kind.
+pub fn composite_aux_hash(segments: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gluon.cache.composite.v1\0");
+    hasher.update((segments.len() as u64).to_le_bytes());
+    for seg in segments {
+        hasher.update((seg.len() as u64).to_le_bytes());
+        hasher.update(seg);
+    }
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +166,28 @@ mod tests {
         };
         assert_eq!(r.key, "image:boot");
         assert!(r.aux_hash.is_none());
+    }
+
+    #[test]
+    fn composite_aux_hash_stable_for_identical_inputs() {
+        let a = composite_aux_hash(&[b"image:boot", b"hadris-fat=0.5.0"]);
+        let b = composite_aux_hash(&[b"image:boot", b"hadris-fat=0.5.0"]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn composite_aux_hash_length_prefix_collision_resistance() {
+        // ["foo", "bar"] must not collide with ["foob", "ar"].
+        let a = composite_aux_hash(&[b"foo", b"bar"]);
+        let b = composite_aux_hash(&[b"foob", b"ar"]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn composite_aux_hash_segment_count_matters() {
+        // Empty trailing segment is not the same as no trailing segment.
+        let a = composite_aux_hash(&[b"foo"]);
+        let b = composite_aux_hash(&[b"foo", b""]);
+        assert_ne!(a, b);
     }
 }
