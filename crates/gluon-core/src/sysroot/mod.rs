@@ -8,24 +8,33 @@
 //!
 //! ### Fast path vs slow path
 //!
-//! A stamp file (`<sysroot>/stamp`) records the hex-encoded
-//! [`RustcInfo::version_hash`](crate::compile::RustcInfo::version_hash) of the toolchain that most recently
-//! populated the sysroot. On entry we read that stamp:
+//! Freshness is tracked by a Composite cache entry keyed
+//! `"sysroot:<target_name>"` in the shared [`crate::cache::Cache`]. Its
+//! single file input is the rustc binary path (so the cache layer's
+//! mtime+size+sha256 fingerprinting catches toolchain swaps); its
+//! `aux_hash` rolls in the rustc
+//! [`version_hash`](crate::compile::RustcInfo::version_hash), which
+//! catches commit-hash bumps that share the same on-disk file
+//! fingerprint (e.g. a binary rebuilt at the same path with the same
+//! mtime+size). The entry's `output_path` is the canonical
+//! `libcore-gluon-core.rlib` so the cache layer's `output_path.exists()`
+//! check doubles as a "the sysroot dir is still intact" sentinel —
+//! `rm -rf <sysroot>` forces a rebuild.
 //!
-//! - **Fast path.** If the stamp exists and matches the current rustc's
-//!   version hash, we return immediately — no rustc spawn, no cache touch.
-//!   This is the common case on every build after the first and must stay
-//!   cheap (a single `fs::read`).
-//! - **Slow path.** Otherwise we compile the three sysroot crates in
+//! - **Fast path.** If the composite entry is fresh, return immediately
+//!   — no rustc spawn, no per-crate cache work. This is the common case
+//!   on every build after the first.
+//! - **Slow path.** Otherwise compile the three sysroot crates in
 //!   dependency order (`core` → `compiler_builtins` → `alloc`), routing
-//!   each through the shared [`crate::cache::Cache`] so individual crates
-//!   can be skipped when their inputs haven't changed. After all three
-//!   succeed we save the cache and atomically write the stamp.
+//!   each through the shared [`crate::cache::Cache`] so individual
+//!   crates can be skipped when their inputs haven't changed. After all
+//!   three succeed we record the composite entry and save the cache
+//!   once.
 //!
-//! The stamp is written with a plain `fs::write` rather than a
-//! write-then-rename dance: if the build is interrupted mid-write, the
-//! next run simply won't find a matching stamp and will re-enter the slow
-//! path, which is itself cache-driven and near-free on a clean tree.
+//! If the build is interrupted before `mark_composite_built` runs, the
+//! next invocation simply finds no composite entry and re-enters the
+//! slow path, which is itself cache-driven and near-free on a clean
+//! tree.
 //!
 //! ### Unstable features
 //!
@@ -37,18 +46,19 @@
 //! accidentally depend on internals of the sysroot crates as if they were
 //! stable. Both are standard for custom-sysroot flows.
 
+use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
 use crate::compile::{CompileCtx, Emit, RustcCommandBuilder};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{CrateType, TargetDef};
 use std::path::{Path, PathBuf};
 
 /// Ensure a usable custom sysroot exists for `target` and return its
-/// directory plus whether the result came from the stamp fast-path.
+/// directory plus whether the result came from the cache fast-path.
 ///
 /// Returns `(ctx.layout.sysroot_dir(target), was_cached)` on success.
-/// `was_cached` is `true` when the existing stamp file matched the
-/// current toolchain version (no rustc spawned). See the module docs for
-/// the fast-path/slow-path split.
+/// `was_cached` is `true` when the `"sysroot:<target>"` composite cache
+/// entry was fresh (no rustc spawned). See the module docs for the
+/// fast-path/slow-path split.
 ///
 /// The `was_cached` flag is consumed by the scheduler and surfaced via
 /// [`crate::BuildSummary`] so the CLI can report a single accurate
@@ -60,23 +70,33 @@ pub fn ensure_sysroot(
 ) -> Result<(PathBuf, bool)> {
     let sysroot_dir = ctx.layout.sysroot_dir(target);
     let sysroot_lib_dir = ctx.layout.sysroot_lib_dir(target);
-    let stamp_path = ctx.layout.sysroot_stamp(target);
-    let version_hex = hex_encode(&ctx.rustc_info.version_hash());
 
-    // Fast path: a matching stamp means the sysroot is already good for
-    // this toolchain. No rustc spawn, no cache touch.
-    if let Ok(existing) = std::fs::read_to_string(&stamp_path)
-        && existing.trim() == version_hex
+    // Fast-path inputs. The Composite entry uses the rustc binary path
+    // as its single file input — the cache layer's mtime+size+sha256
+    // fingerprinting catches toolchain swaps. The `aux_hash` rolls in
+    // the version_hash, which catches commit-hash bumps that share the
+    // same on-disk file fingerprint (e.g. a binary rebuilt at the same
+    // path with the same mtime+size). The `output_path` is the
+    // canonical libcore rlib (the same file `build_sysroot_crate("core",
+    // ...)` writes) so the cache layer's `output_path.exists()` check
+    // doubles as a sentinel: `rm -rf <sysroot>` forces a rebuild.
+    let core_rlib_sentinel = sysroot_lib_dir.join("libcore-gluon-core.rlib");
+    let aux = composite_aux_hash(&[&ctx.rustc_info.version_hash()]);
+    let cache_key = format!("sysroot:{}", target.name);
+    let inputs = vec![ctx.rustc_info.rustc_path.clone()];
+
     {
-        // Defensive: if the stamp exists but the sysroot directory was
-        // partially deleted or corrupted, fall through to the slow path
-        // instead of returning a success that will produce a cryptic
-        // "can't find crate for core" error in the next downstream
-        // compile. We check for the deterministic libcore rlib path
-        // (the same one `build_sysroot_crate` writes) as a cheap proxy
-        // for "the sysroot directory is still intact."
-        let core_rlib = sysroot_lib_dir.join("libcore-gluon-core.rlib");
-        if sysroot_lib_dir.is_dir() && core_rlib.exists() {
+        let mut cache = ctx
+            .cache
+            .lock()
+            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
+        let q = CompositeQuery {
+            key: &cache_key,
+            inputs: &inputs,
+            aux_hash: Some(aux),
+            output_path: &core_rlib_sentinel,
+        };
+        if cache.is_composite_fresh(&q) {
             return Ok((sysroot_dir, true));
         }
     }
@@ -102,17 +122,11 @@ pub fn ensure_sysroot(
         }
     };
 
-    // Make sure the output + stamp directories exist before rustc runs.
+    // Make sure the output directory exists before rustc runs.
     std::fs::create_dir_all(&sysroot_lib_dir).map_err(|e| Error::Io {
         path: sysroot_lib_dir.clone(),
         source: e,
     })?;
-    if let Some(parent) = stamp_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| Error::Io {
-            path: parent.to_path_buf(),
-            source: e,
-        })?;
-    }
 
     // Compile the three sysroot crates in dependency order. Each later
     // crate links against the rlibs produced by the earlier ones.
@@ -144,23 +158,24 @@ pub fn ensure_sysroot(
         stderr_sink,
     )?;
 
-    // Persist cache updates once, after all three crates succeeded.
+    // Record the composite entry and persist the cache once, after all
+    // three crates succeeded. A mid-operation crash leaves no composite
+    // entry, which causes the next run to re-enter the slow path — and
+    // that path is itself cache-driven, so it's near-free on a clean
+    // tree.
     {
         let mut cache = ctx
             .cache
             .lock()
             .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
+        cache.mark_composite_built(CompositeRecord {
+            key: cache_key,
+            inputs,
+            aux_hash: Some(aux),
+            output_path: core_rlib_sentinel,
+        })?;
         cache.save()?;
     }
-
-    // Write the stamp last. A mid-operation crash leaves no stamp, which
-    // causes the next run to re-enter the slow path — and that path is
-    // cache-driven, so it's near-free on a clean tree. A single short
-    // string doesn't need an atomic write-then-rename.
-    std::fs::write(&stamp_path, version_hex.as_bytes()).map_err(|e| Error::Io {
-        path: stamp_path.clone(),
-        source: e,
-    })?;
 
     Ok((sysroot_dir, false))
 }
@@ -342,18 +357,6 @@ fn build_sysroot_crate(
     Ok(path)
 }
 
-/// Lowercase hex encoding of a 32-byte digest. Local helper to avoid
-/// pulling in a dependency for two call sites.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push(HEX[(b >> 4) as usize] as char);
-        out.push(HEX[(b & 0x0f) as usize] as char);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,38 +417,67 @@ mod tests {
         }
     }
 
+    fn which_binary(name: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
     #[test]
-    fn stamp_reuse_skips_rustc_spawn() {
+    fn ensure_sysroot_writes_no_stamp_file() {
+        // After Stage 5 migration the stamp file path must not be
+        // produced. We exercise the fast path so no real rustc spawns.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let layout = BuildLayout::new(tmp.path(), "sysroot-unit");
+        let layout = BuildLayout::new(tmp.path(), "no-stamp");
         let target = make_target();
 
-        // Pre-create the sysroot dir + stamp matching version_hex. We
-        // point rustc_path at an obviously broken path so a real spawn
-        // would surface clearly as an Io error — the fast path must
-        // return Ok without ever touching it.
-        let bogus_rustc = PathBuf::from("/dev/null/definitely-not-rustc");
-        let info = fake_rustc_info(bogus_rustc, Some(PathBuf::from("/nope")));
-        let version_hex = hex_encode(&info.version_hash());
-
-        let sysroot_dir = layout.sysroot_dir(&target);
+        // Use a real always-stat-able binary as a stand-in for rustc.
+        // The cache layer needs to be able to fingerprint the rustc
+        // input path; pointing at /dev/null/nope wouldn't pass the
+        // metadata() check.
+        let real_path = which_binary("cat").unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let info = fake_rustc_info(real_path.clone(), Some(PathBuf::from("/nope")));
         let sysroot_lib_dir = layout.sysroot_lib_dir(&target);
-        std::fs::create_dir_all(&sysroot_lib_dir).expect("mkdir sysroot lib");
-        // The fast path now also verifies libcore exists alongside the
-        // stamp (so partial deletion of the sysroot dir forces a
-        // rebuild). Write a zero-byte placeholder so the existence
-        // check passes without needing a real rlib in a unit test.
+        std::fs::create_dir_all(&sysroot_lib_dir).expect("mkdir");
         std::fs::write(sysroot_lib_dir.join("libcore-gluon-core.rlib"), b"")
-            .expect("write fake libcore rlib");
-        let stamp_path = layout.sysroot_stamp(&target);
-        std::fs::write(&stamp_path, version_hex.as_bytes()).expect("write stamp");
+            .expect("write fake rlib");
 
-        let cache = Cache::load(layout.cache_manifest()).0;
+        // Pre-mark the sysroot composite entry as if a previous build
+        // succeeded with this rustc.
+        use crate::cache::{CompositeRecord, composite_aux_hash};
+        let manifest_path = layout.cache_manifest();
+        let mut cache = Cache::load(&manifest_path).0;
+        let aux = composite_aux_hash(&[&info.version_hash()]);
+        cache
+            .mark_composite_built(CompositeRecord {
+                key: format!("sysroot:{}", target.name),
+                inputs: vec![real_path.clone()],
+                aux_hash: Some(aux),
+                output_path: sysroot_lib_dir.join("libcore-gluon-core.rlib"),
+            })
+            .expect("mark");
+        cache.save().expect("save");
+
+        let cache = Cache::load(&manifest_path).0;
+        let layout_for_check = layout.clone();
         let ctx = CompileCtx::new(layout, Arc::new(info), cache);
         let mut stderr_sink: Vec<u8> = Vec::new();
-        let (got, was_cached) = ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
-        assert_eq!(got, sysroot_dir);
-        assert!(was_cached, "stamp fast-path must report was_cached=true");
+        let (_dir, was_cached) =
+            ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
+        assert!(was_cached, "fast path expected; was_cached must be true");
+
+        // Crucial: no stamp file was created.
+        let stamp = layout_for_check.sysroot_dir(&target).join("stamp");
+        assert!(
+            !stamp.exists(),
+            "ensure_sysroot must not write a sidecar stamp file: {}",
+            stamp.display()
+        );
     }
 
     /// End-to-end sysroot build against the host toolchain. Gated with
@@ -471,7 +503,6 @@ mod tests {
         let layout = BuildLayout::new(tmp.path(), "sysroot-e2e");
         let target = make_target();
         let cache = Cache::load(layout.cache_manifest()).0;
-        let expected_hex = hex_encode(&info.version_hash());
         let ctx = CompileCtx::new(layout, Arc::new(info), cache);
 
         let mut stderr_sink: Vec<u8> = Vec::new();
@@ -483,20 +514,26 @@ mod tests {
             let rlib = lib_dir.join(format!("lib{crate_name}-gluon-{crate_name}.rlib"));
             assert!(rlib.exists(), "expected {rlib:?} to exist after build");
         }
-        let stamp = ctx.layout.sysroot_stamp(&target);
-        assert!(stamp.exists(), "stamp file should exist");
-        let stamp_content = std::fs::read_to_string(&stamp).expect("read stamp");
-        assert_eq!(stamp_content.trim(), expected_hex);
+        // Cache manifest must contain the sysroot composite entry. The
+        // version_hash equivalent now lives inside the manifest's
+        // binary `aux_hash` and isn't byte-comparable in the same way
+        // the old stamp file was.
+        let manifest_bytes = std::fs::read_to_string(ctx.layout.cache_manifest())
+            .expect("read manifest");
+        assert!(
+            manifest_bytes.contains(&format!("sysroot:{}", target.name)),
+            "expected sysroot composite entry in manifest"
+        );
 
-        // Second call must hit the stamp fast path and be effectively
+        // Second call must hit the cache fast path and be effectively
         // instant. 100ms is a generous upper bound for a single
-        // `fs::read` + string compare.
+        // composite-entry freshness check.
         let start = Instant::now();
         let (sysroot_dir2, second_cached) =
             ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("second build");
         let elapsed = start.elapsed();
         assert_eq!(sysroot_dir, sysroot_dir2);
-        assert!(second_cached, "second build must hit the stamp fast path");
+        assert!(second_cached, "second build must hit the cache fast path");
         assert!(elapsed.as_millis() < 100, "fast path too slow: {elapsed:?}");
     }
 
