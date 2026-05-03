@@ -29,10 +29,12 @@
 //! Keeping this order stable is non-negotiable: any reordering of the
 //! flags invalidates every on-disk cache entry.
 
+use super::artifact_shape::CrateArtifactShape;
 use super::command_builder::build_rustc_command;
 #[cfg(test)]
 use crate::cache::BuildRecord;
 use crate::compile::layout::BuildLayout;
+use crate::compile::rustc::RustcCommandBuilder;
 use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateDef, ResolvedConfig, ResolvedCrateRef};
@@ -93,6 +95,87 @@ pub(crate) fn collect_artifact_env_sources(
     Ok(out)
 }
 
+/// Everything `compile()` needs after argument resolution but before
+/// spawning rustc. Built once by [`prepare_compile_context`]; consumed
+/// by the [`crate::compile::run_compile_and_cache`] call at the tail
+/// of `compile()`.
+struct CompileContext {
+    crate_name: String,
+    /// `Some(target_name)` for cross crates; `None` for host crates.
+    /// Captured here so the per-crate error closures don't need to
+    /// re-resolve the target handle from the model.
+    target_name_for_fail: Option<String>,
+    is_host: bool,
+    out_dir: PathBuf,
+    output_path: PathBuf,
+    depfile_path: PathBuf,
+    cache_key: String,
+    argv_hash: [u8; 32],
+    builder: RustcCommandBuilder,
+    extra_sources: Vec<PathBuf>,
+}
+
+/// Gather every input `compile()` needs after argument resolution but
+/// before spawning rustc. Pulls together the rustc command builder,
+/// cache key, output directory, and artifact-env source paths in one
+/// place — leaving `compile()` itself as a thin wrapper that builds
+/// error closures and dispatches to `run_compile_and_cache`.
+fn prepare_compile_context(
+    ctx: &CompileCtx,
+    input: &CompileCrateInput<'_>,
+) -> Result<CompileContext> {
+    let model = input.model;
+    let resolved = input.resolved;
+    let crate_ref = input.crate_ref;
+
+    let crate_def: &CrateDef = model.crates.get(crate_ref.handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "crate handle {:?} not found in build model",
+            crate_ref.handle
+        ))
+    })?;
+
+    let (builder, output_path, depfile_path) = build_rustc_command(ctx, input)?;
+    let argv_hash = builder.hash();
+    let cache_key = build_cache_key(&ctx.layout, model, resolved, crate_def, crate_ref)?;
+
+    // `out_dir` must exist on disk before rustc spawns; the
+    // run_compile_and_cache helper takes care of the mkdir given
+    // this path. Sourcing it from `CrateArtifactShape` keeps the
+    // dispatch (host / cross-final / cross-artifact) in exactly
+    // one place — the same place `command_builder` and
+    // `artifact_path` consult.
+    let shape = CrateArtifactShape::for_crate(&ctx.layout, model, resolved, crate_def, crate_ref)?;
+    let out_dir = shape.out_dir;
+
+    let target_name_for_fail = if crate_ref.host {
+        None
+    } else {
+        Some(
+            model
+                .targets
+                .get(crate_ref.target)
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| "<unknown>".to_string()),
+        )
+    };
+
+    let extra_sources = collect_artifact_env_sources(crate_def, model, input.artifacts)?;
+
+    Ok(CompileContext {
+        crate_name: crate_def.name.clone(),
+        target_name_for_fail,
+        is_host: crate_ref.host,
+        out_dir,
+        output_path,
+        depfile_path,
+        cache_key,
+        argv_hash,
+        builder,
+        extra_sources,
+    })
+}
+
 /// Build the cache key for a single crate compilation.
 ///
 /// The key shape — `"crate:host:<name>[:driver]"` for host crates and
@@ -143,90 +226,28 @@ pub fn compile(
     input: CompileCrateInput<'_>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
-    let model = input.model;
-    let resolved = input.resolved;
-    let crate_ref = input.crate_ref;
+    let cc = prepare_compile_context(ctx, &input)?;
 
-    let crate_def: &CrateDef = model.crates.get(crate_ref.handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "crate handle {:?} not found in build model",
-            crate_ref.handle
-        ))
-    })?;
-
-    let crate_name = &crate_def.name;
-
-    let (builder, output_path, depfile_path) = build_rustc_command(ctx, &input)?;
-
-    let argv_hash = builder.hash();
-
-    let cache_key = build_cache_key(&ctx.layout, model, resolved, crate_def, crate_ref)?;
-
-    // Derive the out-dir that must exist on the slow path before rustc
-    // writes its artifact. This used to live in the body of the
-    // pre-extraction slow path; hoisting it up so the shared helper can
-    // mkdir it preserves the original ordering (cache check first, then
-    // mkdir, then spawn).
-    let out_dir = if crate_ref.host {
-        ctx.layout.host_artifact_dir(crate_def)
-    } else if crate_def.crate_type.is_executable() {
-        // Cross Bin and RawBinary crates use cross_final_dir as --out-dir
-        // (see build_rustc_command comment). Both produce a single
-        // executable artifact (ELF or flat) at a deterministic name.
-        let target = model.targets.get(crate_ref.target).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle not found when creating output directory",
-                crate_name
-            ))
-        })?;
-        ctx.layout.cross_final_dir(target, &resolved.profile)
-    } else {
-        let target = model.targets.get(crate_ref.target).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle not found when creating output directory",
-                crate_name
-            ))
-        })?;
-        ctx.layout
-            .cross_artifact_dir(target, &resolved.profile, crate_def)
-    };
-
-    // Build the error-headline closures up front so we can capture the
-    // crate / target naming context by value. For cross crates we name
-    // the target in the headline so multi-target builds don't force the
-    // user to dig through the command to see which invocation failed.
-    let crate_name_fail = crate_name.clone();
-    let crate_name_depfile = crate_name.clone();
-    let is_host = crate_ref.host;
-    let target_name_for_fail = if crate_ref.host {
-        None
-    } else {
-        Some(
-            model
-                .targets
-                .get(crate_ref.target)
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
-    };
-    let depfile_for_diag = depfile_path.clone();
-
-    // Collect the artifact_env source paths now — once — so they feed
-    // both the freshness query (via sources_for_query) and the cache
-    // record (via parse_depfile + extend). The build_rustc_command
-    // walk above injected them as env vars; here we redo the same walk
-    // to get the path list for cache plumbing.
-    let extra_sources = collect_artifact_env_sources(crate_def, model, input.artifacts)?;
+    // Capture state into owned values so the error closures (which
+    // outlive `cc`) can reference it. For cross crates we name the
+    // target in the spawn-fail headline so multi-target builds don't
+    // force the user to dig through the command to see which
+    // invocation failed.
+    let crate_name_fail = cc.crate_name.clone();
+    let crate_name_depfile = cc.crate_name.clone();
+    let is_host = cc.is_host;
+    let target_name_for_fail = cc.target_name_for_fail.clone();
+    let depfile_for_diag = cc.depfile_path.clone();
 
     crate::compile::run_compile_and_cache(
         ctx,
-        builder,
-        argv_hash,
-        cache_key,
-        output_path,
-        depfile_path,
-        Some(&out_dir),
-        extra_sources,
+        cc.builder,
+        cc.argv_hash,
+        cc.cache_key,
+        cc.output_path,
+        cc.depfile_path,
+        Some(&cc.out_dir),
+        cc.extra_sources,
         Box::new(move |output, rendered| {
             let headline = if is_host {
                 format!(
