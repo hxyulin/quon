@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (breaking — model wire format)
+
+- `BuildModel`: cross-references are handle-only. Parallel
+  `name: String + name_handle: Option<Handle<...>>` pairs are gone;
+  consumers read handles directly.
+- `BuildModel.config_options`: now an `Arena<ConfigOptionDef>`
+  (was `BTreeMap<String, _>`). Wire format changes (object → array).
+- `BuildModel.qemu`, `BuildModel.bootloader`: now `Option<...>`.
+- New typed enums: `PanicStrategy`, `BootloaderKind` (with
+  `Custom(String)` escape hatch), `ImageFormat`, `TargetSpec`,
+  `DepResolution`.
+- `gluon run` against a `gluon.rs` with no `cfg.qemu(...)` block
+  now fails with a typed `Error::QemuNotConfigured` carrying a
+  user-actionable message.
+
+### Cache impact
+
+- First build after this version is a full cache miss (manifest
+  schema bumped). Subsequent builds resume normal caching.
+
 ### Removed
 
 - `gluon.rhai` configuration format. Every project must now declare
