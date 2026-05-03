@@ -39,6 +39,7 @@
 //! fallback would never actually kick in. Eager hashing costs one full
 //! read per build, which is dwarfed by the compile itself.
 
+pub mod composite;
 pub mod depinfo;
 pub mod hash;
 pub mod lock;
