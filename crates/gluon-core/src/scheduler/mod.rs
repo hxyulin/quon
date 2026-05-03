@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, CrateDef, EspDef, Handle, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, TargetDef};
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -244,6 +244,29 @@ fn dispatch_esp(
     })
 }
 
+fn dispatch_image(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    snapshot: &ArtifactsSnapshot,
+    image_handle: Handle<ImageDef>,
+    stdout: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let ictx = ImageCtx {
+        ctx,
+        model,
+        resolved,
+        artifacts: &snapshot.artifacts,
+        esp_dirs: &snapshot.esps,
+    };
+    let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
+    Ok(NodeOutput::Image {
+        handle: image_handle,
+        path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -323,26 +346,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // Image — assemble a bootable disk image. See image::build_image.
             // ------------------------------------------------------------------
             DagNode::Image(image_handle) => {
-                // Snapshot artifacts and esp_dirs so the helper can
-                // resolve sources without holding the locks across the
-                // FAT format + write loop (which can take 100s of ms
-                // for large images). One lock acquisition reads both
-                // since they live in the same `ArtifactsSnapshot`.
-                let (artifacts_snapshot, esp_dirs_snapshot) = {
-                    let guard = lock_or_poison(self.state, "state")?;
-                    (guard.artifacts.clone(), guard.esps.clone())
-                };
-                let ictx = ImageCtx {
-                    ctx: self.ctx,
-                    model: self.model,
-                    resolved: self.resolved,
-                    artifacts: &artifacts_snapshot,
-                    esp_dirs: &esp_dirs_snapshot,
-                };
-                let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
-                lock_or_poison(self.state, "state")?
-                    .images
-                    .insert(image_handle, path);
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_image(
+                    self.ctx, self.model, self.resolved, &snapshot, image_handle, stdout,
+                )?;
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("Image output is cacheable");
                 self.record(was_cached);
                 let _ = stderr;
                 Ok(())
