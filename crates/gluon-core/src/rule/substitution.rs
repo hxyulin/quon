@@ -224,8 +224,8 @@ mod tests {
     use crate::compile::{ArtifactMap, BuildLayout};
     use crate::rule::RuleCtx;
     use gluon_model::{
-        BuildModel, Handle, ProjectDef, RuleDef, RuleHandler, TargetDef, ResolvedConfig,
-        ResolvedProfile,
+        BuildModel, Handle, ProjectDef, ResolvedConfig, ResolvedProfile, RuleDef, RuleHandler,
+        TargetDef,
     };
     use std::path::PathBuf;
 
@@ -340,7 +340,9 @@ mod tests {
             ],
         );
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args.len(), 4);
         assert_eq!(
             args[0],
@@ -367,9 +369,14 @@ mod tests {
             image_paths: RuleCtx::empty_image_paths(),
         };
 
-        let rule = make_rule("testrule", vec!["${project_name}-${profile}-${target}".into()]);
+        let rule = make_rule(
+            "testrule",
+            vec!["${project_name}-${profile}-${target}".into()],
+        );
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args, vec!["testproject-debug-x86_64-test".to_string()]);
     }
 
@@ -390,7 +397,9 @@ mod tests {
 
         let rule = make_rule("testrule", vec!["café-${profile}-naïve".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args, vec!["café-debug-naïve".to_string()]);
     }
 
@@ -466,7 +475,9 @@ mod tests {
 
         let rule = make_rule("testrule", vec!["$HOME/no_brace".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(
             args[0], "$HOME/no_brace",
             "literal $ must pass through unchanged"
@@ -495,7 +506,9 @@ mod tests {
             span: None,
         };
 
-        let out_args = Substituter::new(&ctx, &rule).expand_args(&rule.outputs).unwrap();
+        let out_args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.outputs)
+            .unwrap();
         assert_eq!(out_args.len(), 1);
         assert_eq!(
             out_args[0],
@@ -556,12 +569,11 @@ mod tests {
             image_paths: RuleCtx::empty_image_paths(),
         };
 
-        let rule = make_rule(
-            "strip",
-            vec!["objcopy".into(), "${artifact:kernel}".into()],
-        );
+        let rule = make_rule("strip", vec!["objcopy".into(), "${artifact:kernel}".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args[1], artifact_path.display().to_string());
     }
 
@@ -630,7 +642,9 @@ mod tests {
             vec!["sha256sum".into(), "${image:boot-disk}".into()],
         );
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args[1], image_path.display().to_string());
     }
 
@@ -774,7 +788,9 @@ mod tests {
 
         let rule = make_rule("testrule", vec!["${project_root}/keys/sign.key".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(
             args[0],
             format!("{}/keys/sign.key", resolved.project_root.display())
@@ -795,7 +811,9 @@ mod tests {
 
         let rule = make_rule("testrule", vec!["echo $${HOME}".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args[0], "echo ${HOME}");
     }
 
@@ -813,7 +831,9 @@ mod tests {
 
         let rule = make_rule("testrule", vec!["cost: $$5".into()]);
 
-        let args = Substituter::new(&ctx, &rule).expand_args(&rule.inputs).unwrap();
+        let args = Substituter::new(&ctx, &rule)
+            .expand_args(&rule.inputs)
+            .unwrap();
         assert_eq!(args[0], "cost: $5");
     }
 }
