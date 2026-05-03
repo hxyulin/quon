@@ -15,6 +15,7 @@
 //! All "live" work (resolving OVMF paths, copying a writable vars file,
 //! spawning) lives in [`super::ovmf`] and [`super`] respectively.
 
+use super::boot_mode;
 use super::ovmf::ResolvedOvmf;
 use super::resolve::ResolvedQemu;
 use crate::error::{Error, Result};
@@ -127,9 +128,8 @@ pub fn build_qemu_command(
         }
     }
 
-    // 6. Mode-specific boot wiring.
-    crate::run::boot_mode::assembler_for(mode)
-        .assemble(&mut args, resolved, kernel, ovmf, skip_path_checks)?;
+    // 6. Mode-specific boot wiring — delegated to BootModeAssembler.
+    boot_mode::assembler_for(mode).assemble(&mut args, resolved, kernel, ovmf, skip_path_checks)?;
 
     // 7. Test-mode exit device. Wired in here (before user extras)
     //    so the user can still override or suppress via `extra_args`
