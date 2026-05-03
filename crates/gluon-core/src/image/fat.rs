@@ -18,6 +18,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use super::ResolvedEntry;
+use super::formatter::PartitionFormatter;
 use super::source::StampSource;
 
 /// Format `image_path` as a flat FAT32 image (no partition table).
@@ -299,21 +300,21 @@ fn fat_to_compile(image_name: &str, dest_path: &str, err: hadris_fat::FatError) 
 /// requested byte range, and delegates to `format_fat32_into`.
 pub(super) struct Fat32Formatter;
 
-impl crate::image::formatter::PartitionFormatter for Fat32Formatter {
+impl PartitionFormatter for Fat32Formatter {
     fn format_in_place(
         &self,
-        image_path: &std::path::Path,
+        image_path: &Path,
         start_byte: u64,
         len_bytes: u64,
         scoped_name: &str,
         entries: &[ResolvedEntry],
         stdout: &mut Vec<u8>,
-    ) -> crate::error::Result<()> {
-        let file = std::fs::OpenOptions::new()
+    ) -> Result<()> {
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(image_path)
-            .map_err(|e| crate::error::Error::Io {
+            .map_err(|e| Error::Io {
                 path: image_path.to_path_buf(),
                 source: e,
             })?;
