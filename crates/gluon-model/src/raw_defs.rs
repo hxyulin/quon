@@ -6,10 +6,9 @@
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
+use crate::build_model::default_true;
 use crate::source::SourceSpan;
 use serde::{Deserialize, Serialize};
-
-fn default_true() -> bool { true }
 
 /// Raw form of [`crate::build_model::DepDef`]: name strings, no
 /// resolution. Intern resolves `crate_name` against project crates

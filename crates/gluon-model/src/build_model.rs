@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
