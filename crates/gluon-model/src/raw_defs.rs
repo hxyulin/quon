@@ -156,6 +156,80 @@ impl Named for RawCrateDef {
     fn name(&self) -> &str { &self.name }
 }
 
+/// Raw form of [`crate::build_model::BootloaderDef`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawBootloaderDef {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_crate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_file: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extras: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// Raw form of [`crate::build_model::EspDef`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawEspDef {
+    pub name: String,
+    #[serde(default)]
+    pub entries: Vec<RawEspEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawEspDef {
+    fn name(&self) -> &str { &self.name }
+}
+
+/// Raw form of [`crate::build_model::EspEntry`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawEspEntry {
+    pub source_crate: String,
+    pub dest_path: String,
+}
+
+/// Raw form of [`crate::build_model::BuildStepDef`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawBuildStepDef {
+    pub name: String,
+    pub runner: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, RawBuildStepInput>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawBuildStepDef {
+    fn name(&self) -> &str { &self.name }
+}
+
+/// Raw form of [`crate::build_model::BuildStepInput`]. The `Crate`
+/// variant carries a name string instead of a handle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawBuildStepInput {
+    Crate { crate_name: String },
+    File { path: String },
+    Literal { value: String },
+}
+
+/// Raw form of [`crate::build_model::PipelineStep`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawPipelineStep {
+    pub name: String,
+    pub inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +299,83 @@ mod tests {
         let de: RawGroupDef = serde_json::from_str(&json).unwrap();
         assert_eq!(de.target, "x86_64");
         assert_eq!(de.crates, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn raw_bootloader_def_round_trips() {
+        let b = RawBootloaderDef {
+            kind: "uefi".into(),
+            protocol: Some("gop".into()),
+            entry_crate: Some("boot".into()),
+            config_file: Some("limine.cfg".into()),
+            extras: BTreeMap::new(),
+            span: None,
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let de: RawBootloaderDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.kind, "uefi");
+        assert_eq!(de.entry_crate.as_deref(), Some("boot"));
+    }
+
+    #[test]
+    fn raw_esp_round_trips() {
+        let e = RawEspDef {
+            name: "default".into(),
+            entries: vec![RawEspEntry {
+                source_crate: "boot".into(),
+                dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
+            }],
+            span: None,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let de: RawEspDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.entries.len(), 1);
+        assert_eq!(de.entries[0].source_crate, "boot");
+    }
+
+    #[test]
+    fn raw_build_step_round_trips() {
+        let mut s = RawBuildStepDef {
+            name: "stripper".into(),
+            runner: "elf-stripper".into(),
+            inputs: BTreeMap::new(),
+            env: BTreeMap::new(),
+            output: "stripped.elf".into(),
+            span: None,
+        };
+        s.inputs.insert(
+            "ELF".into(),
+            RawBuildStepInput::Crate { crate_name: "kernel".into() },
+        );
+        s.inputs.insert(
+            "FOO".into(),
+            RawBuildStepInput::File { path: "tools/foo".into() },
+        );
+        s.inputs.insert(
+            "BAR".into(),
+            RawBuildStepInput::Literal { value: "yes".into() },
+        );
+        let json = serde_json::to_string(&s).unwrap();
+        let de: RawBuildStepDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.runner, "elf-stripper");
+        assert_eq!(de.inputs.len(), 3);
+        match &de.inputs["ELF"] {
+            RawBuildStepInput::Crate { crate_name } => assert_eq!(crate_name, "kernel"),
+            other => panic!("expected Crate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_pipeline_step_round_trips() {
+        let s = RawPipelineStep {
+            name: "compile".into(),
+            inputs: vec!["kernel-group".into(), "shared".into()],
+            rule: Some("postprocess".into()),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let de: RawPipelineStep = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.inputs.len(), 2);
+        assert_eq!(de.rule.as_deref(), Some("postprocess"));
     }
 
     #[test]
