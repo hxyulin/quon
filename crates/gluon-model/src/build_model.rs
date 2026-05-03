@@ -423,13 +423,10 @@ pub struct BootloaderDef {
     /// with GOP-only graphics).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    /// Name of the crate that serves as the bootloader entry point.
-    /// Resolved against the crate arena by the intern pass.
+    /// Resolved bootloader entry crate. `None` when the user has not
+    /// declared one (legal — some bootloaders are pure config files).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_crate: Option<String>,
-    /// Resolved handle for `entry_crate`, populated by the intern pass.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry_crate_handle: Option<Handle<CrateDef>>,
+    pub entry_crate: Option<Handle<CrateDef>>,
     /// Path to a bootloader configuration file (e.g. `boot.cfg` for
     /// Limine). Resolved relative to the project root by consumers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1075,11 +1072,39 @@ mod tests {
 
     #[test]
     fn bootloader_def_round_trips_through_json() {
+        // Mint a real CrateDef handle so the resolved entry_crate field
+        // (now a typed handle) round-trips through serde unchanged.
+        let mut groups: Arena<GroupDef> = Arena::new();
+        let (group, _) = groups.insert("g".into(), GroupDef::default());
+        let mut crates: Arena<CrateDef> = Arena::new();
+        let (entry_handle, _) = crates.insert(
+            "bootloader".into(),
+            CrateDef {
+                name: "bootloader".into(),
+                path: "crates/bootloader".into(),
+                edition: "2024".into(),
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Host,
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
+            },
+        );
+
         let bl = BootloaderDef {
             kind: "uefi".into(),
             protocol: Some("gop".into()),
-            entry_crate: Some("bootloader".into()),
-            entry_crate_handle: None,
+            entry_crate: Some(entry_handle),
             config_file: Some("boot.cfg".into()),
             extras: BTreeMap::new(),
             span: None,
@@ -1088,7 +1113,7 @@ mod tests {
         let de: BootloaderDef = serde_json::from_str(&json).unwrap();
         assert_eq!(de.kind, "uefi");
         assert_eq!(de.protocol.as_deref(), Some("gop"));
-        assert_eq!(de.entry_crate.as_deref(), Some("bootloader"));
+        assert_eq!(de.entry_crate, Some(entry_handle));
         assert_eq!(de.config_file.as_deref(), Some("boot.cfg"));
         assert!(de.extras.is_empty());
     }

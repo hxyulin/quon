@@ -323,8 +323,7 @@ fn intern_bootloader(
     BootloaderDef {
         kind: raw.kind.clone(),
         protocol: raw.protocol.clone(),
-        entry_crate: raw.entry_crate.clone(),
-        entry_crate_handle,
+        entry_crate: entry_crate_handle,
         config_file: raw.config_file.clone(),
         extras: raw.extras.clone(),
         span: raw.span.clone(),

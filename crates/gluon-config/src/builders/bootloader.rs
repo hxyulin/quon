@@ -30,7 +30,8 @@ impl<'cfg> BootloaderBuilder<'cfg> {
     }
 
     /// Set the name of the crate that serves as the bootloader entry point.
-    /// The `entry_crate_handle` is populated later by the intern pass.
+    /// The intern pass resolves this name into a [`Handle<CrateDef>`] on
+    /// the resolved [`gluon_model::BootloaderDef`].
     pub fn entry_crate(mut self, name: &str) -> Self {
         let n = name.to_string();
         self.modify(|bl| bl.entry_crate = Some(n));

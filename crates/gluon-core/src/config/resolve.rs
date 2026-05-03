@@ -1429,7 +1429,12 @@ mod tests {
                 .protocol("gop");
         });
         assert_eq!(model.bootloader.kind, "uefi");
-        assert_eq!(model.bootloader.entry_crate.as_deref(), Some("boot"));
+        let entry = model
+            .bootloader
+            .entry_crate
+            .and_then(|h| model.crates.get(h))
+            .map(|c| c.name.as_str());
+        assert_eq!(entry, Some("boot"));
         assert_eq!(model.bootloader.protocol.as_deref(), Some("gop"));
     }
 
