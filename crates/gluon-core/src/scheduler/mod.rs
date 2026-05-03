@@ -25,8 +25,8 @@ use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, ResolvedConfig};
-use snapshot::ArtifactsSnapshot;
+use gluon_model::{BuildModel, Handle, ResolvedConfig, TargetDef};
+use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -89,6 +89,35 @@ fn lock_or_poison<'a, T>(
         .map_err(|_| Error::Config(format!("scheduler: {name} mutex poisoned")))
 }
 
+// ---------------------------------------------------------------------------
+// Per-node dispatch helpers
+//
+// Each `dispatch_*` is a pure function over an immutable snapshot — no
+// mutex, no shared state. The dispatch arm acquires the state lock
+// twice: once before the helper to clone the snapshot, once after to
+// merge the helper's `NodeOutput`. Helpers must never see a `Mutex`.
+// ---------------------------------------------------------------------------
+
+/// `_snapshot` is unused today (Sysroot has no inputs from prior
+/// nodes) but is part of the dispatch-helper signature shape so all
+/// per-variant fns are uniform.
+fn dispatch_sysroot(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    _snapshot: &ArtifactsSnapshot,
+    target: Handle<TargetDef>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let (path, was_cached) =
+        crate::sysroot::ensure_sysroot_for_node(ctx, model, target, stdout, stderr)?;
+    Ok(NodeOutput::Sysroot {
+        target,
+        path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -97,12 +126,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // Sysroot — build the custom sysroot for the target triple.
             // ------------------------------------------------------------------
             DagNode::Sysroot(target) => {
-                let (path, was_cached) = crate::sysroot::ensure_sysroot_for_node(
-                    self.ctx, self.model, target, stdout, stderr,
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_sysroot(
+                    self.ctx, self.model, &snapshot, target, stdout, stderr,
                 )?;
-                lock_or_poison(self.state, "state")?
-                    .sysroots
-                    .insert(target, path);
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("Sysroot output is cacheable");
                 self.record(was_cached);
                 Ok(())
             }
