@@ -125,12 +125,6 @@ impl BuildLayout {
             .join("lib")
     }
 
-    /// Stamp file marking a successful sysroot build
-    /// (`<sysroot>/stamp`).
-    pub fn sysroot_stamp(&self, target: &TargetDef) -> PathBuf {
-        self.sysroot_dir(target).join("stamp")
-    }
-
     /// Per-host-crate artifact directory.
     ///
     /// `gluon build`: `<root>/host/<crate>/`.
@@ -371,10 +365,6 @@ mod tests {
         assert_eq!(
             l.sysroot_lib_dir(&t),
             PathBuf::from("/tmp/fake/sysroot/x86_64-test/lib/rustlib/x86_64-test/lib")
-        );
-        assert_eq!(
-            l.sysroot_stamp(&t),
-            PathBuf::from("/tmp/fake/sysroot/x86_64-test/stamp")
         );
     }
 
