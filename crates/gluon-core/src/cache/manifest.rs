@@ -167,14 +167,21 @@ impl CacheManifest {
         match serde_json::from_slice::<CacheManifest>(&bytes) {
             Ok(m) if m.version == Self::CURRENT_VERSION => (m, warnings),
             Ok(m) => {
-                warnings.push(
-                    Diagnostic::warning(format!(
-                        "cache manifest at {} is version {}; treating as cold cache",
-                        path.display(),
-                        m.version
-                    ))
-                    .with_note("Next build will rebuild from scratch. Delete the file to silence this warning."),
-                );
+                // Schema version mismatch — either an older gluon wrote
+                // a v < CURRENT manifest (we never carry stale entries
+                // forward across schema bumps) or a newer gluon wrote a
+                // v > CURRENT manifest (we can't make sense of fields
+                // that didn't exist when this binary was built). Both
+                // collapse to "cold cache, rebuild from scratch"; the
+                // wording deliberately says "upgraded" because the
+                // overwhelmingly common path is a forward upgrade after
+                // a gluon version bump.
+                warnings.push(Diagnostic::warning(format!(
+                    "cache schema upgraded; rebuilt clean (manifest at {} was version {}, expected {})",
+                    path.display(),
+                    m.version,
+                    Self::CURRENT_VERSION
+                )));
                 (Self::fresh(), warnings)
             }
             Err(_) => {
@@ -364,7 +371,11 @@ mod tests {
         assert!(loaded.rustc.is_empty());
         assert_eq!(loaded.version, CacheManifest::CURRENT_VERSION);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].message.contains("version"));
+        assert!(
+            warnings[0].message.contains("cache schema upgraded"),
+            "warning text mismatch: {}",
+            warnings[0].message
+        );
     }
 
     #[test]
@@ -516,5 +527,49 @@ mod tests {
         assert_eq!(loaded.composite.len(), 1);
         assert!(loaded.rustc.contains_key("crate-foo"));
         assert!(loaded.composite.contains_key("image:boot"));
+    }
+
+    #[test]
+    fn v1_manifest_is_discarded_with_upgrade_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("cache.json");
+        // A literal v1 payload as written by the previous CURRENT_VERSION.
+        std::fs::write(
+            &p,
+            br#"{"version": 1, "entries": {"foo": {
+                "argv_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+                "source_files": {},
+                "parent_dir_mtimes": {},
+                "output_path": "/x.rlib",
+                "built_at": 0
+            }}}"#,
+        )
+        .expect("seed v1");
+        let (loaded, warnings) = CacheManifest::load(&p);
+        assert_eq!(loaded.version, CacheManifest::CURRENT_VERSION);
+        assert!(loaded.rustc.is_empty(), "v1 entries must be discarded");
+        assert!(loaded.composite.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].message.contains("cache schema upgraded"),
+            "warning text mismatch: {}",
+            warnings[0].message
+        );
+    }
+
+    #[test]
+    fn future_version_is_discarded_with_upgrade_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("future.json");
+        std::fs::write(&p, br#"{"version": 99, "rustc": {}, "composite": {}}"#).expect("seed");
+        let (loaded, warnings) = CacheManifest::load(&p);
+        assert!(loaded.rustc.is_empty());
+        assert!(loaded.composite.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].message.contains("cache schema upgraded"),
+            "warning text mismatch: {}",
+            warnings[0].message
+        );
     }
 }
