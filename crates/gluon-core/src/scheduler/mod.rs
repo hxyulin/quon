@@ -25,7 +25,9 @@ use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
 use dag::Dag as DagType;
-use gluon_model::{BuildModel, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, TargetDef};
+use gluon_model::{
+    BuildModel, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef, TargetDef,
+};
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -267,6 +269,33 @@ fn dispatch_image(
     })
 }
 
+fn dispatch_rule(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    rules: &RuleRegistry,
+    snapshot: &ArtifactsSnapshot,
+    rule_handle: Handle<RuleDef>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let rule = model.rules.get(rule_handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: Rule node references handle {:?} not in model.rules",
+            rule_handle
+        ))
+    })?;
+    let rule_ctx = RuleCtx {
+        layout: &ctx.layout,
+        resolved,
+        model,
+        artifacts: &snapshot.artifacts,
+        image_paths: &snapshot.images,
+    };
+    rules.dispatch(&rule_ctx, rule, stdout, stderr)?;
+    Ok(NodeOutput::Rule)
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -363,28 +392,19 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // ------------------------------------------------------------------
             DagNode::Rule(rule_handle) => {
                 // Rule nodes are not cacheable in MVP-M — no counter update.
-                let rule = self.model.rules.get(rule_handle).ok_or_else(|| {
-                    Error::Compile(format!(
-                        "scheduler: Rule node references handle {:?} not in model.rules",
-                        rule_handle
-                    ))
-                })?;
-                // Snapshot artifacts (for `${artifact:<crate>}`) and
-                // images (for `${image:<name>}`) so substitution sees a
-                // stable view without holding the lock across the
-                // rule's runtime. One lock acquisition for both.
-                let (artifacts_snapshot, images_snapshot) = {
-                    let guard = lock_or_poison(self.state, "state")?;
-                    (guard.artifacts.clone(), guard.images.clone())
-                };
-                let rule_ctx = RuleCtx {
-                    layout: &self.ctx.layout,
-                    resolved: self.resolved,
-                    model: self.model,
-                    artifacts: &artifacts_snapshot,
-                    image_paths: &images_snapshot,
-                };
-                self.rules.dispatch(&rule_ctx, rule, stdout, stderr)?;
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_rule(
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    self.rules,
+                    &snapshot,
+                    rule_handle,
+                    stdout,
+                    stderr,
+                )?;
+                // merge() returns None for Rule — no counter to update.
+                lock_or_poison(self.state, "state")?.merge(output);
                 Ok(())
             }
 
