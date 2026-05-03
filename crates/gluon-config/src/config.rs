@@ -390,16 +390,7 @@ impl Config {
         ty: ConfigType,
         default: ConfigValue,
     ) -> ConfigOptionBuilder<'_> {
-        if self.raw.config_options.contains_key(name) {
-            self.diagnostics.push(ConfigError::new(format!(
-                "config option '{name}' is defined more than once"
-            )));
-            return ConfigOptionBuilder {
-                cfg: self,
-                state: BuilderState::Duplicate { name: name.into(), span: None },
-            };
-        }
-        self.raw.config_options.insert(
+        let (handle, inserted) = self.raw.config_options.insert(
             name.into(),
             ConfigOptionDef {
                 name: name.into(),
@@ -416,9 +407,18 @@ impl Config {
                 visible_if_expr: None,
             },
         );
+        if !inserted {
+            self.diagnostics.push(ConfigError::new(format!(
+                "config option '{name}' is defined more than once"
+            )));
+            return ConfigOptionBuilder {
+                cfg: self,
+                state: BuilderState::Duplicate { name: name.into(), span: None },
+            };
+        }
         ConfigOptionBuilder {
             cfg: self,
-            state: BuilderState::Valid { state: (), name: name.into(), span: None },
+            state: BuilderState::Valid { state: handle, name: name.into(), span: None },
         }
     }
 

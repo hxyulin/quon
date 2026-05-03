@@ -37,7 +37,7 @@ pub struct RawBuildModel {
     pub external_deps: Arena<ExternalDepDef>,
     #[serde(default)]
     pub esps: Arena<RawEspDef>,
-    pub config_options: BTreeMap<String, ConfigOptionDef>,
+    pub config_options: Arena<ConfigOptionDef>,
     pub presets: BTreeMap<String, PresetDef>,
     #[serde(default)]
     pub bootloader: RawBootloaderDef,

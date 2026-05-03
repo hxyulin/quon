@@ -27,9 +27,11 @@ pub struct BuildModel {
     /// `gluon run --uefi` when there is exactly one declaration.
     #[serde(default)]
     pub esps: Arena<EspDef>,
-    /// Keyed by option NAME (e.g. `"CONFIG_FOO"`); options are not in an arena
-    /// because every reference to them is by string identifier.
-    pub config_options: BTreeMap<String, ConfigOptionDef>,
+    /// Config options live in an `Arena` so the model has a uniform handle
+    /// shape across all named declarations. External references to options
+    /// are still by name string (resolver, kconfig, etc.) — they go through
+    /// `arena.lookup(name)` to obtain a handle.
+    pub config_options: Arena<ConfigOptionDef>,
     pub presets: BTreeMap<String, PresetDef>,
     /// Bootloader configuration (singleton per project).
     #[serde(default)]

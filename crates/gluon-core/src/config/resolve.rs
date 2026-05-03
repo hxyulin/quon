@@ -96,11 +96,12 @@ pub fn resolve(
         .and_then(|name| model.presets.get(name))
         .map(|p| &p.overrides);
 
-    for (name, opt) in &model.config_options {
+    for (_, opt) in model.config_options.iter() {
         // Skip group structural options — they don't carry values.
         if matches!(opt.ty, ConfigType::Group) {
             continue;
         }
+        let name = &opt.name;
 
         let mut value =
             coerce(&opt.default, opt, name, &mut diags).unwrap_or_else(|| off_value_for(opt));
@@ -133,8 +134,9 @@ pub fn resolve(
     }
 
     // 6. Validate ranges.
-    for (name, opt) in &model.config_options {
+    for (_, opt) in model.config_options.iter() {
         let Some((lo, hi)) = opt.range else { continue };
+        let name = &opt.name;
         let Some(v) = resolved_options.get(name) else {
             continue;
         };
@@ -151,13 +153,14 @@ pub fn resolve(
     }
 
     // 7. Validate choice values.
-    for (name, opt) in &model.config_options {
+    for (_, opt) in model.config_options.iter() {
         if !matches!(opt.ty, ConfigType::Choice) {
             continue;
         }
         let Some(choices) = &opt.choices else {
             continue;
         };
+        let name = &opt.name;
         let Some(ResolvedValue::Choice(picked)) = resolved_options.get(name) else {
             continue;
         };
@@ -176,9 +179,17 @@ pub fn resolve(
 
         // depends_on: any unsatisfied dependency forces this option off.
         // Collect names first to avoid mutation during iteration.
-        let names: Vec<String> = model.config_options.keys().cloned().collect();
+        let names: Vec<String> = model
+            .config_options
+            .iter()
+            .map(|(_, o)| o.name.clone())
+            .collect();
         for name in &names {
-            let Some(opt) = model.config_options.get(name) else {
+            let Some(opt) = model
+                .config_options
+                .lookup(name)
+                .and_then(|h| model.config_options.get(h))
+            else {
                 continue;
             };
 
@@ -218,7 +229,11 @@ pub fn resolve(
 
         // selects: any "on" option forces its selects to "on".
         for name in &names {
-            let Some(opt) = model.config_options.get(name) else {
+            let Some(opt) = model
+                .config_options
+                .lookup(name)
+                .and_then(|h| model.config_options.get(h))
+            else {
                 continue;
             };
             if opt.selects.is_empty() {
@@ -229,7 +244,11 @@ pub fn resolve(
                 continue;
             }
             for sel in &opt.selects {
-                let Some(target_opt) = model.config_options.get(sel) else {
+                let Some(target_opt) = model
+                    .config_options
+                    .lookup(sel)
+                    .and_then(|h| model.config_options.get(h))
+                else {
                     diags.push(Diagnostic::error(format!(
                         "option '{name}' selects unknown option '{sel}'"
                     )));
@@ -816,7 +835,7 @@ mod tests {
         let lowered = crate::kconfig::load_kconfig(&kconfig_path)
             .expect("load kconfig");
         for (name, opt) in lowered.options {
-            model.config_options.insert(name, opt);
+            let _ = model.config_options.insert(name, opt);
         }
         for (name, preset) in lowered.presets {
             model.presets.insert(name, preset);

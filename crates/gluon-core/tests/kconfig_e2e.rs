@@ -202,7 +202,7 @@ fn kconfig_source_directive_pulls_extras_into_model() {
     let model =
         gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     assert!(
-        model.config_options.contains_key("FANCY_FEATURE"),
+        model.config_options.lookup("FANCY_FEATURE").is_some(),
         "source directive failed to pull in FANCY_FEATURE from extras.kconfig"
     );
 }

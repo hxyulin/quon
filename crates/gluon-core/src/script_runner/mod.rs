@@ -154,12 +154,12 @@ fn finalize(mut raw: RawBuildModel, project_root: &Path) -> Result<BuildModel> {
         let lowered = crate::kconfig::load_kconfig(&abs).map_err(Error::Diagnostics)?;
 
         for (name, opt) in lowered.options {
-            if raw.config_options.contains_key(&name) {
+            let (_, inserted) = raw.config_options.insert(name.clone(), opt);
+            if !inserted {
                 return Err(Error::Diagnostics(vec![Diagnostic::error(format!(
                     "config option '{name}' from .kconfig conflicts with an existing declaration"
                 ))]));
             }
-            raw.config_options.insert(name, opt);
         }
         for (name, preset) in lowered.presets {
             if raw.presets.contains_key(&name) {
