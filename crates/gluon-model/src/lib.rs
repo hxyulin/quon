@@ -9,6 +9,7 @@ pub mod handle;
 pub mod intern;
 pub mod kconfig;
 pub mod raw;
+pub mod raw_defs;
 pub mod resolved;
 pub mod source;
 
