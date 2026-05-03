@@ -794,8 +794,14 @@ fn format_partition_in_place(
     // hadris error attributes the failure to the partition.
     let scoped_name = format!("{}::partition({})", image.name, rp.def.name);
 
-    formatter::select_formatter(&rp.def.fs_type, &image.name, &rp.def.name)?
-        .format_in_place(image_path, start_byte, len_bytes, &scoped_name, resolved_entries, stdout)
+    formatter::select_formatter(&rp.def.fs_type, &image.name, &rp.def.name)?.format_in_place(
+        image_path,
+        start_byte,
+        len_bytes,
+        &scoped_name,
+        resolved_entries,
+        stdout,
+    )
 }
 
 fn describe_raw_source(s: &RawSource) -> String {

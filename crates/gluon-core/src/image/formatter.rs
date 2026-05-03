@@ -112,7 +112,10 @@ mod tests {
         );
         // FAT32 will error trying to open the nonexistent path —
         // that confirms we got the FAT32 impl, not the stub.
-        assert!(result.is_err(), "expected FAT32 to fail on nonexistent path");
+        assert!(
+            result.is_err(),
+            "expected FAT32 to fail on nonexistent path"
+        );
     }
 
     #[test]

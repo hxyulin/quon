@@ -281,13 +281,7 @@ mod tests {
         };
         let mut args: Vec<OsString> = Vec::new();
         UefiAssembler
-            .assemble(
-                &mut args,
-                &r,
-                Path::new("/ignored"),
-                Some(&ovmf),
-                false,
-            )
+            .assemble(&mut args, &r, Path::new("/ignored"), Some(&ovmf), false)
             .unwrap();
         let a = args_to_strings(&args);
         let code_arg = "if=pflash,format=raw,readonly=on,file=/opt/ovmf/CODE.fd";
@@ -319,13 +313,7 @@ mod tests {
         };
         let mut args: Vec<OsString> = Vec::new();
         UefiAssembler
-            .assemble(
-                &mut args,
-                &r,
-                Path::new("/k"),
-                Some(&ovmf),
-                false,
-            )
+            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
             .unwrap();
         let a = args_to_strings(&args);
         let expected = format!("format=raw,file=fat:rw:{}", esp.display());
@@ -352,13 +340,7 @@ mod tests {
         };
         let mut args: Vec<OsString> = Vec::new();
         UefiAssembler
-            .assemble(
-                &mut args,
-                &r,
-                Path::new("/k"),
-                Some(&ovmf),
-                false,
-            )
+            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
             .unwrap();
         let a = args_to_strings(&args);
         let expected = format!("format=raw,file={}", img.display());
@@ -384,13 +366,7 @@ mod tests {
         };
         let mut args: Vec<OsString> = Vec::new();
         UefiAssembler
-            .assemble(
-                &mut args,
-                &r,
-                Path::new("/k"),
-                Some(&ovmf),
-                false,
-            )
+            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
             .unwrap();
         let a = args_to_strings(&args);
         // UEFI hybrid: a plain raw drive (no `if=ide` — OVMF probes any
@@ -413,13 +389,7 @@ mod tests {
         };
         let mut args: Vec<OsString> = Vec::new();
         let err = UefiAssembler
-            .assemble(
-                &mut args,
-                &r,
-                Path::new("/k"),
-                Some(&ovmf),
-                false,
-            )
+            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
             .unwrap_err();
         assert!(matches!(err, Error::EspMissing { .. }));
     }
