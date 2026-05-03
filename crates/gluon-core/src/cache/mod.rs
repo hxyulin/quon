@@ -48,6 +48,7 @@ pub mod manifest;
 pub use depinfo::parse_depfile;
 pub use hash::{hash_argv, sha256_bytes, sha256_file};
 pub use lock::CacheLock;
+pub use composite::{CompositeEntry, CompositeQuery, CompositeRecord, composite_aux_hash};
 pub use manifest::{CacheManifest, FileFingerprint, RustcEntry};
 
 use crate::error::{Error, Result};
@@ -314,6 +315,92 @@ impl Cache {
         self.manifest.rustc.insert(rec.key, entry);
         self.dirty = true;
         Ok(())
+    }
+
+    /// Check whether the composite entry (if any) for `q.key` is still
+    /// valid given the current filesystem and the query's expected
+    /// inputs / aux state.
+    ///
+    /// Algorithm mirrors [`Cache::is_fresh`] minus the rustc-specific
+    /// `argv_hash` check, plus an `aux_hash` equality check. The
+    /// per-input two-tier (mtime+size fast path, sha256 slow-path
+    /// fallback) is identical to the rustc-entry path, including the
+    /// in-place mtime refresh on a successful slow-path match.
+    ///
+    /// Takes `&mut self` for the same reason `is_fresh` does — the
+    /// slow-path SHA-256 check can refresh a source's recorded mtime
+    /// in place, marking the cache dirty.
+    pub fn is_composite_fresh(&mut self, q: &crate::cache::composite::CompositeQuery<'_>) -> bool {
+        let Some(entry) = self.manifest.composite.get(q.key) else {
+            return false;
+        };
+        if entry.aux_hash != q.aux_hash {
+            return false;
+        }
+        if !q.output_path.exists() {
+            return false;
+        }
+
+        // Set comparison — same canonicalisation as `is_fresh` to defeat
+        // duplicate-path queries.
+        let query_set: BTreeSet<&Path> = q.inputs.iter().map(|p| p.as_path()).collect();
+        if query_set.len() != entry.inputs.len() {
+            return false;
+        }
+        for src in &query_set {
+            if !entry.inputs.contains_key(*src) {
+                return false;
+            }
+        }
+
+        // Per-input freshness with slow-path fallback.
+        let mut refreshes: Vec<(PathBuf, u128, u64)> = Vec::new();
+        for &src in &query_set {
+            let meta = match std::fs::metadata(src) {
+                Ok(m) => m,
+                Err(_) => return false,
+            };
+            let Some(fp) = entry.inputs.get(src) else {
+                return false;
+            };
+            let cur_size = meta.len();
+            let cur_mtime = match meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            {
+                Some(d) => d.as_nanos(),
+                None => return false,
+            };
+            if cur_mtime == fp.mtime_ns && cur_size == fp.size {
+                continue;
+            }
+            let Some(stored_hash) = fp.sha256 else {
+                return false;
+            };
+            let cur_hash = match sha256_file(src) {
+                Ok(h) => h,
+                Err(_) => return false,
+            };
+            if cur_hash != stored_hash {
+                return false;
+            }
+            refreshes.push((src.to_path_buf(), cur_mtime, cur_size));
+        }
+
+        if !refreshes.is_empty()
+            && let Some(entry_mut) = self.manifest.composite.get_mut(q.key)
+        {
+            for (src, mtime_ns, size) in refreshes {
+                if let Some(fp) = entry_mut.inputs.get_mut(&src) {
+                    fp.mtime_ns = mtime_ns;
+                    fp.size = size;
+                }
+            }
+            self.dirty = true;
+        }
+
+        true
     }
 
     #[cfg(test)]
@@ -629,6 +716,25 @@ mod tests {
 
         let sources = vec![a.clone(), a];
         assert!(cache.is_fresh(&basic_query("k", argv, &sources, &out)));
+    }
+
+    #[test]
+    fn composite_cold_miss() {
+        use crate::cache::composite::CompositeQuery;
+
+        let fx = Fixture::new();
+        let a = fx.write("a.bin", b"hello");
+        let out = fx.touch_output("out.img");
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        let inputs = vec![a.clone()];
+        let q = CompositeQuery {
+            key: "image:boot",
+            inputs: &inputs,
+            aux_hash: Some([0xAA; 32]),
+            output_path: &out,
+        };
+        assert!(!cache.is_composite_fresh(&q));
     }
 
     #[test]

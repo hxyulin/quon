@@ -10,8 +10,9 @@
 
 use crate::cache::manifest::FileFingerprint;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One composite cache entry. Keyed in [`CacheManifest::composite`] by a
 /// caller-chosen string (e.g. `"sysroot:x86_64-unknown-none"`,
@@ -33,8 +34,6 @@ pub struct CompositeEntry {
     /// Informational; not used in freshness checks.
     pub built_at: u128,
 }
-
-use std::path::Path;
 
 /// Input for [`crate::cache::Cache::is_composite_fresh`]. Grouped into
 /// a struct because the four fields must stay in sync — passing them
@@ -65,8 +64,6 @@ pub struct CompositeRecord {
     pub aux_hash: Option<[u8; 32]>,
     pub output_path: PathBuf,
 }
-
-use sha2::{Digest, Sha256};
 
 /// Domain-separated SHA-256 over (tag, len-prefixed segments...).
 ///
