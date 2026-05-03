@@ -7,11 +7,21 @@
 use super::CmdContext;
 use crate::cli::RunArgs;
 use anyhow::{Result, bail};
+use gluon_core::Error as CoreError;
 use gluon_core::model::BootMode;
 use std::time::Duration;
 
 /// Execute the `gluon run` pipeline against the prepared context.
 pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
+    // Reject an absent qemu block at the CLI boundary so the user gets
+    // a targeted diagnostic ("you forgot a `cfg.qemu(...)` block")
+    // instead of a panic from inside `gluon_core::run`. `model.qemu`
+    // is `Option<QemuDef>` since Stage 4 Phase G — the runner inside
+    // gluon-core relies on the CLI to do this gating before calling in.
+    if ctx.model.qemu.is_none() {
+        return Err(CoreError::QemuNotConfigured.into());
+    }
+
     // CLI boot-mode override. The three flags are mutually exclusive
     // in the clap schema; if none are set, we pass `None` so the
     // profile's own `qemu_boot_mode(...)` (or project-level

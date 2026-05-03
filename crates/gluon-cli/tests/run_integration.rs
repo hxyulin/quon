@@ -257,6 +257,36 @@ fn gluon_run_cli_uefi_flag_overrides_direct_profile() {
 }
 
 #[test]
+fn gluon_run_without_qemu_block_errors_clearly() {
+    // The `minimal` fixture declares a `cfg.qemu(...)` block; strip it
+    // and confirm `gluon run` rejects the config at the CLI boundary
+    // with the `QemuNotConfigured` diagnostic. We use `--dry-run` so
+    // the test is hermetic (no rustc/QEMU); the gating happens before
+    // any of that machinery anyway, but `--dry-run` is also the cheapest
+    // way to make sure a regression that moved the check past the
+    // build step would still fail this test.
+    let (_tmp, fixture) = setup_fixture("minimal");
+    strip_qemu_block(&fixture);
+
+    let output = gluon_command(&fixture)
+        .args(["run", "--dry-run"])
+        .output()
+        .expect("spawn gluon run");
+
+    assert!(
+        !output.status.success(),
+        "gluon run should fail when cfg.qemu(...) is missing, status={:?}, stdout=\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires a `cfg.qemu(...)` block"),
+        "expected QemuNotConfigured wording in stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn gluon_run_uefi_without_ovmf_errors_loudly() {
     // `minimal-uefi` declares boot_mode uefi but its qemu() block
     // does not set explicit ovmf paths. With env vars scrubbed
@@ -372,6 +402,43 @@ fn rewrite_qemu_binary(fixture: &Path, new_binary: &str) {
         original, rewritten,
         "expected fixture to contain 'qemu-system-x86_64' literal so the \
          test can rewrite it; check tests/fixtures/minimal/gluon.rs"
+    );
+    fs::write(&rs_path, rewritten).expect("write gluon.rs");
+}
+
+/// Strip the entire `cfg.qemu(...)` chained call from the fixture's
+/// `gluon.rs`, returning a `gluon.rs` that builds and resolves but
+/// has no QEMU configuration. Used to exercise the
+/// `Error::QemuNotConfigured` CLI-boundary check.
+///
+/// The fixture's qemu chain spans multiple lines and ends with
+/// `.serial_stdio();`. Rather than fight with newline-sensitive regex,
+/// we slice between two known anchors (`cfg.qemu(` and the next
+/// semicolon at column zero or as the line's last non-whitespace char).
+/// The minimal fixture is shaped specifically to make this trivial.
+fn strip_qemu_block(fixture: &Path) {
+    let rs_path = fixture.join("gluon.rs");
+    let original = fs::read_to_string(&rs_path).expect("read gluon.rs");
+    let start = original
+        .find("cfg.qemu(")
+        .expect("fixture must contain a `cfg.qemu(` call to strip");
+    // Find the first `;` after the `cfg.qemu(` opening. The chain
+    // ending in `;` terminates the statement; everything between is
+    // method calls + whitespace. Tolerant of multi-line chains.
+    let end_rel = original[start..]
+        .find(';')
+        .expect("cfg.qemu(...) statement must end with `;`");
+    let end = start + end_rel + 1; // include the `;`
+    let mut rewritten = String::with_capacity(original.len());
+    rewritten.push_str(&original[..start]);
+    rewritten.push_str(&original[end..]);
+    assert_ne!(
+        original, rewritten,
+        "strip_qemu_block produced an unchanged file — fixture shape may have drifted"
+    );
+    assert!(
+        !rewritten.contains("cfg.qemu("),
+        "strip_qemu_block left a `cfg.qemu(` behind:\n{rewritten}"
     );
     fs::write(&rs_path, rewritten).expect("write gluon.rs");
 }

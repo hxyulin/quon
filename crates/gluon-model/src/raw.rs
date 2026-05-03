@@ -22,12 +22,11 @@ use std::path::PathBuf;
 ///
 /// Types that hold no cross-references are reused verbatim: targets,
 /// rules, external deps, images, presets, project, qemu, config
-/// options. Singleton `bootloader` is now `Option<RawBootloaderDef>`
-/// — `Some` means the user wrote a `cfg.bootloader(...)` block, `None`
-/// means they didn't. Duplicate detection at the builder layer reads
-/// `field.is_some()` rather than a sidecar `*_was_set` flag (Phase G
-/// of Stage 4 retired the bootloader sidecar). The `qemu` field is
-/// next on the chopping block.
+/// options. Singleton `bootloader` and `qemu` are `Option<...>` —
+/// `Some` means the user wrote the corresponding `cfg.<x>(...)` block,
+/// `None` means they didn't. Duplicate detection at the builder layer
+/// reads `field.is_some()` rather than a sidecar `*_was_set` flag
+/// (Phase G of Stage 4 retired the sidecars).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RawBuildModel {
     pub project: Option<ProjectDef>,
@@ -48,14 +47,10 @@ pub struct RawBuildModel {
     pub images: Arena<ImageDef>,
     #[serde(default)]
     pub build_steps: Arena<RawBuildStepDef>,
-    #[serde(default)]
-    pub qemu: QemuDef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu: Option<QemuDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
-    /// Singleton-set sidecar for `qemu` — dies in the next sub-task when
-    /// `qemu` becomes `Option<QemuDef>`.
-    #[serde(skip)]
-    pub qemu_was_set: bool,
 }
 
 #[cfg(test)]
@@ -101,17 +96,22 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_flags_skip_serde() {
-        // Only `qemu_was_set` remains — `bootloader_was_set` was retired in
-        // the first half of Phase G when `bootloader` became
-        // `Option<RawBootloaderDef>`. This test will collapse entirely when
-        // `qemu` follows the same path.
-        let raw = RawBuildModel {
-            qemu_was_set: true,
-            ..Default::default()
-        };
+    fn singleton_options_default_to_none() {
+        // Phase G of Stage 4: bootloader and qemu are `Option<...>` and
+        // their absence is communicated by `None`, not by sidecar
+        // `*_was_set` flags.  `skip_serializing_if = "Option::is_none"`
+        // keeps the wire format empty when nothing is configured.
+        let raw = RawBuildModel::default();
+        assert!(raw.bootloader.is_none());
+        assert!(raw.qemu.is_none());
         let json = serde_json::to_string(&raw).expect("serde");
-        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert!(!de.qemu_was_set);
+        assert!(
+            !json.contains("\"qemu\""),
+            "absent qemu must not be serialized, got: {json}"
+        );
+        assert!(
+            !json.contains("\"bootloader\""),
+            "absent bootloader must not be serialized, got: {json}"
+        );
     }
 }

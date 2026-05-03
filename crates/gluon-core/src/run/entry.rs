@@ -144,13 +144,26 @@ pub fn run(
 
     // Step 3: resolve QEMU config.
     //
+    // `model.qemu` is `Option<QemuDef>` since Phase G of Stage 4: the CLI
+    // is responsible for rejecting an absent qemu block at the entry
+    // point with `Error::QemuNotConfigured`. By the time we reach `run`
+    // the field must be `Some` — `expect` documents that contract for
+    // future readers and produces a panic, not a silent default, if the
+    // CLI ever forgets the check. Refactoring the function signature to
+    // accept `&QemuDef` directly is the cleaner long-term shape, but
+    // that's a wider blast radius than this phase needs.
+    //
     // We pass the target's spec as the triple because for builtin
     // targets it is the triple (`x86_64-unknown-none`), and for custom
     // JSON specs it's the spec path — which users typically name with
     // the arch prefix, so the arch-prefix match in
     // `default_binary_for_target` still has a reasonable shot.
+    let qemu_def = model
+        .qemu
+        .as_ref()
+        .expect("CLI rejects an absent qemu block before reaching run()");
     let mut resolved_qemu = resolve_qemu(
-        &model.qemu,
+        qemu_def,
         profile,
         &target.spec,
         opts.boot_mode_override,
@@ -165,7 +178,7 @@ pub fn run(
     // `image_paths` map, falling back to `BuildLayout::image_path` in
     // dry-run / `--no-build` modes (where the build didn't run, so the
     // map is empty).
-    if let Some(disk_source) = model.qemu.disk.clone() {
+    if let Some(disk_source) = qemu_def.disk.clone() {
         let image_paths = match build_summary.as_ref() {
             Some(s) => s.image_paths.clone(),
             None => {
@@ -247,7 +260,7 @@ pub fn run(
     // Step 4: OVMF (only when the final boot mode is UEFI).
     let ovmf = if resolved_qemu.boot_mode == BootMode::Uefi {
         let ovmf_ctx = OvmfResolveCtx::from_env(ctx.layout.root(), &profile.name);
-        Some(resolve_ovmf(&model.qemu, &ovmf_ctx)?)
+        Some(resolve_ovmf(qemu_def, &ovmf_ctx)?)
     } else {
         None
     };

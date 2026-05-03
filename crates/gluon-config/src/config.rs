@@ -1,7 +1,7 @@
 use gluon_model::{
     BootloaderKind, ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef,
-    PresetDef, ProjectDef, RawBootloaderDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef,
-    RawProfileDef, RuleDef, RuleHandler, TargetDef, TristateVal,
+    PresetDef, ProjectDef, QemuDef, RawBootloaderDef, RawBuildModel, RawBuildStepDef, RawEspDef,
+    RawGroupDef, RawProfileDef, RuleDef, RuleHandler, TargetDef, TristateVal,
 };
 use crate::builders::{
     BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
@@ -228,14 +228,19 @@ impl Config {
     /// This mirrors the engine's exact diagnostic string:
     /// `"qemu is defined more than once"`.
     pub fn qemu(&mut self, program: &str) -> QemuBuilder<'_> {
-        let state = if self.raw.qemu_was_set {
+        let state = if self.raw.qemu.is_some() {
             // Mirror engine wording verbatim.
             self.diagnostics
                 .push(ConfigError::new("qemu is defined more than once".to_string()));
             BuilderState::Duplicate { name: program.into(), span: None }
         } else {
-            self.raw.qemu_was_set = true;
-            self.raw.qemu.binary = Some(program.into());
+            // Allocate the `Some(QemuDef)` payload here so the chained
+            // builder methods can `.as_mut().unwrap()` safely (only the
+            // `Valid` arm reaches them).
+            self.raw.qemu = Some(QemuDef {
+                binary: Some(program.into()),
+                ..Default::default()
+            });
             BuilderState::Valid { state: (), name: program.into(), span: None }
         };
         QemuBuilder { cfg: self, state }

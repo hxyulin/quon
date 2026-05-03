@@ -49,9 +49,15 @@ pub struct BuildModel {
     /// other build-step inputs).
     #[serde(default)]
     pub build_steps: Arena<BuildStepDef>,
-    /// Stub QEMU configuration; details land in a later sub-project.
-    #[serde(default)]
-    pub qemu: QemuDef,
+    /// QEMU configuration. `None` when the `gluon.rs` did not declare a
+    /// `cfg.qemu(...)` block. `gluon run` requires this to be `Some`
+    /// — the CLI rejects an absent qemu block at the entry point with
+    /// `gluon_core::Error::QemuNotConfigured` so the diagnostic points
+    /// the user at the missing config rather than crashing deeper in
+    /// argv assembly. `gluon build` and other non-run subcommands work
+    /// fine with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qemu: Option<QemuDef>,
 }
 
 /// Project metadata.

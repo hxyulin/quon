@@ -107,6 +107,9 @@ pub enum Error {
     #[error("profile '{profile}' has no boot_binary set — required by `gluon run`")]
     NoBootBinary { profile: String },
 
+    #[error("`gluon run` requires a `cfg.qemu(...)` block in your `gluon.rs`; none was found")]
+    QemuNotConfigured,
+
     #[error(
         "QEMU binary '{binary}' not found on PATH — install QEMU or set a different binary via `qemu(\"<path>\")`"
     )]

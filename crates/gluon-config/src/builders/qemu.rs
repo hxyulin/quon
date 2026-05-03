@@ -21,10 +21,18 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// Apply `f` to the `QemuDef` if this builder is `Valid`.
     ///
     /// Short-circuits silently when in `Duplicate` state so the first
-    /// call's values are never overwritten by a second call.
+    /// call's values are never overwritten by a second call. The
+    /// `as_mut().unwrap()` is safe because `Config::qemu` populates
+    /// `Some(QemuDef)` before returning a `Valid` builder; `Duplicate`
+    /// short-circuits and never touches the field.
     fn modify<F: FnOnce(&mut gluon_model::QemuDef)>(&mut self, f: F) {
         if !self.state.is_duplicate() {
-            f(&mut self.cfg.raw.qemu);
+            f(self
+                .cfg
+                .raw
+                .qemu
+                .as_mut()
+                .expect("Valid qemu builder always has Some(QemuDef)"));
         }
     }
 
@@ -129,14 +137,32 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// second pushes a diagnostic (mirroring the engine's behaviour).
     pub fn esp_dir(self, path: impl Into<PathBuf>) -> Self {
         if !self.state.is_duplicate() {
-            if self.cfg.raw.qemu.esp.is_some() {
+            // `as_ref().unwrap()`: Valid builders always carry Some(QemuDef).
+            // We read `esp` first (immutable borrow), then drop that borrow
+            // before either pushing a diagnostic on `self.cfg.diagnostics`
+            // or mutating `self.cfg.raw.qemu`. Doing it in one expression
+            // would conflict because both targets sit under `self.cfg`.
+            let already_set = self
+                .cfg
+                .raw
+                .qemu
+                .as_ref()
+                .expect("Valid qemu builder always has Some(QemuDef)")
+                .esp
+                .is_some();
+            if already_set {
                 // Mirror engine wording verbatim.
                 self.cfg.diagnostics.push(ConfigError::new(
                     "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
                 ));
             } else {
                 let p = path.into();
-                self.cfg.raw.qemu.esp = Some(EspSource::Dir(p));
+                self.cfg
+                    .raw
+                    .qemu
+                    .as_mut()
+                    .expect("Valid qemu builder always has Some(QemuDef)")
+                    .esp = Some(EspSource::Dir(p));
             }
         }
         self
@@ -148,14 +174,27 @@ impl<'cfg> QemuBuilder<'cfg> {
     /// second pushes a diagnostic.
     pub fn esp_image(self, path: impl Into<PathBuf>) -> Self {
         if !self.state.is_duplicate() {
-            if self.cfg.raw.qemu.esp.is_some() {
+            let already_set = self
+                .cfg
+                .raw
+                .qemu
+                .as_ref()
+                .expect("Valid qemu builder always has Some(QemuDef)")
+                .esp
+                .is_some();
+            if already_set {
                 // Mirror engine wording verbatim.
                 self.cfg.diagnostics.push(ConfigError::new(
                     "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
                 ));
             } else {
                 let p = path.into();
-                self.cfg.raw.qemu.esp = Some(EspSource::Image(p));
+                self.cfg
+                    .raw
+                    .qemu
+                    .as_mut()
+                    .expect("Valid qemu builder always has Some(QemuDef)")
+                    .esp = Some(EspSource::Image(p));
             }
         }
         self
@@ -196,7 +235,7 @@ mod tests {
             .ovmf_vars("/opt/ovmf/VARS.fd")
             .esp_dir("./build/esp");
 
-        let q = &cfg.raw.qemu;
+        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
         assert_eq!(q.binary.as_deref(), Some("qemu-system-x86_64"));
         assert_eq!(q.machine.as_deref(), Some("q35"));
         assert_eq!(q.memory_mb, Some(512));
@@ -213,13 +252,14 @@ mod tests {
         let mut cfg = Config::new();
         cfg.qemu("a").machine("q35");
         cfg.qemu("b").machine("pc");
+        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
         assert_eq!(
-            cfg.raw.qemu.binary.as_deref(),
+            q.binary.as_deref(),
             Some("a"),
             "first call's binary preserved"
         );
         assert_eq!(
-            cfg.raw.qemu.machine.as_deref(),
+            q.machine.as_deref(),
             Some("q35"),
             "second call's machine must NOT clobber the first"
         );
@@ -233,7 +273,7 @@ mod tests {
         cfg.qemu("a").boot_mode("legacy");
         assert!(cfg.diagnostics.iter().any(|d| d.message.contains("legacy")));
         assert_eq!(
-            cfg.raw.qemu.boot_mode,
+            cfg.raw.qemu.as_ref().expect("qemu populated").boot_mode,
             None,
             "unknown boot_mode must NOT be silently ignored AND must not be set"
         );
@@ -244,7 +284,7 @@ mod tests {
         let mut cfg = Config::new();
         cfg.qemu("a").esp_dir("a").esp_image("b.img");
         // First call wins.
-        match &cfg.raw.qemu.esp {
+        match &cfg.raw.qemu.as_ref().expect("qemu populated").esp {
             Some(EspSource::Dir(p)) => assert_eq!(p, &PathBuf::from("a")),
             other => panic!("expected EspSource::Dir(\"a\"), got {other:?}"),
         }
@@ -261,20 +301,22 @@ mod tests {
             .extra_args(&["-display", "none"])
             .extra_args(&["-no-reboot"]);
         assert_eq!(
-            cfg.raw.qemu.extra_args,
+            cfg.raw.qemu.as_ref().expect("qemu populated").extra_args,
             vec!["-display".to_string(), "none".to_string(), "-no-reboot".to_string()],
         );
         assert!(cfg.diagnostics.is_empty());
     }
 
     #[test]
-    fn qemu_was_set_does_not_serialize() {
-        let mut cfg = Config::new();
-        cfg.qemu("q").machine("q35");
+    fn unset_qemu_is_none() {
+        // Singleton-set is now "field is Some(...)". A fresh config that
+        // never called `qemu(...)` round-trips with `qemu` omitted.
+        let cfg = Config::new();
+        assert!(cfg.raw.qemu.is_none());
         let json = serde_json::to_string(&cfg.raw).unwrap();
         assert!(
-            !json.contains("qemu_was_set"),
-            "qemu_was_set must be #[serde(skip)] — not serialized"
+            !json.contains("\"qemu\""),
+            "absent qemu must not be serialized, got: {json}"
         );
     }
 }

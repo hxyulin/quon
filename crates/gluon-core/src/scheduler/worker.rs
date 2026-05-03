@@ -486,6 +486,7 @@ fn error_message(e: &Error) -> String {
         // Display impl so they still render sensibly if they ever do.
         other @ (Error::NoBootBinary { .. }
         | Error::QemuBinaryNotFound { .. }
+        | Error::QemuNotConfigured
         | Error::OvmfNotFound { .. }
         | Error::EspMissing { .. }
         | Error::QemuTimeout
