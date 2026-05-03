@@ -389,8 +389,8 @@ pub(crate) fn build_rustc_command(
                 crate_name, crate_ref.target
             ))
         })?;
-        if let Some(s) = &target.panic_strategy {
-            builder.raw_arg("-C").raw_arg(format!("panic={s}"));
+        if let Some(s) = target.panic_strategy {
+            builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
         }
     }
 

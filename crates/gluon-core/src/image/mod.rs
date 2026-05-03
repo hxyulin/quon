@@ -833,7 +833,8 @@ mod tests {
     use crate::cache::Cache;
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
-        BuildModel, ImageEntry, ImageSource, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef,
+        BuildModel, ImageEntry, ImageSource, PanicStrategy, ProjectDef, ResolvedConfig,
+        ResolvedProfile, TargetDef,
     };
     use std::sync::Arc;
 
@@ -865,7 +866,7 @@ mod tests {
                 name: "x86_64-unknown-none".into(),
                 spec: "x86_64-unknown-none".into(),
                 builtin: true,
-                panic_strategy: Some("abort".into()),
+                panic_strategy: Some(PanicStrategy::Abort),
                 span: None,
             },
         );

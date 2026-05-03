@@ -248,8 +248,8 @@ fn build_sysroot_crate(
     //   error: the crate ... is compiled with a different panic strategy
     // Emit `-C panic=<s>` before the extra-filename arg so the canonical
     // token order in args (and therefore the cache hash) stays stable.
-    if let Some(s) = &target.panic_strategy {
-        builder.raw_arg("-C").raw_arg(format!("panic={s}"));
+    if let Some(s) = target.panic_strategy {
+        builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
     }
 
     // compiler_builtins needs two cfgs to build standalone:

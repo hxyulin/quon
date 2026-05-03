@@ -337,7 +337,7 @@ pub fn generate_rust_project_json_with_script(
 mod tests {
     use super::*;
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, GroupDef, ProjectDef, ResolvedConfig,
+        BuildModel, CrateDef, CrateType, DepDef, GroupDef, PanicStrategy, ProjectDef, ResolvedConfig,
         ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::path::PathBuf;
@@ -368,7 +368,7 @@ mod tests {
                 name: "x86_64-unknown-none".into(),
                 spec: "x86_64-unknown-none".into(),
                 builtin: true,
-                panic_strategy: Some("abort".into()),
+                panic_strategy: Some(PanicStrategy::Abort),
                 span: None,
             },
         );

@@ -272,8 +272,8 @@ pub fn ensure_config_crate(
         .extern_crate("alloc", &sysroot_lib.join("liballoc-gluon-alloc.rlib"));
 
     // Panic strategy — must match the sysroot and downstream crates.
-    if let Some(s) = &target.panic_strategy {
-        builder.raw_arg("-C").raw_arg(format!("panic={s}"));
+    if let Some(s) = target.panic_strategy {
+        builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
     }
 
     // extra-filename LAST so the canonical token order (and therefore the

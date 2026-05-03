@@ -80,6 +80,24 @@ pub struct ProjectDef {
     pub default_profile: Option<String>,
 }
 
+/// Panic strategy for a target — wire format is the lowercase rustc
+/// spelling so existing JSON model dumps round-trip unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PanicStrategy {
+    Abort,
+    Unwind,
+}
+
+impl PanicStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Abort => "abort",
+            Self::Unwind => "unwind",
+        }
+    }
+}
+
 /// A compilation target definition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TargetDef {
@@ -92,12 +110,13 @@ pub struct TargetDef {
     /// `-C panic=<strategy>` is passed to every rustc invocation that
     /// builds a crate for this target — including sysroot crates.
     ///
-    /// Bare-metal targets almost always want `Some("abort")`. Mixing panic
-    /// strategies across sysroot rlibs and downstream crates fails at link
-    /// time with `error: the crate ... is compiled with a different panic
-    /// strategy`, so this must be consistent across all crates for a target.
+    /// Bare-metal targets almost always want `Some(PanicStrategy::Abort)`.
+    /// Mixing panic strategies across sysroot rlibs and downstream crates
+    /// fails at link time with `error: the crate ... is compiled with a
+    /// different panic strategy`, so this must be consistent across all
+    /// crates for a target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub panic_strategy: Option<String>,
+    pub panic_strategy: Option<PanicStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
 }
@@ -1172,6 +1191,14 @@ mod tests {
             ImageSource::Crate(name) => assert_eq!(name, "bootloader"),
             other => panic!("expected ImageSource::Crate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn panic_strategy_serde_lowercase() {
+        let json = serde_json::to_string(&PanicStrategy::Abort).unwrap();
+        assert_eq!(json, r#""abort""#);
+        let de: PanicStrategy = serde_json::from_str(r#""unwind""#).unwrap();
+        assert_eq!(de, PanicStrategy::Unwind);
     }
 
     #[test]

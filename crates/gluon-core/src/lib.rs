@@ -383,7 +383,7 @@ pub fn configure(
 mod tests {
     use super::*;
     use crate::cache::Cache;
-    use gluon_model::{BuildModel, ProjectDef, ResolvedProfile, TargetDef};
+    use gluon_model::{BuildModel, PanicStrategy, ProjectDef, ResolvedProfile, TargetDef};
     use std::fs;
     use std::sync::Arc;
 
@@ -479,7 +479,7 @@ mod tests {
                 name: "x86_64-unknown-none".into(),
                 spec: "x86_64-unknown-none".into(),
                 builtin: true,
-                panic_strategy: Some("abort".into()),
+                panic_strategy: Some(PanicStrategy::Abort),
                 span: None,
             },
         );
@@ -548,7 +548,7 @@ mod tests {
                 name: "x86_64-unknown-none".into(),
                 spec: "x86_64-unknown-none".into(),
                 builtin: true,
-                panic_strategy: Some("abort".into()),
+                panic_strategy: Some(PanicStrategy::Abort),
                 span: None,
             },
         );

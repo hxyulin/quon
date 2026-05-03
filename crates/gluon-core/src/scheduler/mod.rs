@@ -420,7 +420,9 @@ mod tests {
     use super::*;
     use crate::cache::Cache;
     use crate::compile::{BuildLayout, RustcInfo};
-    use gluon_model::{BuildModel, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef};
+    use gluon_model::{
+        BuildModel, PanicStrategy, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef,
+    };
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -452,7 +454,7 @@ mod tests {
             name: "x86_64-unknown-none".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
-            panic_strategy: Some("abort".into()),
+            panic_strategy: Some(PanicStrategy::Abort),
             span: None,
         };
         let (target_handle, _) = model.targets.insert("x86_64-unknown-none".into(), target);
@@ -691,7 +693,7 @@ mod tests {
             name: "x86_64-unknown-none".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
-            panic_strategy: Some("abort".into()),
+            panic_strategy: Some(PanicStrategy::Abort),
             span: None,
         };
         let (target_handle, _) = model

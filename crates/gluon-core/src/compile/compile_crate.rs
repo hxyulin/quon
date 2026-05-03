@@ -275,8 +275,8 @@ mod tests {
     use crate::compile::compile_utils::normalize_crate_name;
     use crate::compile::{ArtifactMap, BuildLayout, RustcCommandBuilder, RustcInfo};
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, DepResolution, GroupDef, Handle, ProjectDef,
-        ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
+        BuildModel, CrateDef, CrateType, DepDef, DepResolution, GroupDef, Handle, PanicStrategy,
+        ProjectDef, ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::borrow::Cow;
     use std::collections::BTreeMap;
@@ -332,12 +332,12 @@ mod tests {
         }
     }
 
-    fn make_target_with_panic(name: &str, spec: &str, strategy: &str) -> TargetDef {
+    fn make_target_with_panic(name: &str, spec: &str, strategy: PanicStrategy) -> TargetDef {
         TargetDef {
             name: name.into(),
             spec: spec.into(),
             builtin: true,
-            panic_strategy: Some(strategy.into()),
+            panic_strategy: Some(strategy),
             span: None,
         }
     }
@@ -1003,7 +1003,7 @@ mod tests {
         let mut model = BuildModel::default();
         let th = insert_target(
             &mut model,
-            make_target_with_panic("x86", "x86_64-unknown-none", "abort"),
+            make_target_with_panic("x86", "x86_64-unknown-none", PanicStrategy::Abort),
         );
         let ch = insert_crate(
             &mut model,
