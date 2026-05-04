@@ -20,25 +20,31 @@ pub struct BuildModel {
     pub rules: Arena<RuleDef>,
     pub pipelines: Arena<PipelineDef>,
     pub external_deps: Arena<ExternalDepDef>,
-    /// Map of external dep name → absolute path of the rlib (for libs)
-    /// or dylib (for proc-macros) that satisfies it.
+    /// Map of `(target, cargo-target-name)` → absolute path of the
+    /// rlib (for libs) or dylib (for proc-macros) that satisfies it.
     ///
     /// Populated by `vendor::auto_register_vendored_deps` from
     /// `gluon.lock` after `gluon vendor` has run. Consumed by the
     /// compile path: `compile::command_builder` looks up each
-    /// `DepResolution::External(handle)` against this map and emits
-    /// `--extern <alias>=<path>` for the consumer's rustc invocation.
+    /// `DepResolution::External(handle)` against this map (using the
+    /// dep's declared target and the cargo-normalised crate name) and
+    /// emits `--extern <alias>=<path>` for the consumer's rustc
+    /// invocation.
     ///
-    /// Empty for projects with no external deps, and empty when
-    /// `gluon vendor` has not been run yet — the compile path then
-    /// errors with a "run `gluon vendor`" diagnostic.
+    /// `target = Host` covers the cargo-as-builder pipeline (host
+    /// proc-macros, host helper crates). Cross-target keys cover the
+    /// gluon-driven rustc pipeline added in v2 (e.g. `bitflags`
+    /// compiled against the kernel target with the gluon-built
+    /// sysroot).
     ///
-    /// V1 only stores host-target artifacts. Cross-target external
-    /// deps are rejected at registration time; that's a future feature
-    /// (it requires either `-Z build-std` for cargo or pre-built
-    /// per-target sysroots).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub external_artifacts: BTreeMap<String, PathBuf>,
+    /// Runtime-only — never serialised. The on-disk source of truth
+    /// is `gluon.lock`; the in-memory map is a load-time cache that
+    /// the compile path consults. `#[serde(skip)]` keeps the model's
+    /// canonical JSON shape stable across vendor reruns and avoids
+    /// the JSON-string-key constraint a `BTreeMap` with a struct key
+    /// would otherwise impose.
+    #[serde(skip)]
+    pub external_artifacts: BTreeMap<ExternalArtifactKey, PathBuf>,
     /// EFI System Partition declarations. Each entry describes a set of
     /// compiled artifacts to be assembled into a FAT-layout directory
     /// under `build/cross/<target>/<profile>/esp/<name>/`. Consumed by
@@ -234,12 +240,38 @@ pub struct ProfileDef {
 /// resolve time from `rustc -vV`. `Cross(Handle<TargetDef>)` is a
 /// user-defined target whose name resolves to a handle in the
 /// `targets` arena.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Implements `Ord`/`Hash` so it can serve as a `BTreeMap`/`HashMap`
+/// key — used by `BuildModel::external_artifacts` to disambiguate
+/// host-built and cross-built copies of the same crate name.
+#[derive(
+    Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "handle")]
 pub enum TargetSpec {
     #[default]
     Host,
     Cross(Handle<TargetDef>),
+}
+
+/// Composite key for `BuildModel::external_artifacts`.
+///
+/// `target` is the compile target the artifact was built against.
+/// `cargo_target_name` is the cargo-normalised crate name (hyphens
+/// replaced with underscores: `proc-macro2` → `proc_macro2`). The
+/// compile path normalises user-declared dep names to this form
+/// before lookup so the map matches both the cargo-as-builder
+/// pipeline (which emits underscore-normalised names from `cargo
+/// metadata`) and direct user declarations.
+///
+/// Why a composite key rather than a nested `BTreeMap<TargetSpec,
+/// BTreeMap<String, PathBuf>>`: lookups are always `(target, name)`
+/// pairs — never "all artifacts for a target" or "all targets for
+/// a name". Flat keying keeps the lookup a single hash/compare.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExternalArtifactKey {
+    pub target: TargetSpec,
+    pub cargo_target_name: String,
 }
 
 /// A group of crates with shared compilation behavior.
@@ -403,6 +435,18 @@ pub struct ExternalDepDef {
     pub cfg_flags: Vec<String>,
     /// Extra `rustc` flags to pass when compiling this dependency.
     pub rustc_flags: Vec<String>,
+    /// Compile target this dep is built against. `Host` (default)
+    /// goes through the cargo-as-builder pipeline. `Cross(_)` goes
+    /// through the gluon-driven rustc pipeline so the dep is built
+    /// against the user's custom target with the gluon-built sysroot
+    /// — this is how kernel-side crates (bitflags, volatile, …) get
+    /// compiled.
+    ///
+    /// `#[serde(default)]` so persisted models from before this field
+    /// existed deserialise unchanged (every existing dep was
+    /// implicitly host-target).
+    #[serde(default)]
+    pub target: TargetSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
 }

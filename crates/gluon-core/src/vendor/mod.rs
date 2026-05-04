@@ -31,7 +31,7 @@ pub use lockfile::{VendorLock, VendorLockPackage};
 
 use crate::compile::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{BuildModel, DepSource, ExternalDepDef, GitRef};
+use gluon_model::{BuildModel, DepSource, ExternalArtifactKey, ExternalDepDef, GitRef};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -630,9 +630,18 @@ pub fn auto_register_vendored_deps(
             );
             continue;
         }
-        model
-            .external_artifacts
-            .insert(pkg.name.clone(), path.clone());
+        // The lockfile entry preserves the user-declared dep name
+        // (hyphens intact). The compile path normalises to underscores
+        // before lookup — match that here so both sides agree on the
+        // key shape. v1 lockfile entries have no per-package target
+        // field, so they all key under `Host`; the v2 schema bump
+        // (cross-target vendored builds) will plumb the package's
+        // declared target through here.
+        let key = ExternalArtifactKey {
+            target: gluon_model::TargetSpec::Host,
+            cargo_target_name: pkg.name.replace('-', "_"),
+        };
+        model.external_artifacts.insert(key, path.clone());
     }
 
     if !diags.is_empty() {
@@ -705,6 +714,7 @@ mod tests {
             default_features: true,
             cfg_flags: Vec::new(),
             rustc_flags: Vec::new(),
+            target: gluon_model::TargetSpec::Host,
             span: None,
         }
     }
@@ -1079,7 +1089,10 @@ mod tests {
 
         assert_eq!(model.external_artifacts.len(), 1);
         assert_eq!(
-            model.external_artifacts.get("syn"),
+            model.external_artifacts.get(&ExternalArtifactKey {
+                target: gluon_model::TargetSpec::Host,
+                cargo_target_name: "syn".into(),
+            }),
             Some(&fake_artifact),
         );
     }

@@ -269,7 +269,19 @@ pub(crate) fn build_rustc_command(
                         crate_name, extern_name,
                     ))
                 })?;
-                let path = model.external_artifacts.get(&ext.name).ok_or_else(|| {
+                // Lookup key matches what `auto_register_vendored_deps`
+                // wrote: the dep's declared target (Host for v1's
+                // cargo-as-builder pipeline, Cross(_) for v2's
+                // gluon-driven pipeline) plus the cargo-normalised
+                // crate name (hyphens → underscores). The dep's
+                // *target*, not the consumer's, is what disambiguates
+                // — a kernel-target consumer that pulls a host-built
+                // proc-macro still looks it up under `Host`.
+                let key = gluon_model::ExternalArtifactKey {
+                    target: ext.target,
+                    cargo_target_name: ext.name.replace('-', "_"),
+                };
+                let path = model.external_artifacts.get(&key).ok_or_else(|| {
                     Error::Compile(format!(
                         "crate '{}' depends on external crate '{}' but no \
                          vendor artifact is registered for it — run \

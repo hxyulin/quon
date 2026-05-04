@@ -219,6 +219,7 @@ mod tests {
             default_features: true,
             cfg_flags: Vec::new(),
             rustc_flags: Vec::new(),
+            target: gluon_model::TargetSpec::Host,
             span: None,
         }
     }
