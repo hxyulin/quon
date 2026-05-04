@@ -2,7 +2,8 @@
 //!
 //! `gluon.lock` is a thin peer of cargo's `Cargo.lock`. The authoritative
 //! version resolution lives in cargo's lockfile, inside the scratch
-//! workspace under `<build>/vendor-workspace/Cargo.lock`. `gluon.lock`
+//! workspace under `<build>/vendor-workspaces/<target>/Cargo.lock` (one
+//! per target — `host/` for the host pipeline). `gluon.lock`
 //! instead records two things cargo cannot:
 //!
 //! 1. A **fingerprint** over the declared `BuildModel::external_deps`

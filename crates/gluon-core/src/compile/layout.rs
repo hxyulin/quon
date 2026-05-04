@@ -271,17 +271,33 @@ impl BuildLayout {
         project_root.join("vendor")
     }
 
-    /// Scratch Cargo workspace used to drive `cargo vendor`
-    /// (`<root>/vendor-workspace/`).
+    /// Scratch Cargo workspace for the **host** target's vendored deps
+    /// (`<root>/vendor-workspaces/host/`).
     ///
     /// Contains a generated `Cargo.toml` + stub `lib.rs` synthesised
-    /// from `BuildModel::external_deps`, plus the `Cargo.lock` that
-    /// cargo writes during `cargo vendor`. The `Cargo.lock` inside this
-    /// dir is the authoritative resolution pin; it is intended to be
-    /// committed via a `.gitignore` carveout so repeat vendor runs are
-    /// deterministic across machines.
+    /// from the host-targeted subset of `BuildModel::external_deps`,
+    /// plus the `Cargo.lock` that cargo writes during `cargo vendor`.
+    /// The `Cargo.lock` inside this dir is the authoritative resolution
+    /// pin; it is intended to be committed via a `.gitignore` carveout
+    /// so repeat vendor runs are deterministic across machines.
+    ///
+    /// Cross-target deps (declared via `cfg.dependency(...).target(t)`)
+    /// get a sibling workspace at
+    /// [`Self::vendor_workspace_for_target`].
     pub fn vendor_workspace_dir(&self) -> PathBuf {
-        self.root.join("vendor-workspace")
+        self.vendor_workspace_for_target("host")
+    }
+
+    /// Scratch Cargo workspace for a specific target's vendored deps
+    /// (`<root>/vendor-workspaces/<target>/`).
+    ///
+    /// `target_name` is the unqualified name of a `TargetDef` from the
+    /// model (or the literal `"host"` for the host pipeline). One
+    /// workspace per target keeps the per-target dep set, `Cargo.lock`,
+    /// and any future cross-target divergence (e.g. per-target features)
+    /// physically isolated.
+    pub fn vendor_workspace_for_target(&self, target_name: &str) -> PathBuf {
+        self.root.join("vendor-workspaces").join(target_name)
     }
 
     /// Path to the project-root `gluon.lock` file.
@@ -467,12 +483,19 @@ mod tests {
     #[test]
     fn vendor_workspace_dir_is_under_build_root() {
         // The scratch Cargo workspace is gluon-managed and lives under
-        // build/. Cargo.toml + Cargo.lock inside it are the source of
-        // truth for resolution (Cargo.lock committed via gitignore
-        // carveout).
+        // build/vendor-workspaces/<target>/. The host-targeted set lives
+        // at host/; cross targets get sibling subdirectories.
         assert_eq!(
             layout().vendor_workspace_dir(),
-            PathBuf::from("/tmp/fake/vendor-workspace")
+            PathBuf::from("/tmp/fake/vendor-workspaces/host")
+        );
+    }
+
+    #[test]
+    fn vendor_workspace_for_target_uses_target_name() {
+        assert_eq!(
+            layout().vendor_workspace_for_target("x86_64-kernel"),
+            PathBuf::from("/tmp/fake/vendor-workspaces/x86_64-kernel")
         );
     }
 

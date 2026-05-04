@@ -44,7 +44,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 }
 
 /// Copy the fixture into a tempdir so tests don't mutate the tree
-/// under version control. `gluon.lock` and `build/vendor-workspace/`
+/// under version control. `gluon.lock` and `build/vendor-workspaces/`
 /// both live inside the project root, so doing this in place would
 /// leave files behind across runs.
 ///
