@@ -46,6 +46,12 @@ use super::metadata::{CrateId, CrateKind, ResolvedGraph};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VendorCrateBuild {
     pub crate_id: CrateId,
+    /// Cargo-normalised name (`-` → `_`) — the form used in
+    /// `--extern <name>=<path>`, in artifact filenames, and as the
+    /// lookup key in [`gluon_model::ExternalArtifactKey`]. Stored
+    /// alongside `crate_id.name` (which keeps the user-facing
+    /// hyphenated form) so the scheduler doesn't need to re-derive it.
+    pub cargo_target_name: String,
     pub target: TargetSpec,
     pub kind: CrateKind,
     pub manifest_dir: PathBuf,
@@ -152,6 +158,7 @@ pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Result<Vec<VendorCrateBuild>
             .collect();
         nodes.push(VendorCrateBuild {
             crate_id: id.clone(),
+            cargo_target_name: c.cargo_target_name.clone(),
             target,
             kind: c.kind,
             manifest_dir: c.manifest_dir.clone(),
