@@ -48,13 +48,19 @@ fn setup_fixture(name: &str) -> (TempDir, PathBuf) {
     (tmp, dst)
 }
 
+/// Recursive copy that skips `build/` and `esp/` (gitignored artifact
+/// dirs — see `tests/integration.rs::copy_dir_all` for the rationale).
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let from = entry.path();
-        let to = dst.join(entry.file_name());
+        let name = entry.file_name();
+        if ty.is_dir() && (name == "build" || name == "esp") {
+            continue;
+        }
+        let to = dst.join(name);
         if ty.is_dir() {
             copy_dir_all(&from, &to)?;
         } else if ty.is_file() {

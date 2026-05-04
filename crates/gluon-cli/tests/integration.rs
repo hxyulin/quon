@@ -69,13 +69,25 @@ fn fixture_source_dir() -> PathBuf {
 
 /// Recursive copy. Deliberately hand-rolled — we don't want to pull in
 /// `fs_extra` or similar just for tests.
+///
+/// Skips directories named `build` and `esp`: these are gitignored
+/// artifact dirs (see `.gitignore`'s `tests/fixtures/*/build/` and
+/// `tests/fixtures/*/esp/`). A developer who has run `gluon build`
+/// inside a fixture directly will leave half a gigabyte of stale
+/// artefacts behind — copying those into the tempdir makes the test
+/// non-hermetic and breaks `--no-build` / `--dry-run` assertions
+/// because the artefacts that "should not exist" do.
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let ty = entry.file_type()?;
         let from = entry.path();
-        let to = dst.join(entry.file_name());
+        let name = entry.file_name();
+        if ty.is_dir() && (name == "build" || name == "esp") {
+            continue;
+        }
+        let to = dst.join(name);
         if ty.is_dir() {
             copy_dir_all(&from, &to)?;
         } else if ty.is_file() {
