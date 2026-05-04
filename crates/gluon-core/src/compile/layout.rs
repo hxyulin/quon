@@ -258,6 +258,45 @@ impl BuildLayout {
         self.root.join(".rustc-info.json")
     }
 
+    /// Per-crate output directory for a host-pinned vendored crate
+    /// (`<root>/host/vendor-deps/<crate>/`).
+    ///
+    /// Vendored crates are kept in a sibling tree (`vendor-deps/`)
+    /// rather than mixed into the user crate dir so a stray cargo run
+    /// or a user-declared crate named the same as a vendored one can't
+    /// trample its artifacts. `<crate>` is the cargo-normalised name
+    /// (hyphens → underscores) so the path matches what rustc emits
+    /// from `--crate-name`.
+    pub fn host_vendor_dep_dir(&self, cargo_target_name: &str) -> PathBuf {
+        self.user_crate_root()
+            .join("host")
+            .join("vendor-deps")
+            .join(cargo_target_name)
+    }
+
+    /// Per-crate output directory for a cross-target vendored crate
+    /// (`<root>/cross/<target>/<profile>/vendor-deps/<crate>/`).
+    ///
+    /// The `vendor-deps/` separation parallels [`Self::host_vendor_dep_dir`]
+    /// for cross builds. Profile-keyed because rustc invocations differ
+    /// per profile (opt level, debug info), even though cargo's
+    /// resolution itself is profile-agnostic — that means the same
+    /// vendored crate may be compiled twice, once per profile, when
+    /// consumers across profiles use it.
+    pub fn cross_vendor_dep_dir(
+        &self,
+        target: &TargetDef,
+        profile: &ResolvedProfile,
+        cargo_target_name: &str,
+    ) -> PathBuf {
+        self.user_crate_root()
+            .join("cross")
+            .join(&target.name)
+            .join(&profile.name)
+            .join("vendor-deps")
+            .join(cargo_target_name)
+    }
+
     // -------- vendor paths (sub-project #3) --------
 
     /// Path to the populated vendor directory (`<project>/vendor/`).
@@ -496,6 +535,24 @@ mod tests {
         assert_eq!(
             layout().vendor_workspace_for_target("x86_64-kernel"),
             PathBuf::from("/tmp/fake/vendor-workspaces/x86_64-kernel")
+        );
+    }
+
+    #[test]
+    fn host_vendor_dep_dir_uses_cargo_normalised_name() {
+        // proc-macro2 → proc_macro2 in the path so the dir matches what
+        // rustc emits from --crate-name.
+        assert_eq!(
+            layout().host_vendor_dep_dir("proc_macro2"),
+            PathBuf::from("/tmp/fake/host/vendor-deps/proc_macro2")
+        );
+    }
+
+    #[test]
+    fn cross_vendor_dep_dir_keys_on_target_profile_and_crate() {
+        assert_eq!(
+            layout().cross_vendor_dep_dir(&target(), &profile(), "bitflags"),
+            PathBuf::from("/tmp/fake/cross/x86_64-test/debug/vendor-deps/bitflags")
         );
     }
 

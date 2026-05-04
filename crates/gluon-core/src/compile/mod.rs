@@ -27,6 +27,7 @@ pub mod extern_map;
 pub mod layout;
 pub mod rustc;
 pub mod rustc_info;
+pub mod vendor_command;
 
 pub use driver::DriverKind;
 

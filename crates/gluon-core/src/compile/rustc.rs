@@ -59,6 +59,7 @@ impl Emit {
 /// See the module docs for the canonical token forms each setter produces.
 /// All setters are infallible and chainable; the builder cannot fail to
 /// build a [`std::process::Command`].
+#[derive(Debug)]
 pub struct RustcCommandBuilder {
     rustc: PathBuf,
     /// Canonical, order-preserving arg list. Tests and the cache key both
