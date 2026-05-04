@@ -4,7 +4,7 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{DepSource, ExternalDepDef, GitRef, Handle};
+use gluon_model::{DepSource, ExternalDepDef, GitRef, Handle, TargetDef, TargetSpec};
 
 /// Chainable builder returned by [`Config::dependency`].
 pub struct DependencyBuilder<'cfg> {
@@ -108,6 +108,38 @@ impl<'cfg> DependencyBuilder<'cfg> {
         self.modify(|d| d.rustc_flags = v);
         self
     }
+
+    /// Pin this dep to a cross-compile target, identified by a handle minted
+    /// from [`Config::target`]. Mirrors [`crate::builders::GroupBuilder::target`]:
+    /// a stale handle (one not present in this `Config`'s target arena)
+    /// pushes a diagnostic and leaves the dep's target at its default.
+    ///
+    /// MVP scope: each dep name may declare exactly one target. To compile
+    /// the same crate for both host and a cross target, declare it twice
+    /// under different names (e.g. `bitflags_host` / `bitflags_kernel`)
+    /// until per-target arena keying lands.
+    pub fn target(mut self, target: Handle<TargetDef>) -> Self {
+        let exists = self.cfg.raw.targets.get(target).is_some();
+        if !exists && !self.state.is_duplicate() {
+            self.cfg.diagnostics.push(ConfigError::new(format!(
+                "dependency \"{}\" received a target handle that doesn't exist in this Config",
+                self.state.name(),
+            )));
+            return self;
+        }
+        if exists {
+            self.modify(|d| d.target = TargetSpec::Cross(target));
+        }
+        self
+    }
+
+    /// Pin this dep explicitly to the host triple. Equivalent to omitting
+    /// `.target(...)` entirely; provided for parity with
+    /// [`crate::builders::GroupBuilder::target_host`].
+    pub fn target_host(mut self) -> Self {
+        self.modify(|d| d.target = TargetSpec::Host);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -178,5 +210,54 @@ mod tests {
             other => panic!("expected CratesIo from first definition, got {other:?}"),
         }
         assert_eq!(cfg.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn dependency_target_records_cross_spec() {
+        use gluon_model::TargetSpec;
+        let mut cfg = Config::new();
+        let kernel = cfg.target("x86_64-unknown-none");
+        cfg.dependency("bitflags").version("2.11").target(kernel);
+        let h = cfg.raw.external_deps.lookup("bitflags").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
+        assert_eq!(d.target, TargetSpec::Cross(kernel));
+        assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn dependency_target_host_explicit_matches_default() {
+        use gluon_model::TargetSpec;
+        let mut cfg = Config::new();
+        cfg.dependency("serde").version("1").target_host();
+        let h = cfg.raw.external_deps.lookup("serde").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
+        assert_eq!(d.target, TargetSpec::Host);
+        assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn dependency_target_default_is_host() {
+        use gluon_model::TargetSpec;
+        let mut cfg = Config::new();
+        cfg.dependency("serde").version("1");
+        let h = cfg.raw.external_deps.lookup("serde").unwrap();
+        let d = cfg.raw.external_deps.get(h).unwrap();
+        assert_eq!(d.target, TargetSpec::Host);
+    }
+
+    #[test]
+    fn dependency_target_with_stale_handle_pushes_diagnostic() {
+        // Same Stage 1 limitation as GroupBuilder/ProfileBuilder: Handle<TargetDef>
+        // is just an index. Exercising the stale-handle guard requires the
+        // receiving Config's target arena to be smaller than the stale index.
+        let mut cfg_a = Config::new();
+        let stale = cfg_a.target("from-a");
+
+        let mut cfg_b = Config::new();
+        cfg_b.dependency("bitflags").version("2.11").target(stale);
+        assert_eq!(cfg_b.diagnostics.len(), 1);
+        assert!(cfg_b.diagnostics[0]
+            .message
+            .contains("doesn't exist in this Config"));
     }
 }
