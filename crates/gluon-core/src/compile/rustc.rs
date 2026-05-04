@@ -219,6 +219,37 @@ impl RustcCommandBuilder {
         self
     }
 
+    /// Emit a bare `--extern <name>` (no `=path`). Used for sysroot-
+    /// resolved built-in crates whose location rustc knows about
+    /// without us telling it. The canonical use is `proc_macro` for
+    /// proc-macro crates: cargo emits `--extern proc_macro` so rustc
+    /// resolves it via the active sysroot's `target-libdir`. Without
+    /// this, modern (no `extern crate` line) proc-macro source fails
+    /// with `E0432: unresolved import proc_macro`.
+    pub fn extern_crate_bare(&mut self, name: &str) -> &mut Self {
+        debug_assert!(
+            !name.contains('='),
+            "extern crate name must not contain '=': {name:?}"
+        );
+        self.args.push(OsString::from("--extern"));
+        self.args.push(OsString::from(name));
+        self
+    }
+
+    /// Emit `-L dependency=<dir>`. Tells rustc where to look for
+    /// transitive crate dependencies that were not handed in via
+    /// `--extern`. Required when consuming an rlib whose own deps
+    /// must be resolved by name — e.g. cargo-built vendored crates
+    /// have transitive deps (unicode-ident behind syn) that the
+    /// user never declared, so they're not in our `--extern` list.
+    pub fn library_search_dependency(&mut self, dir: &Path) -> &mut Self {
+        self.args.push(OsString::from("-L"));
+        let mut s = OsString::from("dependency=");
+        s.push(dir.as_os_str());
+        self.args.push(s);
+        self
+    }
+
     pub fn cfg(&mut self, flag: &str) -> &mut Self {
         self.args.push(OsString::from("--cfg"));
         self.args.push(OsString::from(flag));

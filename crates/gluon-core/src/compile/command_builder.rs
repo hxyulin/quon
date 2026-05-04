@@ -226,25 +226,144 @@ pub(crate) fn build_rustc_command(
 
     // Explicit dependencies (BTreeMap order = deterministic argv order).
     //
-    // Only project-resolved deps (`DepResolution::Project`) participate
-    // in the compile-time `--extern` wiring here — their artifacts are
-    // produced by sibling crate compiles and recorded in `artifacts`.
-    // External deps (`DepResolution::External`) are linked through the
-    // vendor pipeline and surface to rustc via the sysroot search path
-    // rather than this loop.
+    // Two flavours:
+    //
+    // - `DepResolution::Project(h)` — sibling project crates. Their
+    //   artifacts come from `ArtifactMap`, populated by the scheduler
+    //   as each gluon-managed compile completes.
+    //
+    // - `DepResolution::External(eh)` — vendored crates compiled by
+    //   cargo via the cargo-as-builder vendor pipeline (see
+    //   `vendor/cargo_cmd.rs::run_cargo_build_vendor` and
+    //   `vendor/mod.rs::auto_register_vendored_deps`). Their artifact
+    //   paths live in `model.external_artifacts`, populated at
+    //   model-load time from `gluon.lock`. We look up the vendored
+    //   artifact by the external dep's *crate name* (not the alias),
+    //   matching how `auto_register` keys the map.
+    //
+    //   v1 limitation: vendored deps assume host-target compatibility.
+    //   A cross-target consumer that pulls a host-built rlib would
+    //   fail to link with an opaque rustc error. We don't pre-flight
+    //   that case here yet — the lepton-os usage path is host-only
+    //   (proc-macros and their deps), so the live failure mode is
+    //   acceptable until v2 wires per-target vendored builds.
+    let mut external_dep_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
     for (extern_name, dep_def) in &crate_def.deps {
-        let dep_handle = match dep_def.resolution {
-            DepResolution::Project(h) => h,
-            DepResolution::External(_) => continue,
+        let artifact_path: PathBuf = match dep_def.resolution {
+            DepResolution::Project(h) => artifacts
+                .get(h)
+                .ok_or_else(|| {
+                    Error::Compile(format!(
+                        "crate '{}' depends on '{}' but its artifact is not yet \
+                         available in ArtifactMap (scheduler bug — dep must be \
+                         built before depender)",
+                        crate_name, extern_name,
+                    ))
+                })?
+                .to_path_buf(),
+            DepResolution::External(eh) => {
+                let ext = model.external_deps.get(eh).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "crate '{}': external dep handle for '{}' is dangling \
+                         (intern bug)",
+                        crate_name, extern_name,
+                    ))
+                })?;
+                let path = model.external_artifacts.get(&ext.name).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "crate '{}' depends on external crate '{}' but no \
+                         vendor artifact is registered for it — run \
+                         `gluon vendor` to build the external dep set",
+                        crate_name, ext.name,
+                    ))
+                })?;
+                if let Some(parent) = path.parent() {
+                    external_dep_dirs.insert(parent.to_path_buf());
+                }
+                path.clone()
+            }
         };
-        let artifact_path = artifacts.get(dep_handle).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}' depends on '{}' but its artifact is not yet available in \
-                 ArtifactMap (scheduler bug — dep must be built before depender)",
-                crate_name, extern_name,
-            ))
-        })?;
-        builder.extern_crate(extern_name, artifact_path);
+        builder.extern_crate(extern_name, &artifact_path);
+    }
+
+    // Transitive vendored deps. Cargo built the user's external deps
+    // in one workspace, so any crate's transitive deps live alongside
+    // it in `target/release/deps/`. Adding `-L dependency=<dir>` lets
+    // rustc resolve those (e.g. `unicode-ident` behind `syn`) without
+    // forcing the user to declare them in `cfg.dependency()`.
+    //
+    // Sorted iteration: BTreeSet is already deterministic, but state
+    // it explicitly — argv order matters for cache-key stability.
+    for dir in &external_dep_dirs {
+        builder.library_search_dependency(dir);
+    }
+
+    // Transitive search paths. rustc validates the recorded dep
+    // graph of every `--extern`'d rlib at consumer-compile time:
+    // it walks each rlib's metadata, looks at the deps the rlib
+    // *itself* records, and tries to load each by name from a
+    // search path. `--extern` only covers the consumer's *direct*
+    // deps; transitives (siblings, proc-macros, libs-of-libs) need
+    // a search path.
+    //
+    // Cargo handles this by tracking the full transitive graph and
+    // emitting `-L dependency=<dir>` for every directory holding a
+    // transitive artifact. We mirror that: BFS the consumer's
+    // direct Project deps, follow each one's deps, and collect the
+    // parent dir of every reached artifact into a dedup set. Both
+    // proc-macros (host dylibs in `build/host/<crate>/`) and cross
+    // libs (rlibs in `build/cross/<target>/<profile>/<crate>/`)
+    // need to be reachable; one BTreeSet handles both.
+    //
+    // External deps don't need walking — vendored artifacts live
+    // alongside each other in cargo's `target/release/deps/`, so
+    // adding the one parent dir for each direct External (above)
+    // already exposes their transitive siblings (e.g. `unicode-ident`
+    // behind `syn`).
+    let mut transitive_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
+    let mut visited: std::collections::BTreeSet<gluon_model::Handle<gluon_model::CrateDef>> =
+        Default::default();
+    let mut queue: std::collections::VecDeque<gluon_model::Handle<gluon_model::CrateDef>> =
+        Default::default();
+    for dep_def in crate_def.deps.values() {
+        if let DepResolution::Project(h) = dep_def.resolution
+            && visited.insert(h)
+        {
+            queue.push_back(h);
+        }
+    }
+    while let Some(h) = queue.pop_front() {
+        let Some(dep_crate) = model.crates.get(h) else {
+            continue;
+        };
+        if let Some(p) = artifacts.get(h)
+            && let Some(parent) = p.parent()
+        {
+            transitive_dirs.insert(parent.to_path_buf());
+        }
+        for d in dep_crate.deps.values() {
+            if let DepResolution::Project(child_h) = d.resolution
+                && visited.insert(child_h)
+            {
+                queue.push_back(child_h);
+            }
+        }
+    }
+    for dir in &transitive_dirs {
+        builder.library_search_dependency(dir);
+    }
+
+    // Modern proc-macro source (no `extern crate proc_macro;` line)
+    // imports `proc_macro` directly. Without `--extern proc_macro`,
+    // rustc fails with `E0432: unresolved import proc_macro`. The
+    // `proc_macro` crate is a sysroot built-in for the host target;
+    // bare `--extern proc_macro` (no `=path`) makes rustc resolve it
+    // via its sysroot's `target-libdir`, matching what cargo does for
+    // every `--crate-type=proc-macro` build. Cheap to emit
+    // unconditionally for proc-macro crates, and harmless when the
+    // source happens to use the older `extern crate` form.
+    if crate_def.crate_type == CrateType::ProcMacro {
+        builder.extern_crate_bare("proc_macro");
     }
 
     // Artifact env vars: deterministic, BTreeMap-ordered, canonicalised.

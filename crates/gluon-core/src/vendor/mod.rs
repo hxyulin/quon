@@ -31,20 +31,9 @@ pub use lockfile::{VendorLock, VendorLockPackage};
 
 use crate::compile::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{
-    BuildModel, CrateDef, CrateType, DepSource, ExternalDepDef, GitRef, GroupDef, Handle,
-    TargetSpec,
-};
+use gluon_model::{BuildModel, DepSource, ExternalDepDef, GitRef};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Name of the synthetic group every vendored crate is inserted into.
-///
-/// Prefix chosen so it can never collide with a user-defined group: the
-/// Rhai builder rejects group names starting with `__`. (If it turns
-/// out not to — a future tightening should — we can add an explicit
-/// check during registration.)
-pub const VENDORED_GROUP_NAME: &str = "__vendored";
 
 /// Options for [`vendor_sync`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -344,6 +333,8 @@ pub fn vendor_sync(
                             version,
                             source: encode_source_string(&dep.source),
                             checksum: None,
+                            // Filled in by the cargo-build pass below.
+                            artifact_path: None,
                         });
                     }
                     Err(e) => {
@@ -383,6 +374,8 @@ pub fn vendor_sync(
                     version,
                     source: encode_source_string(&dep.source),
                     checksum: Some(checksum),
+                    // Filled in by the cargo-build pass below.
+                    artifact_path: None,
                 });
             }
         }
@@ -392,6 +385,27 @@ pub fn vendor_sync(
         return Err(Error::Diagnostics(diags));
     }
 
+    // Cargo-as-builder pass. Compile the scratch workspace so we
+    // capture the rlib / dylib paths cargo produced — this is what
+    // gluon's compile path will `--extern` against. Punted to a
+    // follow-up issue: path-only models (which never run cargo
+    // vendor) do not yet trigger a cargo build either, so consumer
+    // crates that depend on a path dep will fail with a "missing
+    // artifact" diagnostic at compile time. Lepton-os doesn't use
+    // path-sourced external deps, so this is fine for v1.
+    if has_non_path_dep {
+        let cargo_target_dir = workspace_dir.join("target");
+        let artifacts = cargo_cmd::run_cargo_build_vendor(
+            &workspace_dir,
+            &cargo_target_dir,
+            &vendor_dir,
+            cargo_cmd::VendorFlags {
+                offline: opts.offline,
+            },
+        )?;
+        attach_artifact_paths(&mut packages, &artifacts);
+    }
+
     let lock = VendorLock {
         version: VendorLock::CURRENT_VERSION,
         fingerprint,
@@ -399,6 +413,26 @@ pub fn vendor_sync(
     };
     lock.save_atomic(&lock_path)?;
     Ok(lock)
+}
+
+/// Attach cargo's emitted artifact paths to lockfile packages.
+///
+/// Cargo's `target.name` normalises hyphens to underscores
+/// (`proc-macro2` → `proc_macro2`), but our lockfile keeps the
+/// original hyphen-bearing crate name. Match by normalising both
+/// sides to underscores. Packages whose artifact wasn't found
+/// (typically path deps that the cargo workspace doesn't include)
+/// are left with `artifact_path = None`.
+fn attach_artifact_paths(
+    packages: &mut [VendorLockPackage],
+    artifacts: &std::collections::BTreeMap<String, std::path::PathBuf>,
+) {
+    for pkg in packages.iter_mut() {
+        let normalised = pkg.name.replace('-', "_");
+        if let Some(p) = artifacts.get(&normalised) {
+            pkg.artifact_path = Some(p.clone());
+        }
+    }
 }
 
 /// Verify `gluon.lock` against the live model and the on-disk
@@ -483,129 +517,16 @@ fn resolve_path_dep(project_root: &Path, path: &str) -> PathBuf {
     }
 }
 
-/// Decode the source field of a [`VendorLockPackage`] back into enough
-/// state to locate the crate on disk.
+/// Read `gluon.lock` and populate `model.external_artifacts` with the
+/// rlib / dylib path that cargo produced for each pinned external
+/// dep.
 ///
-/// Returns a discriminator so [`auto_register_vendored_deps`] can
-/// route CratesIo/Git entries through `find_vendored_crate_dir` and
-/// Path entries through the declared path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum LockedSourceKind {
-    /// `crates-io` — look under `vendor/<name>-*/`.
-    CratesIo,
-    /// `git+<url>#<ref>` — look under `vendor/<name>-*/`.
-    Git,
-    /// `path+<relpath>` — resolve the relpath against project_root.
-    Path(String),
-}
-
-fn parse_locked_source(source: &str) -> Option<LockedSourceKind> {
-    if source == "crates-io" {
-        Some(LockedSourceKind::CratesIo)
-    } else if source.starts_with("git+") {
-        Some(LockedSourceKind::Git)
-    } else {
-        source
-            .strip_prefix("path+")
-            .map(|rest| LockedSourceKind::Path(rest.to_string()))
-    }
-}
-
-/// Extract `[lib] proc-macro` and `[package] edition` from a vendored
-/// `Cargo.toml`. Returns `(edition, is_proc_macro)`. Edition defaults
-/// to `"2015"` when absent (the historical cargo default) so the
-/// synthetic CrateDef always has a valid edition string.
-fn read_cargo_edition_and_type(manifest_path: &Path) -> Result<(String, bool)> {
-    let bytes = fs::read(manifest_path).map_err(|e| Error::Io {
-        path: manifest_path.to_path_buf(),
-        source: e,
-    })?;
-    let text = std::str::from_utf8(&bytes).map_err(|e| {
-        Error::Diagnostics(vec![Diagnostic::error(format!(
-            "{} is not valid UTF-8: {e}",
-            manifest_path.display()
-        ))])
-    })?;
-    let parsed: toml::Value = toml::from_str(text).map_err(|e| {
-        Error::Diagnostics(vec![Diagnostic::error(format!(
-            "failed to parse {}: {e}",
-            manifest_path.display()
-        ))])
-    })?;
-
-    let edition = parsed
-        .get("package")
-        .and_then(|p| p.get("edition"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("2015")
-        .to_string();
-
-    let is_proc_macro = parsed
-        .get("lib")
-        .and_then(|l| l.get("proc-macro"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    Ok((edition, is_proc_macro))
-}
-
-/// Ensure the synthetic `__vendored` group exists in the model and
-/// return its handle (which the caller stores on each new CrateDef).
-///
-/// If a user-declared group already occupies the name (it shouldn't,
-/// per the `__`-prefix convention), we error loudly rather than
-/// silently overwriting.
-fn ensure_vendored_group(model: &mut BuildModel) -> Result<Handle<GroupDef>> {
-    if let Some(h) = model.groups.lookup(VENDORED_GROUP_NAME) {
-        // Sanity check: if a user somehow created this, make sure it
-        // looks like our synthetic group before we start dropping
-        // crates into it.
-        if let Some(g) = model.groups.get(h)
-            && !matches!(g.target, TargetSpec::Host)
-        {
-            // Resolve the cross target's name for the diagnostic. We
-            // don't know what handle it points at, so go through the
-            // arena; if the handle is dangling (shouldn't happen on a
-            // well-interned model), fall back to a placeholder.
-            let target_name = match g.target {
-                TargetSpec::Host => "host".to_string(),
-                TargetSpec::Cross(h) => model
-                    .targets
-                    .get(h)
-                    .map(|t| t.name.clone())
-                    .unwrap_or_else(|| "<unknown>".to_string()),
-            };
-            return Err(Error::Diagnostics(vec![Diagnostic::error(format!(
-                "group '{VENDORED_GROUP_NAME}' already exists with target '{target_name}' — \
-                 this name is reserved for vendored dependencies"
-            ))]));
-        }
-        return Ok(h);
-    }
-
-    let group = GroupDef {
-        name: VENDORED_GROUP_NAME.into(),
-        target: TargetSpec::Host,
-        default_edition: "2021".into(),
-        crates: Vec::new(),
-        shared_flags: Vec::new(),
-        is_project: false,
-        config: false,
-        no_sysroot: false,
-        span: None,
-    };
-    let (handle, _) = model.groups.insert(VENDORED_GROUP_NAME.into(), group);
-    Ok(handle)
-}
-
-/// Walk `gluon.lock` and insert a synthetic [`CrateDef`] into
-/// `model.crates` for every pinned package.
-///
-/// This is how the compile path "sees" vendored crates — after the
-/// call, every package in `gluon.lock` has a corresponding
-/// `model.crates` entry whose handles are pre-populated (group +
-/// target), matching the shape the intern pass would produce for a
-/// Rhai-declared crate.
+/// This is the link between the cargo-as-builder vendor pipeline (run
+/// by `gluon vendor`) and gluon's compile pipeline. The compile path
+/// (`compile/command_builder.rs`) consults `model.external_artifacts`
+/// when it sees a `DepResolution::External(handle)` edge, looks the
+/// dep's name up in the map, and emits `--extern <alias>=<path>` for
+/// the consumer's rustc invocation.
 ///
 /// # Contract
 ///
@@ -616,30 +537,25 @@ fn ensure_vendored_group(model: &mut BuildModel) -> Result<Handle<GroupDef>> {
 ///   `gluon vendor`.
 /// - Errors if `gluon.lock`'s fingerprint disagrees with the live
 ///   model's.
-/// - Errors if a synthetic crate's name collides with a
-///   user-declared crate.
+/// - Errors if any pinned package lacks an `artifact_path` (means the
+///   lockfile predates the cargo-as-builder pipeline) or the recorded
+///   path is missing on disk (build/ was wiped). Both diagnostics
+///   point the user at `gluon vendor`.
 ///
-/// This function is **idempotent** in the sense that calling it
-/// twice on the same model is a no-op on the second call (the second
-/// insert into `model.crates` finds the existing handle and returns
-/// without modifying it), but callers should not rely on that — the
-/// normal pattern is one call per model load.
+/// This function is idempotent: re-running it just re-inserts the
+/// same map entries. Cheap to call defensively on every model load.
 ///
 /// # Ordering
 ///
-/// Must be called **after** the script has been compiled and run and
-/// the intern pass has run (so `model.crates` contains all the user
-/// crates with their handles populated), and **before** the resolve
-/// pass (so resolve sees the vendored crates when walking the crate
-/// graph). See `auto_register_vendored_deps_inline` below, or use this
-/// function directly from a CLI layer.
+/// Must be called **after** the build model is loaded (intern pass
+/// already ran on user-declared deps) and **before** any compile or
+/// resolve pass that consults `model.external_artifacts`.
 pub fn auto_register_vendored_deps(
     model: &mut BuildModel,
     layout: &BuildLayout,
     project_root: &Path,
 ) -> Result<()> {
     let lock_path = layout.gluon_lock(project_root);
-    let vendor_dir = layout.vendor_dir(project_root);
 
     let maybe_lock = VendorLock::load(&lock_path)?;
     match (&maybe_lock, model.external_deps.is_empty()) {
@@ -664,128 +580,59 @@ pub fn auto_register_vendored_deps(
         ]));
     }
 
-    // Bail out before touching model.groups if we have nothing to
-    // register — keeps the "empty model, empty lock" case perfectly
-    // side-effect-free.
     if lock.packages.is_empty() {
         return Ok(());
     }
 
-    let group_handle = ensure_vendored_group(model)?;
-
-    // Insert synthetic CrateDefs. We intentionally ignore the
-    // `_inserted` flag from `Arena::insert` for the success path: a
-    // duplicate registration (which shouldn't happen in normal flow
-    // but can if a caller double-calls this function) is a no-op.
-    // However, if the duplicate *isn't* ours — i.e. a user declared a
-    // crate with the same name — we error, because that would mean
-    // the user's crate silently shadows the vendored one.
+    // Populate the artifact map from the lockfile. The compile path
+    // looks up `external_deps[h].name` against this map to wire
+    // `--extern <alias>=<path>` for each consumer crate's
+    // `DepResolution::External(h)` edge — see
+    // `compile/command_builder.rs`.
+    //
+    // Path deps don't go through cargo build in v1, so they have no
+    // artifact_path; we silently skip them here. Anything that tries
+    // to consume them at compile time will surface a clearer "no
+    // artifact for X" diagnostic from `command_builder`. Crates-io
+    // and git entries, by contrast, *must* have an artifact_path —
+    // a missing one means the lockfile predates the cargo-as-builder
+    // pipeline and the user needs to re-run `gluon vendor`.
     let mut diags: Vec<Diagnostic> = Vec::new();
     for pkg in &lock.packages {
-        let source_kind = match parse_locked_source(&pkg.source) {
-            Some(k) => k,
-            None => {
-                diags.push(Diagnostic::error(format!(
-                    "gluon.lock entry '{}' has unrecognised source '{}'",
-                    pkg.name, pkg.source
-                )));
-                continue;
+        let is_path_source = pkg.source.starts_with("path+");
+        let Some(path) = pkg.artifact_path.as_ref() else {
+            if !is_path_source {
+                diags.push(
+                    Diagnostic::error(format!(
+                        "gluon.lock entry '{}' has no artifact_path",
+                        pkg.name
+                    ))
+                    .with_note(
+                        "this usually means the lockfile predates the cargo-as-builder \
+                         vendor pipeline",
+                    )
+                    .with_note("run `gluon vendor` to refresh"),
+                );
             }
+            continue;
         };
-
-        // Locate the crate on disk and parse its manifest.
-        let (crate_dir, manifest_path) = match &source_kind {
-            LockedSourceKind::CratesIo | LockedSourceKind::Git => {
-                let dir = match find_vendored_crate_dir(&vendor_dir, &pkg.name)? {
-                    Some(d) => d,
-                    None => {
-                        diags.push(
-                            Diagnostic::error(format!(
-                                "gluon.lock references '{}' but no vendor directory was found",
-                                pkg.name
-                            ))
-                            .with_note(format!(
-                                "expected to find it under {}",
-                                vendor_dir.display()
-                            ))
-                            .with_note("run `gluon vendor` to re-populate"),
-                        );
-                        continue;
-                    }
-                };
-                let m = dir.join("Cargo.toml");
-                (dir, m)
-            }
-            LockedSourceKind::Path(relpath) => {
-                let dir = resolve_path_dep(project_root, relpath);
-                let m = dir.join("Cargo.toml");
-                if !m.exists() {
-                    diags.push(Diagnostic::error(format!(
-                        "path dependency '{}' has no Cargo.toml at {}",
-                        pkg.name,
-                        m.display()
-                    )));
-                    continue;
-                }
-                (dir, m)
-            }
-        };
-
-        let (edition, is_proc_macro) = match read_cargo_edition_and_type(&manifest_path) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Error::Diagnostics(mut ds) = e {
-                    diags.append(&mut ds);
-                } else {
-                    diags.push(Diagnostic::error(format!(
-                        "failed to read {}: {e}",
-                        manifest_path.display()
-                    )));
-                }
-                continue;
-            }
-        };
-
-        // Detect name collisions with user crates before insertion.
-        // Arena::insert is no-op on collision, which would hide the
-        // conflict.
-        if let Some(existing_h) = model.crates.lookup(&pkg.name)
-            && let Some(existing) = model.crates.get(existing_h)
-            && existing.group != group_handle
-        {
-            diags.push(Diagnostic::error(format!(
-                "vendored crate '{}' collides with a user-declared crate",
-                pkg.name
-            )));
+        if !path.exists() {
+            diags.push(
+                Diagnostic::error(format!(
+                    "gluon.lock entry '{}' points at missing artifact: {}",
+                    pkg.name,
+                    path.display(),
+                ))
+                .with_note(
+                    "the cargo build/ directory was probably wiped — \
+                     run `gluon vendor` to rebuild",
+                ),
+            );
             continue;
         }
-
-        let path_str = crate_dir.to_string_lossy().to_string();
-        let crate_def = CrateDef {
-            name: pkg.name.clone(),
-            path: path_str,
-            edition,
-            crate_type: if is_proc_macro {
-                CrateType::ProcMacro
-            } else {
-                CrateType::Lib
-            },
-            target: TargetSpec::Host,
-            deps: Default::default(),
-            dev_deps: Default::default(),
-            features: Vec::new(),
-            root: None,
-            linker_script: None,
-            group: group_handle,
-            is_project_crate: false,
-            cfg_flags: Vec::new(),
-            rustc_flags: Vec::new(),
-            requires_config: Vec::new(),
-            artifact_deps: Vec::new(),
-            artifact_env: Default::default(),
-            span: None,
-        };
-        model.crates.insert(pkg.name.clone(), crate_def);
+        model
+            .external_artifacts
+            .insert(pkg.name.clone(), path.clone());
     }
 
     if !diags.is_empty() {
@@ -798,6 +645,53 @@ pub fn auto_register_vendored_deps(
 mod tests {
     use super::*;
     use gluon_model::Arena;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn attach_artifact_paths_normalises_hyphens() {
+        let mut packages = vec![
+            VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:a".into()),
+                artifact_path: None,
+            },
+            VendorLockPackage {
+                name: "proc-macro2".into(),
+                version: "1.0.106".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:b".into()),
+                artifact_path: None,
+            },
+            VendorLockPackage {
+                name: "missing-from-cargo".into(),
+                version: "1.0.0".into(),
+                source: "path+../missing".into(),
+                checksum: None,
+                artifact_path: None,
+            },
+        ];
+        let mut artifacts: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+        artifacts.insert("syn".into(), "/tmp/libsyn-1.rlib".into());
+        artifacts.insert("proc_macro2".into(), "/tmp/libproc_macro2-2.dylib".into());
+
+        attach_artifact_paths(&mut packages, &artifacts);
+
+        assert_eq!(
+            packages[0].artifact_path,
+            Some("/tmp/libsyn-1.rlib".into())
+        );
+        assert_eq!(
+            packages[1].artifact_path,
+            Some("/tmp/libproc_macro2-2.dylib".into()),
+            "hyphen in lockfile name must match underscore in cargo target name"
+        );
+        assert_eq!(
+            packages[2].artifact_path, None,
+            "package not in cargo output stays None — caller decides what that means"
+        );
+    }
 
     fn minimal_layout(tmp: &Path) -> BuildLayout {
         BuildLayout::new(tmp.join("build"), "demo")
@@ -1123,129 +1017,182 @@ mod tests {
         assert!(err.to_string().contains("stale"), "{err}");
     }
 
+    // Path deps don't go through cargo build in v1, so the artifact
+    // map stays empty for path-only models. Consumer crates that
+    // actually try to use the dep at compile time will surface the
+    // gap with a clearer "no artifact for X" diagnostic — see
+    // `command_builder.rs`. Tracking this separately so the empty-map
+    // case doesn't get conflated with a bug.
     #[test]
-    fn auto_register_inserts_synthetic_crate_for_path_dep() {
+    fn auto_register_path_only_leaves_artifact_map_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let (project, layout, mut model) = setup_path_only_project(tmp.path());
         vendor_sync(&model, &layout, &project, VendorOptions::default()).unwrap();
 
         auto_register_vendored_deps(&mut model, &layout, &project).unwrap();
 
-        // The synthetic __vendored group must exist.
-        let group_handle = model.groups.lookup(VENDORED_GROUP_NAME).expect("group");
-        let group = model.groups.get(group_handle).unwrap();
-        assert_eq!(group.target, TargetSpec::Host);
-
-        // And the synthetic crate must be registered and point at the
-        // declared path.
-        let crate_handle = model.crates.lookup("helper").expect("crate");
-        let krate = model.crates.get(crate_handle).unwrap();
-        assert_eq!(krate.group, group_handle);
-        assert_eq!(krate.target, TargetSpec::Host);
-        assert_eq!(krate.crate_type, gluon_model::CrateType::Lib);
-        assert_eq!(krate.edition, "2021");
-        assert!(krate.path.ends_with("helper"));
+        assert!(
+            model.external_artifacts.is_empty(),
+            "v1 doesn't compile path deps, so no artifact_path is set: {:?}",
+            model.external_artifacts,
+        );
     }
 
+    // The artifact-population happy path. Synthesise a lockfile with a
+    // crates-io-style entry whose `artifact_path` points at a real file
+    // on disk; auto_register must copy the path into
+    // model.external_artifacts under the user-declared name.
     #[test]
-    fn auto_register_errors_on_name_collision_with_user_crate() {
+    fn auto_register_populates_external_artifacts_from_lock() {
         let tmp = tempfile::tempdir().unwrap();
-        let (project, layout, mut model) = setup_path_only_project(tmp.path());
-        vendor_sync(&model, &layout, &project, VendorOptions::default()).unwrap();
+        let project = tmp.path().to_path_buf();
+        let layout = minimal_layout(&project);
 
-        // Pre-insert a user crate named "helper" in a normal group.
-        let (user_group_h, _) = model.groups.insert(
-            "user-group".into(),
-            GroupDef {
-                name: "user-group".into(),
-                target: TargetSpec::Host,
-                ..Default::default()
+        // Materialise a fake artifact on disk so the existence check
+        // doesn't trip.
+        let fake_artifact = project.join("fake-libsyn.rlib");
+        std::fs::write(&fake_artifact, b"<not a real rlib>").unwrap();
+
+        let mut model = model_with_deps(vec![external_dep(
+            "syn",
+            DepSource::CratesIo {
+                version: "2.0".into(),
             },
+        )]);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let lock = VendorLock {
+            version: VendorLock::CURRENT_VERSION,
+            fingerprint,
+            packages: vec![VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:x".into()),
+                artifact_path: Some(fake_artifact.clone()),
+            }],
+        };
+        let lock_path = layout.gluon_lock(&project);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        lock.save_atomic(&lock_path).unwrap();
+
+        auto_register_vendored_deps(&mut model, &layout, &project).unwrap();
+
+        assert_eq!(model.external_artifacts.len(), 1);
+        assert_eq!(
+            model.external_artifacts.get("syn"),
+            Some(&fake_artifact),
         );
-        model.crates.insert(
-            "helper".into(),
-            CrateDef {
-                name: "helper".into(),
-                path: String::new(),
-                edition: "2024".into(),
-                crate_type: CrateType::Lib,
-                target: TargetSpec::Host,
-                deps: Default::default(),
-                dev_deps: Default::default(),
-                features: Vec::new(),
-                root: None,
-                linker_script: None,
-                group: user_group_h,
-                is_project_crate: true,
-                cfg_flags: Vec::new(),
-                rustc_flags: Vec::new(),
-                requires_config: Vec::new(),
-                artifact_deps: Vec::new(),
-                artifact_env: Default::default(),
-                span: None,
+    }
+
+    // Old lockfile (no artifact_path) → diagnostic. The auto_register
+    // must not silently soldier on with an empty map; the consumer's
+    // compile would then fail with a confusing "missing extern" error.
+    #[test]
+    fn auto_register_errors_when_artifact_path_missing_from_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().to_path_buf();
+        let layout = minimal_layout(&project);
+
+        let mut model = model_with_deps(vec![external_dep(
+            "syn",
+            DepSource::CratesIo {
+                version: "2.0".into(),
             },
-        );
+        )]);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let lock = VendorLock {
+            version: VendorLock::CURRENT_VERSION,
+            fingerprint,
+            packages: vec![VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:x".into()),
+                artifact_path: None,
+            }],
+        };
+        let lock_path = layout.gluon_lock(&project);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        lock.save_atomic(&lock_path).unwrap();
 
         let err = auto_register_vendored_deps(&mut model, &layout, &project).expect_err("fail");
-        assert!(err.to_string().contains("collides"), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("no artifact_path"), "msg: {msg}");
+        assert!(msg.contains("gluon vendor"), "msg: {msg}");
     }
 
+    // The recorded path was wiped (e.g. user ran `rm -rf build/` or
+    // similar). Distinct error from the missing-field case so the
+    // diagnostic can suggest the right fix.
+    #[test]
+    fn auto_register_errors_when_artifact_file_missing_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().to_path_buf();
+        let layout = minimal_layout(&project);
+
+        let mut model = model_with_deps(vec![external_dep(
+            "syn",
+            DepSource::CratesIo {
+                version: "2.0".into(),
+            },
+        )]);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let lock = VendorLock {
+            version: VendorLock::CURRENT_VERSION,
+            fingerprint,
+            packages: vec![VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:x".into()),
+                artifact_path: Some(project.join("does-not-exist.rlib")),
+            }],
+        };
+        let lock_path = layout.gluon_lock(&project);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        lock.save_atomic(&lock_path).unwrap();
+
+        let err = auto_register_vendored_deps(&mut model, &layout, &project).expect_err("fail");
+        let msg = err.to_string();
+        assert!(msg.contains("missing artifact"), "msg: {msg}");
+        assert!(msg.contains("gluon vendor"), "msg: {msg}");
+    }
+
+    // Defensive call pattern: callers may auto_register on every model
+    // load. Re-running must produce the same artifact map.
     #[test]
     fn auto_register_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let (project, layout, mut model) = setup_path_only_project(tmp.path());
-        vendor_sync(&model, &layout, &project, VendorOptions::default()).unwrap();
+        let project = tmp.path().to_path_buf();
+        let layout = minimal_layout(&project);
+        let fake_artifact = project.join("fake-libsyn.rlib");
+        std::fs::write(&fake_artifact, b"x").unwrap();
+
+        let mut model = model_with_deps(vec![external_dep(
+            "syn",
+            DepSource::CratesIo {
+                version: "2.0".into(),
+            },
+        )]);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let lock = VendorLock {
+            version: VendorLock::CURRENT_VERSION,
+            fingerprint,
+            packages: vec![VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                source: "crates-io".into(),
+                checksum: Some("sha256:x".into()),
+                artifact_path: Some(fake_artifact.clone()),
+            }],
+        };
+        let lock_path = layout.gluon_lock(&project);
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        lock.save_atomic(&lock_path).unwrap();
 
         auto_register_vendored_deps(&mut model, &layout, &project).unwrap();
-        let before = model.crates.len();
+        let before = model.external_artifacts.clone();
         auto_register_vendored_deps(&mut model, &layout, &project).unwrap();
-        assert_eq!(model.crates.len(), before);
-    }
-
-    #[test]
-    fn parse_locked_source_recognises_all_variants() {
-        assert_eq!(
-            parse_locked_source("crates-io"),
-            Some(LockedSourceKind::CratesIo)
-        );
-        assert_eq!(
-            parse_locked_source("git+https://example.com/x.git#rev=abc"),
-            Some(LockedSourceKind::Git)
-        );
-        assert_eq!(
-            parse_locked_source("path+../local"),
-            Some(LockedSourceKind::Path("../local".to_string()))
-        );
-        assert!(parse_locked_source("nonsense").is_none());
-    }
-
-    #[test]
-    fn read_cargo_edition_and_type_detects_proc_macro() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("Cargo.toml");
-        std::fs::write(
-            &p,
-            br#"[package]
-name = "macros"
-version = "0.1.0"
-edition = "2018"
-[lib]
-proc-macro = true
-"#,
-        )
-        .unwrap();
-        let (edition, is_pm) = read_cargo_edition_and_type(&p).unwrap();
-        assert_eq!(edition, "2018");
-        assert!(is_pm);
-    }
-
-    #[test]
-    fn read_cargo_edition_defaults_to_2015_when_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("Cargo.toml");
-        std::fs::write(&p, b"[package]\nname=\"x\"\nversion=\"0.1.0\"\n").unwrap();
-        let (edition, is_pm) = read_cargo_edition_and_type(&p).unwrap();
-        assert_eq!(edition, "2015");
-        assert!(!is_pm);
+        assert_eq!(model.external_artifacts, before);
     }
 }

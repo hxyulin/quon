@@ -54,7 +54,7 @@ use crate::error::{Diagnostic, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One vendored package as pinned in `gluon.lock`.
 ///
@@ -87,6 +87,17 @@ pub struct VendorLockPackage {
     /// user edits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    /// Absolute path to the artifact (`.rlib` for libs, `.dylib`/`.so`/
+    /// `.dll` for proc-macros) that cargo produced when building the
+    /// scratch vendor workspace. Captured from `cargo build
+    /// --message-format=json`. `None` for fresh lockfiles written
+    /// before the cargo-build step ran (e.g. lockfiles from older
+    /// gluon versions, or path-only models that skipped the build).
+    ///
+    /// `gluon build` consults this path via `command_builder` to wire
+    /// `--extern <alias>=<path>` for consumer crates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_path: Option<PathBuf>,
 }
 
 /// Top-level `gluon.lock` document.
@@ -291,18 +302,21 @@ mod tests {
                     version: "2.11.0".into(),
                     source: "crates-io".into(),
                     checksum: Some("sha256:aaaa".into()),
+                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libbitflags-abcd.rlib")),
                 },
                 VendorLockPackage {
                     name: "tokio".into(),
                     version: "1.40.0".into(),
                     source: "git+https://github.com/tokio-rs/tokio#abc1234".into(),
                     checksum: Some("sha256:bbbb".into()),
+                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libtokio-efgh.rlib")),
                 },
                 VendorLockPackage {
                     name: "local-helper".into(),
                     version: "0.1.0".into(),
                     source: "path+../helper".into(),
                     checksum: None,
+                    artifact_path: Some(PathBuf::from("/build/target/release/deps/liblocal_helper-ijkl.rlib")),
                 },
             ],
         }
@@ -316,6 +330,36 @@ mod tests {
         lock.save_atomic(&p).expect("save");
         let loaded = VendorLock::load(&p).expect("load").expect("present");
         assert_eq!(loaded, lock);
+    }
+
+    // Old lockfiles (gluon < cargo-as-builder) lack the `artifact_path`
+    // field. Loading them must succeed with `artifact_path = None` so
+    // upgrades don't force a re-vendor; the auto_register pass can
+    // detect the missing path and either run the cargo-build step or
+    // surface a "rerun gluon vendor" diagnostic, depending on context.
+    #[test]
+    fn loads_old_lockfile_without_artifact_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("gluon.lock");
+        std::fs::write(
+            &p,
+            br#"version = 1
+fingerprint = "sha256:abc"
+
+[[package]]
+name = "bitflags"
+version = "2.11.0"
+source = "crates-io"
+checksum = "sha256:aaaa"
+"#,
+        )
+        .expect("seed");
+        let loaded = VendorLock::load(&p).expect("load").expect("present");
+        assert_eq!(loaded.packages.len(), 1);
+        assert!(
+            loaded.packages[0].artifact_path.is_none(),
+            "absent field must deserialise to None"
+        );
     }
 
     #[test]
@@ -411,12 +455,17 @@ fingerprint = "sha256:xx"
                 version: "0.1.0".into(),
                 source: "path+../local".into(),
                 checksum: None,
+                artifact_path: None,
             }],
         };
         let toml = toml::to_string_pretty(&lock).expect("serialise");
         assert!(
             !toml.contains("checksum"),
             "path dep emitted a checksum: {toml}"
+        );
+        assert!(
+            !toml.contains("artifact_path"),
+            "absent artifact_path leaked into output: {toml}"
         );
     }
 }

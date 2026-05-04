@@ -25,7 +25,7 @@
 //!    checksum.
 
 use gluon_core::compile::BuildLayout;
-use gluon_core::model::{CrateType, DepSource};
+use gluon_core::model::DepSource;
 use gluon_core::vendor::{self, VendorOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -135,31 +135,20 @@ fn path_only_fixture_vendors_and_auto_registers() {
         .expect("vendor_sync again");
     assert_eq!(lock, lock2);
 
-    // Auto-register populates model.crates with a synthetic entry
-    // pointing at the real path dep directory.
+    // Auto-register is a no-op for the artifact map when the only
+    // declared dep is path-sourced — v1's cargo-as-builder pipeline
+    // doesn't compile path deps (the manifest_gen step skips them, so
+    // cargo never produces an artifact). The consumer-side compile
+    // path will surface the gap with a clearer "no artifact for X"
+    // diagnostic if anyone actually tries to depend on this path dep
+    // at compile time.
     let mut model_for_reg = model.clone();
     vendor::auto_register_vendored_deps(&mut model_for_reg, &layout, &project)
         .expect("auto_register");
-    let crate_handle = model_for_reg
-        .crates
-        .lookup("vendor_minimal_helper")
-        .expect("synthetic crate");
-    let krate = model_for_reg.crates.get(crate_handle).unwrap();
-    assert_eq!(krate.edition, "2021");
-    assert_eq!(krate.crate_type, CrateType::Lib);
-    let vendored_group = model_for_reg
-        .groups
-        .lookup(vendor::VENDORED_GROUP_NAME)
-        .expect("vendored group present");
-    assert_eq!(krate.group, vendored_group);
-    assert!(krate.path.contains("vendor-minimal-helper"));
-
-    // And the synthetic group is registered.
     assert!(
-        model_for_reg
-            .groups
-            .lookup(vendor::VENDORED_GROUP_NAME)
-            .is_some()
+        model_for_reg.external_artifacts.is_empty(),
+        "path deps don't get artifact_path in v1: {:?}",
+        model_for_reg.external_artifacts,
     );
 }
 

@@ -20,6 +20,25 @@ pub struct BuildModel {
     pub rules: Arena<RuleDef>,
     pub pipelines: Arena<PipelineDef>,
     pub external_deps: Arena<ExternalDepDef>,
+    /// Map of external dep name → absolute path of the rlib (for libs)
+    /// or dylib (for proc-macros) that satisfies it.
+    ///
+    /// Populated by `vendor::auto_register_vendored_deps` from
+    /// `gluon.lock` after `gluon vendor` has run. Consumed by the
+    /// compile path: `compile::command_builder` looks up each
+    /// `DepResolution::External(handle)` against this map and emits
+    /// `--extern <alias>=<path>` for the consumer's rustc invocation.
+    ///
+    /// Empty for projects with no external deps, and empty when
+    /// `gluon vendor` has not been run yet — the compile path then
+    /// errors with a "run `gluon vendor`" diagnostic.
+    ///
+    /// V1 only stores host-target artifacts. Cross-target external
+    /// deps are rejected at registration time; that's a future feature
+    /// (it requires either `-Z build-std` for cargo or pre-built
+    /// per-target sysroots).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_artifacts: BTreeMap<String, PathBuf>,
     /// EFI System Partition declarations. Each entry describes a set of
     /// compiled artifacts to be assembled into a FAT-layout directory
     /// under `build/cross/<target>/<profile>/esp/<name>/`. Consumed by
