@@ -12,12 +12,17 @@
 //! - [`metadata`] — invoke `cargo metadata` against a per-target
 //!   scratch workspace and parse the JSON into a target-agnostic
 //!   [`metadata::ResolvedGraph`].
+//! - [`graph`] — lower a `ResolvedGraph` into scheduler-node
+//!   descriptors ([`graph::VendorCrateBuild`]), applying proc-macro
+//!   re-targeting (proc-macros are dlopen'd by rustc and must always
+//!   be host) and rejecting `build.rs`-bearing crates (MVP scope:
+//!   build scripts are not yet supported).
 //!
 //! Future modules (next slices, per the design spec):
 //!
-//! - `graph` — lower a `ResolvedGraph` into scheduler nodes, applying
-//!   proc-macro re-targeting (proc-macros are dlopen'd by rustc and
-//!   must always be host) and rejecting `build.rs`-bearing crates
-//!   (MVP scope: build scripts are not yet supported).
+//! - scheduler integration — a `BuildNode::VendorCrateBuild` variant
+//!   plus a dispatcher that turns each `VendorCrateBuild` into a rustc
+//!   invocation against gluon's per-target sysroot.
 
+pub mod graph;
 pub mod metadata;
