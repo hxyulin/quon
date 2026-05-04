@@ -279,6 +279,78 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
     out
 }
 
+/// Run `cargo metadata --format-version 1 --frozen` against the scratch
+/// vendor workspace and return the captured JSON stdout.
+///
+/// `--frozen` is always passed: by the time we call metadata, `cargo
+/// vendor` has populated the workspace's lockfile, and any need to
+/// update it would mean the vendor dir is out of sync with the
+/// declared deps — surfacing that as a hard cargo error keeps the
+/// build deterministic.
+///
+/// `--offline` is gated on [`VendorFlags::offline`], same as
+/// [`run_cargo_vendor`]. When set, cargo additionally refuses any
+/// network access.
+///
+/// Returns the JSON string for downstream parsing by
+/// [`super::cross::metadata::parse_metadata`]. Splitting subprocess
+/// invocation from JSON parsing keeps each side independently
+/// testable: the parser exercises canned JSON without spawning cargo,
+/// and this function is exercised against a real toolchain in the
+/// orchestration tests without needing the full graph machinery.
+pub fn run_cargo_metadata(workspace_dir: &Path, flags: VendorFlags) -> Result<String> {
+    let cargo = resolve_cargo();
+
+    let mut cmd = Command::new(&cargo);
+    cmd.arg("metadata")
+        .arg("--manifest-path")
+        .arg(workspace_dir.join("Cargo.toml"))
+        .arg("--format-version")
+        .arg("1")
+        .arg("--frozen");
+
+    if flags.offline {
+        cmd.arg("--offline");
+    }
+
+    // Capture stderr so the failure path can include cargo's diagnostic
+    // text in the gluon error (unlike vendor, which inherits stderr to
+    // show live progress — metadata is a quick query and produces no
+    // user-facing progress, so capturing keeps the surface clean).
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = cmd.output().map_err(|e| {
+        Error::Diagnostics(vec![
+            Diagnostic::error(format!("failed to spawn `cargo metadata`: {e}")).with_note(format!(
+                "tried to invoke {} (set $CARGO to override)",
+                cargo.display()
+            )),
+        ])
+    })?;
+
+    if !output.status.success() {
+        return Err(Error::Diagnostics(vec![
+            Diagnostic::error(format!(
+                "`cargo metadata` failed with exit code {:?}",
+                output.status.code()
+            ))
+            .with_note(format!("scratch workspace: {}", workspace_dir.display()))
+            .with_note(format!(
+                "stderr:\n{}",
+                String::from_utf8_lossy(&output.stderr).trim_end()
+            )),
+        ]));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| {
+        Error::Diagnostics(vec![Diagnostic::error(format!(
+            "`cargo metadata` produced non-UTF-8 stdout: {e}"
+        ))])
+    })
+}
+
 /// Quote a string literal for cargo's `--config` flag (TOML basic
 /// string). Mirrors what we do for `escape_toml_str` in
 /// [`super::manifest_gen`] but inlines the wrapping quotes since
@@ -430,5 +502,70 @@ not json at all
         let msg = err.to_string();
         assert!(msg.contains("failed to spawn"), "msg: {msg}");
         assert!(msg.contains(bogus), "msg: {msg}");
+    }
+
+    #[test]
+    fn metadata_spawn_failure_is_diagnosed() {
+        // Same shape as spawn_failure_is_diagnosed but exercises the
+        // `cargo metadata` arm. Confirms the diagnostic includes both
+        // the headline ("failed to spawn `cargo metadata`") and the
+        // bogus path so the user can tell which subprocess failed.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            b"[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[lib]\npath=\"lib.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(ws.join("lib.rs"), b"").unwrap();
+
+        let bogus = "/nonexistent/gluon-vendor-test-cargo-metadata-missing";
+        let result = temp_env::with_var("CARGO", Some(bogus), || {
+            run_cargo_metadata(&ws, VendorFlags::default())
+        });
+
+        let err = result.expect_err("must fail — bogus CARGO path");
+        let msg = err.to_string();
+        assert!(msg.contains("failed to spawn"), "msg: {msg}");
+        assert!(msg.contains("cargo metadata"), "msg: {msg}");
+        assert!(msg.contains(bogus), "msg: {msg}");
+    }
+
+    #[test]
+    fn metadata_failure_includes_cargo_stderr_in_diagnostic() {
+        // Run real cargo against an invalid manifest so cargo exits
+        // non-zero and writes a diagnostic to stderr. Confirms the
+        // run_cargo_metadata error path captures and surfaces it.
+        // Skipped if cargo isn't on $PATH (shouldn't happen in this
+        // workspace's CI, but be defensive).
+        if std::process::Command::new("cargo")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped — cargo not on $PATH");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // Deliberately malformed: missing `[package]` section produces
+        // a precise, stable cargo diagnostic on stderr.
+        std::fs::write(ws.join("Cargo.toml"), b"this is not valid toml syntax !!!\n").unwrap();
+
+        let err = run_cargo_metadata(&ws, VendorFlags::default())
+            .expect_err("invalid manifest must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("`cargo metadata` failed"), "msg: {msg}");
+        assert!(msg.contains("stderr:"), "msg: {msg}");
+        // Cargo's exact wording for parse errors has shifted across
+        // versions ("could not parse" vs "expected" etc.), but the
+        // failed path is always quoted in stderr — assert that.
+        assert!(
+            msg.contains(ws.join("Cargo.toml").to_string_lossy().as_ref()),
+            "stderr capture must include the offending manifest path: {msg}",
+        );
     }
 }
