@@ -30,6 +30,9 @@ use gluon_core::vendor::{self, VendorOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "network-tests")]
+use gluon_model::TargetSpec;
+
 /// Walk up from `CARGO_MANIFEST_DIR` (which is `crates/gluon-core`
 /// for this test crate) to the workspace root, then descend into
 /// `tests/fixtures/<name>`. Mirrors the helper in `kconfig_e2e.rs`.
@@ -262,5 +265,112 @@ fn full_fixture_vendors_bitflags_from_crates_io() {
             .crates
             .lookup("vendor_minimal_helper")
             .is_some()
+    );
+}
+
+// ------------------------------------------------------------------
+// Network-gated: cross-target pipeline against `vendor-cross-minimal`.
+//
+// Proves slices 1–4 hold together end-to-end against real cargo:
+//
+//   populate_cross_vendor_workspaces  → cargo vendor into the per-target scratch
+//   build_cross_vendor_context        → cargo metadata + graph lowering + ctx.add
+//
+// The scheduler dispatch path (slice 2c-iv) is unit-tested separately
+// in `crates/gluon-core/src/scheduler/mod.rs`; running the full rustc
+// build of bitflags against gluon's per-target sysroot would require
+// `rust-src` plus a kernel-buildable user crate, which is intentionally
+// out of scope for this fixture.
+// ------------------------------------------------------------------
+
+/// Stage `vendor-cross-minimal` into a tempdir. Unlike the host fixture
+/// there's no sibling crate to copy — the cross fixture is a single
+/// directory with `gluon.rs` and `.gitignore`.
+#[cfg(feature = "network-tests")]
+fn stage_cross_fixture(tmp: &Path) -> PathBuf {
+    let project_src = fixture_dir("vendor-cross-minimal");
+    let project_dst = tmp.join("vendor-cross-minimal");
+    copy_dir_recursive(&project_src, &project_dst);
+    project_dst
+}
+
+#[cfg(feature = "network-tests")]
+#[test]
+fn cross_fixture_populates_per_target_workspace_and_builds_context() {
+    if gluon_core::RustcInfo::probe().is_err() {
+        eprintln!(
+            "cross_fixture_populates_per_target_workspace_and_builds_context: \
+             skipped — rustc probe failed",
+        );
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = stage_cross_fixture(tmp.path());
+
+    let model = gluon_core::load_build_model(&project).expect("load_build_model");
+    assert_eq!(model.external_deps.len(), 1, "fixture declares one cross dep");
+
+    // Resolve the bitflags handle + its cross target handle from the
+    // model itself, so the test stays robust if we rename the target
+    // in the fixture later.
+    let bf_handle = model.external_deps.lookup("bitflags").expect("bitflags dep");
+    let bf_def = model.external_deps.get(bf_handle).unwrap();
+    let cross_target_handle = match bf_def.target {
+        TargetSpec::Cross(h) => h,
+        TargetSpec::Host => panic!("fixture must mark bitflags as Cross(...)"),
+    };
+    let target = model.targets.get(cross_target_handle).expect("target def");
+
+    let layout = BuildLayout::new(project.join("build"), "vendor-cross-minimal");
+
+    // ---- Phase 1: populate the per-target scratch workspace.
+    vendor::cross::populate_cross_vendor_workspaces(&model, &layout, VendorOptions::default())
+        .expect("populate_cross_vendor_workspaces");
+
+    let scratch = layout.vendor_workspace_for_target(&target.name);
+    assert!(scratch.exists(), "scratch dir not created: {}", scratch.display());
+    assert!(scratch.join("Cargo.toml").exists(), "scratch missing Cargo.toml");
+    assert!(scratch.join("Cargo.lock").exists(), "scratch missing Cargo.lock");
+
+    // cargo vendor populates <scratch>/vendor/. Modern cargo drops the
+    // version suffix when a crate has only one version in the graph, so
+    // accept either `bitflags` or `bitflags-*`.
+    let scratch_vendor = scratch.join("vendor");
+    assert!(scratch_vendor.exists(), "scratch/vendor missing");
+    let has_bitflags = fs::read_dir(&scratch_vendor)
+        .expect("read scratch/vendor")
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n == "bitflags" || n.starts_with("bitflags-")
+        });
+    assert!(has_bitflags, "no bitflags dir under {}", scratch_vendor.display());
+
+    // The host pipeline must NOT have created a project-root vendor/
+    // dir — the cross fixture has zero host-tagged deps.
+    assert!(
+        !project.join("vendor").exists(),
+        "host vendor dir leaked for cross-only fixture",
+    );
+
+    // ---- Phase 2: build the VendorBuildContext from the scratch.
+    let ctx =
+        vendor::cross::build_cross_vendor_context(&model, &layout).expect("build_cross_vendor_context");
+
+    assert!(
+        !ctx.is_empty(),
+        "context should contain at least one VendorCrateBuild for bitflags",
+    );
+
+    let id = ctx
+        .lookup(TargetSpec::Cross(cross_target_handle), "bitflags")
+        .expect("ctx.lookup for bitflags @ cross target");
+    let build = ctx.get(id).expect("get build by id");
+    assert_eq!(build.cargo_target_name, "bitflags");
+    assert_eq!(build.target, TargetSpec::Cross(cross_target_handle));
+    assert!(
+        build.manifest_dir.starts_with(&scratch_vendor),
+        "manifest_dir should sit under the per-target scratch vendor: {}",
+        build.manifest_dir.display(),
     );
 }

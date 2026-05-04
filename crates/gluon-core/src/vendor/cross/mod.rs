@@ -173,7 +173,8 @@ pub fn build_cross_vendor_context(
                 .with_note("run `gluon vendor` to populate it"),
             ]));
         }
-        let json = cargo_cmd::run_cargo_metadata(&scratch, flags)?;
+        let vendor_dir = scratch.join("vendor");
+        let json = cargo_cmd::run_cargo_metadata(&scratch, &vendor_dir, flags)?;
         let graph = metadata::parse_metadata(&json, *target_handle).map_err(|e| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

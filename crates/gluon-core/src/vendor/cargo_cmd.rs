@@ -292,13 +292,27 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
 /// [`run_cargo_vendor`]. When set, cargo additionally refuses any
 /// network access.
 ///
+/// `vendor_dir` redirects cargo to resolve crates.io packages from the
+/// vendored copy rather than the global registry cache. Without this,
+/// `manifest_path` entries in the JSON point at
+/// `~/.cargo/registry/src/...`, so the downstream rustc dispatch path
+/// would compile from the cargo cache instead of the vendored sources
+/// — silently breaking offline-build and reproducibility guarantees.
+/// Same `--config` shape as [`run_cargo_build_vendor`] uses for the
+/// host pipeline; we keep both invocations consistent rather than
+/// writing a `.cargo/config.toml` next to the scratch.
+///
 /// Returns the JSON string for downstream parsing by
 /// [`super::cross::metadata::parse_metadata`]. Splitting subprocess
 /// invocation from JSON parsing keeps each side independently
 /// testable: the parser exercises canned JSON without spawning cargo,
 /// and this function is exercised against a real toolchain in the
 /// orchestration tests without needing the full graph machinery.
-pub fn run_cargo_metadata(workspace_dir: &Path, flags: VendorFlags) -> Result<String> {
+pub fn run_cargo_metadata(
+    workspace_dir: &Path,
+    vendor_dir: &Path,
+    flags: VendorFlags,
+) -> Result<String> {
     let cargo = resolve_cargo();
 
     let mut cmd = Command::new(&cargo);
@@ -307,7 +321,14 @@ pub fn run_cargo_metadata(workspace_dir: &Path, flags: VendorFlags) -> Result<St
         .arg(workspace_dir.join("Cargo.toml"))
         .arg("--format-version")
         .arg("1")
-        .arg("--frozen");
+        .arg("--frozen")
+        .arg("--config")
+        .arg("source.crates-io.replace-with=\"vendored-sources\"")
+        .arg("--config")
+        .arg(format!(
+            "source.vendored-sources.directory={}",
+            toml_string_literal(&vendor_dir.to_string_lossy()),
+        ));
 
     if flags.offline {
         cmd.arg("--offline");
@@ -521,8 +542,9 @@ not json at all
         std::fs::write(ws.join("lib.rs"), b"").unwrap();
 
         let bogus = "/nonexistent/gluon-vendor-test-cargo-metadata-missing";
+        let vendor = ws.join("vendor");
         let result = temp_env::with_var("CARGO", Some(bogus), || {
-            run_cargo_metadata(&ws, VendorFlags::default())
+            run_cargo_metadata(&ws, &vendor, VendorFlags::default())
         });
 
         let err = result.expect_err("must fail — bogus CARGO path");
@@ -555,7 +577,8 @@ not json at all
         // a precise, stable cargo diagnostic on stderr.
         std::fs::write(ws.join("Cargo.toml"), b"this is not valid toml syntax !!!\n").unwrap();
 
-        let err = run_cargo_metadata(&ws, VendorFlags::default())
+        let vendor = ws.join("vendor");
+        let err = run_cargo_metadata(&ws, &vendor, VendorFlags::default())
             .expect_err("invalid manifest must fail");
         let msg = err.to_string();
         assert!(msg.contains("`cargo metadata` failed"), "msg: {msg}");

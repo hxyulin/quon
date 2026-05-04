@@ -1,0 +1,3 @@
+# Gluon build artefacts (includes per-target vendor scratches at
+# build/vendor-workspaces/<target>/).
+/build/
