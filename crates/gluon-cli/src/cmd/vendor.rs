@@ -61,5 +61,13 @@ pub fn run(ctx: LayoutContext, check_mode: bool, force: bool, offline: bool) -> 
             layout.vendor_dir(&project_root).display()
         );
     }
+    // Cross-target deps live in per-target scratch workspaces (one
+    // per cross target) so versions can diverge across targets without
+    // colliding with the host pipeline's project-root vendor/. Always
+    // run after the host pipeline so users see a single `gluon vendor`
+    // do the right thing regardless of whether they have cross deps.
+    // For host-only models this short-circuits to a no-op with no
+    // cargo invocation.
+    vendor::cross::populate_cross_vendor_workspaces(&model, &layout, opts)?;
     Ok(())
 }

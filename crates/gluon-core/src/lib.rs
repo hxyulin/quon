@@ -132,12 +132,13 @@ pub fn build_with_workers(
     let rules = rule::RuleRegistry::with_builtins();
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
-    // The cross-target vendor build context is empty until `vendor_sync`
-    // wires up the per-target `cargo metadata` → `VendorBuildContext`
-    // pipeline (in-progress slice). With an empty context, `build_dag`
-    // emits zero `VendorCrate` nodes and the pipeline behaves exactly
-    // as before this parameter existed.
-    let vendor_ctx = crate::vendor::cross::context::VendorBuildContext::new();
+    // Build the cross-target vendor context by reading per-target
+    // scratch workspaces populated by `gluon vendor`. For host-only
+    // models this short-circuits to an empty context with no cargo
+    // invocation, so projects without cross deps pay zero overhead.
+    // Models declaring cross deps without populated workspaces
+    // produce a "run `gluon vendor`" diagnostic.
+    let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(model, &ctx.layout)?;
     let summary = scheduler::execute_pipeline(
         ctx,
         model,
