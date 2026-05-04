@@ -23,6 +23,7 @@
 
 pub mod cargo_cmd;
 pub mod checksum;
+pub mod cross;
 pub mod fingerprint;
 pub mod lockfile;
 pub mod manifest_gen;
