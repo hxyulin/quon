@@ -96,6 +96,7 @@ pub type NodeId = u32;
 ///
 /// All adjacency structures use `BTreeMap`/`BTreeSet` for stable iteration
 /// across runs — see module-level doc for the full rationale.
+#[derive(Debug)]
 pub struct Dag {
     /// All nodes, indexed by `NodeId`.
     pub nodes: Vec<DagNode>,
@@ -363,13 +364,42 @@ pub fn build_dag(
             ))
         })?;
 
-        for dep in crate_def.deps.values() {
-            // External deps don't participate in the crate-DAG: their
-            // build artifacts come out of the vendor pipeline rather
-            // than being scheduled as `DagNode::Crate` nodes here.
+        for (extern_name, dep) in &crate_def.deps {
             let dep_handle = match dep.resolution {
                 DepResolution::Project(h) => h,
-                DepResolution::External(_) => continue,
+                DepResolution::External(ext_handle) => {
+                    // External deps live outside the user-crate arena.
+                    // Two pipelines own them: V1 (host-targeted) goes
+                    // through the cargo wrapper and produces artifacts
+                    // before the scheduler runs, so it's invisible to
+                    // the DAG; V2 (cross-targeted, the new vendor
+                    // pipeline) registers a `VendorCrateBuild` in
+                    // `vendor_ctx` per `(target, cargo_target_name)`.
+                    //
+                    // We look up the dep in `vendor_ctx` using
+                    // `(ExternalDepDef::target, extern_name)`. The
+                    // extern name is the BTreeMap key here — that's
+                    // the rust extern form (`--extern <name>=<path>`),
+                    // which is the cargo-normalised (underscored) form
+                    // and therefore matches `VendorBuildContext::lookup`'s
+                    // expectations.
+                    //
+                    // A miss is silent: V1 host externals never appear
+                    // in `vendor_ctx`, and during the migration window
+                    // every caller passes `VendorBuildContext::new()`,
+                    // so a hard error here would break the workspace.
+                    // Once the V2 pipeline becomes the only path, a
+                    // missing entry will become a resolver-level
+                    // diagnostic upstream of this function.
+                    let Some(ext_def) = model.external_deps.get(ext_handle) else {
+                        continue;
+                    };
+                    if let Some(vendor_id) = vendor_ctx.lookup(ext_def.target, extern_name) {
+                        let v_node = dag.insert_node(DagNode::VendorCrate(vendor_id));
+                        dag.add_edge(v_node, crate_id);
+                    }
+                    continue;
+                }
             };
             // Skip deps that are not part of this build (dangling handles).
             if !resolved_handles.contains(&dep_handle) {
@@ -398,27 +428,59 @@ pub fn build_dag(
     }
 
     // -----------------------------------------------------------------------
-    // Step 3.5: Vendored crate nodes.
+    // Step 3.5: Vendored crate nodes + their internal/sysroot edges.
     // -----------------------------------------------------------------------
     // Insert one VendorCrate node per registered build in vendor_ctx. The
     // node identity is the VendorBuildId (assigned in registration order
     // by `vendor_sync` — itself deterministic), so DAG iteration stays
     // stable across runs.
     //
-    // No edges are added here yet:
-    //   - Vendor → vendor edges (from VendorDepEdge) and consumer crate →
-    //     vendor edges (from external deps in user crates) are added in
-    //     a follow-up slice. Until then, the scheduler will see vendor
-    //     nodes as in-degree-zero leaves with no consumers — runnable in
-    //     isolation but not yet wired to the rest of the graph. With an
-    //     empty `vendor_ctx` (the current state of every caller), this
-    //     loop is a no-op.
-    //   - The downstream dispatcher returns a hard error rather than
-    //     attempting a stub compile, so a mistakenly populated context
-    //     fails loudly at scheduling time rather than producing broken
-    //     artifacts silently.
-    for (id, _build) in vendor_ctx.iter() {
-        dag.insert_node(DagNode::VendorCrate(id));
+    // Edges added here:
+    //   - **Vendor → vendor** (from each `VendorDepEdge`). Misses are a
+    //     hard error: the vendor graph is internally produced by
+    //     `build_vendor_nodes` from a single resolved cargo metadata
+    //     output, so an unresolvable edge means the lowering is broken,
+    //     not a user mistake. Failing loudly here is preferable to
+    //     letting the scheduler deadlock later.
+    //   - **Sysroot → cross vendor**. Cross-targeted vendor builds need
+    //     gluon's per-target sysroot just like user cross crates.
+    //     Host-targeted vendor builds (proc-macros and their deps) skip
+    //     this edge — they compile against the host toolchain.
+    //     `insert_node` is idempotent, so a sysroot referenced *only* by
+    //     vendor crates (e.g. a multi-target project where bitflags
+    //     targets the kernel target but no user crate does) is created
+    //     here with no other consumers. That's harmless: the sysroot
+    //     just gets built earlier than otherwise.
+    //
+    // **No vendor → ConfigCrate edge.** Vendor crates are external
+    // (crates.io) deps, unaware of the user's `CONFIG_*` constants;
+    // wiring them to the config crate would force a phantom dependency
+    // that delays vendor builds for no reason.
+    //
+    // Consumer-side (user crate → vendor) edges live in Step 3 above,
+    // wired during the user-crate dep walk so we can use the user
+    // crate's `BTreeMap` extern-name keys directly.
+    for (id, build) in vendor_ctx.iter() {
+        let v_node = dag.insert_node(DagNode::VendorCrate(id));
+
+        for edge in &build.deps {
+            let dep_id = vendor_ctx.lookup(edge.target, &edge.extern_name).ok_or_else(
+                || {
+                    Error::Compile(format!(
+                        "build_dag: vendor build {id} ({}) references unresolved dep \
+                         ({:?}, {}) — vendor graph lowering produced an inconsistent edge",
+                        build.crate_id, edge.target, edge.extern_name
+                    ))
+                },
+            )?;
+            let dep_node = dag.insert_node(DagNode::VendorCrate(dep_id));
+            dag.add_edge(dep_node, v_node);
+        }
+
+        if let gluon_model::TargetSpec::Cross(target) = build.target {
+            let sysroot_id = dag.insert_node(DagNode::Sysroot(target));
+            dag.add_edge(sysroot_id, v_node);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2156,5 +2218,334 @@ mod tests {
                 .unwrap_or(false),
             "BuildStep → Image edge missing — unified artifact namespace not wired"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Vendor-pipeline edges (slice 2c-iii)
+    // -----------------------------------------------------------------------
+    //
+    // The `Step 3.5` and consumer-side branches in `build_dag` form the
+    // structural contract between the vendor pipeline and the rest of
+    // the scheduler. The five tests below pin down each edge category:
+    //   1. Cross vendor build → its target's sysroot (depends on it).
+    //   2. Host vendor build → no sysroot edge (proc-macros use host
+    //      toolchain).
+    //   3. Vendor → vendor edges along `VendorDepEdge`s.
+    //   4. User crate's `External(_)` dep → `vendor → consumer` edge
+    //      when the dep matches a registered vendor build.
+    //   5. User crate's `External(_)` dep with no matching vendor entry
+    //      → no edge, no panic (V1 host externals + empty-context case).
+
+    use crate::vendor::cross::context::VendorBuildContext;
+    use crate::vendor::cross::graph::{VendorCrateBuild, VendorDepEdge};
+    use crate::vendor::cross::metadata::{CrateId, CrateKind};
+    use gluon_model::{DepSource, ExternalDepDef};
+    use std::path::PathBuf;
+
+    fn vendor_build(
+        name: &str,
+        ver: &str,
+        target: TargetSpec,
+        kind: CrateKind,
+        deps: Vec<VendorDepEdge>,
+    ) -> VendorCrateBuild {
+        VendorCrateBuild {
+            crate_id: CrateId { name: name.into(), version: ver.into() },
+            cargo_target_name: name.replace('-', "_"),
+            target,
+            kind,
+            manifest_dir: PathBuf::from(format!("/vendor/{name}-{ver}")),
+            lib_path: PathBuf::from(format!("/vendor/{name}-{ver}/src/lib.rs")),
+            edition: "2021".into(),
+            features: vec![],
+            deps,
+        }
+    }
+
+    #[test]
+    fn vendor_cross_build_gets_sysroot_edge() {
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        let mut vctx = VendorBuildContext::new();
+        let vid = vctx
+            .add(vendor_build(
+                "bitflags",
+                "2.11.0",
+                TargetSpec::Cross(th),
+                CrateKind::Lib,
+                vec![],
+            ))
+            .expect("add vendor build");
+
+        let resolved = make_resolved(th, vec![]);
+        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+
+        let sysroot_id = *dag.node_index.get(&DagNode::Sysroot(th)).unwrap();
+        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
+        let sys_outs = dag.edges_out.get(&sysroot_id).expect("sysroot has outs");
+        assert!(
+            sys_outs.contains(&v_id),
+            "cross vendor build must depend on its target's sysroot"
+        );
+        // Cross vendor build's only predecessor here is the sysroot.
+        assert_eq!(*dag.in_degree.get(&v_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn vendor_host_build_has_no_sysroot_edge() {
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        let mut vctx = VendorBuildContext::new();
+        let vid = vctx
+            .add(vendor_build(
+                "syn",
+                "2.0.0",
+                TargetSpec::Host,
+                CrateKind::ProcMacro,
+                vec![],
+            ))
+            .expect("add vendor build");
+
+        let resolved = make_resolved(th, vec![]);
+        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+
+        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
+        // No sysroot edge — host vendor builds compile against host
+        // toolchain. In-degree should be 0 (leaf).
+        assert_eq!(
+            *dag.in_degree.get(&v_id).unwrap(),
+            0,
+            "host vendor build must be a leaf — no sysroot dep"
+        );
+    }
+
+    #[test]
+    fn vendor_to_vendor_edges_are_wired_along_dep_edges() {
+        // `consumer` (cross) depends on `dep` (cross). Verify
+        // dep → consumer edge in the DAG.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        let mut vctx = VendorBuildContext::new();
+        let dep_vid = vctx
+            .add(vendor_build(
+                "dep-crate",
+                "1.0.0",
+                TargetSpec::Cross(th),
+                CrateKind::Lib,
+                vec![],
+            ))
+            .expect("add dep");
+        let consumer_vid = vctx
+            .add(vendor_build(
+                "consumer-crate",
+                "1.0.0",
+                TargetSpec::Cross(th),
+                CrateKind::Lib,
+                vec![VendorDepEdge {
+                    extern_name: "dep_crate".into(),
+                    crate_id: CrateId { name: "dep-crate".into(), version: "1.0.0".into() },
+                    target: TargetSpec::Cross(th),
+                }],
+            ))
+            .expect("add consumer");
+
+        let resolved = make_resolved(th, vec![]);
+        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+
+        let dep_id = *dag.node_index.get(&DagNode::VendorCrate(dep_vid)).unwrap();
+        let consumer_id = *dag.node_index.get(&DagNode::VendorCrate(consumer_vid)).unwrap();
+        let dep_outs = dag.edges_out.get(&dep_id).expect("dep has outs");
+        assert!(
+            dep_outs.contains(&consumer_id),
+            "vendor dep → vendor consumer edge missing"
+        );
+        // Consumer in-degree: sysroot (1) + dep (1) = 2.
+        assert_eq!(*dag.in_degree.get(&consumer_id).unwrap(), 2);
+    }
+
+    #[test]
+    fn vendor_to_vendor_unresolved_edge_is_hard_error() {
+        // VendorCrateBuild.deps points at a (target, name) that the
+        // context never registered. This is an internal-consistency
+        // failure of the lowering — `build_dag` must surface it loudly.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        let mut vctx = VendorBuildContext::new();
+        vctx.add(vendor_build(
+            "consumer",
+            "1.0.0",
+            TargetSpec::Cross(th),
+            CrateKind::Lib,
+            vec![VendorDepEdge {
+                extern_name: "ghost".into(),
+                crate_id: CrateId { name: "ghost".into(), version: "1.0.0".into() },
+                target: TargetSpec::Cross(th),
+            }],
+        ))
+        .expect("add consumer");
+
+        let resolved = make_resolved(th, vec![]);
+        let err = build_dag(&resolved, &model, &vctx).expect_err("must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unresolved dep") && msg.contains("ghost"),
+            "error must name the offending edge; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn user_crate_external_dep_resolves_to_vendor_consumer_edge() {
+        // User cross crate has an `External(_)` dep whose target+name
+        // matches a registered vendor build. Verify
+        // `vendor → user crate` edge.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        // Register the vendor build first so we know its id.
+        let mut vctx = VendorBuildContext::new();
+        let vid = vctx
+            .add(vendor_build(
+                "bitflags",
+                "2.11.0",
+                TargetSpec::Cross(th),
+                CrateKind::Lib,
+                vec![],
+            ))
+            .expect("add vendor");
+
+        // Register the ExternalDepDef and grab its handle.
+        let (ext_h, _) = model.external_deps.insert(
+            "bitflags".into(),
+            ExternalDepDef {
+                name: "bitflags".into(),
+                source: DepSource::CratesIo { version: "2.11.0".into() },
+                features: vec![],
+                default_features: true,
+                cfg_flags: vec![],
+                rustc_flags: vec![],
+                target: TargetSpec::Cross(th),
+                span: None,
+            },
+        );
+
+        // Build the user crate with that External dep keyed by the
+        // extern name `bitflags`.
+        let group = ensure_group(&mut model, "default", Some(th));
+        let (user_h, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Cross(th),
+                group,
+                deps: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "bitflags".into(),
+                        DepDef {
+                            resolution: DepResolution::External(ext_h),
+                            features: vec![],
+                            version: None,
+                            optional: false,
+                            default_features: true,
+                            span: None,
+                        },
+                    );
+                    m
+                },
+                ..test_crate_defaults(group)
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef { handle: user_h, target: th, host: false }],
+        );
+        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+
+        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
+        let user_id = *dag.node_index.get(&DagNode::Crate(user_h)).unwrap();
+        let v_outs = dag.edges_out.get(&v_id).expect("vendor has outs");
+        assert!(
+            v_outs.contains(&user_id),
+            "vendor → user-crate edge missing for matching External dep"
+        );
+        // User crate in-degree: sysroot + config + vendor = 3.
+        assert_eq!(*dag.in_degree.get(&user_id).unwrap(), 3);
+    }
+
+    #[test]
+    fn user_crate_external_dep_with_no_vendor_entry_is_silently_skipped() {
+        // V1 host external (or pre-vendor-sync state): the External
+        // dep exists on the user crate but the vendor context has no
+        // matching entry. Must NOT panic and must NOT add an edge
+        // pointing at a non-existent vendor node.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-test");
+
+        let (ext_h, _) = model.external_deps.insert(
+            "serde".into(),
+            ExternalDepDef {
+                name: "serde".into(),
+                source: DepSource::CratesIo { version: "1.0.0".into() },
+                features: vec![],
+                default_features: true,
+                cfg_flags: vec![],
+                rustc_flags: vec![],
+                target: TargetSpec::Host, // V1 path
+                span: None,
+            },
+        );
+
+        let group = ensure_group(&mut model, "default", Some(th));
+        let (user_h, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Cross(th),
+                group,
+                deps: {
+                    let mut m = BTreeMap::new();
+                    m.insert(
+                        "serde".into(),
+                        DepDef {
+                            resolution: DepResolution::External(ext_h),
+                            features: vec![],
+                            version: None,
+                            optional: false,
+                            default_features: true,
+                            span: None,
+                        },
+                    );
+                    m
+                },
+                ..test_crate_defaults(group)
+            },
+        );
+
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef { handle: user_h, target: th, host: false }],
+        );
+        // Empty vendor context — V1 path has no vendor entries.
+        let dag =
+            build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
+
+        // No vendor node should have been created — the only nodes are
+        // Sysroot, ConfigCrate, and the user crate.
+        let user_id = *dag.node_index.get(&DagNode::Crate(user_h)).unwrap();
+        // In-degree for the user crate: sysroot + config = 2 (no
+        // vendor edge added).
+        assert_eq!(*dag.in_degree.get(&user_id).unwrap(), 2);
+        assert_eq!(dag.len(), 3, "no vendor node should be inserted on lookup miss");
     }
 }
