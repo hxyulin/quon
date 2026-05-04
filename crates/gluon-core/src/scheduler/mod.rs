@@ -25,6 +25,7 @@ use crate::compile::{CompileCrateInput, CompileCtx, compile_crate};
 use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
+use crate::vendor::cross::context::VendorBuildContext;
 use dag::Dag as DagType;
 use gluon_model::{
     BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef,
@@ -51,6 +52,11 @@ struct PipelineDispatcher<'a> {
     model: &'a BuildModel,
     resolved: &'a ResolvedConfig,
     rules: &'a RuleRegistry,
+    /// Vendored-crate side-table populated by `vendor_sync` and read
+    /// by the `DagNode::VendorCrate` dispatch arm. Empty when no cross
+    /// vendored deps are declared, in which case no `VendorCrate` nodes
+    /// are emitted by `build_dag` and the dispatch arm is unreachable.
+    vendor_ctx: &'a VendorBuildContext,
     dag: &'a DagType,
     /// Single canonical-state mutex. Stage 8 collapses the four per-map
     /// mutexes (sysroots, artifacts, esps, images) into this bundle so
@@ -454,6 +460,25 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
                 self.record(was_cached);
                 Ok(())
             }
+
+            // ------------------------------------------------------------------
+            // VendorCrate — compile a vendored external crate via gluon-driven
+            // rustc. The dispatch helper, edge wiring (vendor → vendor and
+            // consumer → vendor), and `vendor_sync` orchestration land in
+            // follow-up slices. Until then, no caller populates
+            // `vendor_ctx`, so `build_dag` emits zero `VendorCrate` nodes
+            // and this arm is unreachable in practice. The error path is
+            // kept rather than `unreachable!()` so a mistakenly populated
+            // context fails with a diagnostic instead of an abort.
+            // ------------------------------------------------------------------
+            DagNode::VendorCrate(id) => {
+                let _ = (id, &self.vendor_ctx);
+                let _ = (stdout, stderr);
+                Err(Error::Compile(format!(
+                    "scheduler: VendorCrate({id}) dispatch is not yet wired \
+                     (cross-target vendor build pipeline is in progress)",
+                )))
+            }
         }
     }
 }
@@ -480,16 +505,23 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
 /// Per-job output is buffered in `Vec<u8>` inside the worker pool and
 /// flushed to `stdout`/`stderr` as each job completes. This prevents
 /// interleaved rustc output from parallel compilations.
+// Eight inputs is one above clippy's default threshold. Folding them
+// into a `PipelineInputs` bundle would be the right long-term shape
+// (and is queued for a follow-up refactor) but would touch every
+// call site for an orthogonal concern; doing it here would muddy the
+// vendor pipeline diff.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_pipeline(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
+    vendor_ctx: &VendorBuildContext,
     rules: &RuleRegistry,
     workers: usize,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<BuildSummary> {
-    let dag = build_dag(resolved, model)?;
+    let dag = build_dag(resolved, model, vendor_ctx)?;
 
     let state: Mutex<ArtifactsSnapshot> = Mutex::new(ArtifactsSnapshot::default());
     // `Relaxed` is sufficient: we only need atomicity, not ordering
@@ -504,6 +536,7 @@ pub fn execute_pipeline(
         model,
         resolved,
         rules,
+        vendor_ctx,
         dag: &dag,
         state: &state,
         built: &built,
@@ -628,7 +661,7 @@ mod tests {
         let mut stderr = Vec::<u8>::new();
 
         // Should fail because rust-src is not present (fake rustc info has None).
-        let result = execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut stdout, &mut stderr);
+        let result = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut stdout, &mut stderr);
 
         // The pipeline must propagate an error — not panic.
         assert!(
@@ -689,7 +722,7 @@ mod tests {
         {
             let mut out = Vec::<u8>::new();
             let mut err = Vec::<u8>::new();
-            execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out, &mut err)
+            execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out, &mut err)
                 .expect("first run should succeed");
         }
         ctx.cache
@@ -703,7 +736,7 @@ mod tests {
         {
             let mut out = Vec::<u8>::new();
             let mut err = Vec::<u8>::new();
-            execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out, &mut err)
+            execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out, &mut err)
                 .expect("second run should succeed");
         }
         let elapsed = start.elapsed();
@@ -740,7 +773,7 @@ mod tests {
 
         let mut out1 = Vec::<u8>::new();
         let mut err1 = Vec::<u8>::new();
-        let s1 = execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out1, &mut err1)
+        let s1 = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out1, &mut err1)
             .expect("first run");
 
         let target = model
@@ -756,7 +789,7 @@ mod tests {
         // Second run — same fixture, same scheduler; cache should hit.
         let mut out2 = Vec::<u8>::new();
         let mut err2 = Vec::<u8>::new();
-        let s2 = execute_pipeline(&ctx, &model, &resolved, &rules, 1, &mut out2, &mut err2)
+        let s2 = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out2, &mut err2)
             .expect("second run");
         let bin2 = std::fs::read(&bin).expect("read second-run binary");
 
@@ -800,6 +833,7 @@ mod tests {
             &ctx,
             &model,
             &resolved,
+            &VendorBuildContext::new(),
             &rules,
             workers,
             &mut stdout,

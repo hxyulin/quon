@@ -132,10 +132,17 @@ pub fn build_with_workers(
     let rules = rule::RuleRegistry::with_builtins();
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
+    // The cross-target vendor build context is empty until `vendor_sync`
+    // wires up the per-target `cargo metadata` → `VendorBuildContext`
+    // pipeline (in-progress slice). With an empty context, `build_dag`
+    // emits zero `VendorCrate` nodes and the pipeline behaves exactly
+    // as before this parameter existed.
+    let vendor_ctx = crate::vendor::cross::context::VendorBuildContext::new();
     let summary = scheduler::execute_pipeline(
         ctx,
         model,
         resolved,
+        &vendor_ctx,
         &rules,
         workers,
         &mut stdout,

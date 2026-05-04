@@ -23,6 +23,7 @@
 //! **Do not change `edges_out` to `Vec` under any circumstances.**
 
 use crate::error::{Error, Result};
+use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
 use gluon_model::{
     BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepResolution, EspDef, Handle, ImageDef,
     ImageSource, ResolvedConfig, RuleDef, TargetDef,
@@ -69,6 +70,14 @@ pub enum DagNode {
     /// raw writes, qemu `disk_ref`, etc.) get edges *to* this node.
     /// See [`BuildStepDef`].
     BuildStep(Handle<BuildStepDef>),
+    /// Compile a vendored external crate via gluon-driven rustc.
+    /// One node per registered build in the [`VendorBuildContext`]
+    /// passed to [`build_dag`]. Depends on its own dep edges (other
+    /// vendor crates) and, for cross-targeted vendor builds, on the
+    /// per-target sysroot. Consumed by user crates that declare
+    /// `cfg.dependency(...).target(t)`. See
+    /// [`crate::vendor::cross::graph::VendorCrateBuild`].
+    VendorCrate(VendorBuildId),
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +254,11 @@ impl Default for Dag {
 /// NOT performed here. Malformed models that contain cycles will simply fail
 /// to make progress at scheduling time (the worker pool detects deadlock and
 /// returns an error).
-pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
+pub fn build_dag(
+    resolved: &ResolvedConfig,
+    model: &BuildModel,
+    vendor_ctx: &VendorBuildContext,
+) -> Result<Dag> {
     let mut dag = Dag::new();
 
     // Helper: look up whether a crate's group has `no_sysroot=true`.
@@ -382,6 +395,30 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel) -> Result<Dag> {
             let dep_id = dag.insert_node(DagNode::Crate(dep_handle));
             dag.add_edge(dep_id, crate_id);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 3.5: Vendored crate nodes.
+    // -----------------------------------------------------------------------
+    // Insert one VendorCrate node per registered build in vendor_ctx. The
+    // node identity is the VendorBuildId (assigned in registration order
+    // by `vendor_sync` — itself deterministic), so DAG iteration stays
+    // stable across runs.
+    //
+    // No edges are added here yet:
+    //   - Vendor → vendor edges (from VendorDepEdge) and consumer crate →
+    //     vendor edges (from external deps in user crates) are added in
+    //     a follow-up slice. Until then, the scheduler will see vendor
+    //     nodes as in-degree-zero leaves with no consumers — runnable in
+    //     isolation but not yet wired to the rest of the graph. With an
+    //     empty `vendor_ctx` (the current state of every caller), this
+    //     loop is a no-op.
+    //   - The downstream dispatcher returns a hard error rather than
+    //     attempting a stub compile, so a mistakenly populated context
+    //     fails loudly at scheduling time rather than producing broken
+    //     artifacts silently.
+    for (id, _build) in vendor_ctx.iter() {
+        dag.insert_node(DagNode::VendorCrate(id));
     }
 
     // -----------------------------------------------------------------------
@@ -887,7 +924,7 @@ mod tests {
             }],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // All three node kinds must be present.
         let sysroot_id = *dag
@@ -986,7 +1023,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let sysroot_id = *dag.node_index.get(&DagNode::Sysroot(th)).unwrap();
         let config_id = *dag.node_index.get(&DagNode::ConfigCrate(th)).unwrap();
@@ -1123,7 +1160,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let c_id = *dag.node_index.get(&DagNode::Crate(c_h)).unwrap();
         let b_id = *dag.node_index.get(&DagNode::Crate(b_h)).unwrap();
@@ -1195,7 +1232,7 @@ mod tests {
         );
 
         let resolved = make_resolved(th, vec![]);
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let rule0_id = *dag.node_index.get(&DagNode::Rule(rule0_h)).unwrap();
         let rule1_id = *dag.node_index.get(&DagNode::Rule(rule1_h)).unwrap();
@@ -1305,7 +1342,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let rule_id = *dag.node_index.get(&DagNode::Rule(rule_h)).unwrap();
         let cx_id = *dag.node_index.get(&DagNode::Crate(cx_h)).unwrap();
@@ -1393,7 +1430,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let kernel_id = *dag
             .node_index
@@ -1475,7 +1512,7 @@ mod tests {
             }],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let bl_id = *dag.node_index.get(&DagNode::Crate(bl_h)).unwrap();
         let esp_id = *dag
@@ -1532,7 +1569,7 @@ mod tests {
         );
 
         // Must not return Err.
-        let dag = build_dag(&resolved, &model).expect("unknown artifact_dep must not abort");
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("unknown artifact_dep must not abort");
         // Consumer's in-degree: Sysroot + ConfigCrate only (no artifact edge).
         let consumer_id = *dag.node_index.get(&DagNode::Crate(consumer_h)).unwrap();
         assert_eq!(*dag.in_degree.get(&consumer_id).unwrap(), 2);
@@ -1644,7 +1681,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let img_id = *dag
             .node_index
@@ -1759,7 +1796,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
         let img_id = *dag.node_index.get(&DagNode::Image(img_h)).unwrap();
         let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
         let boot_id = *dag.node_index.get(&DagNode::Crate(boot_h)).unwrap();
@@ -1873,7 +1910,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // The bios target must NOT have a Sysroot or ConfigCrate node.
         assert!(
@@ -1943,7 +1980,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model).unwrap();
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // Two distinct ConfigCrate nodes.
         let cfg1_id = *dag
@@ -2030,7 +2067,7 @@ mod tests {
                 },
             ],
         );
-        let dag = build_dag(&resolved, &model).expect("dag built");
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         let bs_id = *dag
             .node_index
@@ -2108,7 +2145,7 @@ mod tests {
                 host: true,
             }],
         );
-        let dag = build_dag(&resolved, &model).expect("dag built");
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         let bs_id = *dag.node_index.get(&DagNode::BuildStep(bs_h)).unwrap();
         let image_id = *dag.node_index.get(&DagNode::Image(image_h)).unwrap();
