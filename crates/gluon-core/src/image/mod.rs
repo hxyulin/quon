@@ -14,23 +14,9 @@
 //! sub-partition builders ([`ImageDef::partitions`]), raw LBA writes
 //! ([`ImageDef::raw_writes`]), and the Stage1Meta blob.
 //!
-//! ## Caching
-//!
 //! Image builds are cached via the unified composite cache under key
-//! `image:<name>`. The composite entry's inputs are every source path
-//! that contributes bytes to the final image (flat entries + partition
-//! entries + raw writes). Its `aux_hash` folds in:
-//!
-//! - The serialised [`ImageDef`] (any change to format/size/entries
-//!   busts the cache).
-//! - The hadris-fat crate version (so library bumps invalidate
-//!   correctly even when the user's config and inputs haven't changed).
-//! - Per-entry source-kind tags, so a crate→file rename in `gluon.rs`
-//!   busts the cache even when the resolved on-disk path happens to
-//!   match.
-//!
-//! Per-input mtime + size + sha256 freshness is handled by the
-//! composite-cache layer itself; see `crate::cache` for the algorithm.
+//! `image:<name>`. See `docs/src/architecture/cache.md` for the entry
+//! shape and the segments that go into the `aux_hash`.
 
 mod fat;
 mod formatter;

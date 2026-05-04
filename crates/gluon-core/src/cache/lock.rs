@@ -1,41 +1,8 @@
 //! Cross-process advisory lock around a project's build cache.
 //!
-//! Two `gluon build` invocations against the same project share the
-//! same `cache-manifest.json`. Without coordination they race
-//! catastrophically: each one reads the manifest at startup, mutates
-//! its in-memory copy, and writes it back at the end. The atomic
-//! write-rename in `manifest::save_atomic` keeps the file from being
-//! corrupted at the byte level, but it can't stop "last writer wins"
-//! from silently dropping the other build's freshness records.
-//!
-//! [`CacheLock`] is the fix: a `flock(2)`-style advisory exclusive lock
-//! held on a sibling lockfile (`cache-manifest.json.lock`) for the
-//! entire duration of a build. Acquire it before reading the manifest
-//! and drop it after the final save; concurrent builds in the same
-//! project then serialise on the lock instead of clobbering each other.
-//!
-//! ### Why advisory and not the manifest itself?
-//!
-//! - We need to lock *across* the read and the write, with the manifest
-//!   file being deleted/recreated by the atomic-rename in between. A
-//!   lock on the manifest itself would be invalidated the moment
-//!   `save_atomic` did its rename.
-//! - A separate lockfile is also a good place to add liveness tags
-//!   later (PID, hostname, "this build is still running") if we ever
-//!   want richer wait diagnostics. For MVP-M the file is just a
-//!   coordination point.
-//!
-//! ### Why not a mutex?
-//!
-//! In-process mutexes don't help across `gluon` invocations from a
-//! script-on-save editor + a terminal rebuild + a CI pre-commit hook —
-//! every common multi-build scenario is multi-process.
-//!
-//! ### Build vs clean
-//!
-//! Both [`crate::build`] and [`crate::clean`] take this lock. Clean
-//! racing a build is just as dangerous as build-vs-build: clean would
-//! `rm -rf` files the builder is in the middle of writing.
+//! See `docs/src/architecture/concurrency.md` for the lock's role in
+//! gluon's multi-process safety story (why advisory, why a sibling
+//! file, why both `build` and `clean` take it).
 
 use crate::compile::BuildLayout;
 use crate::error::{Error, Result};

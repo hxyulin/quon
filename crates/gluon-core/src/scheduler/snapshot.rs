@@ -1,15 +1,8 @@
 //! `ArtifactsSnapshot` — owned, immutable view of the scheduler's
 //! per-node output maps, plus the `NodeOutput` enum that per-variant
-//! dispatch helpers return for merging.
-//!
-//! ### Why a single bundled snapshot?
-//!
-//! Stage 8 collapses the scheduler's four independent `Mutex`-guarded
-//! maps into one `Mutex<ArtifactsSnapshot>` so each per-node dispatch
-//! arm acquires the lock at most twice: once to read-clone the
-//! snapshot before running the helper, and once to merge the helper's
-//! output afterwards. Per-node helpers themselves see only
-//! `&ArtifactsSnapshot` — no `Mutex`, no risk of deadlock.
+//! dispatch helpers return for merging. See
+//! `docs/src/architecture/concurrency.md` for the dispatch protocol
+//! (clone snapshot → run helper lock-free → merge `NodeOutput`).
 
 use crate::compile::ArtifactMap;
 use gluon_model::{BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};

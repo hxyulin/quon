@@ -8,18 +8,11 @@
 //!
 //! ### Fast path vs slow path
 //!
-//! Freshness is tracked by a Composite cache entry keyed
-//! `"sysroot:<target_name>"` in the shared [`crate::cache::Cache`]. Its
-//! single file input is the rustc binary path (so the cache layer's
-//! mtime+size+sha256 fingerprinting catches toolchain swaps); its
-//! `aux_hash` rolls in the rustc
-//! [`version_hash`](crate::compile::RustcInfo::version_hash), which
-//! catches commit-hash bumps that share the same on-disk file
-//! fingerprint (e.g. a binary rebuilt at the same path with the same
-//! mtime+size). The entry's `output_path` is the canonical
-//! `libcore-gluon-core.rlib` so the cache layer's `output_path.exists()`
-//! check doubles as a "the sysroot dir is still intact" sentinel —
-//! `rm -rf <sysroot>` forces a rebuild.
+//! Freshness is a Composite cache entry keyed `"sysroot:<target_name>"`;
+//! see `docs/src/architecture/cache.md` for the entry shape. The entry's
+//! `output_path` is the canonical `libcore-gluon-core.rlib` so the
+//! cache's existence check doubles as a "sysroot dir is still intact"
+//! sentinel — `rm -rf <sysroot>` forces a rebuild.
 //!
 //! - **Fast path.** If the composite entry is fresh, return immediately
 //!   — no rustc spawn, no per-crate cache work. This is the common case
@@ -36,15 +29,9 @@
 //! slow path, which is itself cache-driven and near-free on a clean
 //! tree.
 //!
-//! ### Unstable features
-//!
-//! `core`, `compiler_builtins`, and `alloc` use `#![feature(...)]`
-//! internally, so a stable `rustc` cannot compile them without opting in.
-//! We set `RUSTC_BOOTSTRAP=1` in the child environment for every sysroot
-//! rustc invocation (the same switch Cargo's `build-std` uses) and pass
-//! `-Z force-unstable-if-unmarked` so downstream crates cannot
-//! accidentally depend on internals of the sysroot crates as if they were
-//! stable. Both are standard for custom-sysroot flows.
+//! `RUSTC_BOOTSTRAP=1` and `-Z force-unstable-if-unmarked` are set on
+//! every sysroot rustc invocation; see
+//! `docs/src/architecture/external-deps.md` for the rationale.
 
 use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
 use crate::compile::{CompileCtx, Emit, RustcCommandBuilder};

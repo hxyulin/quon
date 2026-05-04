@@ -18,16 +18,8 @@
 //!   from the sysroot, and outputs under
 //!   `<build>/cross/<target>/<profile>/<crate>/`.
 //!
-//! ### Flag assembly ordering
-//!
-//! The canonical token order (which determines the cache key hash) is:
-//! input → crate-name → crate-type → edition → sysroot? → target? →
-//! out-dir → emit → implicit-externs? → explicit-externs → opt-level →
-//! debug-info → lto? → cfg-flags → panic-strategy? → extra-rustc-flags →
-//! incremental → linker-script? → extra-filename.
-//!
-//! Keeping this order stable is non-negotiable: any reordering of the
-//! flags invalidates every on-disk cache entry.
+//! See `docs/src/architecture/cache.md` for the canonical rustc-flag
+//! token order that determines the cache key hash.
 
 use super::artifact_shape::CrateArtifactShape;
 use super::command_builder::build_rustc_command;

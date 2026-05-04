@@ -1,43 +1,8 @@
 //! Hybrid mtime + content-hash build cache.
 //!
-//! This module is the load-bearing correctness layer for gluon's
-//! incrementality story. Every build artefact that can be skipped must
-//! first be proved fresh by [`Cache::is_fresh`]; every artefact that's
-//! actually (re)built gets recorded via [`Cache::mark_built`]. The rule
-//! that governs both sides is simple: when in doubt, invalidate.
-//!
-//! ### Freshness algorithm
-//!
-//! For a given [`FreshnessQuery`] we consider an entry fresh iff:
-//!
-//! 1. The entry exists in the manifest under `key`.
-//! 2. The recorded `argv_hash` matches the query (same rustc flags,
-//!    environment, cwd).
-//! 3. The declared `output_path` still exists on disk.
-//! 4. The recorded source set exactly matches the query's source set —
-//!    adding or removing a source file is always a change, even if every
-//!    remaining file's hash is unchanged.
-//! 5. Every source file passes the two-tier freshness check:
-//!    - **Fast path:** recorded `mtime_ns` + `size` match the filesystem.
-//!    - **Slow path (fallback):** when the fast path disagrees, compute
-//!      the current SHA-256 and compare to the recorded one. If they
-//!      match, the mtime is a false positive (e.g. `touch`, CI checkout,
-//!      `git restore`); we refresh the mtime in place and keep the cache.
-//!      If they differ, the content genuinely changed → stale.
-//!
-//! The slow path is what makes the cache robust against build systems
-//! and CI setups that churn mtimes without changing content. It only
-//! triggers when the fast path already disagrees, so the common happy
-//! case still runs in O(n) stats with no hashing.
-//!
-//! ### Eager fingerprint population
-//!
-//! On [`Cache::mark_built`] we compute and store the SHA-256 for every
-//! source file immediately — not lazily on first mtime-mismatch. Lazy
-//! population would mean "first touch triggers a rebuild that still
-//! doesn't populate the hash, so the second touch also rebuilds": the
-//! fallback would never actually kick in. Eager hashing costs one full
-//! read per build, which is dwarfed by the compile itself.
+//! See `docs/src/architecture/cache.md` for the freshness algorithm,
+//! two-tier source check, eager fingerprint population, and the rule
+//! ("when in doubt, invalidate") that governs both sides.
 
 pub mod composite;
 pub mod depinfo;

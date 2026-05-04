@@ -1,26 +1,8 @@
 //! Minimal parser for rustc-emitted dep-info files (`--emit=dep-info`).
 //!
-//! Rustc writes a Makefile-style fragment whose first target-line lists the
-//! output followed by every source file it compiled. We only care about that
-//! first target-line — the subsequent per-prereq stubs and `# env-dep:`
-//! comments are informational and rustc regenerates them deterministically.
-//! The parser's job is to extract the prereq list, with three edge cases
-//! that rustc actually produces:
-//!
-//! 1. **Backslash-escaped spaces in paths.** A path containing a literal
-//!    space is emitted as `foo\ bar.rs`. We decode `\ ` → ` ` on
-//!    tokenisation.
-//! 2. **Line continuations.** A trailing `\` immediately before a newline
-//!    means the logical line continues on the next physical line. We join
-//!    them with a single space before tokenising.
-//! 3. **Leading blank / `#`-comment lines.** Rustc doesn't currently emit
-//!    them at the top, but the Make-ish format allows them and we skip them
-//!    defensively.
-//!
-//! Anything more exotic (`$(VAR)` expansions, `;` recipes, etc.) is outside
-//! the subset rustc emits, and we deliberately don't try to handle it. A
-//! malformed depfile is a bug in the toolchain, not in gluon — we surface
-//! the failure as [`Error::Config`] so the diagnostic points at the file.
+//! See `docs/src/architecture/external-deps.md` for the dep-info
+//! format and the Make subset this parser handles. Anything outside
+//! that subset is a toolchain bug; we surface it as [`Error::Config`].
 
 use crate::error::{Error, Result};
 use std::ffi::OsString;

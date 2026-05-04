@@ -45,6 +45,13 @@
 - [Kernel with Config Options](./cookbook/config-options.md)
 - [UEFI Bootloader + Kernel](./cookbook/uefi-bootloader.md)
 
+# Architecture
+
+- [Build Cache](./architecture/cache.md)
+- [Determinism](./architecture/determinism.md)
+- [Concurrency](./architecture/concurrency.md)
+- [External Dependencies](./architecture/external-deps.md)
+
 # Migration
 
 - [Rhai to Rust](./migration/rhai-to-rust.md)

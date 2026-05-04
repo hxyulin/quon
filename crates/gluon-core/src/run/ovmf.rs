@@ -1,41 +1,8 @@
 //! OVMF firmware path resolver.
 //!
-//! UEFI boot in QEMU needs two firmware files:
-//!
-//! - **CODE**: the read-only OVMF UEFI image (`OVMF_CODE.fd`). QEMU
-//!   mmaps this as the lower pflash bank.
-//! - **VARS**: the writable NVRAM store
-//!   (`OVMF_VARS.fd`). UEFI updates this on every boot, so QEMU
-//!   requires it to be writable.
-//!
-//! We do not ship OVMF. Users provide paths via (in precedence order):
-//!
-//! 1. Explicit `.ovmf_code(...)` / `.ovmf_vars(...)` calls in
-//!    `gluon.rs` → populate [`gluon_model::QemuDef::ovmf_code`] and
-//!    `ovmf_vars`.
-//! 2. `OVMF_CODE` / `OVMF_VARS` environment variables.
-//! 3. A small table of well-known system paths per OS.
-//!
-//! If none of those resolve, we return [`Error::OvmfNotFound`] with a
-//! multi-line diagnostic listing every fallback the resolver tried,
-//! so the user knows exactly what to install or set.
-//!
-//! ## Writable vars copy
-//!
-//! A UEFI firmware image on disk (especially one installed by the
-//! system package manager) is usually read-only for non-root users.
-//! Since QEMU has to write NVRAM updates back to the vars file,
-//! running with a read-only path would fail at boot.
-//!
-//! The resolver detects this and copies the vars file once to
-//! `<build_root>/ovmf_vars-<profile>.fd`, returning the writable copy
-//! path instead. Subsequent runs re-use the copy as long as its mtime
-//! is ≥ the source mtime; if the source is refreshed (e.g. via a
-//! package upgrade), we re-copy.
-//!
-//! The per-profile suffix exists so two concurrent runs of different
-//! profiles don't race on the same NVRAM file — NVRAM state is
-//! per-boot-environment and shouldn't leak between profiles.
+//! See `docs/src/architecture/external-deps.md` for the precedence
+//! chain (explicit → env → system probe), the system path table,
+//! and the writable-vars copy strategy.
 
 use crate::error::{Error, Result};
 use gluon_model::QemuDef;

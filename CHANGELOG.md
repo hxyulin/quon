@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Stage 9 — architecture docs + comment cleanup)
+
+- **Four new architecture docs** consolidate scattered
+  architectural-invariant comments under `docs/src/architecture/`,
+  linked from a new "Architecture" section in `SUMMARY.md`:
+  - `cache.md` — two-entry-kind manifest, freshness algorithm,
+    two-tier source check, eager fingerprint population, atomic
+    write-temp + fsync + rename, schema versioning, composite
+    `aux_hash` domain separation, canonical rustc-flag token order.
+  - `determinism.md` — `BTreeMap`/`BTreeSet` everywhere, edge
+    dedup invariant in `scheduler::dag` (with the deadlock incident
+    that motivated it), cache-key stability, multi-thread vs `-j1`
+    semantics.
+  - `concurrency.md` — multi-process advisory `flock` on a sibling
+    lockfile, atomic manifest writes, the Stage 8 in-process snapshot
+    dispatch protocol.
+  - `external-deps.md` — rustc dep-info Make subset, QEMU CLI
+    shape, OVMF system-path probe table, hadris-fat / FAT32
+    assumptions, `RUSTC_BOOTSTRAP` rationale.
+
+### Changed (Stage 9 — architecture docs + comment cleanup)
+
+- **Module-level rationale comments shrink to pointers.** Long
+  module-doc blocks at `cache/{mod,manifest,depinfo,lock}.rs`,
+  `compile/{compile_crate,extern_map}.rs`, `scheduler/{mod,dag,snapshot}.rs`,
+  `image/mod.rs`, `run/ovmf.rs`, and `sysroot/mod.rs` now point at
+  the architecture docs instead of duplicating their content. The
+  `scheduler::dag` `BTreeSet`-not-`Vec` warning stays inline at the
+  violation site (the `edges_out` type declaration), as does the
+  volume-label collision rationale in `image/fat.rs` and
+  per-function operational comments throughout.
+- **`scheduler/mod.rs` module doc no longer mentions the deleted
+  `helpers` submodule.** Stage 6 removed `helpers/`; the module-doc
+  references are updated to describe the per-variant dispatch
+  helpers and link to the concurrency architecture doc.
+- **No behaviour changes.** Pure documentation work. `cargo build`,
+  `cargo clippy`, and `mdbook build` are all clean; pre-existing
+  rustdoc warnings unrelated to this stage are unchanged.
+
 ### Changed (Stage 8 — scheduler `ArtifactsSnapshot` abstraction)
 
 - **Per-node dispatch arms no longer see shared mutable state.**

@@ -8,10 +8,11 @@
 //! engine that drives a [`Dag`] to completion, either single-threaded (`-j1`)
 //! or multi-threaded.
 //!
-//! [`helpers`] contains per-node work functions called by [`execute_pipeline`].
-//!
 //! [`execute_pipeline`] wires the above together: builds the DAG, runs the
-//! worker pool, and dispatches each node to the appropriate helper.
+//! worker pool, and dispatches each node to the appropriate per-variant
+//! helper. The dispatch protocol — clone the snapshot, run the helper
+//! lock-free, merge the result — is documented in
+//! `docs/src/architecture/concurrency.md`.
 
 pub mod dag;
 mod snapshot;

@@ -2,17 +2,11 @@
 //!
 //! The DAG is generic in the sense that the scheduler never looks inside
 //! a `DagNode` — it only tracks identities and edges. The pipeline
-//! dispatcher (Chunk B4) is the only code that matches on `DagNode` variant
-//! and calls the corresponding work function.
+//! dispatcher is the only code that matches on `DagNode` variant and
+//! calls the corresponding work function.
 //!
-//! ### Why `BTreeMap`/`BTreeSet` everywhere?
-//!
-//! Determinism is non-negotiable (see `CLAUDE.md` §3). Build outputs must
-//! be reproducible: two runs of `gluon build` with identical input must
-//! produce byte-identical artifacts. Determinism collapses at the first
-//! `HashMap` — its iteration order is randomised across runs. Every
-//! adjacency structure in this module therefore uses `BTreeMap` or
-//! `BTreeSet`.
+//! Adjacency uses `BTreeMap`/`BTreeSet` for cache-key stability — see
+//! `docs/src/architecture/determinism.md`.
 //!
 //! ### Why `BTreeSet` for `edges_out` values instead of `Vec`?
 //!

@@ -1,38 +1,8 @@
 //! On-disk cache manifest types and atomic persistence.
 //!
-//! The manifest is a JSON document describing, for every previously-built
-//! cache entry, the rustc argv digest, the set of source files that went
-//! into the build (with mtime/size/content-hash fingerprints), the
-//! declared output path, and a build timestamp. It is the single source of
-//! truth for "have we already built this?" — see [`crate::cache::Cache`]
-//! for the freshness algorithm that reads it.
-//!
-//! ### Corruption policy
-//!
-//! A corrupted or version-mismatched manifest is *always* treated as a
-//! cold cache, never as a build failure. The rationale is the same as for
-//! `RustcInfo` in chunk A1: a cache that refuses to load stops a build
-//! that was otherwise going to succeed, which is strictly worse than a
-//! cache that forces a rebuild. We log a warning to stderr so the user
-//! isn't silently paying the re-build cost, but we never return an error.
-//!
-//! ### Atomic writes
-//!
-//! [`CacheManifest::save_atomic`] writes to `<path>.tmp.<pid>.<nonce>` +
-//! fsync + rename so a crash mid-write can never leave a truncated manifest
-//! on disk. The `<pid>.<nonce>` suffix prevents concurrent gluon processes
-//! that share the same build directory from clobbering each other's temp
-//! files — `<pid>` alone is not collision-free across PID namespaces (two
-//! containers can legitimately share a PID), so we append a nanosecond
-//! nonce drawn from the wall clock. (Two processes writing the *final*
-//! path concurrently is still a race, but a last-writer-wins rename is
-//! acceptable: both writers are working from an internally-consistent
-//! snapshot.)
-//!
-//! On any failure during the write/fsync/rename sequence, the temp file
-//! is removed before the error is propagated. Without this cleanup, a
-//! cache directory would slowly accumulate `.tmp.*` orphans across
-//! repeated failed builds.
+//! See `docs/src/architecture/cache.md` for the manifest's role, the
+//! corruption-handling policy (always cold-cache, never error), and
+//! the atomic write-temp + fsync + rename protocol.
 
 use crate::error::{Diagnostic, Error, Result};
 use serde::{Deserialize, Serialize};

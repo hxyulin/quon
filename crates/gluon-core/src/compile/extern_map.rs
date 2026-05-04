@@ -2,15 +2,8 @@
 //!
 //! The scheduler populates this as each crate completes; `compile_crate`
 //! consults it to wire `--extern` flags for the crate's dependencies.
-//!
-//! ### Why [`BTreeMap`] not [`HashMap`](std::collections::HashMap)
-//!
-//! `--extern` flags are pushed onto the rustc argv in the order they are
-//! visited. Using a `BTreeMap` guarantees that iteration order is
-//! determined by the handle index (a monotonically assigned integer) rather
-//! than the random hash seed — so the resulting argv, and therefore the
-//! cache key, are identical across runs on any machine. This is mandatory
-//! per CLAUDE.md's determinism requirement.
+//! Backed by `BTreeMap` for cache-key stability — see
+//! `docs/src/architecture/determinism.md`.
 
 use gluon_model::{BuildModel, BuildStepDef, CrateDef, Handle, TargetDef};
 use std::collections::BTreeMap;
