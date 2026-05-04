@@ -69,14 +69,7 @@ pub(crate) enum NodeOutput {
     },
     /// One vendored-crate build's output. Lands in
     /// [`ArtifactsSnapshot::vendor_artifacts`] keyed by the build's
-    /// [`VendorBuildId`].
-    ///
-    /// Currently constructed only in the merge tests below — the
-    /// scheduler dispatch arm that produces it lands in a follow-up
-    /// slice (the cross-target `dispatch_vendor_crate` helper). Marked
-    /// `allow(dead_code)` to keep the workspace warning-clean during
-    /// the gap; remove the attribute when the dispatch arm wires it up.
-    #[allow(dead_code)]
+    /// [`VendorBuildId`]. Produced by `dispatch_vendor_crate`.
     VendorCrate {
         id: VendorBuildId,
         out_path: PathBuf,

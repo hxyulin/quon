@@ -21,15 +21,16 @@ pub mod worker;
 pub use dag::{Dag, DagNode, NodeId, build_dag};
 pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
 
+use crate::compile::vendor_command::{VendorCompileInput, build_vendor_rustc_command};
 use crate::compile::{CompileCrateInput, CompileCtx, compile_crate};
-use crate::error::{Error, Result};
+use crate::error::{Diagnostic, Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
-use crate::vendor::cross::context::VendorBuildContext;
+use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
 use dag::Dag as DagType;
 use gluon_model::{
     BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef,
-    TargetDef,
+    TargetDef, TargetSpec,
 };
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
@@ -334,6 +335,213 @@ fn dispatch_build_step(
     })
 }
 
+/// Cache key for one vendored-crate build.
+///
+/// Includes `version` because the on-disk out_dir is keyed only on
+/// `cargo_target_name` (see [`crate::compile::layout::BuildLayout::host_vendor_dep_dir`]).
+/// Without version in the key, a `cargo update` that bumps a vendored
+/// crate's version would map to the same cache slot as the previous
+/// version's build — the `argv_hash` check would catch it (the vendor
+/// dir name changes), but it's clearer to encode the version directly.
+fn build_vendor_cache_key(
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    build: &crate::vendor::cross::graph::VendorCrateBuild,
+    layout: &crate::compile::layout::BuildLayout,
+) -> Result<String> {
+    let suffix = layout.cache_key_suffix();
+    let name = &build.crate_id.name;
+    let version = &build.crate_id.version;
+    match build.target {
+        TargetSpec::Host => Ok(format!("vendor:host:{name}:{version}{suffix}")),
+        TargetSpec::Cross(target_handle) => {
+            let target = model.targets.get(target_handle).ok_or_else(|| {
+                Error::Compile(format!(
+                    "scheduler: vendor build {name} references target handle {:?} \
+                     not in build model",
+                    target_handle,
+                ))
+            })?;
+            Ok(format!(
+                "vendor:cross:{name}:{version}:{}:{}{suffix}",
+                resolved.profile.name, target.name,
+            ))
+        }
+    }
+}
+
+/// Compile one vendored crate via gluon-driven rustc.
+///
+/// Mirrors [`dispatch_crate`]'s shape: looks up the build descriptor,
+/// resolves dep `--extern` paths from the snapshot, derives target/sysroot
+/// for cross builds (host builds skip both), then delegates to
+/// [`run_compile_and_cache`] for the freshness → spawn → mark_built dance.
+///
+/// Resolution failures (missing dep artifact, missing sysroot, missing
+/// target in model) are scheduler invariant violations — the DAG
+/// guarantees deps are built before parents and that every cross
+/// vendor build has a Sysroot edge. They're surfaced as `Error::Compile`
+/// rather than `unreachable!()` so a real bug fails diagnostically.
+fn dispatch_vendor_crate(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    vendor_ctx: &VendorBuildContext,
+    snapshot: &ArtifactsSnapshot,
+    id: VendorBuildId,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeOutput> {
+    let build = vendor_ctx.get(id).ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: VendorCrate({id}) not found in vendor context (scheduler bug)",
+        ))
+    })?;
+
+    // --- Resolve dep --extern paths from snapshot.vendor_artifacts ---
+    // The DAG wires every dep edge into a vendor → vendor scheduler edge,
+    // so each dep must already be in vendor_artifacts by the time this
+    // arm runs. A miss is a scheduler bug, not a user mistake.
+    let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+    for edge in &build.deps {
+        let dep_id = vendor_ctx.lookup(edge.target, &edge.extern_name).ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: vendor build {id} ({}) dep edge `{}` did not resolve in \
+                 vendor_ctx (lowering bug — DAG was built but lookup now fails)",
+                build.crate_id.name, edge.extern_name,
+            ))
+        })?;
+        let dep_path = snapshot.vendor_artifacts.get(&dep_id).cloned().ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: vendor build {id} ({}) ran before its dep {dep_id} ({}) \
+                 completed; DAG edge missing?",
+                build.crate_id.name, edge.crate_id.name,
+            ))
+        })?;
+        extern_artifacts.insert(edge.extern_name.clone(), dep_path);
+    }
+
+    // --- Derive target/sysroot/out_dir based on host vs cross ---
+    // Host: no --target, no --sysroot, out_dir under host/vendor-deps/.
+    // Cross: triple from TargetDef::spec, sysroot from snapshot, out_dir
+    // under cross/<target>/<profile>/vendor-deps/.
+    let (target_triple, target_triple_builtin, sysroot_owned, out_dir) = match build.target {
+        TargetSpec::Host => (
+            None,
+            false,
+            None::<PathBuf>,
+            ctx.layout.host_vendor_dep_dir(&build.cargo_target_name),
+        ),
+        TargetSpec::Cross(target_handle) => {
+            let target = model.targets.get(target_handle).ok_or_else(|| {
+                Error::Compile(format!(
+                    "scheduler: vendor build {id} ({}) references target handle {:?} \
+                     not in build model",
+                    build.crate_id.name, target_handle,
+                ))
+            })?;
+            let sysroot = snapshot.sysroots.get(&target_handle).cloned().ok_or_else(|| {
+                Error::Compile(format!(
+                    "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
+                     dependency completed; DAG edge missing?",
+                    build.crate_id.name, target_handle,
+                ))
+            })?;
+            let out_dir =
+                ctx.layout
+                    .cross_vendor_dep_dir(target, &resolved.profile, &build.cargo_target_name);
+            (
+                Some(target.spec.clone()),
+                target.builtin,
+                Some(sysroot),
+                out_dir,
+            )
+        }
+    };
+
+    // --- Assemble rustc command ---
+    let input = VendorCompileInput {
+        build,
+        extern_artifacts: &extern_artifacts,
+        sysroot_dir: sysroot_owned.as_deref(),
+        out_dir: &out_dir,
+        rustc: &ctx.rustc_info.rustc_path,
+        target_triple: target_triple.as_deref(),
+        target_triple_builtin,
+        opt_level: resolved.profile.opt_level,
+        debug_info: resolved.profile.debug_info,
+    };
+    let (builder, output_path, depfile_path) = build_vendor_rustc_command(&input).map_err(|e| {
+        Error::Compile(format!(
+            "scheduler: vendor build {id} ({}) command assembly failed: {e}",
+            build.crate_id.name,
+        ))
+    })?;
+    let argv_hash = builder.hash();
+    let cache_key = build_vendor_cache_key(model, resolved, build, &ctx.layout)?;
+
+    // --- Cache + spawn ---
+    // Capture per-build state into owned values so the error closures
+    // (which outlive `build`) can reference it.
+    let crate_name_fail = build.crate_id.name.clone();
+    let crate_name_depfile = build.crate_id.name.clone();
+    let target_label = match build.target {
+        TargetSpec::Host => "host".to_string(),
+        TargetSpec::Cross(h) => model
+            .targets
+            .get(h)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "<unknown>".to_string()),
+    };
+    let depfile_for_diag = depfile_path.clone();
+
+    let (out_path, was_cached) = crate::compile::run_compile_and_cache(
+        ctx,
+        builder,
+        argv_hash,
+        cache_key,
+        output_path,
+        depfile_path,
+        Some(&out_dir),
+        Vec::new(),
+        Box::new(move |output, rendered| {
+            Error::Diagnostics(vec![
+                Diagnostic::error(format!(
+                    "rustc failed while building vendored crate '{}' for {}: exit={:?}",
+                    crate_name_fail,
+                    target_label,
+                    output.status.code(),
+                ))
+                .with_note(format!(
+                    "stderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .with_note(format!("command: {rendered}")),
+            ])
+        }),
+        Box::new(move |e| {
+            Error::Diagnostics(vec![
+                Diagnostic::error(format!(
+                    "built vendored crate '{}' but its depfile at {} could not be read",
+                    crate_name_depfile,
+                    depfile_for_diag.display(),
+                ))
+                .with_note(format!("underlying error: {e}"))
+                .with_note(
+                    "the artifact is on disk but the cache was not updated; \
+                     the next run will re-spawn rustc for this crate",
+                ),
+            ])
+        }),
+        stderr,
+    )?;
+
+    Ok(NodeOutput::VendorCrate {
+        id,
+        out_path,
+        was_cached,
+    })
+}
+
 impl<'a> JobDispatcher for PipelineDispatcher<'a> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let node_kind = self.dag.nodes[node as usize];
@@ -463,21 +671,28 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
 
             // ------------------------------------------------------------------
             // VendorCrate — compile a vendored external crate via gluon-driven
-            // rustc. The dispatch helper, edge wiring (vendor → vendor and
-            // consumer → vendor), and `vendor_sync` orchestration land in
-            // follow-up slices. Until then, no caller populates
-            // `vendor_ctx`, so `build_dag` emits zero `VendorCrate` nodes
-            // and this arm is unreachable in practice. The error path is
-            // kept rather than `unreachable!()` so a mistakenly populated
-            // context fails with a diagnostic instead of an abort.
+            // rustc against the per-target sysroot. Dep `--extern` paths
+            // come from `snapshot.vendor_artifacts` (populated by prior
+            // VendorCrate nodes in topological order); cross builds also
+            // pull their sysroot from `snapshot.sysroots`.
             // ------------------------------------------------------------------
             DagNode::VendorCrate(id) => {
-                let _ = (id, &self.vendor_ctx);
-                let _ = (stdout, stderr);
-                Err(Error::Compile(format!(
-                    "scheduler: VendorCrate({id}) dispatch is not yet wired \
-                     (cross-target vendor build pipeline is in progress)",
-                )))
+                let snapshot = lock_or_poison(self.state, "state")?.clone();
+                let output = dispatch_vendor_crate(
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    self.vendor_ctx,
+                    &snapshot,
+                    id,
+                    stderr,
+                )?;
+                let was_cached = lock_or_poison(self.state, "state")?
+                    .merge(output)
+                    .expect("VendorCrate output is cacheable");
+                self.record(was_cached);
+                let _ = stdout;
+                Ok(())
             }
         }
     }
@@ -642,6 +857,102 @@ mod tests {
             project_root: "/tmp".into(),
         };
         (model, resolved)
+    }
+
+    // -------------------------------------------------------------------
+    // dispatch_vendor_crate — pre-spawn error-path coverage. These
+    // exercise the resolution logic in isolation; they all fail before
+    // rustc is spawned, so they don't need a real toolchain.
+    // -------------------------------------------------------------------
+
+    fn vendor_lib(
+        name: &str,
+        ver: &str,
+        target: TargetSpec,
+        deps: Vec<crate::vendor::cross::graph::VendorDepEdge>,
+    ) -> crate::vendor::cross::graph::VendorCrateBuild {
+        use crate::vendor::cross::graph::VendorCrateBuild;
+        use crate::vendor::cross::metadata::{CrateId, CrateKind};
+        VendorCrateBuild {
+            crate_id: CrateId { name: name.into(), version: ver.into() },
+            cargo_target_name: name.replace('-', "_"),
+            target,
+            kind: CrateKind::Lib,
+            manifest_dir: PathBuf::from(format!("/vendor/{name}-{ver}")),
+            lib_path: PathBuf::from(format!("/vendor/{name}-{ver}/src/lib.rs")),
+            edition: "2021".into(),
+            features: vec![],
+            deps,
+        }
+    }
+
+    #[test]
+    fn dispatch_vendor_crate_missing_sysroot_for_cross_errors() {
+        // Cross vendor build whose Sysroot isn't in the snapshot — this
+        // is the "Sysroot ran after VendorCrate" failure mode.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = make_ctx(tmp.path());
+        let (model, resolved) = make_minimal_model_and_resolved();
+        let target = resolved.profile.target;
+        let mut vendor_ctx = VendorBuildContext::new();
+        let id = vendor_ctx
+            .add(vendor_lib("bitflags", "2.11.0", TargetSpec::Cross(target), vec![]))
+            .expect("add ok");
+        let snapshot = ArtifactsSnapshot::default(); // empty — no sysroot
+        let mut stderr = Vec::<u8>::new();
+        let err = dispatch_vendor_crate(
+            &ctx, &model, &resolved, &vendor_ctx, &snapshot, id, &mut stderr,
+        )
+        .expect_err("must error");
+        match err {
+            Error::Compile(msg) => assert!(
+                msg.contains("Sysroot") && msg.contains("DAG edge missing"),
+                "unexpected diagnostic: {msg}",
+            ),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_vendor_crate_missing_dep_artifact_errors() {
+        // Dep edge resolves in vendor_ctx but its artifact isn't in
+        // snapshot.vendor_artifacts — the "dep ran after parent" mode.
+        // Use a host build to bypass the sysroot requirement and isolate
+        // the dep-artifact lookup.
+        use crate::vendor::cross::graph::VendorDepEdge;
+        use crate::vendor::cross::metadata::CrateId;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = make_ctx(tmp.path());
+        let (model, resolved) = make_minimal_model_and_resolved();
+        let mut vendor_ctx = VendorBuildContext::new();
+        let _dep_id = vendor_ctx
+            .add(vendor_lib("dep", "1.0.0", TargetSpec::Host, vec![]))
+            .expect("dep add ok");
+        let parent_id = vendor_ctx
+            .add(vendor_lib(
+                "parent",
+                "1.0.0",
+                TargetSpec::Host,
+                vec![VendorDepEdge {
+                    extern_name: "dep".into(),
+                    crate_id: CrateId { name: "dep".into(), version: "1.0.0".into() },
+                    target: TargetSpec::Host,
+                }],
+            ))
+            .expect("parent add ok");
+        let snapshot = ArtifactsSnapshot::default(); // empty — dep not built
+        let mut stderr = Vec::<u8>::new();
+        let err = dispatch_vendor_crate(
+            &ctx, &model, &resolved, &vendor_ctx, &snapshot, parent_id, &mut stderr,
+        )
+        .expect_err("must error");
+        match err {
+            Error::Compile(msg) => assert!(
+                msg.contains("ran before its dep") && msg.contains("DAG edge missing"),
+                "unexpected diagnostic: {msg}",
+            ),
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     /// Smoke test: an empty crate list still produces a valid DAG (Sysroot +
