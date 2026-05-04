@@ -115,19 +115,29 @@ pub struct VendorCompileInput<'a> {
 
 /// Assemble the rustc invocation for one vendored-crate build.
 ///
-/// Returns the configured [`RustcCommandBuilder`] and the path the
+/// Returns the configured [`RustcCommandBuilder`], the path the
 /// resulting rlib (or .so for proc-macros) will live at after rustc
-/// completes — `<out_dir>/lib<crate>.rlib` for libs,
-/// `<out_dir>/lib<crate>.so` (or `.dylib` on macOS) for proc-macros.
+/// completes (`<out_dir>/lib<crate>.rlib` for libs,
+/// `<out_dir>/lib<crate>.so` for proc-macros on Linux, `.dylib` on
+/// macOS, `.dll` on Windows), and the depfile path
+/// (`<out_dir>/<crate>.d`).
 ///
-/// The output path is computed by mirroring the `--crate-name` /
+/// Both paths are computed by mirroring the `--crate-name` /
 /// `--out-dir` rules rustc itself uses, *not* by inspecting the
-/// filesystem after the fact. That keeps the path predictable to the
-/// scheduler before the build runs (so it can register the artifact
-/// in the artifact map ahead of time).
+/// filesystem after the fact. That keeps them predictable to the
+/// scheduler before the build runs — the cache layer needs the
+/// depfile path *before* spawning rustc to seed its freshness query
+/// from the previous run's depfile contents.
+///
+/// Vendor builds emit `[Emit::Link, Emit::DepInfo]`. The depfile is
+/// not optional: gluon's cache layer requires a depfile after every
+/// successful rustc spawn so source-file changes (`cargo vendor` re-
+/// extracting an upstream source-only patch onto the same lockfile
+/// version) invalidate downstream entries. See
+/// [`super::compile_and_cache`] for the freshness contract.
 pub fn build_vendor_rustc_command(
     input: &VendorCompileInput<'_>,
-) -> Result<(RustcCommandBuilder, PathBuf), VendorCommandError> {
+) -> Result<(RustcCommandBuilder, PathBuf, PathBuf), VendorCommandError> {
     let build = input.build;
     let crate_name = &build.cargo_target_name;
 
@@ -169,10 +179,13 @@ pub fn build_vendor_rustc_command(
 
     // --- Output ---
     b.out_dir(input.out_dir);
-    // Lib emit only — we don't hook into rustc dep-info for vendor
-    // builds yet (the cache is keyed on the assembled command hash and
-    // file-mtime polling, same as the host pipeline).
-    b.emit(&[Emit::Link]);
+    // Emit both the artifact (rlib/.so) and a depfile. The depfile lives
+    // alongside the artifact at `<out_dir>/<crate>.d`; threading the path
+    // through `emit_with_dep_info_path` keeps the "rustc paths predictable
+    // before the spawn" invariant (the cache layer needs the depfile path
+    // up-front to seed its freshness query from the previous run).
+    let depfile_path = input.out_dir.join(format!("{crate_name}.d"));
+    b.emit_with_dep_info_path(&[Emit::Link, Emit::DepInfo], &depfile_path);
 
     // --- Profile knobs ---
     b.opt_level(input.opt_level);
@@ -208,7 +221,7 @@ pub fn build_vendor_rustc_command(
     // get one out_dir each, so collisions aren't possible). Linux
     // proc-macros land at `lib<name>.so`; macOS at `lib<name>.dylib`.
     let out_path = expected_artifact_path(input.out_dir, crate_name, build);
-    Ok((b, out_path))
+    Ok((b, out_path, depfile_path))
 }
 
 fn crate_kind_to_type(build: &VendorCrateBuild) -> CrateType {
@@ -312,7 +325,7 @@ mod tests {
             opt_level: 0,
             debug_info: true,
         };
-        let (cmd, out_path) = build_vendor_rustc_command(&input).expect("ok");
+        let (cmd, out_path, depfile_path) = build_vendor_rustc_command(&input).expect("ok");
 
         let args = args_to_strings(&cmd);
         assert!(
@@ -327,6 +340,10 @@ mod tests {
         assert_eq!(
             out_path,
             PathBuf::from("/build/cross/x86_64-test/dev/vendor-deps/bitflags/libbitflags.rlib"),
+        );
+        assert_eq!(
+            depfile_path,
+            PathBuf::from("/build/cross/x86_64-test/dev/vendor-deps/bitflags/bitflags.d"),
         );
     }
 
@@ -348,7 +365,11 @@ mod tests {
             opt_level: 3,
             debug_info: false,
         };
-        let (cmd, out_path) = build_vendor_rustc_command(&input).expect("ok");
+        let (cmd, out_path, depfile_path) = build_vendor_rustc_command(&input).expect("ok");
+
+        // Depfile path mirrors the artifact's basename without the `lib`
+        // prefix or extension — `<out_dir>/<crate_name>.d`.
+        assert_eq!(depfile_path, out_dir.join("syn.d"));
 
         let args = args_to_strings(&cmd);
         assert!(
@@ -406,7 +427,7 @@ mod tests {
             opt_level: 0,
             debug_info: true,
         };
-        let (cmd, _) = build_vendor_rustc_command(&input).expect("ok");
+        let (cmd, _, _) = build_vendor_rustc_command(&input).expect("ok");
         let args = args_to_strings(&cmd);
 
         // Both --extern entries present, with the right paths.
@@ -439,7 +460,7 @@ mod tests {
             opt_level: 0,
             debug_info: true,
         };
-        let (cmd, _) = build_vendor_rustc_command(&input).expect("ok");
+        let (cmd, _, _) = build_vendor_rustc_command(&input).expect("ok");
         let args = args_to_strings(&cmd);
         assert!(
             args.iter().any(|a| a == "feature=\"alloc\""),
@@ -448,6 +469,38 @@ mod tests {
         assert!(
             args.iter().any(|a| a == "feature=\"std\""),
             "missing std cfg: {args:?}"
+        );
+    }
+
+    #[test]
+    fn emit_token_contains_dep_info_with_explicit_path() {
+        // Explicit-path depfile is what `compile_and_cache` relies on:
+        // it needs to know the depfile path BEFORE rustc spawns, to seed
+        // the freshness query. If rustc were left to derive the path
+        // from --out-dir + --crate-name itself (the default), the cache
+        // layer would have to reconstruct that derivation by hand.
+        let b = build_lib("bitflags", cross_target(), vec![]);
+        let externs = BTreeMap::new();
+        let out_dir = PathBuf::from("/build/cross/x86_64-test/dev/vendor-deps/bitflags");
+        let sysroot = PathBuf::from("/sysroot");
+        let rustc = rustc_path();
+        let input = VendorCompileInput {
+            build: &b,
+            extern_artifacts: &externs,
+            sysroot_dir: Some(&sysroot),
+            out_dir: &out_dir,
+            rustc: &rustc,
+            target_triple: Some("x86_64-unknown-none"),
+            target_triple_builtin: true,
+            opt_level: 0,
+            debug_info: true,
+        };
+        let (cmd, _, depfile_path) = build_vendor_rustc_command(&input).expect("ok");
+        let args = args_to_strings(&cmd);
+        let expected_emit = format!("--emit=link,dep-info={}", depfile_path.display());
+        assert!(
+            args.iter().any(|a| a == &expected_emit),
+            "expected emit token {expected_emit:?} not found in args: {args:?}",
         );
     }
 
