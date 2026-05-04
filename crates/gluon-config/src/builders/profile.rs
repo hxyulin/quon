@@ -3,7 +3,7 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{Handle, RawProfileDef, TargetDef};
+use gluon_model::{BootMode, Handle, RawProfileDef, TargetDef};
 
 /// Chainable builder returned by [`Config::profile`].
 pub struct ProfileBuilder<'cfg> {
@@ -89,6 +89,35 @@ impl<'cfg> ProfileBuilder<'cfg> {
         self.modify(|p| p.preset = Some(n));
         self
     }
+
+    /// Pin the QEMU boot mode for this profile. Accepts the same string
+    /// vocabulary as [`crate::builders::QemuBuilder::boot_mode`]:
+    /// `"direct"`, `"uefi"`, or `"bios"`.
+    ///
+    /// When set, this overrides the project-level `qemu().boot_mode(...)`
+    /// for runs of this profile — useful for projects whose `dev-uefi`
+    /// and `dev-bios` profiles share a compilation graph but boot
+    /// differently.
+    pub fn qemu_boot_mode(mut self, mode: &str) -> Self {
+        let parsed = match mode {
+            "direct" => Some(BootMode::Direct),
+            "uefi" => Some(BootMode::Uefi),
+            "bios" => Some(BootMode::Bios),
+            other => {
+                if !self.state.is_duplicate() {
+                    self.cfg.diagnostics.push(ConfigError::new(format!(
+                        "profile.qemu_boot_mode: expected \"direct\", \"uefi\", or \"bios\", \
+                         got \"{other}\""
+                    )));
+                }
+                None
+            }
+        };
+        if let Some(m) = parsed {
+            self.modify(|p| p.qemu_boot_mode = Some(m));
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -135,6 +164,35 @@ mod tests {
         );
         assert!(cfg.diagnostics[0].message.contains("dev"));
         assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+    }
+
+    #[test]
+    fn qemu_boot_mode_parses_known_values() {
+        use gluon_model::BootMode;
+        let mut cfg = Config::new();
+        cfg.profile("dev-uefi").qemu_boot_mode("uefi");
+        cfg.profile("dev-bios").qemu_boot_mode("bios");
+        cfg.profile("dev-direct").qemu_boot_mode("direct");
+
+        let uefi = cfg.raw.profiles.lookup("dev-uefi").unwrap();
+        let bios = cfg.raw.profiles.lookup("dev-bios").unwrap();
+        let direct = cfg.raw.profiles.lookup("dev-direct").unwrap();
+        assert_eq!(cfg.raw.profiles.get(uefi).unwrap().qemu_boot_mode, Some(BootMode::Uefi));
+        assert_eq!(cfg.raw.profiles.get(bios).unwrap().qemu_boot_mode, Some(BootMode::Bios));
+        assert_eq!(cfg.raw.profiles.get(direct).unwrap().qemu_boot_mode, Some(BootMode::Direct));
+        assert!(cfg.diagnostics.is_empty(), "valid values must not push diagnostics");
+    }
+
+    #[test]
+    fn qemu_boot_mode_rejects_unknown_value() {
+        let mut cfg = Config::new();
+        cfg.profile("dev").qemu_boot_mode("kexec");
+
+        let h = cfg.raw.profiles.lookup("dev").unwrap();
+        let p = cfg.raw.profiles.get(h).unwrap();
+        assert!(p.qemu_boot_mode.is_none(), "unknown value must leave field unset");
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(cfg.diagnostics[0].message.contains("kexec"));
     }
 
     #[test]

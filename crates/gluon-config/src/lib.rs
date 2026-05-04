@@ -11,9 +11,10 @@ pub use error::{ConfigError, Result};
 // Stage 4 will expand this list as typed enums (`BootloaderKind`, etc.)
 // land in `gluon-model`.
 pub use gluon_model::{
-    Binding, BuildModel, ConfigValue, CrateDef, CrateType, DepSource,
-    Expr, GitRef, GroupDef, Handle, ImageDef, ImageEntry, ProfileDef,
-    ProjectDef, RawBuildModel, TargetDef, TristateVal,
+    Binding, BootMode, BuildModel, ConfigValue, CrateDef, CrateType,
+    DepSource, DisplayMode, Expr, GitRef, GroupDef, Handle, ImageDef,
+    ImageEntry, PartitionTable, ProfileDef, ProjectDef, RawBuildModel,
+    TargetDef, TristateVal,
 };
 
 #[cfg(test)]
@@ -25,24 +26,27 @@ mod reexports_compile {
     #[test]
     fn types_are_visible() {
         use crate::{
-            Binding, BuildModel, ConfigValue, CrateDef, CrateType,
-            DepSource, Expr, GitRef, GroupDef, Handle, ImageDef,
-            ImageEntry, ProfileDef, ProjectDef, RawBuildModel,
-            TargetDef, TristateVal,
+            Binding, BootMode, BuildModel, ConfigValue, CrateDef,
+            CrateType, DepSource, DisplayMode, Expr, GitRef, GroupDef,
+            Handle, ImageDef, ImageEntry, PartitionTable, ProfileDef,
+            ProjectDef, RawBuildModel, TargetDef, TristateVal,
         };
         let _ = std::mem::size_of::<(
             Binding,
+            BootMode,
             BuildModel,
             ConfigValue,
             CrateDef,
             CrateType,
             DepSource,
+            DisplayMode,
             Expr,
             GitRef,
             GroupDef,
             Handle<TargetDef>,
             ImageDef,
             ImageEntry,
+            PartitionTable,
             ProfileDef,
             ProjectDef,
             RawBuildModel,
