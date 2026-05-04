@@ -281,7 +281,11 @@ pub fn vendor_sync(
     // declared dep is Path-sourced, the generated manifest will have
     // no dependencies and we can skip running cargo vendor.
     let workspace_dir = layout.vendor_workspace_dir();
-    manifest_gen::write_vendor_workspace(&workspace_dir, &model.external_deps)?;
+    manifest_gen::write_vendor_workspace(
+        &workspace_dir,
+        &model.external_deps,
+        gluon_model::TargetSpec::Host,
+    )?;
 
     let has_non_path_dep = model
         .external_deps

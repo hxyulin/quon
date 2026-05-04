@@ -32,7 +32,7 @@
 //! so this is not a maintenance burden.
 
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{Arena, DepSource, ExternalDepDef, GitRef};
+use gluon_model::{Arena, DepSource, ExternalDepDef, GitRef, TargetSpec};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -48,19 +48,33 @@ const WORKSPACE_PACKAGE_NAME: &str = "gluon-vendor-workspace";
 /// Cargo.toml + resolves deps, never builds the workspace.
 const STUB_LIB_RS: &str = "// Auto-generated stub for `cargo vendor`. Do not edit.\n";
 
-/// Render the scratch `Cargo.toml` for the given external deps.
+/// Render the scratch `Cargo.toml` for the given external deps,
+/// restricted to the subset whose `target` matches `target_filter`.
+///
+/// One scratch workspace is generated per declared target (`host` plus
+/// one per cross target with at least one dep). Splitting like this
+/// lets cargo resolve each target's set independently — including
+/// future per-target feature divergence — without polluting cross
+/// resolutions with host-only crates or vice versa.
 ///
 /// Returns the full manifest as a `String`. Path-sourced deps are
-/// silently skipped — see the module docs.
+/// silently skipped — see the module docs. If the filtered subset is
+/// empty, the generated manifest still contains a valid (depless)
+/// `[package]` table; the caller should typically check first and
+/// avoid creating empty per-target workspaces, but the function
+/// itself does not error in that case.
 ///
 /// # Errors
 ///
 /// Returns an [`Error::Diagnostics`] with the dep's `span` attached
 /// when a [`DepSource::CratesIo`] entry has an empty version (the
-/// Rhai builder defaults to `""` when `.version()` is never called,
-/// which is a user error we detect here rather than at `cargo vendor`
-/// time so the diagnostic points at the right line in `gluon.rs`).
-pub fn generate_vendor_cargo_toml(deps: &Arena<ExternalDepDef>) -> Result<String> {
+/// builder leaves `""` when `.version()` is never called, which is a
+/// user error we detect here rather than at `cargo vendor` time so
+/// the diagnostic points at the right line in `gluon.rs`).
+pub fn generate_vendor_cargo_toml(
+    deps: &Arena<ExternalDepDef>,
+    target_filter: TargetSpec,
+) -> Result<String> {
     // Collect diagnostics across all deps so the user sees every
     // problem in one pass, not just the first one. Matches the
     // accumulate-then-report pattern used by the intern pass.
@@ -88,6 +102,7 @@ pub fn generate_vendor_cargo_toml(deps: &Arena<ExternalDepDef>) -> Result<String
     let mut entries: Vec<(&str, &ExternalDepDef)> = deps
         .names()
         .filter_map(|(name, h)| deps.get(h).map(|d| (name, d)))
+        .filter(|(_, d)| d.target == target_filter)
         .collect();
     entries.sort_by_key(|(name, _)| *name);
 
@@ -168,20 +183,26 @@ pub fn generate_vendor_cargo_toml(deps: &Arena<ExternalDepDef>) -> Result<String
 }
 
 /// Write the generated manifest and stub `lib.rs` into
-/// `workspace_dir`, creating the directory if needed.
+/// `workspace_dir`, creating the directory if needed. Only deps whose
+/// `target` matches `target_filter` are emitted into the manifest —
+/// see [`generate_vendor_cargo_toml`].
 ///
 /// The stub is rewritten on every call — it's three bytes and
 /// deterministic, so there is no point being clever about caching.
 /// The `Cargo.toml` is rewritten on every call for the same reason:
 /// the caller is expected to have already decided that re-vendoring
 /// is necessary.
-pub fn write_vendor_workspace(workspace_dir: &Path, deps: &Arena<ExternalDepDef>) -> Result<()> {
+pub fn write_vendor_workspace(
+    workspace_dir: &Path,
+    deps: &Arena<ExternalDepDef>,
+    target_filter: TargetSpec,
+) -> Result<()> {
     fs::create_dir_all(workspace_dir).map_err(|e| Error::Io {
         path: workspace_dir.to_path_buf(),
         source: e,
     })?;
 
-    let manifest = generate_vendor_cargo_toml(deps)?;
+    let manifest = generate_vendor_cargo_toml(deps, target_filter)?;
     let manifest_path = workspace_dir.join("Cargo.toml");
     fs::write(&manifest_path, manifest.as_bytes()).map_err(|e| Error::Io {
         path: manifest_path,
@@ -209,7 +230,7 @@ fn escape_toml_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gluon_model::SourceSpan;
+    use gluon_model::{Handle, SourceSpan};
 
     fn dep(name: &str, source: DepSource) -> ExternalDepDef {
         ExternalDepDef {
@@ -238,9 +259,18 @@ mod tests {
             .unwrap_or_else(|e| panic!("generated manifest is not valid TOML:\n{s}\n\nerror: {e}"));
     }
 
+    /// Most existing tests construct `dep(...)` fixtures with the
+    /// default `TargetSpec::Host` and exercise the host pipeline. This
+    /// helper keeps those call sites readable. Tests that need to
+    /// exercise per-target filtering call
+    /// [`generate_vendor_cargo_toml`] directly with an explicit filter.
+    fn mk_manifest(deps: &Arena<ExternalDepDef>) -> Result<String> {
+        generate_vendor_cargo_toml(deps, TargetSpec::Host)
+    }
+
     #[test]
     fn empty_arena_emits_valid_package_only_manifest() {
-        let out = generate_vendor_cargo_toml(&Arena::new()).expect("ok");
+        let out = mk_manifest(&Arena::new()).expect("ok");
         assert_parses_as_toml(&out);
         assert!(out.contains("[package]"));
         assert!(out.contains(WORKSPACE_PACKAGE_NAME));
@@ -253,7 +283,7 @@ mod tests {
     // scratch manifest declares its own `[workspace]` to detach.
     #[test]
     fn manifest_declares_empty_workspace_to_detach_from_outer_workspace() {
-        let out = generate_vendor_cargo_toml(&Arena::new()).expect("ok");
+        let out = mk_manifest(&Arena::new()).expect("ok");
         assert_parses_as_toml(&out);
         let parsed: toml::Value = toml::from_str(&out).unwrap();
         let ws = parsed
@@ -268,7 +298,7 @@ mod tests {
 
     #[test]
     fn crates_io_dep_emits_version() {
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        let out = mk_manifest(&arena(vec![dep(
             "bitflags",
             DepSource::CratesIo {
                 version: "2.11".into(),
@@ -284,7 +314,7 @@ mod tests {
     fn empty_crates_io_version_is_diagnosed() {
         let mut d = dep("bitflags", DepSource::CratesIo { version: "".into() });
         d.span = Some(SourceSpan::point("gluon.rs", 42, 1));
-        let err = generate_vendor_cargo_toml(&arena(vec![d])).expect_err("must fail");
+        let err = mk_manifest(&arena(vec![d])).expect_err("must fail");
         let msg = err.to_string();
         assert!(msg.contains("no version specified"), "msg: {msg}");
         assert!(msg.contains("gluon.rs:42:1"), "msg: {msg}");
@@ -296,7 +326,7 @@ mod tests {
 
     #[test]
     fn git_rev_emits_rev_key() {
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        let out = mk_manifest(&arena(vec![dep(
             "tokio",
             DepSource::Git {
                 url: "https://github.com/tokio-rs/tokio.git".into(),
@@ -313,7 +343,7 @@ mod tests {
 
     #[test]
     fn git_tag_emits_tag_key() {
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        let out = mk_manifest(&arena(vec![dep(
             "x",
             DepSource::Git {
                 url: "https://example.com/x.git".into(),
@@ -326,7 +356,7 @@ mod tests {
 
     #[test]
     fn git_branch_emits_branch_key() {
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        let out = mk_manifest(&arena(vec![dep(
             "x",
             DepSource::Git {
                 url: "https://example.com/x.git".into(),
@@ -339,7 +369,7 @@ mod tests {
 
     #[test]
     fn git_default_ref_emits_no_ref_key() {
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        let out = mk_manifest(&arena(vec![dep(
             "x",
             DepSource::Git {
                 url: "https://example.com/x.git".into(),
@@ -356,7 +386,7 @@ mod tests {
 
     #[test]
     fn path_deps_are_omitted_entirely() {
-        let out = generate_vendor_cargo_toml(&arena(vec![
+        let out = mk_manifest(&arena(vec![
             dep(
                 "local-helper",
                 DepSource::Path {
@@ -385,7 +415,7 @@ mod tests {
             },
         );
         d.features = vec!["std".into(), "alloc".into(), "serde".into()];
-        let out = generate_vendor_cargo_toml(&arena(vec![d])).expect("ok");
+        let out = mk_manifest(&arena(vec![d])).expect("ok");
         assert_parses_as_toml(&out);
         // Sorted order: alloc, serde, std.
         assert!(
@@ -403,18 +433,18 @@ mod tests {
             },
         );
         d.default_features = true;
-        let out_true = generate_vendor_cargo_toml(&arena(vec![d.clone()])).expect("ok");
+        let out_true = mk_manifest(&arena(vec![d.clone()])).expect("ok");
         assert!(!out_true.contains("default-features"));
 
         d.default_features = false;
-        let out_false = generate_vendor_cargo_toml(&arena(vec![d])).expect("ok");
+        let out_false = mk_manifest(&arena(vec![d])).expect("ok");
         assert!(out_false.contains("default-features = false"));
     }
 
     #[test]
     fn deps_emitted_in_sorted_order() {
         // Insertion order: z, a, m. Output must be: a, m, z.
-        let out = generate_vendor_cargo_toml(&arena(vec![
+        let out = mk_manifest(&arena(vec![
             dep(
                 "z",
                 DepSource::CratesIo {
@@ -453,6 +483,7 @@ mod tests {
                     version: "0.4".into(),
                 },
             )]),
+            TargetSpec::Host,
         )
         .expect("ok");
         let manifest = std::fs::read_to_string(ws.join("Cargo.toml")).expect("read manifest");
@@ -463,10 +494,10 @@ mod tests {
 
     #[test]
     fn url_with_double_quote_is_escaped() {
-        // A user could theoretically emit a url containing a quote via
-        // a clever Rhai dynamic string. Don't let that produce broken
-        // TOML.
-        let out = generate_vendor_cargo_toml(&arena(vec![dep(
+        // A user could theoretically emit a URL containing a quote via
+        // a dynamic string in their `gluon.rs`. Don't let that produce
+        // broken TOML.
+        let out = mk_manifest(&arena(vec![dep(
             "x",
             DepSource::Git {
                 url: r#"https://example.com/"evil".git"#.into(),
@@ -475,5 +506,59 @@ mod tests {
         )]))
         .expect("ok");
         assert_parses_as_toml(&out);
+    }
+
+    #[test]
+    fn target_filter_separates_host_and_cross_subsets() {
+        // Two host deps and one kernel-targeted dep share the same
+        // arena. Generating with `TargetSpec::Host` must include only
+        // the host pair; generating with `TargetSpec::Cross(handle)`
+        // must include only the kernel one. This is the contract the
+        // per-target scratch workspace generator relies on to keep
+        // resolutions isolated.
+        let kernel = Handle::<gluon_model::TargetDef>::new(0);
+        let mut host_a = dep(
+            "log",
+            DepSource::CratesIo {
+                version: "0.4".into(),
+            },
+        );
+        host_a.target = TargetSpec::Host;
+        let mut host_b = dep(
+            "anyhow",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        host_b.target = TargetSpec::Host;
+        let mut kernel_only = dep(
+            "bitflags",
+            DepSource::CratesIo {
+                version: "2.11".into(),
+            },
+        );
+        kernel_only.target = TargetSpec::Cross(kernel);
+
+        let mixed = arena(vec![host_a, host_b, kernel_only]);
+
+        let host_out = generate_vendor_cargo_toml(&mixed, TargetSpec::Host).expect("host ok");
+        assert!(host_out.contains("[dependencies.log]"));
+        assert!(host_out.contains("[dependencies.anyhow]"));
+        assert!(
+            !host_out.contains("[dependencies.bitflags]"),
+            "kernel dep leaked into host manifest:\n{host_out}"
+        );
+
+        let cross_out =
+            generate_vendor_cargo_toml(&mixed, TargetSpec::Cross(kernel)).expect("cross ok");
+        assert!(cross_out.contains("[dependencies.bitflags]"));
+        assert!(
+            !cross_out.contains("[dependencies.log]"),
+            "host dep leaked into cross manifest:\n{cross_out}"
+        );
+        assert!(
+            !cross_out.contains("[dependencies.anyhow]"),
+            "host dep leaked into cross manifest:\n{cross_out}"
+        );
     }
 }
