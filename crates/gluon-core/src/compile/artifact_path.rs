@@ -58,9 +58,15 @@ pub fn expected_crate_artifact_path(
 
 /// Read-side counterpart to `CrateArtifactShape::debug_elf_path`. Returns
 /// `Some(<name>.elf)` for `CrateType::RawBinary`, `None` for every other
-/// crate type. Mirrors the write-side derivation in `artifact_shape.rs`.
-/// See the rationale for the `.elf` sidecar in
-/// `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`.
+/// crate type.
+///
+/// Exists because `RawBinary` crates strip all ELF headers and debug
+/// sections when the flat `<name>.bin` is produced — the `.elf` is the
+/// debugger-facing sidecar that preserves symbols for `gdb`,
+/// `addr2line`, `objdump`, and `readelf`. Mirrors the write-side
+/// derivation in `artifact_shape.rs`. See
+/// `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`
+/// for the full rationale.
 pub fn expected_debug_elf_path(
     layout: &BuildLayout,
     model: &BuildModel,
@@ -364,5 +370,33 @@ mod tests {
         let resolved = make_resolved(th, Vec::new());
         let err = expected_crate_artifact_path(&layout(), &model, &resolved, ch);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn debug_elf_handle_not_in_resolved_crates_errors() {
+        // Same orphan-handle scenario as `handle_not_in_resolved_crates_errors`
+        // but exercising the read-side `.elf` lookup. Confirms the error path
+        // is wired and the function-name prefix in the error message
+        // distinguishes this function from `expected_crate_artifact_path`.
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "host-target", "x86_64-unknown-linux-gnu");
+        let g = ensure_group(&mut model);
+        let (ch, _) = model.crates.insert(
+            "orphan".into(),
+            CrateDef {
+                name: "orphan".into(),
+                path: "orphan".into(),
+                crate_type: CrateType::Lib,
+                ..test_crate_defaults(g)
+            },
+        );
+        let resolved = make_resolved(th, Vec::new());
+        let err = expected_debug_elf_path(&layout(), &model, &resolved, ch);
+        assert!(err.is_err());
+        let msg = format!("{}", err.unwrap_err());
+        assert!(
+            msg.contains("expected_debug_elf_path:"),
+            "error message must include the function-name prefix; got: {msg}"
+        );
     }
 }
