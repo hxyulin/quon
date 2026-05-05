@@ -74,6 +74,59 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// First four bytes of every ELF file: `0x7F` 'E' 'L' 'F'.
+/// Defined in the ELF spec — see `e_ident[EI_MAG0..EI_MAG3]`.
+const ELF_MAGIC: [u8; 4] = [0x7f, 0x45, 0x4c, 0x46];
+
+/// Run `rust-objcopy -O binary <elf> <bin>`. The ELF input is expected
+/// to be a real ELF file emitted by rustc + lld; we pre-check the magic
+/// bytes so a user whose linker script forces `OUTPUT_FORMAT(binary)`
+/// gets a specific actionable error instead of an opaque
+/// `rust-objcopy: error: failed to parse object file` message.
+pub fn run_objcopy_to_binary(objcopy: &Path, elf: &Path, bin: &Path) -> Result<()> {
+    let mut header = [0u8; 4];
+    let mut f = std::fs::File::open(elf).map_err(|e| Error::Io {
+        path: elf.to_path_buf(),
+        source: e,
+    })?;
+    use std::io::Read;
+    let n = f.read(&mut header).map_err(|e| Error::Io {
+        path: elf.to_path_buf(),
+        source: e,
+    })?;
+    if n < 4 || header != ELF_MAGIC {
+        return Err(Error::Config(format!(
+            "rust-objcopy could not parse {} as ELF.\n\
+             This usually means your linker script contains \
+             `OUTPUT_FORMAT(binary)`. Remove that line — gluon now \
+             controls output format directly so the rustc step emits \
+             a normal ELF and an objcopy step produces the flat .bin.",
+            elf.display()
+        )));
+    }
+
+    let output = std::process::Command::new(objcopy)
+        .arg("-O")
+        .arg("binary")
+        .arg(elf)
+        .arg(bin)
+        .output()
+        .map_err(|e| Error::Io {
+            path: objcopy.to_path_buf(),
+            source: e,
+        })?;
+    if !output.status.success() {
+        return Err(Error::Config(format!(
+            "rust-objcopy failed converting {} → {} (status {}):\n{}",
+            elf.display(),
+            bin.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +201,62 @@ mod tests {
             msg.contains("rustup component add llvm-tools-preview"),
             "error must hint at the install command, got: {msg}"
         );
+    }
+
+    #[test]
+    fn run_objcopy_rejects_non_elf_input_with_outputformat_hint() {
+        // A file whose first bytes are NOT 7f 45 4c 46 — this is what we'd
+        // see if the user's linker script contains OUTPUT_FORMAT(binary).
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_elf = tmp.path().join("not-actually-elf.elf");
+        fs::write(&fake_elf, b"this is just raw bytes, no ELF header").unwrap();
+
+        let bin_out = tmp.path().join("out.bin");
+        // Probe will resolve to the real toolchain rust-objcopy on the test
+        // host — that's fine, we never reach it because the magic-byte
+        // pre-check fires first.
+        let rustc = which::which("rustc").expect("rustc on PATH");
+        let objcopy = probe_rust_objcopy(&rustc).expect("toolchain probe");
+        let err = run_objcopy_to_binary(&objcopy, &fake_elf, &bin_out)
+            .expect_err("non-ELF input must fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("OUTPUT_FORMAT(binary)"),
+            "error must mention the linker-script gotcha, got: {msg}"
+        );
+    }
+
+    // On macOS and Windows the host `rustc` produces Mach-O / PE, not ELF.
+    // The magic-byte check would reject those — that's correct behaviour,
+    // not a bug. Only Linux hosts produce native ELF, so the fixture below
+    // only makes sense there. Cross-compiling for a Linux target is an
+    // alternative but requires the cross-target to be installed; gating
+    // by OS is simpler and sufficient for the CI matrix.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn run_objcopy_emits_flat_bin_from_real_elf() {
+        // Build a tiny throwaway C-free ELF the host toolchain can produce.
+        // Use rustc itself to compile a `fn main() {}` for the host target,
+        // then convert.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("p.rs");
+        fs::write(&src, b"fn main() {}").unwrap();
+        let elf = tmp.path().join(&exe_name("p"));
+        let status = std::process::Command::new("rustc")
+            .args(["--edition", "2024", "-o"])
+            .arg(&elf)
+            .arg(&src)
+            .status()
+            .expect("spawn rustc");
+        assert!(status.success(), "fixture rustc failed");
+
+        let bin = tmp.path().join("p.bin");
+        let rustc = which::which("rustc").expect("rustc on PATH");
+        let objcopy = probe_rust_objcopy(&rustc).expect("toolchain probe");
+        run_objcopy_to_binary(&objcopy, &elf, &bin).expect("objcopy");
+        assert!(bin.is_file(), ".bin must exist after objcopy");
+        // The flat output is non-zero — strip-nothing -O binary preserves
+        // every loadable section.
+        assert!(fs::metadata(&bin).unwrap().len() > 0);
     }
 }

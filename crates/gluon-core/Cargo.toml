@@ -64,3 +64,6 @@ tempfile = "3"
 # isolated to one place. Keeps our test code free of `unsafe` blocks
 # that would otherwise need per-call SAFETY justifications.
 temp-env = "0.3"
+# Used in objcopy tests to locate `rustc` on PATH so we can derive a
+# probe path without hard-coding a toolchain install location.
+which = "7"
