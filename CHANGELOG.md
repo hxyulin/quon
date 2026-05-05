@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Cross-target vendored builds)
+
+- **`ExternalDepDef::target` selects which target a vendored dep is
+  built for.** `cfg.dependency("bitflags").version("2.11").target(kernel)`
+  builds bitflags against the user's custom target with the gluon-built
+  sysroot via the gluon-driven rustc pipeline, instead of going through
+  the host cargo-as-builder path. `.target_host()` is also available;
+  unannotated deps stay on the host pipeline. See
+  `docs/superpowers/specs/2026-05-04-cross-target-vendor-builds-design.md`
+  for the full design and slice-level commit log.
+- **Per-target `cargo vendor` scratch workspaces** under
+  `build/vendor-workspaces/<target>/` (host pipeline moved from a flat
+  `build/vendor-workspace/` to `build/vendor-workspaces/host/` for
+  symmetry). Each cross target gets its own synthesised `Cargo.toml`
+  listing only the deps tagged for that target; `cargo vendor`
+  populates `vendor/` for that workspace and `cargo metadata --frozen`
+  lowers the resolved graph into `VendorCrateBuild` scheduler
+  descriptors.
+- **`DagNode::VendorCrate` scheduler variant** dispatches each
+  vendored crate through `compile::vendor_command` against the
+  per-target sysroot, with output rlibs landing under
+  `build/cross/<target>/<profile>/vendor-deps/<name>/`. Proc-macro
+  deps re-target to the host as expected.
+- **`gluon.lock` schema v2** adds per-package `target` and `kind`
+  fields. Loading a v1 lockfile is accepted (`target` defaults to
+  `"host"`, `kind` defaults to `"lib"`) so existing on-disk
+  lockfiles migrate transparently on the next `gluon vendor`.
+- **Cache invalidation propagates dep + sysroot changes.** A vendor
+  crate's freshness query folds in (a) every dep's output rlib path
+  and (b) the per-target sysroot lib dir's `*.rlib` set, so a sysroot
+  rebuild or upstream-dep rebuild invalidates the consumer's cache
+  via the existing two-tier mtime+sha256 check.
+- **Vendor fingerprint folds in target.** Adding or removing
+  `.target("kernel")` to an existing dep changes the fingerprint and
+  forces a re-vendor. The fingerprint hashes the *target name* (not
+  the arena handle index) so it stays stable across runs that
+  reorder Rhai-driven inserts.
+
+Behaviour for host-only projects is unchanged except for the
+`build/vendor-workspace/` → `build/vendor-workspaces/host/` rename;
+existing `gluon.lock` files re-fingerprint and re-vendor once on
+upgrade, then settle.
+
 ### Added (Stage 9 — architecture docs + comment cleanup)
 
 - **Four new architecture docs** consolidate scattered
