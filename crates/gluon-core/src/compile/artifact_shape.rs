@@ -118,10 +118,10 @@ impl CrateArtifactShape {
                 })
             }
             CrateType::RawBinary => {
-                // `--oformat=binary` flat output renamed to `.bin`.
-                // Same out-dir handling as Bin (cross_final_dir, no
-                // extra-filename); only the artifact extension
-                // differs.
+                // rustc emits `<name>.elf` into cross_final_dir; a
+                // post-link objcopy step converts it to the flat
+                // `<name>.bin`. Both paths are recorded here so the
+                // freshness check and callers can find both.
                 let out_dir = layout.cross_final_dir(target, &resolved.profile);
                 let output_path = out_dir.join(format!("{crate_name_rustc}.bin"));
                 let depfile_path = out_dir.join(format!("{crate_name_rustc}.d"));
