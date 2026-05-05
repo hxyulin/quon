@@ -24,6 +24,7 @@ pub mod compile_utils;
 pub mod driver;
 pub mod env;
 pub mod extern_map;
+pub mod objcopy;
 pub mod layout;
 pub mod rustc;
 pub mod rustc_info;
