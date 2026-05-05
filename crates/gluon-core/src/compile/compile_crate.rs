@@ -1421,15 +1421,21 @@ mod tests {
     // RawBinary crate-type tests
     // ---------------------------------------------------------------
     //
-    // RawBinary is the flat-binary cousin of Bin. The invariants the
-    // command builder must uphold:
+    // RawBinary is the flat-binary cousin of Bin. The command builder
+    // emits a normal ELF; a post-link objcopy step (wired in
+    // compile_crate.rs via `post_compile_step`) converts it into the
+    // flat `<name>.bin` the build model treats as the primary artifact.
     //
-    //   1. Output filename ends with `.bin` (not the empty/exe suffix
-    //      Bin would use).
-    //   2. `-C link-arg=--oformat=binary` is appended so rust-lld
-    //      writes a flat image instead of an ELF.
-    //   3. `-o <output_path>` is set (rustc otherwise wouldn't write
-    //      to a `.bin` extension).
+    // The invariants the command builder must uphold:
+    //
+    //   1. Build-model `output_path` stays `<name>.bin` — objcopy
+    //      produces it; downstream consumers (image(), build_step())
+    //      keep resolving to the same flat blob.
+    //   2. `--oformat=binary` is GONE. rustc now produces a normal ELF
+    //      so debuggers (gdb, addr2line, objdump) can consume it.
+    //   3. `-o <name>.elf` is set explicitly — rustc's default
+    //      executable name has no extension, and we want an unambiguous
+    //      `.elf` suffix the post-link objcopy step can target.
     //   4. No `-C extra-filename` (same as Bin — rustc doesn't
     //      hash-suffix executables, and we want a stable filename).
     //   5. `--crate-type=bin` is what rustc sees (rustc has no
