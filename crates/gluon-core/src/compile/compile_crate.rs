@@ -29,7 +29,7 @@ use crate::compile::layout::BuildLayout;
 use crate::compile::rustc::RustcCommandBuilder;
 use crate::compile::{ArtifactMap, CompileCtx, PostCompileStep};
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{BuildModel, CrateDef, ResolvedConfig, ResolvedCrateRef};
+use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig, ResolvedCrateRef};
 use std::path::{Path, PathBuf};
 
 /// Input bundle for [`compile`]. Grouped into a struct so the function
@@ -101,6 +101,16 @@ struct CompileContext {
     out_dir: PathBuf,
     output_path: PathBuf,
     depfile_path: PathBuf,
+    /// On-disk path of the auxiliary debug ELF, when one exists.
+    /// Populated for `CrateType::RawBinary` from `CrateArtifactShape`;
+    /// `None` for every other crate type. Threaded through to the
+    /// `run_compile_and_cache` call site so the post-link objcopy
+    /// step can target it.
+    debug_elf_path: Option<PathBuf>,
+    /// The crate-type, captured here so the dispatch in `compile()`
+    /// can decide whether to wire the RawBinary post-compile objcopy
+    /// step without re-resolving the `CrateDef` from the model.
+    crate_type: CrateType,
     cache_key: String,
     argv_hash: [u8; 32],
     builder: RustcCommandBuilder,
@@ -139,6 +149,7 @@ fn prepare_compile_context(
     // `artifact_path` consult.
     let shape = CrateArtifactShape::for_crate(&ctx.layout, model, resolved, crate_def, crate_ref)?;
     let out_dir = shape.out_dir;
+    let debug_elf_path = shape.debug_elf_path;
 
     let target_name_for_fail = if crate_ref.host {
         None
@@ -161,6 +172,8 @@ fn prepare_compile_context(
         out_dir,
         output_path,
         depfile_path,
+        debug_elf_path,
+        crate_type: crate_def.crate_type,
         cache_key,
         argv_hash,
         builder,
@@ -231,6 +244,30 @@ pub fn compile(
     let target_name_for_fail = cc.target_name_for_fail.clone();
     let depfile_for_diag = cc.depfile_path.clone();
 
+    // RawBinary needs a post-link objcopy step: rustc has emitted
+    // <name>.elf into cross_final_dir, and we now run rust-objcopy
+    // -O binary to produce <name>.bin (the build model's primary
+    // artifact). The .elf is also listed as an auxiliary freshness
+    // input so deleting just the sidecar (or having a previous
+    // objcopy crash mid-run) forces a recompile rather than silently
+    // returning a stale cache hit. Other crate types pass the no-op
+    // (empty aux + None) variant.
+    let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) =
+        if matches!(cc.crate_type, CrateType::RawBinary) {
+            let elf_path = cc.debug_elf_path.clone().expect(
+                "CrateArtifactShape must populate debug_elf_path for RawBinary",
+            );
+            let bin_path = cc.output_path.clone();
+            let rustc_path = ctx.rustc_info.rustc_path.clone();
+            let post: PostCompileStep = Box::new(move || {
+                let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path)?;
+                crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
+            });
+            (vec![cc.debug_elf_path.clone().unwrap()], Some(post))
+        } else {
+            (Vec::new(), None)
+        };
+
     crate::compile::run_compile_and_cache(
         ctx,
         cc.builder,
@@ -240,8 +277,8 @@ pub fn compile(
         cc.depfile_path,
         Some(&cc.out_dir),
         cc.extra_sources,
-        Vec::new(),                                  // aux_outputs
-        None::<PostCompileStep>,                     // post_compile_step
+        aux_outputs,
+        post_compile_step,
         Box::new(move |output, rendered| {
             let headline = if is_host {
                 format!(
