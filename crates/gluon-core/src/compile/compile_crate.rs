@@ -1438,7 +1438,7 @@ mod tests {
     //      reject them, breaking real-mode boot sectors which need
     //      `-T boot.ld` to define their load layout.
     #[test]
-    fn flag_assembly_raw_binary_emits_oformat_and_dot_bin_extension() {
+    fn flag_assembly_raw_binary_emits_dot_elf_output_no_oformat() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
         let sysroot_dir = tmp.path().join("sysroot");
@@ -1481,29 +1481,43 @@ mod tests {
             .map(|s| s.to_string_lossy().into_owned())
             .collect();
 
-        // 1. Output filename uses `.bin`.
+        // After: rustc no longer produces the flat `.bin`. It emits a
+        // standard ELF named `<name>.elf` into cross_final_dir, and a
+        // post-compile objcopy step (Task 7) converts it to `<name>.bin`.
+        //
+        // What this test pins:
+        //   1. Output path is still `<name>.bin` (the build model treats
+        //      it as the primary artifact; objcopy produces it).
+        //   2. `--oformat=binary` is GONE from the rustc invocation.
+        //   3. `-o <name>.elf` is set explicitly so the rustc-produced
+        //      ELF has an unambiguous extension.
+        //   4. No `-C extra-filename` (unchanged).
+        //   5. `--crate-type=bin` is what rustc sees (unchanged).
+        //   6. Linker scripts still accepted (unchanged).
+
+        // 1. Build-model primary artifact path is unchanged: `.bin`.
         assert!(
             output_path.to_string_lossy().ends_with("boot_sector.bin"),
-            "RawBinary artifact must end with .bin (using rustc-normalized name), got: {output_path:?}"
+            "build-model output_path stays .bin (objcopy produces it), got: {output_path:?}"
         );
 
-        // 2. `--oformat=binary` is injected as a link-arg.
+        // 2. `--oformat=binary` must NOT appear anywhere.
         assert!(
-            args.windows(2)
-                .any(|w| w[0] == "-C" && w[1] == "link-arg=--oformat=binary"),
-            "RawBinary must emit -C link-arg=--oformat=binary, got: {args:?}"
+            !args.iter().any(|a| a.contains("--oformat=binary")),
+            "RawBinary must NOT pass --oformat=binary anymore, got: {args:?}"
         );
 
-        // 3. `-o <output_path>` is set.
-        let o_pos = args.iter().position(|a| a == "-o");
+        // 3. `-o <something>.elf` is set.
+        let o_pos = args.iter().position(|a| a == "-o")
+            .expect("RawBinary must emit -o <name>.elf");
+        let o_path = &args[o_pos + 1];
         assert!(
-            o_pos.is_some(),
-            "RawBinary must emit -o to force the .bin extension, got: {args:?}"
+            o_path.ends_with(".elf"),
+            "-o argument must end in .elf, got: {o_path}"
         );
-        assert_eq!(
-            args.get(o_pos.unwrap() + 1).map(String::as_str),
-            Some(output_path.to_string_lossy().as_ref()),
-            "-o must point at the resolved output path, got: {args:?}"
+        assert!(
+            !o_path.ends_with(".bin"),
+            "-o must no longer pass .bin to rustc directly, got: {o_path}"
         );
 
         // 4. No `-C extra-filename`.
@@ -1514,8 +1528,7 @@ mod tests {
             "RawBinary must not emit -C extra-filename, got: {args:?}"
         );
 
-        // 5. `--crate-type=bin` is what rustc sees (RawBinary has no
-        //    native rustc representation).
+        // 5. `--crate-type=bin`.
         let ct_pos = args.iter().position(|a| a == "--crate-type").unwrap();
         assert_eq!(
             args.get(ct_pos + 1).map(String::as_str),
@@ -1523,11 +1536,10 @@ mod tests {
             "RawBinary must pass --crate-type=bin to rustc, got: {args:?}"
         );
 
-        // 6. Linker script is emitted (gated by is_executable, not
-        //    crate_type == Bin).
+        // 6. Linker script still emitted.
         assert!(
             args.iter().any(|a| a.contains("boot.ld")),
-            "RawBinary linker_script must be honoured, got: {args:?}"
+            "RawBinary linker_script must still be honoured, got: {args:?}"
         );
     }
 

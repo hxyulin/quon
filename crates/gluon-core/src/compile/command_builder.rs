@@ -445,25 +445,19 @@ pub(crate) fn build_rustc_command(
         if let Some(ls) = &crate_def.linker_script {
             builder.linker_script(&project_root.join(ls));
         }
-        // Note: we do NOT pass `-o` here for cross Bin crates. We use
-        // `--out-dir=cross_final_dir` instead, and omit `-C extra-filename`
-        // for Bin crates (see the output-path derivation above for rationale).
-        // For host Bin crates (unusual), `-o` is also omitted; they use the
-        // host_artifact_dir as --out-dir with extra-filename.
+        // For Bin (cross): we use --out-dir = cross_final_dir and let
+        // rustc produce <name>{exe-suffix}. No -o needed.
         //
-        // RawBinary is the exception: its artifact path uses a `.bin`
-        // extension that rustc has no native concept of, so we force the
-        // output filename via `-o` *and* inject `--oformat=binary` so
-        // rust-lld writes a flat image rather than an ELF.
+        // For RawBinary: rustc emits <name>.elf into cross_final_dir.
+        // We pass -o <name>.elf explicitly because rustc's default
+        // executable name has no extension and we want an unambiguous
+        // .elf suffix the post-link objcopy step (compile_crate.rs
+        // wires it via post_compile_step) can target. The flat
+        // <name>.bin is produced by objcopy after rustc returns
+        // success — see compile/objcopy.rs.
         if crate_def.crate_type == CrateType::RawBinary {
-            builder.raw_arg("-o").raw_arg(output_path.as_os_str());
-            // The `--oformat=binary` flag is consumed by rust-lld at
-            // link time and replaces the default ELF/PE output with a
-            // raw byte image (no headers, sections concatenated in
-            // load-address order). Linker scripts are typically the
-            // way users define that load order — see the boot-sector
-            // crate in lepton-os for the canonical pattern.
-            builder.raw_arg("-C").raw_arg("link-arg=--oformat=binary");
+            let elf_path = output_path.with_extension("elf");
+            builder.raw_arg("-o").raw_arg(elf_path.as_os_str());
         }
     }
 
