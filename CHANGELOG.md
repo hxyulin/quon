@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (RawBinary debug ergonomics)
+
+- **`RawBinary` crates now emit `<name>.elf` alongside `<name>.bin`.**
+  rustc + lld produce a normal ELF; a post-link `rust-objcopy -O binary`
+  step converts it to the flat `<name>.bin` (still the build-model
+  primary artifact). The `.elf` preserves full debug info so `gdb`,
+  `addr2line`, `objdump`, and `readelf` work against BIOS-stage and
+  other RawBinary artifacts. Requires `rust-objcopy` from the
+  `llvm-tools-preview` rustup component (`rustup component add
+  llvm-tools-preview`). A linker script that contains
+  `OUTPUT_FORMAT(binary)` is now incorrect — gluon controls output
+  format directly via the rustc invocation, and the build fails with a
+  diagnostic pointing at the offending directive. See
+  `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`.
+
 ### Added (Cross-target vendored builds)
 
 - **`ExternalDepDef::target` selects which target a vendored dep is
