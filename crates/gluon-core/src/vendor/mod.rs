@@ -247,7 +247,7 @@ pub fn vendor_sync(
     project_root: &Path,
     opts: VendorOptions,
 ) -> Result<VendorLock> {
-    let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+    let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
     let lock_path = layout.gluon_lock(project_root);
     let vendor_dir = layout.vendor_dir(project_root);
 
@@ -474,7 +474,7 @@ pub fn vendor_check(
     };
 
     let mut report = VendorCheckReport::default();
-    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
     if lock.fingerprint != expected_fingerprint {
         report.fingerprint_mismatch = true;
     }
@@ -584,7 +584,7 @@ pub fn auto_register_vendored_deps(
     }
     let lock = maybe_lock.unwrap();
 
-    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
     if lock.fingerprint != expected_fingerprint {
         return Err(Error::Diagnostics(vec![
             Diagnostic::error(
@@ -1089,7 +1089,7 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1134,7 +1134,7 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1173,7 +1173,7 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1213,7 +1213,7 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps);
+        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,

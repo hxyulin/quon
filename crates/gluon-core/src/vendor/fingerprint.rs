@@ -15,11 +15,23 @@
 //! - name
 //! - source (incl. git url + ref, crates-io version, path)
 //! - features + default_features
+//! - target (`Host` vs `Cross(<target-name>)`)
+//!
+//! `target` participates because the V2 cross pipeline runs
+//! `cargo vendor` per target into a separate scratch workspace —
+//! adding/removing `.target("kernel")` to a dep changes which workspace
+//! the dep lives in, which is a vendor-output change.
 //!
 //! Fields that affect compilation but not vendoring — `cfg_flags`,
 //! `rustc_flags` — are **deliberately excluded**. Changing a cfg flag
 //! does not invalidate the vendored tree; the compile-time cache
 //! (hashed over the full rustc invocation) already catches it.
+//!
+//! Likewise, the *spec* of a target (its triple, panic strategy, etc.)
+//! is excluded: only the target's *name* is folded in. Changing the
+//! triple of an existing target does not change which crates `cargo
+//! vendor` pulls in our setup; the per-node compile stamps already
+//! invalidate downstream rustc invocations.
 //!
 //! `span` is also excluded — source-position wobble is not a semantic
 //! change.
@@ -32,7 +44,7 @@
 //! a domain-separated SHA-256 so future fingerprint schemes can
 //! coexist with v1-format lockfiles if we ever need to migrate.
 
-use gluon_model::{Arena, DepSource, ExternalDepDef, GitRef};
+use gluon_model::{Arena, DepSource, ExternalDepDef, GitRef, TargetDef, TargetSpec};
 use sha2::{Digest, Sha256};
 
 /// Domain tag. Bumping this invalidates every existing `gluon.lock`
@@ -44,11 +56,19 @@ const DOMAIN: &str = "gluon.vendor.fingerprint.v1";
 
 /// Compute the fingerprint for a `BuildModel::external_deps` arena.
 ///
+/// `targets` is needed to resolve each `TargetSpec::Cross(handle)` to
+/// the target's stable name string. Arena indices are insertion-order
+/// and not a durable identifier, so they cannot participate in the
+/// hash directly.
+///
 /// Returns a string of the form `"sha256:<64 hex chars>"`. The empty
 /// arena has a well-defined fingerprint (the SHA-256 of just the
 /// domain tag + a zero length prefix) — it is never the empty string,
 /// so `gluon.lock::fingerprint` is always comparable.
-pub fn fingerprint_external_deps(deps: &Arena<ExternalDepDef>) -> String {
+pub fn fingerprint_external_deps(
+    deps: &Arena<ExternalDepDef>,
+    targets: &Arena<TargetDef>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(DOMAIN.as_bytes());
     hasher.update(b"\0");
@@ -115,6 +135,23 @@ pub fn fingerprint_external_deps(deps: &Arena<ExternalDepDef>) -> String {
 
         // default_features — single byte is enough.
         hasher.update([dep.default_features as u8]);
+
+        // Target — single-byte tag + len-prefixed name for `Cross`.
+        // Resolved to the target's *name*, not its arena index, so the
+        // hash is stable across runs (Rhai script reordering can shift
+        // indices). A dangling handle hashes as an empty name; the
+        // tag byte still distinguishes it from `Host`. The cross
+        // pipeline already emits a structured diagnostic for dangling
+        // handles upstream, so this branch only matters for the hash's
+        // total-function obligation.
+        match dep.target {
+            TargetSpec::Host => hasher.update([0u8]),
+            TargetSpec::Cross(handle) => {
+                hasher.update([1u8]);
+                let name = targets.get(handle).map(|t| t.name.as_str()).unwrap_or("");
+                write_len_prefixed(&mut hasher, name.as_bytes());
+            }
+        }
     }
 
     let digest: [u8; 32] = hasher.finalize().into();
@@ -137,7 +174,7 @@ fn hex(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gluon_model::{DepSource, ExternalDepDef, GitRef};
+    use gluon_model::{DepSource, ExternalDepDef, GitRef, Handle, TargetDef};
 
     fn dep(name: &str, source: DepSource) -> ExternalDepDef {
         ExternalDepDef {
@@ -161,10 +198,31 @@ mod tests {
         a
     }
 
+    fn no_targets() -> Arena<TargetDef> {
+        Arena::new()
+    }
+
+    fn targets_with(names: &[&str]) -> Arena<TargetDef> {
+        let mut a = Arena::<TargetDef>::new();
+        for name in names {
+            a.insert(
+                (*name).into(),
+                TargetDef {
+                    name: (*name).into(),
+                    spec: "x86_64-unknown-none".into(),
+                    builtin: true,
+                    panic_strategy: None,
+                    span: None,
+                },
+            );
+        }
+        a
+    }
+
     #[test]
     fn empty_arena_has_stable_fingerprint() {
-        let fp1 = fingerprint_external_deps(&Arena::new());
-        let fp2 = fingerprint_external_deps(&Arena::new());
+        let fp1 = fingerprint_external_deps(&Arena::new(), &no_targets());
+        let fp2 = fingerprint_external_deps(&Arena::new(), &no_targets());
         assert_eq!(fp1, fp2);
         assert!(fp1.starts_with("sha256:"));
         assert_eq!(fp1.len(), "sha256:".len() + 64);
@@ -200,7 +258,10 @@ mod tests {
                 },
             ),
         ]);
-        assert_eq!(fingerprint_external_deps(&a), fingerprint_external_deps(&b));
+        assert_eq!(
+            fingerprint_external_deps(&a, &no_targets()),
+            fingerprint_external_deps(&b, &no_targets())
+        );
     }
 
     #[test]
@@ -233,7 +294,10 @@ mod tests {
                 },
             ),
         ]);
-        assert_eq!(fingerprint_external_deps(&a), fingerprint_external_deps(&b));
+        assert_eq!(
+            fingerprint_external_deps(&a, &no_targets()),
+            fingerprint_external_deps(&b, &no_targets())
+        );
     }
 
     #[test]
@@ -250,7 +314,10 @@ mod tests {
                 version: "2.12".into(),
             },
         )]);
-        assert_ne!(fingerprint_external_deps(&a), fingerprint_external_deps(&b));
+        assert_ne!(
+            fingerprint_external_deps(&a, &no_targets()),
+            fingerprint_external_deps(&b, &no_targets())
+        );
     }
 
     #[test]
@@ -264,7 +331,10 @@ mod tests {
             },
         )]);
         let b = arena_with(vec![dep("x", DepSource::Path { path: "foo".into() })]);
-        assert_ne!(fingerprint_external_deps(&a), fingerprint_external_deps(&b));
+        assert_ne!(
+            fingerprint_external_deps(&a, &no_targets()),
+            fingerprint_external_deps(&b, &no_targets())
+        );
     }
 
     #[test]
@@ -298,10 +368,10 @@ mod tests {
                 reference: GitRef::Default,
             },
         )]);
-        let ftag = fingerprint_external_deps(&tag);
-        let fbranch = fingerprint_external_deps(&branch);
-        let frev = fingerprint_external_deps(&rev);
-        let fdefault = fingerprint_external_deps(&default);
+        let ftag = fingerprint_external_deps(&tag, &no_targets());
+        let fbranch = fingerprint_external_deps(&branch, &no_targets());
+        let frev = fingerprint_external_deps(&rev, &no_targets());
+        let fdefault = fingerprint_external_deps(&default, &no_targets());
         assert_ne!(ftag, fbranch);
         assert_ne!(ftag, frev);
         assert_ne!(ftag, fdefault);
@@ -325,8 +395,8 @@ mod tests {
         );
         b.features = vec!["serde".into(), "std".into()];
         assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a])),
-            fingerprint_external_deps(&arena_with(vec![b]))
+            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
         );
     }
 
@@ -341,8 +411,8 @@ mod tests {
         let mut b = a.clone();
         b.features.push("std".into());
         assert_ne!(
-            fingerprint_external_deps(&arena_with(vec![a])),
-            fingerprint_external_deps(&arena_with(vec![b]))
+            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
         );
     }
 
@@ -357,8 +427,8 @@ mod tests {
         let mut b = a.clone();
         b.default_features = false;
         assert_ne!(
-            fingerprint_external_deps(&arena_with(vec![a])),
-            fingerprint_external_deps(&arena_with(vec![b]))
+            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
         );
     }
 
@@ -377,8 +447,8 @@ mod tests {
         b.cfg_flags = vec!["feature=\"foo\"".into()];
         b.rustc_flags = vec!["-C".into(), "opt-level=3".into()];
         assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a])),
-            fingerprint_external_deps(&arena_with(vec![b]))
+            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
         );
     }
 
@@ -393,8 +463,210 @@ mod tests {
         let mut b = a.clone();
         b.span = Some(gluon_model::SourceSpan::point("fake.rs", 1, 1));
         assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a])),
-            fingerprint_external_deps(&arena_with(vec![b]))
+            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
         );
+    }
+
+    #[test]
+    fn host_to_cross_perturbs_hash() {
+        // The headline acceptance criterion for slice 8: adding
+        // `.target("kernel")` to an existing dep must invalidate the
+        // fingerprint and force a re-vendor.
+        let host_arena = arena_with(vec![dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        )]);
+
+        let targets = targets_with(&["kernel"]);
+        let kernel = targets.lookup("kernel").expect("inserted");
+        let mut cross_dep = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        cross_dep.target = TargetSpec::Cross(kernel);
+        let cross_arena = arena_with(vec![cross_dep]);
+
+        assert_ne!(
+            fingerprint_external_deps(&host_arena, &no_targets()),
+            fingerprint_external_deps(&cross_arena, &targets),
+        );
+    }
+
+    #[test]
+    fn cross_target_name_perturbs_hash() {
+        // Same dep, retargeted from `kernel` to `graphics`. Both arms
+        // are `Cross(_)`, but the resolved target *name* differs, so
+        // the fingerprint must differ.
+        let targets = targets_with(&["kernel", "graphics"]);
+        let kernel = targets.lookup("kernel").expect("inserted");
+        let graphics = targets.lookup("graphics").expect("inserted");
+
+        let mut a = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        a.target = TargetSpec::Cross(kernel);
+
+        let mut b = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        b.target = TargetSpec::Cross(graphics);
+
+        assert_ne!(
+            fingerprint_external_deps(&arena_with(vec![a]), &targets),
+            fingerprint_external_deps(&arena_with(vec![b]), &targets),
+        );
+    }
+
+    #[test]
+    fn cross_handle_index_does_not_affect_hash() {
+        // Two `targets` arenas with the same target name but different
+        // arena insertion orders (so the kernel handle has different
+        // indices). The fingerprint must be identical because we hash
+        // the resolved *name*, not the handle index.
+        let mut targets_a = Arena::<TargetDef>::new();
+        targets_a.insert(
+            "kernel".into(),
+            TargetDef {
+                name: "kernel".into(),
+                spec: "x86_64-unknown-none".into(),
+                builtin: true,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        let kernel_a = targets_a.lookup("kernel").expect("inserted");
+
+        let mut targets_b = Arena::<TargetDef>::new();
+        // Insert a decoy first so `kernel` lands at a different index.
+        targets_b.insert(
+            "decoy".into(),
+            TargetDef {
+                name: "decoy".into(),
+                spec: "aarch64-unknown-none".into(),
+                builtin: true,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        targets_b.insert(
+            "kernel".into(),
+            TargetDef {
+                name: "kernel".into(),
+                spec: "x86_64-unknown-none".into(),
+                builtin: true,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        let kernel_b = targets_b.lookup("kernel").expect("inserted");
+        assert_ne!(
+            kernel_a.index(),
+            kernel_b.index(),
+            "test setup: handles must differ"
+        );
+
+        let mut da = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        da.target = TargetSpec::Cross(kernel_a);
+        let mut db = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        db.target = TargetSpec::Cross(kernel_b);
+
+        assert_eq!(
+            fingerprint_external_deps(&arena_with(vec![da]), &targets_a),
+            fingerprint_external_deps(&arena_with(vec![db]), &targets_b),
+        );
+    }
+
+    #[test]
+    fn cross_target_spec_change_does_not_perturb_hash() {
+        // Changing `target_spec("kernel", "...")` from one triple to
+        // another while keeping the name `"kernel"` does NOT change
+        // the fingerprint: vendor output is keyed by target name in
+        // our setup, and per-node compile stamps catch spec changes
+        // separately. This is documented behaviour — see the module
+        // docstring.
+        let mut targets_a = Arena::<TargetDef>::new();
+        targets_a.insert(
+            "kernel".into(),
+            TargetDef {
+                name: "kernel".into(),
+                spec: "x86_64-unknown-none".into(),
+                builtin: true,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        let kernel_a = targets_a.lookup("kernel").expect("inserted");
+
+        let mut targets_b = Arena::<TargetDef>::new();
+        targets_b.insert(
+            "kernel".into(),
+            TargetDef {
+                name: "kernel".into(),
+                spec: "aarch64-unknown-none".into(),
+                builtin: false,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        let kernel_b = targets_b.lookup("kernel").expect("inserted");
+
+        let mut da = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        da.target = TargetSpec::Cross(kernel_a);
+        let mut db = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        db.target = TargetSpec::Cross(kernel_b);
+
+        assert_eq!(
+            fingerprint_external_deps(&arena_with(vec![da]), &targets_a),
+            fingerprint_external_deps(&arena_with(vec![db]), &targets_b),
+        );
+    }
+
+    #[test]
+    fn dangling_cross_handle_is_total_function() {
+        // A dangling target handle (handle index outside `targets`)
+        // shouldn't panic the hash. The cross context-builder rejects
+        // these upstream with a structured diagnostic, but the
+        // fingerprint must remain a total function so any path that
+        // hashes a half-validated model still returns a value.
+        let mut d = dep(
+            "x",
+            DepSource::CratesIo {
+                version: "1".into(),
+            },
+        );
+        d.target = TargetSpec::Cross(Handle::<TargetDef>::new(99));
+        let fp = fingerprint_external_deps(&arena_with(vec![d]), &no_targets());
+        assert!(fp.starts_with("sha256:"));
     }
 }
