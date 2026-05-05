@@ -166,12 +166,13 @@ pub enum CrateType {
     #[serde(rename = "staticlib")]
     StaticLib,
     /// Flat-binary executable. From rustc's perspective this is still
-    /// `--crate-type=bin`; gluon additionally injects
-    /// `-C link-arg=--oformat=binary` so rust-lld writes a raw image
-    /// instead of an ELF, and uses a `.bin` artifact extension so
-    /// downstream consumers (`image()`, `${artifact:foo}`) get a stable
-    /// path. Linker scripts are permitted (and usually required, since
-    /// flat binaries have no PT_LOAD-driven layout to fall back on).
+    /// `--crate-type=bin`; gluon emits `<name>.elf` from rustc and runs
+    /// a post-link `rust-objcopy -O binary` step to produce the flat
+    /// `<name>.bin` that downstream consumers (`image()`,
+    /// `${artifact:foo}`) resolve to. The `.elf` is preserved as a
+    /// debugger-facing sidecar (`gdb`, `addr2line`, `objdump`). Linker
+    /// scripts are permitted (and usually required, since flat
+    /// binaries have no PT_LOAD-driven layout to fall back on).
     #[serde(rename = "raw-binary")]
     RawBinary,
 }
@@ -179,9 +180,8 @@ pub enum CrateType {
 impl CrateType {
     /// String passed to rustc's `--crate-type=` flag. `RawBinary` maps
     /// to `bin` because rustc has no native concept of flat-binary
-    /// output; the difference is the linker `--oformat=binary` flag,
-    /// which is appended at command-assembly time, not communicated
-    /// via crate-type.
+    /// output; the flat `.bin` is produced by a post-link
+    /// `rust-objcopy` step, not by rustc itself.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Lib => "lib",

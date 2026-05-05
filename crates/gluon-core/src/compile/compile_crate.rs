@@ -253,17 +253,21 @@ pub fn compile(
     // returning a stale cache hit. Other crate types pass the no-op
     // (empty aux + None) variant.
     let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) =
-        if matches!(cc.crate_type, CrateType::RawBinary) {
-            let elf_path = cc.debug_elf_path.clone().expect(
-                "CrateArtifactShape must populate debug_elf_path for RawBinary",
-            );
+        if cc.crate_type == CrateType::RawBinary {
+            let elf_path = cc.debug_elf_path.clone().unwrap_or_else(|| {
+                panic!(
+                    "CrateArtifactShape must populate debug_elf_path for RawBinary (crate '{}')",
+                    cc.crate_name
+                )
+            });
+            let elf_for_aux = elf_path.clone();
             let bin_path = cc.output_path.clone();
             let rustc_path = ctx.rustc_info.rustc_path.clone();
             let post: PostCompileStep = Box::new(move || {
                 let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path)?;
                 crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
             });
-            (vec![cc.debug_elf_path.clone().unwrap()], Some(post))
+            (vec![elf_for_aux], Some(post))
         } else {
             (Vec::new(), None)
         };
