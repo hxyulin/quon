@@ -1,4 +1,4 @@
-//! Locate `rust-objcopy` for post-link binary transforms.
+//! Locate and invoke `rust-objcopy` for post-link binary transforms.
 //!
 //! `rust-objcopy` ships with the rustup `llvm-tools-preview` component
 //! and lives next to `rustc` in the active toolchain's `bin/` directory.
@@ -34,20 +34,26 @@ pub fn probe_rust_objcopy(rustc_path: &Path) -> Result<PathBuf> {
         return Ok(p);
     }
     Err(Error::Config(
-        "rust-objcopy not found. RawBinary crates need it to convert ELF \
+        "rust-objcopy not found. RawBinary crates need it to convert ELF\n\
          to flat binary output. Install with:\n    \
          rustup component add llvm-tools-preview"
             .into(),
     ))
 }
 
+/// Apply the platform-specific executable suffix to `base`. On Windows
+/// returns `<base>.exe`; elsewhere returns `<base>` unchanged.
+fn exe_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_owned()
+    }
+}
+
 fn sibling_of(rustc_path: &Path, name: &str) -> Option<PathBuf> {
     let dir = rustc_path.parent()?;
-    let exe = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
+    let exe = exe_name(name);
     let candidate = dir.join(exe);
     if candidate.is_file() {
         Some(candidate)
@@ -58,11 +64,7 @@ fn sibling_of(rustc_path: &Path, name: &str) -> Option<PathBuf> {
 
 fn which_on_path(name: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
-    let exe = if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    };
+    let exe = exe_name(name);
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(&exe);
         if candidate.is_file() {
@@ -96,12 +98,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
-        let rustc = bin_dir.join(if cfg!(windows) { "rustc.exe" } else { "rustc" });
-        let sibling = bin_dir.join(if cfg!(windows) {
-            "rust-objcopy.exe"
-        } else {
-            "rust-objcopy"
-        });
+        let rustc = bin_dir.join(&exe_name("rustc"));
+        let sibling = bin_dir.join(&exe_name("rust-objcopy"));
         touch_executable(&rustc);
         touch_executable(&sibling);
 
@@ -114,16 +112,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let toolchain_dir = tmp.path().join("toolchain");
         fs::create_dir_all(&toolchain_dir).unwrap();
-        let rustc = toolchain_dir.join(if cfg!(windows) { "rustc.exe" } else { "rustc" });
+        let rustc = toolchain_dir.join(&exe_name("rustc"));
         touch_executable(&rustc);
 
         let path_dir = tmp.path().join("path");
         fs::create_dir_all(&path_dir).unwrap();
-        let path_hit = path_dir.join(if cfg!(windows) {
-            "rust-objcopy.exe"
-        } else {
-            "rust-objcopy"
-        });
+        let path_hit = path_dir.join(&exe_name("rust-objcopy"));
         touch_executable(&path_hit);
 
         // temp_env scopes the PATH override to this closure; the global
@@ -140,7 +134,7 @@ mod tests {
     #[test]
     fn probe_errors_with_install_hint_when_nothing_resolves() {
         let tmp = tempfile::tempdir().unwrap();
-        let rustc = tmp.path().join(if cfg!(windows) { "rustc.exe" } else { "rustc" });
+        let rustc = tmp.path().join(&exe_name("rustc"));
         touch_executable(&rustc);
 
         let err = temp_env::with_var(
