@@ -18,22 +18,31 @@
 //! - the expected output path and depfile path,
 //! - the cache key and precomputed argv hash,
 //! - two small closures that build the per-site error diagnostics (rustc
-//!   exit failure headline, depfile-parse failure diagnostic).
+//!   exit failure headline, depfile-parse failure diagnostic),
+//! - the optional list of `aux_outputs` (sidecar files that must also
+//!   exist for a freshness hit — e.g. `RawBinary`'s `<name>.elf`),
+//! - an optional `post_compile_step` callback that runs after a
+//!   successful rustc spawn and before `mark_built` (used by `RawBinary`
+//!   to invoke `rust-objcopy`).
 //!
 //! The helper handles:
 //!
 //! 1. Seeding `sources_for_query` from the previous run's depfile (empty on
 //!    cold builds, which is fine — the cache entry also doesn't exist).
-//! 2. Narrow-lock freshness check → drop.
+//! 2. Narrow-lock freshness check (including `aux_outputs.iter().all(|p| p.exists())` so a deleted sidecar forces a re-run) → drop.
 //! 3. Early return on a cache hit (no rustc spawn).
 //! 4. Rendering the rustc command to a string **before** consuming the
 //!    builder, so the error path can include the full invocation.
 //! 5. Spawning rustc and surfacing stderr + command in the diagnostic on
 //!    failure.
-//! 6. Parsing the depfile **before** updating the cache (ordering matters:
+//! 6. Optional `post_compile_step` callback runs after rustc success but
+//!    before depfile parse + cache update. A failure here propagates as
+//!    the function's error and leaves the cache stale, so the next run
+//!    re-spawns rustc and retries the callback.
+//! 7. Parsing the depfile **before** updating the cache (ordering matters:
 //!    if parsing fails, the rlib is on disk but the cache stays stale, so
 //!    the next run re-runs rustc rather than silently using a stale entry).
-//! 7. Narrow-lock `mark_built` → drop.
+//! 8. Narrow-lock `mark_built` → drop.
 //!
 //! ## Out-dir creation
 //!
@@ -67,6 +76,14 @@ pub(crate) type RustcFailDiag = dyn FnOnce(&Output, &str) -> Error;
 /// a successful rustc spawn. The caller receives the underlying I/O error
 /// so it can render a note pointing at the on-disk path.
 pub(crate) type DepfileFailDiag = dyn FnOnce(&crate::error::Error) -> Error;
+
+/// Shape of the optional post-compile transform invoked after a successful
+/// rustc spawn but before `mark_built`. The canonical use case is
+/// `RawBinary`: invoking `rust-objcopy` to convert `<name>.elf` into the
+/// flat `<name>.bin`. A failure inside the callback is propagated as the
+/// function's error and leaves the cache stale, so the next run re-spawns
+/// rustc and retries the post-compile step.
+pub(crate) type PostCompileStep = Box<dyn FnOnce() -> Result<()>>;
 
 /// Run the freshness → rustc → depfile → mark_built sequence for a single
 /// rustc invocation. See the module docs for the full contract.
@@ -111,7 +128,7 @@ pub(crate) fn compile_and_cache(
     out_dir_to_create: Option<&Path>,
     extra_sources: Vec<PathBuf>,
     aux_outputs: Vec<PathBuf>,
-    post_compile_step: Option<Box<dyn FnOnce() -> Result<()>>>,
+    post_compile_step: Option<PostCompileStep>,
     rustc_fail: Box<RustcFailDiag>,
     depfile_fail: Box<DepfileFailDiag>,
     stderr_sink: &mut Vec<u8>,

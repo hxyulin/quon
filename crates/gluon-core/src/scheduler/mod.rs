@@ -22,7 +22,7 @@ pub use dag::{Dag, DagNode, NodeId, build_dag};
 pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
 
 use crate::compile::vendor_command::{VendorCompileInput, build_vendor_rustc_command};
-use crate::compile::{CompileCrateInput, CompileCtx, compile_crate};
+use crate::compile::{CompileCrateInput, CompileCtx, PostCompileStep, compile_crate};
 use crate::error::{Diagnostic, Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
@@ -567,7 +567,7 @@ fn dispatch_vendor_crate(
         Some(&out_dir),
         extra_sources,
         Vec::new(),                                  // aux_outputs
-        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
+        None::<PostCompileStep>,                     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

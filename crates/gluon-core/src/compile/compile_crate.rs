@@ -27,7 +27,7 @@ use super::command_builder::build_rustc_command;
 use crate::cache::BuildRecord;
 use crate::compile::layout::BuildLayout;
 use crate::compile::rustc::RustcCommandBuilder;
-use crate::compile::{ArtifactMap, CompileCtx};
+use crate::compile::{ArtifactMap, CompileCtx, PostCompileStep};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateDef, ResolvedConfig, ResolvedCrateRef};
 use std::path::{Path, PathBuf};
@@ -241,7 +241,7 @@ pub fn compile(
         Some(&cc.out_dir),
         cc.extra_sources,
         Vec::new(),                                  // aux_outputs
-        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
+        None::<PostCompileStep>,                     // post_compile_step
         Box::new(move |output, rendered| {
             let headline = if is_host {
                 format!(

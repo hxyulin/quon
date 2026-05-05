@@ -34,7 +34,7 @@
 //! `docs/src/architecture/external-deps.md` for the rationale.
 
 use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
-use crate::compile::{CompileCtx, Emit, RustcCommandBuilder};
+use crate::compile::{CompileCtx, Emit, PostCompileStep, RustcCommandBuilder};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateType, Handle, TargetDef};
 use std::path::{Path, PathBuf};
@@ -335,7 +335,7 @@ fn build_sysroot_crate(
         None,
         Vec::new(), // sysroot crates have no out-of-band inputs
         Vec::new(),                                  // aux_outputs
-        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
+        None::<PostCompileStep>,                     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

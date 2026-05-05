@@ -21,7 +21,7 @@
 //! config crate for their own target via `--extern`.
 
 use crate::compile::compile_utils::sanitise_crate_name;
-use crate::compile::{CompileCtx, Emit, RustcCommandBuilder};
+use crate::compile::{CompileCtx, Emit, PostCompileStep, RustcCommandBuilder};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateType, Handle, ResolvedConfig, ResolvedValue, TargetDef};
 use std::collections::BTreeMap;
@@ -302,7 +302,7 @@ pub fn ensure_config_crate(
         Some(&out_dir),
         Vec::new(), // config crate has no out-of-band inputs
         Vec::new(),                                  // aux_outputs
-        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
+        None::<PostCompileStep>,                     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

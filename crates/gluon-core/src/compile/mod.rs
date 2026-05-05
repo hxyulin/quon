@@ -33,6 +33,10 @@ pub mod vendor_command;
 pub use driver::DriverKind;
 
 pub(crate) use compile_and_cache::compile_and_cache as run_compile_and_cache;
+pub(crate) use compile_and_cache::PostCompileStep;
+
+// Note: PostCompileStep is re-exported via `pub(crate) use` above so callers in other
+// modules can import it directly from crate::compile as PostCompileStep.
 
 pub use artifact_shape::CrateArtifactShape;
 pub use compile_crate::{CompileCrateInput, compile as compile_crate};
