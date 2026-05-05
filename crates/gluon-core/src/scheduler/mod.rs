@@ -35,7 +35,7 @@ use gluon_model::{
 use snapshot::{ArtifactsSnapshot, NodeOutput};
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -370,6 +370,53 @@ fn build_vendor_cache_key(
     }
 }
 
+/// Build the `extra_sources` list for a vendor crate's freshness query.
+///
+/// Vendor crates use *stable* on-disk paths for both their `--sysroot`
+/// and their `--extern` dep rlibs — there's no extra-filename hash in
+/// the way cargo would normally salt these. That means a rebuild of
+/// the sysroot or of a dep produces a new file at the same path; the
+/// compile-time argv (and therefore [`crate::cache::Cache::is_fresh`]'s
+/// `argv_hash`) is unchanged. Rustc's depfile-driven source list
+/// won't surface the change either: vendor builds emit a depfile but
+/// don't pass `-Zbinary-dep-depinfo`, so the depfile only lists `.rs`
+/// files — no rlibs.
+///
+/// Threading the dep rlibs and sysroot rlibs through `extra_sources`
+/// makes the cache layer's per-input two-tier (mtime + sha256) check
+/// participate in the freshness decision. A content change in any
+/// dep rlib or sysroot rlib then invalidates the consumer's entry on
+/// the next build, just like a `.rs` source edit would.
+///
+/// Output is sorted by path so the cache record is deterministic
+/// across invocations — see the project-wide ordering invariant in
+/// `CLAUDE.md`.
+fn collect_vendor_extra_sources(
+    extern_artifacts: &BTreeMap<String, PathBuf>,
+    sysroot_lib_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = extern_artifacts.values().cloned().collect();
+
+    // Walk just the immediate children of `<sysroot>/lib/rustlib/<target>/lib`
+    // and pick up the rlibs (typically core, alloc, compiler_builtins).
+    // Missing dir is silently tolerated: on a cold build the dir may
+    // not exist yet, but the DAG guarantees the Sysroot node ran first
+    // for cross builds, so in practice this is just defensive.
+    if let Some(lib_dir) = sysroot_lib_dir
+        && let Ok(entries) = std::fs::read_dir(lib_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("rlib") {
+                sources.push(path);
+            }
+        }
+    }
+
+    sources.sort();
+    sources
+}
+
 /// Compile one vendored crate via gluon-driven rustc.
 ///
 /// Mirrors [`dispatch_crate`]'s shape: looks up the build descriptor,
@@ -424,39 +471,50 @@ fn dispatch_vendor_crate(
     // Host: no --target, no --sysroot, out_dir under host/vendor-deps/.
     // Cross: triple from TargetDef::spec, sysroot from snapshot, out_dir
     // under cross/<target>/<profile>/vendor-deps/.
-    let (target_triple, target_triple_builtin, sysroot_owned, out_dir) = match build.target {
-        TargetSpec::Host => (
-            None,
-            false,
-            None::<PathBuf>,
-            ctx.layout.host_vendor_dep_dir(&build.cargo_target_name),
-        ),
-        TargetSpec::Cross(target_handle) => {
-            let target = model.targets.get(target_handle).ok_or_else(|| {
-                Error::Compile(format!(
-                    "scheduler: vendor build {id} ({}) references target handle {:?} \
-                     not in build model",
-                    build.crate_id.name, target_handle,
-                ))
-            })?;
-            let sysroot = snapshot.sysroots.get(&target_handle).cloned().ok_or_else(|| {
-                Error::Compile(format!(
-                    "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
-                     dependency completed; DAG edge missing?",
-                    build.crate_id.name, target_handle,
-                ))
-            })?;
-            let out_dir =
-                ctx.layout
-                    .cross_vendor_dep_dir(target, &resolved.profile, &build.cargo_target_name);
-            (
-                Some(target.spec.clone()),
-                target.builtin,
-                Some(sysroot),
-                out_dir,
-            )
-        }
-    };
+    //
+    // `sysroot_lib_dir` is captured separately from `sysroot_owned`
+    // because the freshness layer needs to enumerate the sysroot
+    // *libdir* (`<sysroot>/lib/rustlib/<target>/lib`) — see
+    // [`collect_vendor_extra_sources`] for why.
+    let (target_triple, target_triple_builtin, sysroot_owned, sysroot_lib_dir, out_dir) =
+        match build.target {
+            TargetSpec::Host => (
+                None,
+                false,
+                None::<PathBuf>,
+                None::<PathBuf>,
+                ctx.layout.host_vendor_dep_dir(&build.cargo_target_name),
+            ),
+            TargetSpec::Cross(target_handle) => {
+                let target = model.targets.get(target_handle).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: vendor build {id} ({}) references target handle {:?} \
+                         not in build model",
+                        build.crate_id.name, target_handle,
+                    ))
+                })?;
+                let sysroot = snapshot.sysroots.get(&target_handle).cloned().ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
+                         dependency completed; DAG edge missing?",
+                        build.crate_id.name, target_handle,
+                    ))
+                })?;
+                let sysroot_lib = ctx.layout.sysroot_lib_dir(target);
+                let out_dir = ctx.layout.cross_vendor_dep_dir(
+                    target,
+                    &resolved.profile,
+                    &build.cargo_target_name,
+                );
+                (
+                    Some(target.spec.clone()),
+                    target.builtin,
+                    Some(sysroot),
+                    Some(sysroot_lib),
+                    out_dir,
+                )
+            }
+        };
 
     // --- Assemble rustc command ---
     let input = VendorCompileInput {
@@ -494,6 +552,11 @@ fn dispatch_vendor_crate(
     };
     let depfile_for_diag = depfile_path.clone();
 
+    // Fold dep rlibs and sysroot rlibs into the freshness query so a
+    // sysroot or dep rebuild propagates to this vendor crate's cache
+    // entry. See [`collect_vendor_extra_sources`] for the rationale.
+    let extra_sources = collect_vendor_extra_sources(&extern_artifacts, sysroot_lib_dir.as_deref());
+
     let (out_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
         builder,
@@ -502,7 +565,7 @@ fn dispatch_vendor_crate(
         output_path,
         depfile_path,
         Some(&out_dir),
-        Vec::new(),
+        extra_sources,
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(
@@ -953,6 +1016,90 @@ mod tests {
             ),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // collect_vendor_extra_sources — pure helper, no rustc spawn
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn collect_vendor_extra_sources_empty_inputs_returns_empty() {
+        // Host build with no deps and no sysroot — nothing to fold in.
+        let extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let result = collect_vendor_extra_sources(&extern_artifacts, None);
+        assert!(result.is_empty(), "expected empty, got: {result:?}");
+    }
+
+    #[test]
+    fn collect_vendor_extra_sources_sorts_dep_paths() {
+        // Determinism: the BTreeMap iterates in key order ("alpha", "zeta"),
+        // but the *paths* are sorted independently — pin the sort so a
+        // future map switch can't silently reorder cache stamps.
+        let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        extern_artifacts.insert("zeta".into(), PathBuf::from("/build/aaa.rlib"));
+        extern_artifacts.insert("alpha".into(), PathBuf::from("/build/zzz.rlib"));
+        let result = collect_vendor_extra_sources(&extern_artifacts, None);
+        assert_eq!(
+            result,
+            vec![
+                PathBuf::from("/build/aaa.rlib"),
+                PathBuf::from("/build/zzz.rlib"),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_vendor_extra_sources_picks_up_sysroot_rlibs() {
+        // Cross build: deps + sysroot dir with mixed file types. Only
+        // top-level *.rlib entries should be folded in. The result must
+        // be a sorted, deduplicated path list.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lib_dir = tmp.path().join("lib");
+        std::fs::create_dir_all(&lib_dir).expect("mkdir lib");
+
+        // Top-level: two rlibs (must be picked up), one .so (skipped),
+        // one .d depfile (skipped).
+        let core_rlib = lib_dir.join("libcore-deadbeef.rlib");
+        let alloc_rlib = lib_dir.join("liballoc-cafef00d.rlib");
+        let dylib = lib_dir.join("libsomething.so");
+        let depfile = lib_dir.join("libcore.d");
+        for p in [&core_rlib, &alloc_rlib, &dylib, &depfile] {
+            std::fs::write(p, b"x").expect("seed");
+        }
+
+        // Nested rlib (must NOT be picked up — read_dir is non-recursive).
+        let nested = lib_dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir nested");
+        std::fs::write(nested.join("libignored.rlib"), b"x").expect("seed nested");
+
+        let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        extern_artifacts.insert("bitflags".into(), PathBuf::from("/build/libbitflags.rlib"));
+
+        let result = collect_vendor_extra_sources(&extern_artifacts, Some(&lib_dir));
+
+        // Expected: dep + 2 sysroot rlibs, sorted. The .so and .d are
+        // filtered; the nested rlib is invisible to read_dir's flat walk.
+        let mut expected = vec![
+            PathBuf::from("/build/libbitflags.rlib"),
+            alloc_rlib.clone(),
+            core_rlib.clone(),
+        ];
+        expected.sort();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn collect_vendor_extra_sources_tolerates_missing_sysroot_dir() {
+        // The DAG guarantees the Sysroot node ran before any cross
+        // VendorCrate, so this branch is defensive — but a missing dir
+        // must not panic or error: it just means no sysroot rlibs to
+        // fold in (the cache will catch the mismatch on the next call
+        // when the dir does exist).
+        let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
+        extern_artifacts.insert("dep".into(), PathBuf::from("/build/libdep.rlib"));
+        let nope = PathBuf::from("/this/path/does/not/exist/lib");
+        let result = collect_vendor_extra_sources(&extern_artifacts, Some(&nope));
+        assert_eq!(result, vec![PathBuf::from("/build/libdep.rlib")]);
     }
 
     /// Smoke test: an empty crate list still produces a valid DAG (Sysroot +
