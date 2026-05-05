@@ -38,6 +38,12 @@ pub struct CrateArtifactShape {
     pub output_path: PathBuf,
     /// On-disk path of the rustc-emitted depfile (`.d`).
     pub depfile_path: PathBuf,
+    /// On-disk path of an auxiliary debug ELF, when one exists. Present
+    /// only for `CrateType::RawBinary`, where rustc emits `<name>.elf`
+    /// and a post-link step transforms it into the flat `<name>.bin`
+    /// the build model treats as the primary artifact. Every other
+    /// crate type leaves this `None`.
+    pub debug_elf_path: Option<PathBuf>,
 }
 
 impl CrateArtifactShape {
@@ -82,6 +88,7 @@ impl CrateArtifactShape {
                 out_dir,
                 output_path,
                 depfile_path,
+                debug_elf_path: None,
             });
         }
 
@@ -107,6 +114,7 @@ impl CrateArtifactShape {
                     out_dir,
                     output_path,
                     depfile_path,
+                    debug_elf_path: None,
                 })
             }
             CrateType::RawBinary => {
@@ -117,10 +125,12 @@ impl CrateArtifactShape {
                 let out_dir = layout.cross_final_dir(target, &resolved.profile);
                 let output_path = out_dir.join(format!("{crate_name_rustc}.bin"));
                 let depfile_path = out_dir.join(format!("{crate_name_rustc}.d"));
+                let debug_elf_path = Some(out_dir.join(format!("{crate_name_rustc}.elf")));
                 Ok(Self {
                     out_dir,
                     output_path,
                     depfile_path,
+                    debug_elf_path,
                 })
             }
             _ => {
@@ -135,6 +145,7 @@ impl CrateArtifactShape {
                     out_dir,
                     output_path,
                     depfile_path,
+                    debug_elf_path: None,
                 })
             }
         }
@@ -459,5 +470,10 @@ mod tests {
         assert!(s.contains("/cross/i386-code16/dev/final/"), "{s}");
         // Hyphenated names normalise to underscores for rustc.
         assert!(s.ends_with("/boot_sector.bin"), "{s}");
+        assert_eq!(
+            shape.debug_elf_path.as_deref(),
+            Some(shape.out_dir.join("boot_sector.elf").as_path()),
+            "RawBinary must declare a sibling .elf path next to the .bin"
+        );
     }
 }
