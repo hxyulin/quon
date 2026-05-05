@@ -28,7 +28,7 @@ pub mod fingerprint;
 pub mod lockfile;
 pub mod manifest_gen;
 
-pub use lockfile::{VendorLock, VendorLockPackage};
+pub use lockfile::{VendorLock, VendorLockPackage, VendorPackageKind};
 
 use crate::compile::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
@@ -336,6 +336,12 @@ pub fn vendor_sync(
                         packages.push(VendorLockPackage {
                             name: name.to_string(),
                             version,
+                            // The host pipeline (`vendor_sync`) only ever
+                            // pins host-targeted libs; cross-targeted deps
+                            // and proc-macros come from the V2 cross
+                            // pipeline.
+                            target: "host".to_string(),
+                            kind: VendorPackageKind::Lib,
                             source: encode_source_string(&dep.source),
                             checksum: None,
                             // Filled in by the cargo-build pass below.
@@ -377,6 +383,9 @@ pub fn vendor_sync(
                 packages.push(VendorLockPackage {
                     name: name.to_string(),
                     version,
+                    // Same host-only invariant as the path-dep arm.
+                    target: "host".to_string(),
+                    kind: VendorPackageKind::Lib,
                     source: encode_source_string(&dep.source),
                     checksum: Some(checksum),
                     // Filled in by the cargo-build pass below.
@@ -667,6 +676,8 @@ mod tests {
             VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:a".into()),
                 artifact_path: None,
@@ -674,6 +685,8 @@ mod tests {
             VendorLockPackage {
                 name: "proc-macro2".into(),
                 version: "1.0.106".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:b".into()),
                 artifact_path: None,
@@ -681,6 +694,8 @@ mod tests {
             VendorLockPackage {
                 name: "missing-from-cargo".into(),
                 version: "1.0.0".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "path+../missing".into(),
                 checksum: None,
                 artifact_path: None,
@@ -1081,6 +1096,8 @@ mod tests {
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:x".into()),
                 artifact_path: Some(fake_artifact.clone()),
@@ -1124,6 +1141,8 @@ mod tests {
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:x".into()),
                 artifact_path: None,
@@ -1161,6 +1180,8 @@ mod tests {
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:x".into()),
                 artifact_path: Some(project.join("does-not-exist.rlib")),
@@ -1199,6 +1220,8 @@ mod tests {
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "crates-io".into(),
                 checksum: Some("sha256:x".into()),
                 artifact_path: Some(fake_artifact.clone()),

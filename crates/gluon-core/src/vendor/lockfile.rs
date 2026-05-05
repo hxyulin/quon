@@ -57,10 +57,39 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+/// What rustc crate kind cargo emitted for a vendored package.
+///
+/// Today only two kinds are interesting to gluon's compile path:
+///
+/// - [`Lib`](Self::Lib) — `.rlib` artifacts that cross-compile against
+///   the kernel sysroot.
+/// - [`ProcMacro`](Self::ProcMacro) — host-only dylibs, even when the
+///   *consumer* is a kernel crate.
+///
+/// Other kinds (`bin`, `cdylib`, `staticlib`, ...) are filtered out
+/// upstream in `vendor::cross::metadata` and never make it into a
+/// `VendorLockPackage`. If we ever need to track them, add a variant
+/// here rather than smuggling them through `Lib`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VendorPackageKind {
+    #[default]
+    Lib,
+    ProcMacro,
+}
+
 /// One vendored package as pinned in `gluon.lock`.
 ///
 /// Mirrors the shape upstream hadron used so hand-inspection and
 /// gluon.lock diffs are obvious at a glance.
+///
+/// # Schema-v1 compatibility
+///
+/// `target` and `kind` are v2 additions. Both carry `#[serde(default)]`
+/// so v1 packages (which had neither field) deserialise as
+/// `target = "host"` / `kind = Lib`. That matches the v1 invariant
+/// — the v1 pipeline only ever vendored host-targeted libs — so the
+/// migration is lossless.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorLockPackage {
     /// Crate name as it appears in `Cargo.toml` / `gluon.rs`.
@@ -69,6 +98,21 @@ pub struct VendorLockPackage {
     /// the vendored `Cargo.toml`; for path deps it is the path crate's
     /// declared version.
     pub version: String,
+    /// Build target the package was vendored *for*. Either `"host"` or
+    /// the name of a `target(...)` declared in `gluon.rs`. The same
+    /// crate at the same version may appear twice with different
+    /// `target` values — once host, once cross — and they are pinned,
+    /// stamped, and looked up independently.
+    ///
+    /// Defaults to `"host"` on v1 lockfiles (see the type-level
+    /// schema-v1 note).
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// Crate kind cargo emitted. See [`VendorPackageKind`].
+    ///
+    /// Defaults to [`VendorPackageKind::Lib`] on v1 lockfiles.
+    #[serde(default)]
+    pub kind: VendorPackageKind,
     /// Where the package came from:
     ///
     /// - `"crates-io"` for [`DepSource::CratesIo`]
@@ -101,6 +145,12 @@ pub struct VendorLockPackage {
     pub artifact_path: Option<PathBuf>,
 }
 
+/// Default value for [`VendorLockPackage::target`] when deserialising
+/// a v1 lockfile (see the schema-v1 note on the struct).
+fn default_target() -> String {
+    "host".to_string()
+}
+
 /// Top-level `gluon.lock` document.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VendorLock {
@@ -118,7 +168,23 @@ pub struct VendorLock {
 impl VendorLock {
     /// Current schema version. Bump + add a migration path if
     /// `VendorLock` ever grows incompatible fields.
-    pub const CURRENT_VERSION: u32 = 1;
+    ///
+    /// # Version history
+    ///
+    /// - **v1** (initial): host-only pipeline. `VendorLockPackage`
+    ///   had `name`, `version`, `source`, `checksum`, `artifact_path`.
+    /// - **v2** (cross-target vendor builds): adds `target` and `kind`
+    ///   per package so the same crate can be pinned twice — once for
+    ///   the host pipeline, once for a cross target — and the
+    ///   compile-side lookup can disambiguate between them. v1
+    ///   lockfiles still load (see [`Self::load`]).
+    pub const CURRENT_VERSION: u32 = 2;
+
+    /// Lockfile schema versions this build of gluon understands. v1 is
+    /// kept readable so a `git pull` that brings in a cross-target
+    /// dep doesn't force every collaborator into a manual re-vendor;
+    /// the next `gluon vendor` rewrites at [`Self::CURRENT_VERSION`].
+    const SUPPORTED_VERSIONS: &'static [u32] = &[1, 2];
 
     /// Construct an empty lock with a placeholder fingerprint.
     ///
@@ -173,13 +239,13 @@ impl VendorLock {
                 .with_note("delete gluon.lock and re-run `gluon vendor` to regenerate"),
             ])
         })?;
-        if parsed.version != Self::CURRENT_VERSION {
+        if !Self::SUPPORTED_VERSIONS.contains(&parsed.version) {
             return Err(Error::Diagnostics(vec![
                 Diagnostic::error(format!(
-                    "gluon.lock at {} has schema version {} (expected {})",
+                    "gluon.lock at {} has schema version {} (expected one of {:?})",
                     path.display(),
                     parsed.version,
-                    Self::CURRENT_VERSION
+                    Self::SUPPORTED_VERSIONS,
                 ))
                 .with_note("delete gluon.lock and re-run `gluon vendor` to regenerate"),
             ]));
@@ -294,6 +360,10 @@ mod tests {
     use super::*;
 
     fn sample_lock() -> VendorLock {
+        // Mixed-target sample: bitflags appears twice (host + cross),
+        // syn is host-only proc-macro, local-helper is a host-only path
+        // dep. Exercises every (target, kind) shape the lockfile is
+        // expected to carry.
         VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint: "sha256:deadbeef".into(),
@@ -301,13 +371,35 @@ mod tests {
                 VendorLockPackage {
                     name: "bitflags".into(),
                     version: "2.11.0".into(),
+                    target: "host".into(),
+                    kind: VendorPackageKind::Lib,
                     source: "crates-io".into(),
                     checksum: Some("sha256:aaaa".into()),
                     artifact_path: Some(PathBuf::from("/build/target/release/deps/libbitflags-abcd.rlib")),
                 },
                 VendorLockPackage {
+                    name: "bitflags".into(),
+                    version: "2.11.0".into(),
+                    target: "kernel".into(),
+                    kind: VendorPackageKind::Lib,
+                    source: "crates-io".into(),
+                    checksum: Some("sha256:aaaa".into()),
+                    artifact_path: Some(PathBuf::from("/build/cross/kernel/deps/libbitflags-wxyz.rlib")),
+                },
+                VendorLockPackage {
+                    name: "syn".into(),
+                    version: "2.0.117".into(),
+                    target: "host".into(),
+                    kind: VendorPackageKind::ProcMacro,
+                    source: "crates-io".into(),
+                    checksum: Some("sha256:cccc".into()),
+                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libsyn-mnop.dylib")),
+                },
+                VendorLockPackage {
                     name: "tokio".into(),
                     version: "1.40.0".into(),
+                    target: "host".into(),
+                    kind: VendorPackageKind::Lib,
                     source: "git+https://github.com/tokio-rs/tokio#abc1234".into(),
                     checksum: Some("sha256:bbbb".into()),
                     artifact_path: Some(PathBuf::from("/build/target/release/deps/libtokio-efgh.rlib")),
@@ -315,6 +407,8 @@ mod tests {
                 VendorLockPackage {
                     name: "local-helper".into(),
                     version: "0.1.0".into(),
+                    target: "host".into(),
+                    kind: VendorPackageKind::Lib,
                     source: "path+../helper".into(),
                     checksum: None,
                     artifact_path: Some(PathBuf::from("/build/target/release/deps/liblocal_helper-ijkl.rlib")),
@@ -338,8 +432,14 @@ mod tests {
     // upgrades don't force a re-vendor; the auto_register pass can
     // detect the missing path and either run the cargo-build step or
     // surface a "rerun gluon vendor" diagnostic, depending on context.
+    //
+    // Also exercises the v1 → v2 schema migration: pre-cross-target
+    // lockfiles have no `target` or `kind` fields per package. The
+    // `#[serde(default)]` attributes on those fields must produce
+    // `target = "host"`, `kind = Lib` — matching the v1 invariant
+    // that everything was a host-targeted lib.
     #[test]
-    fn loads_old_lockfile_without_artifact_path() {
+    fn loads_v1_lockfile_with_target_kind_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("gluon.lock");
         std::fs::write(
@@ -356,11 +456,54 @@ checksum = "sha256:aaaa"
         )
         .expect("seed");
         let loaded = VendorLock::load(&p).expect("load").expect("present");
+        assert_eq!(loaded.version, 1, "load must preserve the on-disk version");
         assert_eq!(loaded.packages.len(), 1);
         assert!(
             loaded.packages[0].artifact_path.is_none(),
             "absent field must deserialise to None"
         );
+        assert_eq!(
+            loaded.packages[0].target, "host",
+            "v1 packages migrate to target=host"
+        );
+        assert_eq!(
+            loaded.packages[0].kind,
+            VendorPackageKind::Lib,
+            "v1 packages migrate to kind=lib"
+        );
+    }
+
+    // The next save_atomic after loading a v1 must rewrite the file as
+    // v2 — that's how the migration completes. We assert this against
+    // the same v1 fixture used above.
+    #[test]
+    fn save_after_loading_v1_rewrites_as_v2() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("gluon.lock");
+        std::fs::write(
+            &p,
+            br#"version = 1
+fingerprint = "sha256:abc"
+
+[[package]]
+name = "bitflags"
+version = "2.11.0"
+source = "crates-io"
+checksum = "sha256:aaaa"
+"#,
+        )
+        .expect("seed");
+        let loaded = VendorLock::load(&p).expect("load").expect("present");
+        loaded.save_atomic(&p).expect("save");
+        let body = std::fs::read_to_string(&p).expect("read");
+        assert!(
+            body.contains("version = 2"),
+            "v1 lockfile must round-trip as v2; got: {body}"
+        );
+        let reloaded = VendorLock::load(&p).expect("reload").expect("present");
+        assert_eq!(reloaded.version, VendorLock::CURRENT_VERSION);
+        assert_eq!(reloaded.packages[0].target, "host");
+        assert_eq!(reloaded.packages[0].kind, VendorPackageKind::Lib);
     }
 
     #[test]
@@ -446,6 +589,61 @@ fingerprint = "sha256:xx"
         assert!(body.starts_with("# This file is auto-generated"));
     }
 
+    // Same crate vendored twice — once host, once kernel — must round
+    // trip cleanly. The two entries share name+version+source but
+    // differ in `target`, which is the whole point of v2.
+    #[test]
+    fn round_trip_disambiguates_same_crate_across_targets() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("gluon.lock");
+        let lock = sample_lock();
+        lock.save_atomic(&p).expect("save");
+        let loaded = VendorLock::load(&p).expect("load").expect("present");
+
+        let bitflags: Vec<_> = loaded
+            .packages
+            .iter()
+            .filter(|pkg| pkg.name == "bitflags")
+            .collect();
+        assert_eq!(bitflags.len(), 2, "both bitflags entries must round-trip");
+        let targets: Vec<&str> = bitflags.iter().map(|p| p.target.as_str()).collect();
+        assert!(targets.contains(&"host"));
+        assert!(targets.contains(&"kernel"));
+
+        let syn = loaded
+            .packages
+            .iter()
+            .find(|pkg| pkg.name == "syn")
+            .expect("syn must round-trip");
+        assert_eq!(syn.kind, VendorPackageKind::ProcMacro);
+        assert_eq!(syn.target, "host", "proc-macros are always host-built");
+    }
+
+    // The on-disk `kind` field is the kebab-case form `"proc-macro"`,
+    // not the Rust identifier. Hand-edited lockfiles and external
+    // tooling all see kebab-case, so pin it explicitly.
+    #[test]
+    fn proc_macro_kind_serialises_as_kebab_case() {
+        let lock = VendorLock {
+            version: VendorLock::CURRENT_VERSION,
+            fingerprint: "sha256:x".into(),
+            packages: vec![VendorLockPackage {
+                name: "syn".into(),
+                version: "2.0.117".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::ProcMacro,
+                source: "crates-io".into(),
+                checksum: Some("sha256:y".into()),
+                artifact_path: None,
+            }],
+        };
+        let toml = toml::to_string_pretty(&lock).expect("serialise");
+        assert!(
+            toml.contains(r#"kind = "proc-macro""#),
+            "kind must serialise as kebab-case: {toml}"
+        );
+    }
+
     #[test]
     fn path_deps_serialise_without_checksum_key() {
         let lock = VendorLock {
@@ -454,6 +652,8 @@ fingerprint = "sha256:xx"
             packages: vec![VendorLockPackage {
                 name: "local".into(),
                 version: "0.1.0".into(),
+                target: "host".into(),
+                kind: VendorPackageKind::Lib,
                 source: "path+../local".into(),
                 checksum: None,
                 artifact_path: None,
