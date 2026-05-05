@@ -56,6 +56,41 @@ pub fn expected_crate_artifact_path(
     Ok(shape.output_path)
 }
 
+/// Read-side counterpart to `CrateArtifactShape::debug_elf_path`. Returns
+/// `Some(<name>.elf)` for `CrateType::RawBinary`, `None` for every other
+/// crate type. Mirrors the write-side derivation in `artifact_shape.rs`.
+/// See the rationale for the `.elf` sidecar in
+/// `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`.
+pub fn expected_debug_elf_path(
+    layout: &BuildLayout,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    crate_handle: Handle<CrateDef>,
+) -> Result<Option<PathBuf>> {
+    let crate_def = model.crates.get(crate_handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "expected_debug_elf_path: handle {:?} not in build model",
+            crate_handle
+        ))
+    })?;
+
+    let cref = resolved
+        .crates
+        .iter()
+        .find(|r| r.handle == crate_handle)
+        .ok_or_else(|| {
+            Error::Compile(format!(
+                "expected_debug_elf_path: crate '{}' is not in the resolved \
+                 crate set for the active profile (so its artifact path is not \
+                 well-defined for this build)",
+                crate_def.name,
+            ))
+        })?;
+
+    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, cref)?;
+    Ok(shape.debug_elf_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +280,68 @@ mod tests {
         let s = path.to_string_lossy().replace('\\', "/");
         assert!(s.contains("/host/tooling/"), "{s}");
         assert!(s.ends_with("/libtooling-gluon-tooling.rlib"), "{s}");
+    }
+
+    #[test]
+    fn cross_raw_binary_exposes_debug_elf_sibling() {
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "i386-code16", "i386-unknown-none-code16");
+        let g = ensure_group(&mut model);
+        let (ch, _) = model.crates.insert(
+            "boot-sector".into(),
+            CrateDef {
+                name: "boot-sector".into(),
+                path: "boot-sector".into(),
+                edition: "2024".into(),
+                crate_type: CrateType::RawBinary,
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults(g)
+            },
+        );
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef {
+                handle: ch,
+                target: th,
+                host: false,
+            }],
+        );
+        let elf = expected_debug_elf_path(&layout(), &model, &resolved, ch).unwrap();
+        let elf = elf.expect("RawBinary must expose debug_elf_path");
+        let s = elf.to_string_lossy().replace('\\', "/");
+        assert!(s.contains("/cross/i386-code16/dev/final/"), "{s}");
+        assert!(s.ends_with("/boot_sector.elf"), "{s}");
+    }
+
+    #[test]
+    fn cross_lib_has_no_debug_elf_sibling() {
+        let mut model = BuildModel::default();
+        let th = make_target(&mut model, "x86_64-unknown-none", "x86_64-unknown-none");
+        let g = ensure_group(&mut model);
+        let (ch, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Lib,
+                target: TargetSpec::Cross(th),
+                ..test_crate_defaults(g)
+            },
+        );
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef {
+                handle: ch,
+                target: th,
+                host: false,
+            }],
+        );
+        let elf = expected_debug_elf_path(&layout(), &model, &resolved, ch).unwrap();
+        assert!(
+            elf.is_none(),
+            "non-RawBinary crates must not expose a debug_elf_path"
+        );
     }
 
     #[test]
