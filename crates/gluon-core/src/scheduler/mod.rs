@@ -566,6 +566,8 @@ fn dispatch_vendor_crate(
         depfile_path,
         Some(&out_dir),
         extra_sources,
+        Vec::new(),                                  // aux_outputs
+        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

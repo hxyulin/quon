@@ -301,6 +301,8 @@ pub fn ensure_config_crate(
         depfile_path,
         Some(&out_dir),
         Vec::new(), // config crate has no out-of-band inputs
+        Vec::new(),                                  // aux_outputs
+        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

@@ -334,6 +334,8 @@ fn build_sysroot_crate(
         depfile_path,
         None,
         Vec::new(), // sysroot crates have no out-of-band inputs
+        Vec::new(),                                  // aux_outputs
+        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

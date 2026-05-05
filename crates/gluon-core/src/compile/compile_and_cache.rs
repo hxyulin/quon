@@ -82,6 +82,20 @@ pub(crate) type DepfileFailDiag = dyn FnOnce(&crate::error::Error) -> Error;
 /// with no out-of-band inputs (sysroot, config crate, crates without
 /// `artifact_env`).
 ///
+/// `aux_outputs` lists files that must also exist for a freshness hit.
+/// The canonical use case is `RawBinary`: rustc emits `<name>.elf` and a
+/// post-link objcopy step produces `<name>.bin`. The `.bin` is the
+/// primary `output_path`; the `.elf` lives in `aux_outputs` so deleting
+/// just the sidecar (or having objcopy crash mid-run) forces a recompile.
+/// Pass an empty vector for callers that only produce one artifact.
+///
+/// `post_compile_step` is a callback that runs after a successful rustc
+/// spawn but before `mark_built`. The canonical use case is again
+/// `RawBinary`: invoking `rust-objcopy` to produce the `.bin` from the
+/// `.elf`. A failure here is propagated as the function's error and
+/// leaves the cache stale, so the next run re-spawns rustc and retries.
+/// Pass `None` for callers with no post-link transform.
+///
 /// Returns `(output_path, was_cached)`:
 /// - `was_cached = true` ⇒ the freshness check short-circuited rustc and
 ///   no new process was spawned.
@@ -96,6 +110,8 @@ pub(crate) fn compile_and_cache(
     depfile_path: PathBuf,
     out_dir_to_create: Option<&Path>,
     extra_sources: Vec<PathBuf>,
+    aux_outputs: Vec<PathBuf>,
+    post_compile_step: Option<Box<dyn FnOnce() -> Result<()>>>,
     rustc_fail: Box<RustcFailDiag>,
     depfile_fail: Box<DepfileFailDiag>,
     stderr_sink: &mut Vec<u8>,
@@ -130,7 +146,12 @@ pub(crate) fn compile_and_cache(
         })
     };
 
-    if is_fresh && output_path.exists() {
+    // A freshness hit requires every declared output to be present on disk.
+    // If the primary output exists but an aux sidecar (e.g. the raw `.bin`
+    // produced by a post-link objcopy) was deleted, we must recompile so
+    // the post_compile_step can regenerate it.
+    let aux_present = aux_outputs.iter().all(|p| p.exists());
+    if is_fresh && output_path.exists() && aux_present {
         return Ok((output_path, true));
     }
 
@@ -175,6 +196,14 @@ pub(crate) fn compile_and_cache(
     // parallel compiles never interleave. The failure path above embeds
     // stderr into the diagnostic instead, so we only forward on success.
     stderr_sink.extend_from_slice(&output.stderr);
+
+    // Post-compile transform (e.g. RawBinary's rustc → ELF → objcopy →
+    // flat .bin). Runs BEFORE depfile parse + mark_built so a failure
+    // here leaves the cache stale; the next run re-spawns rustc and
+    // re-attempts the post step.
+    if let Some(post) = post_compile_step {
+        post()?;
+    }
 
     // Parse the depfile BEFORE calling `mark_built` so the cache is only
     // updated once we have the source list in hand. If parsing fails,

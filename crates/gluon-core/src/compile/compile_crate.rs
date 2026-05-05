@@ -240,6 +240,8 @@ pub fn compile(
         cc.depfile_path,
         Some(&cc.out_dir),
         cc.extra_sources,
+        Vec::new(),                                  // aux_outputs
+        None::<Box<dyn FnOnce() -> Result<()>>>,     // post_compile_step
         Box::new(move |output, rendered| {
             let headline = if is_host {
                 format!(
