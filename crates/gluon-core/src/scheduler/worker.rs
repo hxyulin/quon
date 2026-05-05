@@ -491,6 +491,7 @@ fn error_message(e: &Error) -> String {
         | Error::EspMissing { .. }
         | Error::QemuTimeout
         | Error::QemuSpawnFailed { .. }
+        | Error::ObjcopySpawnFailed { .. }
         | Error::UnknownQemuTarget { .. }
         | Error::KilledBySignal { .. }) => other.to_string(),
     }

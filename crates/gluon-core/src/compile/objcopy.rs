@@ -9,6 +9,7 @@
 //! `rust-objcopy`-1.86" mismatches.
 
 use crate::error::{Error, Result};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Find a usable `rust-objcopy` binary.
@@ -89,12 +90,22 @@ pub fn run_objcopy_to_binary(objcopy: &Path, elf: &Path, bin: &Path) -> Result<(
         path: elf.to_path_buf(),
         source: e,
     })?;
-    use std::io::Read;
-    let n = f.read(&mut header).map_err(|e| Error::Io {
-        path: elf.to_path_buf(),
-        source: e,
-    })?;
-    if n < 4 || header != ELF_MAGIC {
+    match f.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Err(Error::Config(format!(
+                "{} is shorter than 4 bytes — not a valid ELF file.",
+                elf.display()
+            )));
+        }
+        Err(e) => {
+            return Err(Error::Io {
+                path: elf.to_path_buf(),
+                source: e,
+            });
+        }
+    }
+    if header != ELF_MAGIC {
         return Err(Error::Config(format!(
             "rust-objcopy could not parse {} as ELF.\n\
              This usually means your linker script contains \
@@ -111,8 +122,8 @@ pub fn run_objcopy_to_binary(objcopy: &Path, elf: &Path, bin: &Path) -> Result<(
         .arg(elf)
         .arg(bin)
         .output()
-        .map_err(|e| Error::Io {
-            path: objcopy.to_path_buf(),
+        .map_err(|e| Error::ObjcopySpawnFailed {
+            binary: objcopy.to_path_buf(),
             source: e,
         })?;
     if !output.status.success() {

@@ -131,6 +131,13 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    #[error("failed to spawn rust-objcopy at {binary}: {source}", binary = .binary.display())]
+    ObjcopySpawnFailed {
+        binary: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error(
         "cannot pick a default QEMU binary for target '{triple}': unknown architecture.\nSet one explicitly with `qemu(\"qemu-system-<arch>\")` in your gluon.rs."
     )]
