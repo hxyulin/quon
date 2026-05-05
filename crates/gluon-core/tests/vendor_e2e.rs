@@ -255,16 +255,34 @@ fn full_fixture_vendors_bitflags_from_crates_io() {
     let report = vendor::vendor_check(&model, &layout, &project).expect("check");
     assert!(report.is_clean(), "{report:?}");
 
-    // auto-register inserts both crates into model.crates.
+    // auto-register populates the artifact map for crates.io-sourced
+    // deps; path deps are intentionally skipped because v1's
+    // cargo-as-builder pipeline doesn't compile path deps (no
+    // artifact). Mirrors the path-only test's expectations — the
+    // contract on `auto_register_vendored_deps` is to populate
+    // `external_artifacts`, not `model.crates`. `model.crates` is for
+    // user-declared project crates (with groups, paths, edition);
+    // vendored externals don't fit that shape.
     let mut model_for_reg = model.clone();
     vendor::auto_register_vendored_deps(&mut model_for_reg, &layout, &project)
         .expect("auto_register");
-    assert!(model_for_reg.crates.lookup("bitflags").is_some());
+    let bitflags_key = gluon_model::ExternalArtifactKey {
+        target: TargetSpec::Host,
+        cargo_target_name: "bitflags".into(),
+    };
     assert!(
-        model_for_reg
-            .crates
-            .lookup("vendor_minimal_helper")
-            .is_some()
+        model_for_reg.external_artifacts.contains_key(&bitflags_key),
+        "bitflags missing from artifact map: {:?}",
+        model_for_reg.external_artifacts,
+    );
+    let helper_key = gluon_model::ExternalArtifactKey {
+        target: TargetSpec::Host,
+        cargo_target_name: "vendor_minimal_helper".into(),
+    };
+    assert!(
+        !model_for_reg.external_artifacts.contains_key(&helper_key),
+        "path dep should not have an artifact in v1: {:?}",
+        model_for_reg.external_artifacts,
     );
 }
 
