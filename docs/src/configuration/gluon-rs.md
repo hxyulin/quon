@@ -40,6 +40,114 @@ fn main() -> gluon_config::Result<()> {
 }
 ```
 
+## Splitting config across files
+
+Beyond a couple of subsystems, a single `gluon.rs` becomes hard to
+navigate. You can split the script across multiple files using Rust's
+`mod` declarations with the `#[path]` attribute — no new gluon API,
+no macro layer.
+
+### Layout
+
+```text
+my-kernel/
+├── gluon.rs                  # root: project, targets, profiles, qemu
+├── bootloader/
+│   ├── gluon.rs              # bootloader subsystem registration
+│   └── ...source...
+├── kernel/
+│   ├── gluon.rs              # kernel subsystem registration
+│   └── ...source...
+└── shared/
+    ├── gluon.rs              # shared crates registration
+    └── ...source...
+```
+
+### Root `gluon.rs`
+
+```rust
+use gluon_config::{Config, Result};
+
+#[path = "bootloader/gluon.rs"]
+mod bootloader;
+#[path = "kernel/gluon.rs"]
+mod kernel;
+#[path = "shared/gluon.rs"]
+mod shared;
+
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
+    cfg.project("my-kernel", "0.1.0");
+
+    let target = cfg.target("x86_64-unknown-none");
+    cfg.profile("dev").target(target).opt_level(0).debug_info(true);
+    cfg.qemu("qemu-system-x86_64").machine("q35").memory(128);
+
+    shared::register(&mut cfg)?;
+    bootloader::register(&mut cfg)?;
+    kernel::register(&mut cfg)?;
+
+    cfg.emit()
+}
+```
+
+### A subsystem file
+
+```rust
+// bootloader/gluon.rs
+use gluon_config::{Config, CrateType, Result};
+
+pub fn register(cfg: &mut Config) -> Result<()> {
+    let target = cfg.target("x86_64-unknown-none");
+
+    cfg.group("bootloader")
+        .target(target)
+        .edition("2024")
+        .add("bios-boot-sector", "bootloader/bios-boot-sector")
+            .crate_type(CrateType::RawBinary)
+            .root("src/main.rs")
+            .linker_script("bootloader/bios-boot-sector/link.ld");
+
+    cfg.image("bios.img").raw_write_crate("bios-boot-sector", 0);
+    Ok(())
+}
+```
+
+### Conventions
+
+- Each subsystem exposes `pub fn register(cfg: &mut Config) -> Result<()>`.
+  Convention only — not enforced by a trait or macro.
+- Cross-subsystem references work by name, not by passing handles.
+  `cfg.target("x86_64-unknown-none")` is idempotent: the second call from
+  any subsystem returns the same handle as the first.
+- `#[path = "..."]` is required because subsystem files don't sit at the
+  default `<modname>.rs` location.
+
+### Where each kind of declaration lives
+
+| Concern              | Lives where                          |
+| -------------------- | ------------------------------------ |
+| `cfg.project(...)`   | Root only (project-wide).            |
+| `cfg.target(...)`    | Root, OR re-lookup in a subsystem.   |
+| `cfg.target_spec()`  | Root (the path is project-relative). |
+| `cfg.dependency(...)`| Root (shared across subsystems).     |
+| `cfg.profile(...)`   | Root (project-wide concept).         |
+| `cfg.image(...)`     | Root or subsystem (boot images often subsystem-owned). |
+| `cfg.qemu(...)`      | Root only.                           |
+| `cfg.group(...)`     | Per-subsystem (the natural unit).    |
+| `cfg.build_step(...)`| Per-subsystem when local; root when cross-cutting. |
+
+These are conventions, not constraints. The `Config` API permits
+anything anywhere — the table is a guideline for keeping projects
+legible.
+
+### Cache behaviour
+
+The script-runner hashes every file the script transitively touches
+(via the rustc-emitted depfile), so editing `bootloader/gluon.rs`
+invalidates the compiled script binary the same way editing the root
+`gluon.rs` would. You don't need to do anything to opt in.
+
 ## Why Rust?
 
 The Rhai DSL was carrying the cost of fighting a dynamic-typed scripting
