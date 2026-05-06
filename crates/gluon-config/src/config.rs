@@ -15,6 +15,18 @@ pub struct Config {
     pub(crate) diagnostics: Vec<ConfigError>,
 }
 
+/// Render a `TargetDef` in human-readable form for redefinition
+/// diagnostics. Used by `Config::target` and `Config::target_spec` to
+/// describe the *previous* shape of a target when a real conflict is
+/// detected, so the user can see both the old and new declaration.
+fn describe_target(t: &TargetDef) -> String {
+    if t.builtin {
+        format!("builtin target \"{}\"", t.spec)
+    } else {
+        format!("custom spec \"{}\"", t.spec)
+    }
+}
+
 impl Config {
     #[must_use]
     pub fn new() -> Self {
@@ -89,43 +101,66 @@ impl Config {
         }
     }
 
-    /// Insert a builtin rustc target triple. If the same name was already
-    /// inserted, return the existing handle without overwriting — Arena::insert
-    /// is idempotent on duplicate names. A diagnostic is accumulated so
-    /// `emit()` can surface the error; the handle remains valid for chaining.
+    /// Insert a builtin rustc target triple, returning a handle for use
+    /// with `profile().target()` / `group().target()` / etc.
+    ///
+    /// Idempotent on identical re-declarations: calling
+    /// `cfg.target("x86_64-unknown-none")` from multiple subsystems
+    /// returns the same handle and accumulates no diagnostic. A
+    /// diagnostic is only pushed if the second call would *change* the
+    /// existing entry (e.g. the same name was previously inserted via
+    /// `target_spec` with a JSON path, or with a different builtin
+    /// spec). This idempotence is the foundation of the multi-file
+    /// `gluon.rs` pattern documented in
+    /// `docs/src/configuration/gluon-rs.md`.
     #[must_use = "pass this handle to profile().target() / group().target() / etc."]
     pub fn target(&mut self, name: &str) -> Handle<TargetDef> {
-        let (h, inserted) = self.raw.targets.insert(name.into(), TargetDef {
+        let candidate = TargetDef {
             name: name.into(),
             spec: name.into(),
             builtin: true,
             panic_strategy: None,
             span: None,
-        });
+        };
+        let (h, inserted) = self.raw.targets.insert(name.into(), candidate);
         if !inserted {
-            self.diagnostics.push(ConfigError::new(format!(
-                "target \"{name}\" is defined more than once"
-            )));
+            let existing = self.raw.targets.get(h).expect("handle just returned");
+            if existing.spec != name || !existing.builtin {
+                self.diagnostics.push(ConfigError::new(format!(
+                    "target \"{name}\" is redefined: previously {prev}, now builtin target \"{name}\"",
+                    prev = describe_target(existing),
+                )));
+            }
         }
         h
     }
 
-    /// Insert a custom target backed by a JSON spec file. If the same name was
-    /// already inserted, return the existing handle without overwriting. A
-    /// diagnostic is accumulated so `emit()` can surface the error.
+    /// Insert a custom target backed by a JSON spec file, returning a
+    /// handle for use with `profile().target()` / `group().target()` / etc.
+    ///
+    /// Idempotent on identical re-declarations (same name AND same
+    /// spec path). A diagnostic is pushed if the second call would
+    /// *change* the existing entry — e.g. a different spec path, or
+    /// the same name was previously inserted via `target()` as a
+    /// builtin.
     #[must_use = "pass this handle to profile().target() / group().target() / etc."]
     pub fn target_spec(&mut self, name: &str, spec: &str) -> Handle<TargetDef> {
-        let (h, inserted) = self.raw.targets.insert(name.into(), TargetDef {
+        let candidate = TargetDef {
             name: name.into(),
             spec: spec.into(),
             builtin: false,
             panic_strategy: None,
             span: None,
-        });
+        };
+        let (h, inserted) = self.raw.targets.insert(name.into(), candidate);
         if !inserted {
-            self.diagnostics.push(ConfigError::new(format!(
-                "target \"{name}\" is defined more than once"
-            )));
+            let existing = self.raw.targets.get(h).expect("handle just returned");
+            if existing.spec != spec || existing.builtin {
+                self.diagnostics.push(ConfigError::new(format!(
+                    "target \"{name}\" is redefined: previously {prev}, now custom spec \"{spec}\"",
+                    prev = describe_target(existing),
+                )));
+            }
         }
         h
     }
@@ -621,24 +656,66 @@ mod project_target_tests {
     }
 
     #[test]
-    fn duplicate_target_pushes_diagnostic() {
+    fn target_is_idempotent_for_identical_calls() {
         let mut cfg = Config::new();
-        let _ = cfg.target("foo");
-        let _ = cfg.target("foo");
-        assert_eq!(cfg.diagnostics.len(), 1, "second target() must push exactly one diagnostic");
+        let h1 = cfg.target("foo");
+        let h2 = cfg.target("foo");
+        assert_eq!(h1, h2, "second target() with same name returns same handle");
+        assert_eq!(cfg.raw.targets.len(), 1, "no duplicate entry");
         assert!(
-            cfg.diagnostics[0].message.contains("foo")
-                && cfg.diagnostics[0].message.contains("defined more than once"),
-            "expected duplicate-target diagnostic, got: {}",
-            cfg.diagnostics[0].message,
+            cfg.diagnostics.is_empty(),
+            "identical re-declaration must not push a diagnostic; got: {:?}",
+            cfg.diagnostics,
         );
     }
 
     #[test]
-    fn duplicate_target_spec_pushes_diagnostic() {
+    fn target_spec_is_idempotent_for_identical_path() {
+        let mut cfg = Config::new();
+        let h1 = cfg.target_spec("custom", "targets/custom.json");
+        let h2 = cfg.target_spec("custom", "targets/custom.json");
+        assert_eq!(h1, h2);
+        assert!(
+            cfg.diagnostics.is_empty(),
+            "identical target_spec re-declaration must not push a diagnostic; got: {:?}",
+            cfg.diagnostics,
+        );
+    }
+
+    #[test]
+    fn target_spec_emits_diagnostic_when_path_changes() {
         let mut cfg = Config::new();
         let _ = cfg.target_spec("custom", "a.json");
         let _ = cfg.target_spec("custom", "b.json");
+        assert_eq!(cfg.diagnostics.len(), 1, "conflicting spec must push diagnostic");
+        let msg = &cfg.diagnostics[0].message;
+        assert!(
+            msg.contains("custom") && msg.contains("a.json") && msg.contains("b.json"),
+            "diagnostic should name the target and both paths; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn target_then_target_spec_emits_diagnostic() {
+        let mut cfg = Config::new();
+        let _ = cfg.target("foo");
+        let _ = cfg.target_spec("foo", "foo.json");
+        assert_eq!(
+            cfg.diagnostics.len(), 1,
+            "switching from builtin to custom spec must push diagnostic"
+        );
+        let msg = &cfg.diagnostics[0].message;
+        assert!(
+            msg.contains("foo") && (msg.contains("builtin") || msg.contains("custom")),
+            "diagnostic should distinguish builtin vs custom; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn target_spec_then_target_emits_diagnostic() {
+        let mut cfg = Config::new();
+        let _ = cfg.target_spec("foo", "foo.json");
+        let _ = cfg.target("foo");
         assert_eq!(cfg.diagnostics.len(), 1);
     }
 
