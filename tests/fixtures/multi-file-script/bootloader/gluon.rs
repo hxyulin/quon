@@ -1,13 +1,12 @@
-//! Bootloader subsystem registration. Exercises the `register()` convention.
-//!
-//! The target handle is owned by the root `gluon.rs` (which also wires
-//! it into the profile) and threaded through here — the Config API
-//! treats `target("...")` as a declaration, not a lookup, so calling it
-//! a second time would emit a "defined more than once" diagnostic.
+//! Bootloader subsystem registration. Exercises the canonical
+//! `register()` convention: the subsystem looks the target up by name
+//! through `cfg.target(...)`, which is idempotent (see
+//! `gluon-config/src/config.rs::Config::target`).
 
-use gluon_config::{Config, Handle, Result, TargetDef};
+use gluon_config::{Config, Result};
 
-pub fn register(cfg: &mut Config, target: Handle<TargetDef>) -> Result<()> {
+pub fn register(cfg: &mut Config) -> Result<()> {
+    let target = cfg.target("x86_64-unknown-none");
     cfg.group("bootloader").target(target).edition("2021");
     Ok(())
 }

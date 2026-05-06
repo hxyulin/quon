@@ -12,11 +12,8 @@ fn main() -> Result<()> {
     let target = cfg.target("x86_64-unknown-none");
     cfg.profile("dev").target(target).opt_level(0).debug_info(true);
 
-    // Subsystems take the target handle by value — the Config API treats
-    // `cfg.target(...)` as a declaration, so threading the handle through
-    // is the natural way to share a single target across modules.
-    bootloader::register(&mut cfg, target)?;
-    kernel::register(&mut cfg, target)?;
+    bootloader::register(&mut cfg)?;
+    kernel::register(&mut cfg)?;
 
     cfg.emit()
 }
