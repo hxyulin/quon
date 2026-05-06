@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Modular workspace config)
+
+- **`gluon.rs` config can now be split across multiple files** using
+  Rust's `mod` + `#[path]` attribute. Each subsystem exposes
+  `pub fn register(cfg: &mut Config) -> Result<()>` and is wired in
+  from the root script. Cross-subsystem references to shared targets
+  work by name — `cfg.target("x86_64-unknown-none")` from any
+  subsystem returns the same handle as the root's declaration, so
+  there's no need to thread `Handle<TargetDef>` through `register()`
+  signatures. See
+  `docs/src/configuration/gluon-rs.md#splitting-config-across-files`.
+- **Script-runner cache invalidates on transitively-included files.**
+  The cache layer now hashes the rustc-emitted depfile's full source
+  list — every file the script touched via `mod` / `#[path]` — so
+  editing a subsystem `gluon.rs` triggers the same recompile as
+  editing the root entrypoint. Previously the cache key hashed only
+  the entrypoint and silently served stale binaries on multi-file
+  edits.
+- **`Config::target` / `Config::target_spec` are now idempotent on
+  identical re-declarations.** Calling `cfg.target("x86_64-unknown-none")`
+  multiple times (e.g. once per subsystem) is silent and returns the
+  same handle. A `"target ... is redefined"` diagnostic still fires
+  when a second call would *change* the existing entry — different
+  spec path, or a switch between builtin and custom-spec.
+
 ### Added (RawBinary debug ergonomics)
 
 - **`RawBinary` crates now emit `<name>.elf` alongside `<name>.bin`.**
