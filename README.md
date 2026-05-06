@@ -84,7 +84,9 @@ fn main() -> Result<()> {
 ```
 
 See [the gluon.rs guide](docs/src/configuration/gluon-rs.md) for details on
-the build script API.
+the build script API, including how to
+[split config across multiple files](docs/src/configuration/gluon-rs.md#splitting-config-across-files)
+in larger projects.
 
 **Build and run:**
 
