@@ -125,6 +125,12 @@ impl Config {
         let (h, inserted) = self.raw.targets.insert(name.into(), candidate);
         if !inserted {
             let existing = self.raw.targets.get(h).expect("handle just returned");
+            // Identity = (spec, builtin) only. Fields that may be set
+            // by later chained builders (panic_strategy, span) are
+            // excluded so legitimate re-lookups stay silent. If a
+            // setter lands for one of those fields, update this
+            // predicate to fold it in — otherwise conflicting later
+            // setters would silently agree.
             if existing.spec != name || !existing.builtin {
                 self.diagnostics.push(ConfigError::new(format!(
                     "target \"{name}\" is redefined: previously {prev}, now builtin target \"{name}\"",
@@ -155,6 +161,7 @@ impl Config {
         let (h, inserted) = self.raw.targets.insert(name.into(), candidate);
         if !inserted {
             let existing = self.raw.targets.get(h).expect("handle just returned");
+            // Identity rule mirrors `target()` above.
             if existing.spec != spec || existing.builtin {
                 self.diagnostics.push(ConfigError::new(format!(
                     "target \"{name}\" is redefined: previously {prev}, now custom spec \"{spec}\"",
