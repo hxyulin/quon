@@ -223,12 +223,13 @@ mod tests {
         fs::write(&fake_elf, b"this is just raw bytes, no ELF header").unwrap();
 
         let bin_out = tmp.path().join("out.bin");
-        // Probe will resolve to the real toolchain rust-objcopy on the test
-        // host — that's fine, we never reach it because the magic-byte
-        // pre-check fires first.
-        let rustc = which::which("rustc").expect("rustc on PATH");
-        let objcopy = probe_rust_objcopy(&rustc).expect("toolchain probe");
-        let err = run_objcopy_to_binary(&objcopy, &fake_elf, &bin_out)
+        // The magic-byte pre-check in run_objcopy_to_binary fires BEFORE the
+        // rust-objcopy spawn, so we don't need a real binary here. Hardcoding
+        // a non-existent path also avoids racing the global $PATH mutex with
+        // `probe_errors_with_install_hint_when_nothing_resolves` (which sets
+        // PATH=""), making this test parallel-safe.
+        let fake_objcopy = PathBuf::from("/nonexistent/objcopy");
+        let err = run_objcopy_to_binary(&fake_objcopy, &fake_elf, &bin_out)
             .expect_err("non-ELF input must fail");
         let msg = format!("{err}");
         assert!(
