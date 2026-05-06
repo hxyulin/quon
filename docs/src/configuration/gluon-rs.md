@@ -137,9 +137,12 @@ pub fn register(cfg: &mut Config) -> Result<()> {
 | `cfg.group(...)`     | Per-subsystem (the natural unit).    |
 | `cfg.build_step(...)`| Per-subsystem when local; root when cross-cutting. |
 
-These are conventions, not constraints. The `Config` API permits
-anything anywhere — the table is a guideline for keeping projects
-legible.
+These are recommended placements, not the only legal ones — the
+`Config` API permits the same builder calls in any module, subject to
+gluon's normal duplicate-name rules (each `group` / `image` / `profile` /
+`dependency` / `build_step` once per name; `qemu` and `bootloader` are
+singletons; `project` is last-call-wins; `target` and `target_spec` are
+idempotent on identical re-declarations).
 
 ### Cache behaviour
 
