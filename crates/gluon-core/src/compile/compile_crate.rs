@@ -254,12 +254,13 @@ pub fn compile(
     // (empty aux + None) variant.
     let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) =
         if cc.crate_type == CrateType::RawBinary {
-            let elf_path = cc.debug_elf_path.clone().unwrap_or_else(|| {
-                panic!(
-                    "CrateArtifactShape must populate debug_elf_path for RawBinary (crate '{}')",
+            let elf_path = cc.debug_elf_path.clone().ok_or_else(|| {
+                Error::Compile(format!(
+                    "BUG: CrateArtifactShape did not populate debug_elf_path for RawBinary crate '{}' — \
+                     this is an internal invariant violation in artifact_shape.rs",
                     cc.crate_name
-                )
-            });
+                ))
+            })?;
             let elf_for_aux = elf_path.clone();
             let bin_path = cc.output_path.clone();
             let rustc_path = ctx.rustc_info.rustc_path.clone();
