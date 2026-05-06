@@ -125,11 +125,16 @@ fn transitive_fingerprint(depfile: &Path) -> Result<String> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-/// Returns `Ok(true)` if `entry_dir` contains a complete, valid cache
-/// entry whose recorded transitive fingerprint matches the current
-/// hash of every source the depfile lists. `Ok(false)` for "miss; the
-/// caller should (re)compile". `Err` only for I/O errors that aren't
-/// "file missing" — those are treated as miss.
+/// Returns `Ok(true)` if `entry_dir` contains a complete cache entry whose
+/// stored transitive fingerprint matches a freshly recomputed one;
+/// `Ok(false)` for "miss; the caller should (re)compile". `Err` is reserved
+/// for I/O errors raised while reading the fingerprint file itself —
+/// failures during the secondary `transitive_fingerprint` recomputation
+/// (a missing source listed in the depfile, an unreadable depfile, etc.)
+/// deliberately collapse to a miss. The recompile that follows overwrites
+/// the depfile and fingerprint, and any genuine source-tree problem gets
+/// surfaced by rustc with full diagnostic context — strictly better than
+/// masking it here as a "cache lookup failure".
 fn lookup_cached_binary(entry_dir: &Path) -> Result<bool> {
     let bin = entry_dir.join(SCRIPT_BIN_NAME);
     let depfile = entry_dir.join("gluon_script.d");
@@ -145,9 +150,11 @@ fn lookup_cached_binary(entry_dir: &Path) -> Result<bool> {
     })?;
     let current_fp = match transitive_fingerprint(&depfile) {
         Ok(fp) => fp,
-        // Depfile lists a missing/unreadable file → treat as miss; the
-        // caller will recompile, which overwrites the depfile and
-        // fingerprint with current ground truth.
+        // Any failure here — depfile lists a missing file, depfile is
+        // corrupted, source file unreadable — collapses to a miss. The
+        // recompile is self-healing for the cache layer (overwrites the
+        // depfile and fingerprint) and forwards any real source-tree
+        // problem to rustc, which produces the canonical diagnostic.
         Err(_) => return Ok(false),
     };
 
