@@ -79,9 +79,10 @@ const SCRIPT_BIN_NAME: &str = "gluon-script";
 ///
 /// File order matters for the hash — we feed paths in the order rustc
 /// listed them, plus the file contents, so a permutation of the depfile
-/// would produce a different fingerprint. That's deterministic because
-/// rustc always emits depfile entries in a stable order for a given
-/// source set.
+/// would produce a different fingerprint. In practice rustc emits
+/// depfile entries deterministically for a given source set; if that
+/// ever changed, the consequence would be a spurious recompile (not a
+/// stale build), so we don't sort the list to harden against it.
 fn transitive_fingerprint(depfile: &Path) -> Result<String> {
     use crate::cache::{parse_depfile, sha256_file};
     use sha2::{Digest, Sha256};
@@ -92,7 +93,7 @@ fn transitive_fingerprint(depfile: &Path) -> Result<String> {
         // Include the path bytes so two files with identical contents
         // at different paths still affect the hash — this catches
         // "subsystem renamed but contents identical" cases.
-        h.update(src.to_string_lossy().as_bytes());
+        h.update(src.as_os_str().as_encoded_bytes());
         h.update(b"\0");
         let bytes = sha256_file(src).map_err(|e| match e {
             Error::Io { source, .. } => Error::Io {
@@ -285,6 +286,31 @@ mod tests {
         let fp1 = transitive_fingerprint(&depfile).expect("fp1");
         let fp2 = transitive_fingerprint(&depfile).expect("fp2");
         assert_eq!(fp1, fp2, "same inputs must produce same fingerprint");
+    }
+
+    #[test]
+    fn transitive_fingerprint_changes_when_path_changes_with_identical_content() {
+        // Guards the invariant in transitive_fingerprint's inline comment:
+        // two files with identical bytes at different paths must produce
+        // different fingerprints.
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.rs");
+        let b = tmp.path().join("b.rs");
+        let same = b"// identical bytes";
+        fs::write(&a, same).unwrap();
+        fs::write(&b, same).unwrap();
+
+        let depfile_a = tmp.path().join("script-a.d");
+        let depfile_b = tmp.path().join("script-b.d");
+        fs::write(&depfile_a, format!("script: {}\n", a.display())).unwrap();
+        fs::write(&depfile_b, format!("script: {}\n", b.display())).unwrap();
+
+        let fp_a = transitive_fingerprint(&depfile_a).expect("fp_a");
+        let fp_b = transitive_fingerprint(&depfile_b).expect("fp_b");
+        assert_ne!(
+            fp_a, fp_b,
+            "different paths with identical content must produce different fingerprints"
+        );
     }
 
     #[test]
