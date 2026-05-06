@@ -55,17 +55,21 @@ pub fn ensure_script_binary(
         path: entry_dir.clone(),
         source: e,
     })?;
-    compile_script(script_path, &bin_path, rustc_info, rlib)?;
+    compile_script(script_path, &entry_dir, rustc_info, rlib)?;
     Ok(bin_path)
 }
 
 /// Filename of the cached script binary inside its entry dir.
 ///
-/// Kept consistent (no `.exe` on Windows) because rustc accepts the
-/// extensionless name on every host we support — and `Command::new`
-/// resolves it without help. If we ever ship Windows builds we'll
-/// adjust this to a `cfg!(windows)` switch.
-const SCRIPT_BIN_NAME: &str = "gluon-script";
+/// Underscored to match `--crate-name gluon_script` — rustc emits the
+/// binary with the crate name (no extension on unix; `.exe` on Windows)
+/// when invoked with `--out-dir` instead of `-o`. The on-disk name
+/// is never user-visible; we keep the `_` form solely to match what
+/// rustc writes.
+#[cfg(not(windows))]
+const SCRIPT_BIN_NAME: &str = "gluon_script";
+#[cfg(windows)]
+const SCRIPT_BIN_NAME: &str = "gluon_script.exe";
 
 /// SHA-256 over the contents of every file the script's depfile lists.
 ///
@@ -134,7 +138,7 @@ fn compute_key(script_path: &Path, rustc_version: &str, rlib: &Path) -> Result<S
 
 fn compile_script(
     script_path: &Path,
-    out_path: &Path,
+    entry_dir: &Path,
     rustc_info: &RustcInfo,
     rlib: &RlibPaths,
 ) -> Result<()> {
@@ -145,31 +149,20 @@ fn compile_script(
 
     // We invoke rustc directly (not via cargo) so the user's gluon.rs
     // doesn't need a Cargo.toml. The flags mirror what a minimal
-    // `cargo build` would emit:
-    //   --error-format human      — see comment below.
-    //   --edition 2024            — match the workspace edition; user's
-    //                               script writes idiomatic modern Rust.
-    //   --extern gluon_config=... — the precompiled rlib the script imports.
-    //   -L dependency=...         — directory holding gluon_config's
-    //                               transitive rlib deps (serde, etc.).
-    //   --crate-type bin          — the script is an executable; we'll
-    //                               spawn it and capture stdout.
-    //   --crate-name gluon-script — stable name for diagnostics; never
-    //                               surfaces to the user.
+    // `cargo build` would emit, plus:
+    //   --out-dir <entry_dir>     — rustc places `gluon_script` AND
+    //                               `gluon_script.d` here under predictable
+    //                               names. This replaces the previous
+    //                               `-o <path>` model so the depfile
+    //                               lands beside the binary.
+    //   --emit link,dep-info      — `link` is the default and produces the
+    //                               binary; `dep-info` produces the depfile
+    //                               we need for transitive cache invalidation
+    //                               (see crate::script_runner::cache::transitive_fingerprint).
     let output = Command::new(&rustc_info.rustc_path)
         .args([
-            // Force human-readable errors regardless of whether stderr is
-            // piped — cargo's terminal-detection default would otherwise
-            // swallow column info when our subprocess capture redirects.
             "--error-format",
             "human",
-            // Stage 1 assumption: gluon-config and gluon-model both use
-            // edition 2024 (matches workspace.package.edition in the root
-            // Cargo.toml). If the workspace edition ever changes, this
-            // constant must change in lockstep or the user's gluon.rs will
-            // fail with a confusing edition-mismatch error. Stage 4+ may
-            // read this from gluon-config's Cargo.toml at build.rs time and
-            // bake it via env!() so it stays in sync.
             "--edition",
             "2024",
             "--extern",
@@ -178,12 +171,12 @@ fn compile_script(
             &l_dependency,
             "--crate-type",
             "bin",
-            // rustc rejects hyphens in `--crate-name`; we expose the
-            // hyphenated name via the output filename instead.
             "--crate-name",
             "gluon_script",
-            "-o",
-            &out_path.display().to_string(),
+            "--emit",
+            "link,dep-info",
+            "--out-dir",
+            &entry_dir.display().to_string(),
             &script_path.display().to_string(),
         ])
         .output()
