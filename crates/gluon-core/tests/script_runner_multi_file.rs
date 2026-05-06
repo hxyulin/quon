@@ -61,7 +61,7 @@ fn multi_file_gluon_rs_registers_each_subsystem_group() {
     let project = tmp.path().join("project");
     stage_fixture_to_tmp(&src, &project);
 
-    // First run: assert both subsystem groups landed.
+    // First run: assert all three subsystem groups landed.
     let model = gluon_core::load_build_model(&project).expect("first load_build_model");
     assert!(
         model.groups.lookup("bootloader").is_some(),
@@ -70,6 +70,10 @@ fn multi_file_gluon_rs_registers_each_subsystem_group() {
     assert!(
         model.groups.lookup("kernel-v1").is_some(),
         "kernel-v1 group must be registered by kernel/gluon.rs"
+    );
+    assert!(
+        model.groups.lookup("shared-utils").is_some(),
+        "shared-utils group must be registered by shared/gluon.rs"
     );
     assert!(
         model.groups.lookup("kernel-v2").is_none(),
@@ -98,5 +102,9 @@ fn multi_file_gluon_rs_registers_each_subsystem_group() {
     assert!(
         model2.groups.lookup("bootloader").is_some(),
         "bootloader registration must still survive (only kernel was edited)"
+    );
+    assert!(
+        model2.groups.lookup("shared-utils").is_some(),
+        "shared-utils registration must still survive (only kernel was edited)"
     );
 }

@@ -7,6 +7,6 @@ use gluon_config::{Config, Result};
 
 pub fn register(cfg: &mut Config) -> Result<()> {
     let target = cfg.target("x86_64-unknown-none");
-    cfg.group("bootloader").target(target).edition("2021");
+    cfg.group("bootloader").target(target).edition("2024");
     Ok(())
 }

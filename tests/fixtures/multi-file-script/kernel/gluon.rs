@@ -11,6 +11,6 @@ use gluon_config::{Config, Result};
 
 pub fn register(cfg: &mut Config) -> Result<()> {
     let target = cfg.target("x86_64-unknown-none");
-    cfg.group("kernel-v1").target(target).edition("2021");
+    cfg.group("kernel-v1").target(target).edition("2024");
     Ok(())
 }
