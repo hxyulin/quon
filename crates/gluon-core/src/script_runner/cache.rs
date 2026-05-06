@@ -34,8 +34,18 @@ use crate::script_runner::rlib::RlibPaths;
 use std::path::{Path, PathBuf};
 
 /// Compile `script_path` into a binary cached under
-/// `<build_dir>/script-runner/scripts/<key>/gluon-script`. Returns the
-/// path to the binary (cached or freshly built).
+/// `<build_dir>/script-runner/scripts/<key>/gluon_script[.exe]`.
+/// Returns the path to the binary (cached or freshly built).
+///
+/// The lookup is two-tier: the outer directory is keyed by
+/// `entrypoint + rustc + rlib` (cheap to recompute on every invocation),
+/// and the inner check verifies that the on-disk transitive fingerprint
+/// still matches the current hash of every file the script's depfile
+/// lists. The fingerprint catches edits to files reached via `mod` /
+/// `#[path]` from the entrypoint, which would otherwise leave the outer
+/// key unchanged. See
+/// `docs/superpowers/specs/2026-05-05-modular-workspace-config-design.md`
+/// for what each layer catches and why both are needed.
 pub fn ensure_script_binary(
     script_path: &Path,
     build_dir: &Path,
@@ -47,7 +57,7 @@ pub fn ensure_script_binary(
     let entry_dir = cache_root.join(&key);
     let bin_path = entry_dir.join(SCRIPT_BIN_NAME);
 
-    if bin_path.is_file() {
+    if entry_dir.is_dir() && lookup_cached_binary(&entry_dir)? {
         return Ok(bin_path);
     }
 
@@ -56,6 +66,7 @@ pub fn ensure_script_binary(
         source: e,
     })?;
     compile_script(script_path, &entry_dir, rustc_info, rlib)?;
+    write_transitive_fingerprint(&entry_dir)?;
     Ok(bin_path)
 }
 
@@ -70,6 +81,9 @@ pub fn ensure_script_binary(
 const SCRIPT_BIN_NAME: &str = "gluon_script";
 #[cfg(windows)]
 const SCRIPT_BIN_NAME: &str = "gluon_script.exe";
+
+/// Filename of the on-disk transitive-source fingerprint.
+const TRANSITIVE_FP_NAME: &str = "transitive-fingerprint.txt";
 
 /// SHA-256 over the contents of every file the script's depfile lists.
 ///
@@ -109,6 +123,51 @@ fn transitive_fingerprint(depfile: &Path) -> Result<String> {
         h.update(bytes);
     }
     Ok(format!("{:x}", h.finalize()))
+}
+
+/// Returns `Ok(true)` if `entry_dir` contains a complete, valid cache
+/// entry whose recorded transitive fingerprint matches the current
+/// hash of every source the depfile lists. `Ok(false)` for "miss; the
+/// caller should (re)compile". `Err` only for I/O errors that aren't
+/// "file missing" — those are treated as miss.
+fn lookup_cached_binary(entry_dir: &Path) -> Result<bool> {
+    let bin = entry_dir.join(SCRIPT_BIN_NAME);
+    let depfile = entry_dir.join("gluon_script.d");
+    let fp_file = entry_dir.join(TRANSITIVE_FP_NAME);
+
+    if !bin.is_file() || !depfile.is_file() || !fp_file.is_file() {
+        return Ok(false);
+    }
+
+    let stored_fp = std::fs::read_to_string(&fp_file).map_err(|e| Error::Io {
+        path: fp_file.clone(),
+        source: e,
+    })?;
+    let current_fp = match transitive_fingerprint(&depfile) {
+        Ok(fp) => fp,
+        // Depfile lists a missing/unreadable file → treat as miss; the
+        // caller will recompile, which overwrites the depfile and
+        // fingerprint with current ground truth.
+        Err(_) => return Ok(false),
+    };
+
+    Ok(stored_fp.trim() == current_fp.trim())
+}
+
+/// Persist the transitive fingerprint for the freshly-compiled binary.
+/// Reads the depfile rustc just emitted and writes the hash to
+/// `<entry_dir>/transitive-fingerprint.txt`. Errors propagate — failure
+/// here means a future `ensure_script_binary` call would treat this
+/// entry as a miss and recompile, which is wasteful but correct.
+fn write_transitive_fingerprint(entry_dir: &Path) -> Result<()> {
+    let depfile = entry_dir.join("gluon_script.d");
+    let fp = transitive_fingerprint(&depfile)?;
+    let target = entry_dir.join(TRANSITIVE_FP_NAME);
+    std::fs::write(&target, fp).map_err(|e| Error::Io {
+        path: target,
+        source: e,
+    })?;
+    Ok(())
 }
 
 fn compute_key(script_path: &Path, rustc_version: &str, rlib: &Path) -> Result<String> {
@@ -332,5 +391,104 @@ mod tests {
             transitive_fingerprint(&depfile).is_err(),
             "missing listed file must surface as an error"
         );
+    }
+
+    // Helpers for the integration-style cache tests below. We can't run
+    // the real rustc through `ensure_script_binary` in a unit test
+    // (~2 s, plus we'd need a real rlib), so these tests stub the
+    // compile by short-circuiting the entry-dir layout: we hand-write
+    // the binary, depfile, and fingerprint that a successful compile
+    // would have produced, then exercise the lookup code.
+    fn make_fake_compile(
+        entry_dir: &Path,
+        bin_bytes: &[u8],
+        depfile_lines: &str,
+        sources: &[(PathBuf, &[u8])],
+    ) {
+        fs::create_dir_all(entry_dir).unwrap();
+        for (p, b) in sources {
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(p, b).unwrap();
+        }
+        fs::write(entry_dir.join(SCRIPT_BIN_NAME), bin_bytes).unwrap();
+        fs::write(entry_dir.join("gluon_script.d"), depfile_lines).unwrap();
+        let fp = transitive_fingerprint(&entry_dir.join("gluon_script.d")).unwrap();
+        fs::write(entry_dir.join(TRANSITIVE_FP_NAME), fp).unwrap();
+    }
+
+    #[test]
+    fn cache_hit_when_no_files_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("entry");
+        let src = tmp.path().join("script.rs");
+        let bin_v1 = b"V1 BINARY";
+        make_fake_compile(
+            &entry,
+            bin_v1,
+            &format!("script: {}\n", src.display()),
+            &[(src.clone(), b"// stable")],
+        );
+
+        let hit = lookup_cached_binary(&entry).expect("lookup");
+        assert!(hit, "stable inputs must report a cache hit");
+        assert_eq!(
+            fs::read(entry.join(SCRIPT_BIN_NAME)).unwrap(),
+            bin_v1,
+            "cache hit must NOT have rewritten the binary"
+        );
+    }
+
+    #[test]
+    fn cache_miss_when_listed_file_edited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("entry");
+        let src = tmp.path().join("subsys.rs");
+        make_fake_compile(
+            &entry,
+            b"V1",
+            &format!("script: {}\n", src.display()),
+            &[(src.clone(), b"// v1")],
+        );
+
+        // User edits the subsystem file — fingerprint stored on disk
+        // no longer matches what we'd compute now.
+        fs::write(&src, b"// v2 EDITED").unwrap();
+
+        let hit = lookup_cached_binary(&entry).expect("lookup");
+        assert!(!hit, "edited subsystem file must trigger a cache miss");
+    }
+
+    #[test]
+    fn cache_miss_when_listed_file_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("entry");
+        let src = tmp.path().join("vanishing.rs");
+        make_fake_compile(
+            &entry,
+            b"V1",
+            &format!("script: {}\n", src.display()),
+            &[(src.clone(), b"// soon to vanish")],
+        );
+
+        fs::remove_file(&src).unwrap();
+
+        let hit = lookup_cached_binary(&entry).expect("lookup");
+        assert!(!hit, "removed listed file must trigger a cache miss");
+    }
+
+    #[test]
+    fn cache_miss_when_no_fingerprint_yet() {
+        // Bare entry dir with binary but no depfile / no fingerprint.
+        // This is the state of an outer dir from before this feature
+        // landed — must report miss so we recompile and seed.
+        let tmp = tempfile::tempdir().unwrap();
+        let entry = tmp.path().join("entry");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join(SCRIPT_BIN_NAME), b"old binary").unwrap();
+
+        let hit = lookup_cached_binary(&entry).expect("lookup");
+        assert!(!hit, "missing fingerprint must report miss");
     }
 }
