@@ -142,43 +142,55 @@ fn compile_script(
     rustc_info: &RustcInfo,
     rlib: &RlibPaths,
 ) -> Result<()> {
+    use std::ffi::OsString;
     use std::process::Command;
 
     let extern_arg = format!("gluon_config={}", rlib.gluon_config_rlib.display());
     let l_dependency = format!("dependency={}", rlib.deps_dir.display());
 
+    // Pinning the depfile path explicitly (rather than letting rustc derive
+    // `<crate-name>.d`) decouples the cache from any future `-C extra-filename`
+    // additions — the depfile lands exactly where `transitive_fingerprint`
+    // expects to find it.
+    let depfile_path = entry_dir.join("gluon_script.d");
+    let mut emit_arg = OsString::from("link,dep-info=");
+    emit_arg.push(depfile_path.as_os_str());
+
     // We invoke rustc directly (not via cargo) so the user's gluon.rs
     // doesn't need a Cargo.toml. The flags mirror what a minimal
     // `cargo build` would emit, plus:
-    //   --out-dir <entry_dir>     — rustc places `gluon_script` AND
-    //                               `gluon_script.d` here under predictable
-    //                               names. This replaces the previous
-    //                               `-o <path>` model so the depfile
-    //                               lands beside the binary.
-    //   --emit link,dep-info      — `link` is the default and produces the
-    //                               binary; `dep-info` produces the depfile
-    //                               we need for transitive cache invalidation
+    //   --out-dir <entry_dir>     — rustc places `gluon_script` here
+    //                               (no extension on unix, `.exe` on
+    //                               Windows). This replaces the previous
+    //                               `-o <path>` model.
+    //   --emit link,dep-info=<p>  — `link` is the default and produces the
+    //                               binary; `dep-info=<p>` produces the
+    //                               depfile we need for transitive cache
+    //                               invalidation, with the path pinned
     //                               (see crate::script_runner::cache::transitive_fingerprint).
+    //
+    // Path arguments are passed as `&OsStr` (via `Path::as_os_str`) rather
+    // than going through `.display().to_string()` so non-UTF-8 paths
+    // survive intact — see the same pattern in
+    // `crate::compile::rustc::RustcCommandBuilder`.
     let output = Command::new(&rustc_info.rustc_path)
-        .args([
-            "--error-format",
-            "human",
-            "--edition",
-            "2024",
-            "--extern",
-            &extern_arg,
-            "-L",
-            &l_dependency,
-            "--crate-type",
-            "bin",
-            "--crate-name",
-            "gluon_script",
-            "--emit",
-            "link,dep-info",
-            "--out-dir",
-            &entry_dir.display().to_string(),
-            &script_path.display().to_string(),
-        ])
+        .arg("--error-format")
+        .arg("human")
+        .arg("--edition")
+        .arg("2024")
+        .arg("--extern")
+        .arg(&extern_arg)
+        .arg("-L")
+        .arg(&l_dependency)
+        .arg("--crate-type")
+        .arg("bin")
+        .arg("--crate-name")
+        .arg("gluon_script")
+        .arg("--emit")
+        .arg(&emit_arg)
+        .arg("--out-dir")
+        .arg(entry_dir.as_os_str())
+        .arg(script_path.as_os_str())
         .output()
         .map_err(|e| Error::Io {
             path: rustc_info.rustc_path.clone(),
