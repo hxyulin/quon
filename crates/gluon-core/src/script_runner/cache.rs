@@ -67,6 +67,45 @@ pub fn ensure_script_binary(
 /// adjust this to a `cfg!(windows)` switch.
 const SCRIPT_BIN_NAME: &str = "gluon-script";
 
+/// SHA-256 over the contents of every file the script's depfile lists.
+///
+/// Used as the secondary cache key for the script-runner: the outer
+/// directory is keyed by the entrypoint hash (cheap to recompute on
+/// every invocation), and this fingerprint catches edits to any file
+/// reached via `mod` / `#[path]` from the entrypoint. See the
+/// "Script-runner cache invariant change" section of
+/// `docs/superpowers/specs/2026-05-05-modular-workspace-config-design.md`
+/// for why this lives outside the entrypoint key.
+///
+/// File order matters for the hash — we feed paths in the order rustc
+/// listed them, plus the file contents, so a permutation of the depfile
+/// would produce a different fingerprint. That's deterministic because
+/// rustc always emits depfile entries in a stable order for a given
+/// source set.
+fn transitive_fingerprint(depfile: &Path) -> Result<String> {
+    use crate::cache::{parse_depfile, sha256_file};
+    use sha2::{Digest, Sha256};
+
+    let sources = parse_depfile(depfile)?;
+    let mut h = Sha256::new();
+    for src in &sources {
+        // Include the path bytes so two files with identical contents
+        // at different paths still affect the hash — this catches
+        // "subsystem renamed but contents identical" cases.
+        h.update(src.to_string_lossy().as_bytes());
+        h.update(b"\0");
+        let bytes = sha256_file(src).map_err(|e| match e {
+            Error::Io { source, .. } => Error::Io {
+                path: src.clone(),
+                source,
+            },
+            other => other,
+        })?;
+        h.update(bytes);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
 fn compute_key(script_path: &Path, rustc_version: &str, rlib: &Path) -> Result<String> {
     use crate::cache::sha256_file;
     use sha2::{Digest, Sha256};
@@ -211,6 +250,56 @@ mod tests {
         assert_ne!(
             k1, k2,
             "different rustc versions must produce different keys"
+        );
+    }
+
+    #[test]
+    fn transitive_fingerprint_changes_when_listed_file_content_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.rs");
+        let b = tmp.path().join("b.rs");
+        fs::write(&a, b"// a v1").unwrap();
+        fs::write(&b, b"// b v1").unwrap();
+        let depfile = tmp.path().join("script.d");
+        fs::write(
+            &depfile,
+            format!("script: {} {}\n", a.display(), b.display()),
+        )
+        .unwrap();
+
+        let fp1 = transitive_fingerprint(&depfile).expect("fp1");
+        fs::write(&b, b"// b v2 - edited").unwrap();
+        let fp2 = transitive_fingerprint(&depfile).expect("fp2");
+
+        assert_ne!(fp1, fp2, "edit to a listed file must change the fingerprint");
+    }
+
+    #[test]
+    fn transitive_fingerprint_is_deterministic_for_same_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.rs");
+        fs::write(&a, b"// stable").unwrap();
+        let depfile = tmp.path().join("script.d");
+        fs::write(&depfile, format!("script: {}\n", a.display())).unwrap();
+
+        let fp1 = transitive_fingerprint(&depfile).expect("fp1");
+        let fp2 = transitive_fingerprint(&depfile).expect("fp2");
+        assert_eq!(fp1, fp2, "same inputs must produce same fingerprint");
+    }
+
+    #[test]
+    fn transitive_fingerprint_errors_when_listed_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let depfile = tmp.path().join("script.d");
+        fs::write(
+            &depfile,
+            format!("script: {}\n", tmp.path().join("ghost.rs").display()),
+        )
+        .unwrap();
+
+        assert!(
+            transitive_fingerprint(&depfile).is_err(),
+            "missing listed file must surface as an error"
         );
     }
 }
