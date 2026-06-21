@@ -1,5 +1,30 @@
 # Gluon
 
+> [!WARNING]
+> **This project is archived.** Gluon was a from-scratch build system that
+> drove `rustc` directly and built its own sysroots — effectively a
+> hand-rolled `-Z build-std`. Since it began, the bare-metal Rust
+> ecosystem matured to the point where Cargo covers the same ground with
+> far less to maintain:
+>
+> - **Sysroots** → `-Z build-std`
+> - **Bootloader/kernel two-triple handoff** → `-Z bindeps` (artifact
+>   dependencies)
+> - **Per-crate linker scripts / cfgs** → a crate's own `build.rs`
+> - **Running in QEMU** → the `runner` key in `.cargo/config.toml`
+>
+> Maintaining a full build system to reimplement those (and to bridge back
+> to Cargo for `build.rs`/proc-macro deps) stopped being worth it. The
+> recommended path is now **Cargo + a `cargo xtask`**.
+>
+> The parts of Gluon that pulled their weight independently of the build
+> graph — disk-image assembly, QEMU launching, Kconfig — have been
+> extracted into a reusable library:
+> **[embedded-build-tools](https://github.com/hxyulin/embedded-build-tools)**.
+>
+> This repository remains available, read-only, as a reference and a
+> record of the design.
+
 Gluon is a build system for bare-metal Rust kernels. It bypasses Cargo,
 drives `rustc` directly, builds custom sysroots, and orchestrates the full
 pipeline from configuration through compilation to bootable artifacts and
