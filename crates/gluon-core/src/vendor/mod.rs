@@ -288,10 +288,16 @@ pub fn vendor_sync(
         gluon_model::TargetSpec::Host,
     )?;
 
-    let has_non_path_dep = model
-        .external_deps
-        .iter()
-        .any(|(_, d)| !matches!(d.source, DepSource::Path { .. }));
+    // Host-only invariant: vendor_sync mirrors the host scratch
+    // workspace (generated with TargetSpec::Host above, which
+    // manifest_gen filters to host deps). Cross-targeted deps are
+    // vendored separately by populate_cross_vendor_workspaces. Apply the
+    // same host filter here so a cross-only dep (e.g. `uefi` for the
+    // bootloader) doesn't make us run cargo vendor for an empty host
+    // workspace and then fail to find it in vendor/.
+    let has_non_path_dep = model.external_deps.iter().any(|(_, d)| {
+        d.target == gluon_model::TargetSpec::Host && !matches!(d.source, DepSource::Path { .. })
+    });
     if has_non_path_dep {
         cargo_cmd::run_cargo_vendor(
             &workspace_dir,
@@ -309,10 +315,13 @@ pub fn vendor_sync(
     let mut diags: Vec<Diagnostic> = Vec::new();
 
     // Iterate in sorted order so the output is deterministic.
+    // Host-only: cross-targeted deps are recorded by the cross pipeline,
+    // not here. See the has_non_path_dep comment above.
     let mut entries: Vec<(&str, &ExternalDepDef)> = model
         .external_deps
         .names()
         .filter_map(|(n, h)| model.external_deps.get(h).map(|d| (n, d)))
+        .filter(|(_, d)| d.target == gluon_model::TargetSpec::Host)
         .collect();
     entries.sort_by_key(|(n, _)| *n);
 
