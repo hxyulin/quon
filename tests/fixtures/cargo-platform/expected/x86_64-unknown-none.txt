@@ -1,0 +1,5 @@
+host64_dep (host, lib) features=[] deps=[]
+none_dep (x86_64-unknown-none, lib) features=[] deps=[]
+plat@build-script (host, build-script) features=[] deps=[host64_dep -> host64_dep]
+plat (x86_64-unknown-none, lib) features=[] deps=[none_dep -> none_dep, triple_dep -> triple_dep] runs=plat@build-script
+triple_dep (x86_64-unknown-none, lib) features=[] deps=[]

@@ -1,0 +1,6 @@
+app@build-script (host, build-script) features=[] deps=[common -> common@host]
+app@lib (x86_64-unknown-none, lib) features=[] deps=[common -> common, pm -> pm] runs=app@build-script
+app (x86_64-unknown-none, bin app) features=[] deps=[app -> app@lib, common -> common, pm -> pm] runs=app@build-script
+common@host (host, lib) features=[build_only,host_only] deps=[]
+common (x86_64-unknown-none, lib) features=[target_only] deps=[]
+pm (host, proc-macro) features=[] deps=[common -> common@host]

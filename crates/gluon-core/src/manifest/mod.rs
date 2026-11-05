@@ -6,15 +6,19 @@
 //!   every dependency to a package (path, or registry via [`lock`] and
 //!   a [`sources::RegistrySources`] map).
 //! - [`platform`] probes target cfgs and matches `[target.'...']` keys.
+//! - [`resolve`] resolves features per domain into a [`UnitGraph`].
 //!
 //! Builds do not use this module yet; `gluon manifest` prints what it
 //! reads.
 
 pub mod lock;
 pub mod platform;
+pub mod resolve;
 pub mod schema;
 pub mod sources;
 pub mod workspace;
+
+pub use resolve::{Domain, Unit, UnitGraph, UnitId, UnitKind};
 
 use std::fmt::Write as _;
 use std::path::Path;

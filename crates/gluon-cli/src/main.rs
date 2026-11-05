@@ -30,7 +30,7 @@ fn run() -> Result<()> {
 
     // `manifest` reads a Cargo workspace directly; it needs no gluon.rs.
     if let cli::Command::Manifest(sub) = &cli.command {
-        return cmd::manifest::run(sub);
+        return cmd::manifest::run(sub, cli.target.as_deref());
     }
 
     // `clean` and `fmt` take the lighter layout-only context (no

@@ -1,0 +1,17 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+common = { path = "../common", features = ["target_only"] }
+pm = { path = "../pm" }
+
+[dev-dependencies]
+common = { path = "../common", features = ["dev_only"] }
+
+[target.'cfg(unix)'.dependencies]
+common = { path = "../common", features = ["unix_only"] }
+
+[build-dependencies]
+common = { path = "../common", features = ["build_only"] }

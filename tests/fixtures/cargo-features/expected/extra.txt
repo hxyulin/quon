@@ -1,0 +1,5 @@
+hidden (x86_64-unknown-none, lib) features=[never] deps=[]
+lib (x86_64-unknown-none, lib) features=[f1,f2,unused] deps=[]
+opt (x86_64-unknown-none, lib) features=[o2] deps=[]
+root (x86_64-unknown-none, lib) features=[cyc-a,cyc-b,default,opt,use-hidden,uses-implicit,viaslash,weak,weakdep] deps=[hidden -> hidden, lib -> lib, opt -> opt, weakdep -> weakdep]
+weakdep (x86_64-unknown-none, lib) features=[w1] deps=[]

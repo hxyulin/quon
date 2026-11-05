@@ -1,0 +1,3 @@
+lib (x86_64-unknown-none, lib) features=[f1,f2] deps=[]
+opt (x86_64-unknown-none, lib) features=[] deps=[]
+root (x86_64-unknown-none, lib) features=[default,opt,uses-implicit] deps=[lib -> lib, opt -> opt]

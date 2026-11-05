@@ -233,6 +233,27 @@ pub enum ManifestCommand {
     /// Print every package the workspace reaches, with inherited fields,
     /// targets, features and dependency edges.
     Packages(ManifestArgs),
+    /// Resolve features and print the unit graph. The global
+    /// `-t/--target` takes a builtin triple or a path to a `.json` spec;
+    /// without it the roots resolve for the host.
+    Units(ManifestUnitsArgs),
+}
+
+/// Arguments for `gluon manifest units`.
+#[derive(clap::Args, Debug)]
+pub struct ManifestUnitsArgs {
+    #[command(flatten)]
+    pub workspace: ManifestArgs,
+    /// Workspace package to resolve as a root; repeatable (default:
+    /// every member that is not a proc macro).
+    #[arg(long = "root", value_name = "PACKAGE")]
+    pub roots: Vec<String>,
+    /// Features to enable on every root, comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    pub features: Vec<String>,
+    /// Do not enable the roots' `default` features.
+    #[arg(long)]
+    pub no_default_features: bool,
 }
 
 /// Where `gluon manifest` finds the workspace.

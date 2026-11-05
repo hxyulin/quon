@@ -1,0 +1,5 @@
+app@lib (x86_64-unknown-none, lib) features=[default] deps=[no_def -> nodef, other -> other]
+app (x86_64-unknown-none, bin app) features=[default] deps=[app -> app@lib, no_def -> nodef, other -> other]
+extra (x86_64-unknown-none, bin extra) features=[default] deps=[app -> app@lib, no_def -> nodef, other -> other]
+nodef (x86_64-unknown-none, lib) features=[default,x] deps=[]
+other (x86_64-unknown-none, lib) features=[] deps=[]

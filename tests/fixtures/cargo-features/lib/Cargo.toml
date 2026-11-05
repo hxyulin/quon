@@ -1,0 +1,11 @@
+[package]
+name = "lib"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["d"]
+d = []
+f1 = ["f2"]
+f2 = []
+unused = []

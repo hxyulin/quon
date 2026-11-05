@@ -1,0 +1,2 @@
+lib (x86_64-unknown-none, lib) features=[f1,f2] deps=[]
+root (x86_64-unknown-none, lib) features=[] deps=[lib -> lib]

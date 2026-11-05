@@ -1,0 +1,23 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lib = { path = "../lib", default-features = false, features = ["f1"] }
+opt = { path = "../opt", optional = true }
+weakdep = { path = "../weakdep", optional = true }
+hidden = { path = "../hidden", optional = true }
+
+[features]
+default = ["uses-implicit"]
+# `opt` is the implicit feature of the optional dependency.
+uses-implicit = ["opt"]
+# Activates `weakdep` and its implicit feature, and enables `w1` on it.
+viaslash = ["weakdep/w1"]
+# Fires only because `opt` is active through the default feature.
+weak = ["opt?/o2", "hidden?/never"]
+# `dep:` activates without creating a feature named `hidden`.
+use-hidden = ["dep:hidden"]
+cyc-a = ["cyc-b"]
+cyc-b = ["cyc-a", "lib/unused"]

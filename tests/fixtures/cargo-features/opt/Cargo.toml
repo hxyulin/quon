@@ -1,0 +1,8 @@
+[package]
+name = "opt"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+o1 = []
+o2 = []

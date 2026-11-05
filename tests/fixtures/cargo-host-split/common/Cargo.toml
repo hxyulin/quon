@@ -1,0 +1,12 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+target_only = []
+host_only = []
+dev_only = []
+unix_only = []
+tool_only = []
+build_only = []

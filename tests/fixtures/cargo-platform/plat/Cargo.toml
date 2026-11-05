@@ -1,0 +1,24 @@
+[package]
+name = "plat"
+version = "0.1.0"
+edition = "2021"
+
+[target.'cfg(target_os = "none")'.dependencies]
+none_dep = { path = "../deps/none_dep" }
+
+[target.'cfg(unix)'.dependencies]
+unix_dep = { path = "../deps/unix_dep" }
+
+[target.x86_64-unknown-none.dependencies]
+triple_dep = { path = "../deps/triple_dep" }
+
+# Matches a custom target spec by its file stem.
+[target.x86_64-custom.dependencies]
+custom_dep = { path = "../deps/custom_dep" }
+
+# Build-dependency tables are evaluated against the host.
+[target.'cfg(target_pointer_width = "64")'.build-dependencies]
+host64_dep = { path = "../deps/host64_dep" }
+
+[target.'cfg(target_os = "none")'.build-dependencies]
+never_dep = { path = "../deps/never_dep" }

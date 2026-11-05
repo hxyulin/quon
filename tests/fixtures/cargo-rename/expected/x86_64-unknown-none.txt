@@ -1,0 +1,4 @@
+app (x86_64-unknown-none, lib) features=[] deps=[aux -> helper, fake -> fake, fake1 -> fake@1.0.0]
+fake@1.0.0 (x86_64-unknown-none, lib) features=[] deps=[]
+fake (x86_64-unknown-none, lib) features=[extra] deps=[]
+helper (x86_64-unknown-none, lib) features=[] deps=[fake -> fake@1.0.0]
