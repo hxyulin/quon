@@ -396,6 +396,24 @@ fn gluon_run_extra_args_pass_through() {
 // --no-build path
 // ---------------------------------------------------------------------------
 
+/// Write a stand-in for `qemu-system-*` into `dir` and return its path.
+/// It records its arguments, one per line, to `$FAKE_QEMU_ARGV_FILE`
+/// when that is set, and exits 0. A script keeps it out of the
+/// binaries `cargo install` ships.
+#[cfg(unix)]
+fn write_fake_qemu(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-qemu");
+    fs::write(
+        &path,
+        "#!/bin/sh\n[ -n \"$FAKE_QEMU_ARGV_FILE\" ] && printf '%s\\n' \"$@\" > \"$FAKE_QEMU_ARGV_FILE\"\nexit 0\n",
+    )
+    .expect("write fake-qemu");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod fake-qemu");
+    path.to_str().expect("utf-8 temp path").to_owned()
+}
+
+#[cfg(unix)]
 /// Rewrite the fixture's `qemu("...")` binary to point at a different path.
 fn rewrite_qemu_binary(fixture: &Path, new_binary: &str) {
     let rs_path = fixture.join("gluon.rs");
@@ -446,6 +464,7 @@ fn strip_qemu_block(fixture: &Path) {
     fs::write(&rs_path, rewritten).expect("write gluon.rs");
 }
 
+#[cfg(unix)]
 #[test]
 fn gluon_run_no_build_skips_build_and_spawns() {
     // Two assertions, both load-bearing:
@@ -457,8 +476,8 @@ fn gluon_run_no_build_skips_build_and_spawns() {
     // The second assertion is what distinguishes "the flag is wired
     // through" from "the flag is wired but the build runs anyway".
     let (_tmp, fixture) = setup_fixture("minimal");
-    let fake_qemu = env!("CARGO_BIN_EXE_fake-qemu");
-    rewrite_qemu_binary(&fixture, fake_qemu);
+    let fake_qemu = write_fake_qemu(&fixture);
+    rewrite_qemu_binary(&fixture, &fake_qemu);
 
     let output = gluon_command(&fixture)
         .args(["run", "--no-build"])
@@ -484,6 +503,7 @@ fn gluon_run_no_build_skips_build_and_spawns() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn gluon_run_no_build_passes_kernel_path_to_qemu() {
     // Belt-and-braces: also assert the fake-qemu binary saw a
@@ -491,8 +511,8 @@ fn gluon_run_no_build_passes_kernel_path_to_qemu() {
     // This catches the regression where --no-build skips the build
     // *and* skips populating the QEMU argv.
     let (_tmp, fixture) = setup_fixture("minimal");
-    let fake_qemu = env!("CARGO_BIN_EXE_fake-qemu");
-    rewrite_qemu_binary(&fixture, fake_qemu);
+    let fake_qemu = write_fake_qemu(&fixture);
+    rewrite_qemu_binary(&fixture, &fake_qemu);
 
     let argv_file = fixture.join("fake-qemu-argv.txt");
 
