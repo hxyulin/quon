@@ -44,6 +44,7 @@
 - [Minimal Kernel](./cookbook/minimal-kernel.md)
 - [Kernel with Config Options](./cookbook/config-options.md)
 - [UEFI Bootloader + Kernel](./cookbook/uefi-bootloader.md)
+- [Limine Kernel](./cookbook/limine.md)
 
 # Architecture
 
