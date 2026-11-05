@@ -1,10 +1,9 @@
 //! Locate and invoke `rust-objcopy` for post-link binary transforms.
 //!
-//! `rust-objcopy` ships with the rustup `llvm-tools-preview` component
-//! and lives next to `rustc` in the active toolchain's `bin/` directory.
-//! We prefer the toolchain-sibling binary over `$PATH` candidates so a
-//! user who has rustup-toolchain-pinned to nightly-X gets the same
-//! `rust-objcopy` rustc itself was built against — avoids a class of
+//! The rustup `llvm-tools` component installs `llvm-objcopy` under
+//! `<sysroot>/lib/rustlib/<host>/bin`. We prefer toolchain binaries over
+//! `$PATH` candidates so a user who has rustup-toolchain-pinned to
+//! nightly-X gets the objcopy rustc itself was built against — avoids a class of
 //! "ELF emitted by rustc-1.95 but stripped by an older host
 //! `rust-objcopy`-1.86" mismatches.
 
@@ -19,22 +18,44 @@ use std::path::{Path, PathBuf};
 ///
 /// 1. `rust-objcopy` (or `rust-objcopy.exe`) in the same directory as
 ///    `rustc_path`.
-/// 2. `rust-objcopy` on `$PATH`.
-/// 3. `llvm-objcopy` on `$PATH` — the upstream LLVM binary, behaviour-
+/// 2. `llvm-objcopy` in `rustlib_bin`, normally
+///    `<sysroot>/lib/rustlib/<host>/bin`. This is where the rustup
+///    `llvm-tools` component installs it; it never lands next to `rustc`
+///    or on `$PATH`.
+/// 3. `rust-objcopy` on `$PATH` (the cargo-binutils wrapper).
+/// 4. `llvm-objcopy` on `$PATH` — the upstream LLVM binary, behaviour-
 ///    compatible for our `-O binary` use case.
 ///
 /// Returns the resolved absolute path, or an error with a `rustup
-/// component add llvm-tools-preview` hint if none of the above resolve.
-pub fn probe_rust_objcopy(rustc_path: &Path) -> Result<PathBuf> {
-    probe_with_path(rustc_path, std::env::var_os("PATH").as_deref())
+/// component add llvm-tools` hint if none of the above resolve.
+pub fn probe_rust_objcopy(rustc_path: &Path, rustlib_bin: &Path) -> Result<PathBuf> {
+    probe_with_path(rustc_path, rustlib_bin, std::env::var_os("PATH").as_deref())
+}
+
+/// `<sysroot>/lib/rustlib/<host>/bin`, where rustup's `llvm-tools`
+/// component puts its binaries.
+pub fn rustlib_bin_dir(sysroot: &Path, host_triple: &str) -> PathBuf {
+    sysroot
+        .join("lib")
+        .join("rustlib")
+        .join(host_triple)
+        .join("bin")
 }
 
 /// [`probe_rust_objcopy`] with `$PATH` passed in, so tests can supply
 /// their own search path without mutating the process environment
 /// (which races with any parallel test that spawns a subprocess).
-fn probe_with_path(rustc_path: &Path, path_var: Option<&OsStr>) -> Result<PathBuf> {
+fn probe_with_path(
+    rustc_path: &Path,
+    rustlib_bin: &Path,
+    path_var: Option<&OsStr>,
+) -> Result<PathBuf> {
     if let Some(p) = sibling_of(rustc_path, "rust-objcopy") {
         return Ok(p);
+    }
+    let rustlib_objcopy = rustlib_bin.join(exe_name("llvm-objcopy"));
+    if rustlib_objcopy.is_file() {
+        return Ok(rustlib_objcopy);
     }
     if let Some(p) = which_on_path(path_var, "rust-objcopy") {
         return Ok(p);
@@ -45,7 +66,7 @@ fn probe_with_path(rustc_path: &Path, path_var: Option<&OsStr>) -> Result<PathBu
     Err(Error::Config(
         "rust-objcopy not found. RawBinary crates need it to convert ELF\n\
          to flat binary output. Install with:\n    \
-         rustup component add llvm-tools-preview"
+         rustup component add llvm-tools"
             .into(),
     ))
 }
@@ -174,8 +195,29 @@ mod tests {
         touch_executable(&rustc);
         touch_executable(&sibling);
 
-        let resolved = probe_rust_objcopy(&rustc).expect("probe");
+        let rustlib_bin = tmp.path().join("rustlib-bin");
+        fs::create_dir_all(&rustlib_bin).unwrap();
+        touch_executable(&rustlib_bin.join(exe_name("llvm-objcopy")));
+
+        let resolved = probe_with_path(&rustc, &rustlib_bin, None).expect("probe");
         assert_eq!(resolved, sibling, "probe must prefer toolchain sibling");
+    }
+
+    #[test]
+    fn probe_finds_llvm_tools_component_in_rustlib_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let rustc = bin_dir.join(exe_name("rustc"));
+        touch_executable(&rustc);
+        let rustlib_bin = rustlib_bin_dir(tmp.path(), "x86_64-unknown-linux-gnu");
+        fs::create_dir_all(&rustlib_bin).unwrap();
+        let objcopy = rustlib_bin.join(exe_name("llvm-objcopy"));
+        touch_executable(&objcopy);
+
+        // An empty PATH proves the hit comes from the sysroot, not PATH.
+        let resolved = probe_with_path(&rustc, &rustlib_bin, Some(OsStr::new(""))).expect("probe");
+        assert_eq!(resolved, objcopy);
     }
 
     #[test]
@@ -191,7 +233,9 @@ mod tests {
         let path_hit = path_dir.join(exe_name("rust-objcopy"));
         touch_executable(&path_hit);
 
-        let resolved = probe_with_path(&rustc, Some(path_dir.as_os_str())).expect("probe");
+        let missing = tmp.path().join("no-rustlib-bin");
+        let resolved =
+            probe_with_path(&rustc, &missing, Some(path_dir.as_os_str())).expect("probe");
         assert_eq!(resolved, path_hit);
     }
 
@@ -201,10 +245,12 @@ mod tests {
         let rustc = tmp.path().join(exe_name("rustc"));
         touch_executable(&rustc);
 
-        let err = probe_with_path(&rustc, Some(OsStr::new(""))).expect_err("probe must fail");
+        let missing = tmp.path().join("no-rustlib-bin");
+        let err =
+            probe_with_path(&rustc, &missing, Some(OsStr::new(""))).expect_err("probe must fail");
         let msg = format!("{err}");
         assert!(
-            msg.contains("rustup component add llvm-tools-preview"),
+            msg.contains("rustup component add llvm-tools"),
             "error must hint at the install command, got: {msg}"
         );
     }
@@ -256,7 +302,9 @@ mod tests {
 
         let bin = tmp.path().join("p.bin");
         let rustc = which::which("rustc").expect("rustc on PATH");
-        let objcopy = probe_rust_objcopy(&rustc).expect("toolchain probe");
+        let info = crate::compile::rustc_info::RustcInfo::probe().expect("probe rustc");
+        let rustlib_bin = rustlib_bin_dir(&info.sysroot, &info.host_triple);
+        let objcopy = probe_rust_objcopy(&rustc, &rustlib_bin).expect("toolchain probe");
         run_objcopy_to_binary(&objcopy, &elf, &bin).expect("objcopy");
         assert!(bin.is_file(), ".bin must exist after objcopy");
         // The flat output is non-zero — strip-nothing -O binary preserves
