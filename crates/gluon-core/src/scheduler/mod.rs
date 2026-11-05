@@ -169,9 +169,10 @@ fn dispatch_esp(
     view: &ResultView<'_>,
     esp_handle: Handle<EspDef>,
     stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
 ) -> Result<NodeOutcome> {
     let (path, was_cached) =
-        crate::generated::esp::ensure_esp(ctx, model, resolved, esp_handle, view, stdout)?;
+        crate::generated::esp::ensure_esp(ctx, model, resolved, esp_handle, view, stdout, stderr)?;
     Ok((Some(path), was_cached))
 }
 
@@ -182,6 +183,7 @@ fn dispatch_image(
     view: &ResultView<'_>,
     image_handle: Handle<ImageDef>,
     stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
 ) -> Result<NodeOutcome> {
     let ictx = ImageCtx {
         ctx,
@@ -189,7 +191,7 @@ fn dispatch_image(
         resolved,
         artifacts: view,
     };
-    let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
+    let (path, was_cached) = build_image(image_handle, &ictx, stdout, stderr)?;
     Ok((Some(path), was_cached))
 }
 
@@ -288,8 +290,12 @@ impl JobDispatcher for PipelineDispatcher<'_> {
             DagNode::Compile(unit) => {
                 dispatch_compile(ctx, model, resolved, self.units, &view, unit, stderr)?
             }
-            DagNode::Esp(handle) => dispatch_esp(ctx, model, resolved, &view, handle, stdout)?,
-            DagNode::Image(handle) => dispatch_image(ctx, model, resolved, &view, handle, stdout)?,
+            DagNode::Esp(handle) => {
+                dispatch_esp(ctx, model, resolved, &view, handle, stdout, stderr)?
+            }
+            DagNode::Image(handle) => {
+                dispatch_image(ctx, model, resolved, &view, handle, stdout, stderr)?
+            }
             DagNode::Rule(handle) => dispatch_rule(
                 ctx, model, resolved, self.rules, &view, handle, stdout, stderr,
             )?,
@@ -413,7 +419,6 @@ fn summarize(dag: &DagType, results: &[OnceLock<NodeResult>]) -> BuildSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use crate::compile::{BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, PanicStrategy, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef,
@@ -440,8 +445,7 @@ mod tests {
         let layout = BuildLayout::new(tmp.join("build"), "testproj");
         let info = fake_rustc_info("/usr/bin/rustc");
         std::fs::create_dir_all(tmp.join("build")).unwrap();
-        let cache = Cache::load(tmp.join("build/cache-manifest.json")).0;
-        CompileCtx::new(layout, Arc::new(info), cache)
+        CompileCtx::new(layout, Arc::new(info))
     }
 
     fn make_minimal_model_and_resolved() -> (BuildModel, ResolvedConfig) {
@@ -749,12 +753,6 @@ mod tests {
             )
             .expect("first run should succeed");
         }
-        ctx.cache
-            .lock()
-            .expect("cache mutex poisoned")
-            .save()
-            .expect("save cache");
-
         // Second run — should hit cache for everything.
         let start = Instant::now();
         {
@@ -1038,8 +1036,7 @@ mod tests {
 
         // --- CompileCtx ---
         let layout = BuildLayout::new(build_dir.clone(), "testproj");
-        let cache = Cache::load(layout.cache_manifest()).0;
-        let ctx = CompileCtx::new(layout, Arc::new(info.clone()), cache);
+        let ctx = CompileCtx::new(layout, Arc::new(info.clone()));
 
         (ctx, model, resolved)
     }

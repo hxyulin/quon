@@ -31,13 +31,12 @@ use std::path::{Path, PathBuf};
 /// - `DriverKind::Clippy` writes under `<root>/tool/clippy/...`.
 ///
 /// **Sysroot, generated config crate, fixed-host-profile units,
-/// vendored crates and the cache manifest are deliberately *not*
+/// vendored crates and the fingerprint records are deliberately *not*
 /// partitioned.** They are built with plain rustc regardless of the
 /// user-facing driver, so re-running them for every check/clippy
-/// invocation would just waste time. The cache manifest can safely
-/// be shared because [`super::rustc::RustcCommandBuilder::hash`]
-/// already incorporates the program path and `--emit` kinds, so
-/// driver-specific entries cannot collide on key.
+/// invocation would just waste time. The records can be shared
+/// because the keys of driver-specific units carry the driver
+/// ([`Self::cache_key_suffix`]).
 #[derive(Debug, Clone)]
 pub struct BuildLayout {
     /// Absolute or relative root under which every derived path lives.
@@ -116,8 +115,17 @@ impl BuildLayout {
         }
     }
 
-    /// Path to the top-level cache manifest (`<root>/cache-manifest.json`).
-    pub fn cache_manifest(&self) -> PathBuf {
+    /// Directory of the fingerprint records (`<root>/.fingerprint/`).
+    /// Shared by every driver: keys carry the driver where the outputs
+    /// differ, and fixed-host-profile units have one record for all.
+    pub fn fingerprint_dir(&self) -> PathBuf {
+        self.root.join(".fingerprint")
+    }
+
+    /// The single-file cache of older Gluon versions
+    /// (`<root>/cache-manifest.json`). Only read to remove it; see
+    /// [`crate::cache::remove_legacy_cache`].
+    pub fn legacy_cache_manifest(&self) -> PathBuf {
         self.root.join("cache-manifest.json")
     }
 
@@ -384,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn cache_manifest_path() {
+    fn fingerprint_dir_path() {
         assert_eq!(
-            layout().cache_manifest(),
-            PathBuf::from("/tmp/fake/cache-manifest.json")
+            layout().fingerprint_dir(),
+            PathBuf::from("/tmp/fake/.fingerprint")
         );
     }
 
@@ -568,14 +576,13 @@ mod tests {
     }
 
     #[test]
-    fn cache_manifest_and_config_crate_paths_are_shared_across_drivers() {
-        // Same rationale as sysroot: cache hashes already discriminate
-        // between driver-flavored entries via program path + emit
-        // kinds, so the manifest can safely be shared. The generated
-        // config crate is identical for build/check/clippy.
+    fn fingerprint_and_config_crate_paths_are_shared_across_drivers() {
+        // Keys of driver-specific units carry the driver, so the
+        // records can share one directory. The generated config crate
+        // is identical for build/check/clippy.
         let rustc = layout();
         let check = check_layout();
-        assert_eq!(rustc.cache_manifest(), check.cache_manifest());
+        assert_eq!(rustc.fingerprint_dir(), check.fingerprint_dir());
         assert_eq!(
             rustc.generated_config_crate_dir(),
             check.generated_config_crate_dir()

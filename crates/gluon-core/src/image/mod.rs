@@ -14,9 +14,10 @@
 //! sub-partition builders ([`ImageDef::partitions`]), raw LBA writes
 //! ([`ImageDef::raw_writes`]), and the Stage1Meta blob.
 //!
-//! Image builds are cached via the unified composite cache under key
-//! `image:<name>`. See `docs/src/architecture/cache.md` for the entry
-//! shape and the segments that go into the `aux_hash`.
+//! Image builds have one fingerprint record, keyed `image:<name>`. Its
+//! command hashes the serialised `ImageDef`, the `hadris-fat` version
+//! and the per-entry source kinds; its declared inputs are every file
+//! that goes into the image. See `docs/src/architecture/cache.md`.
 
 mod fat;
 mod formatter;
@@ -24,7 +25,7 @@ mod mbr;
 mod partition;
 mod source;
 
-use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
+use crate::cache::{Freshness, FreshnessQuery, RecordInput, hash_parts};
 use crate::compile::CompileCtx;
 use crate::compile::extern_map::ArtifactLookup;
 use crate::compile::extern_map::resolve_artifact_by_name;
@@ -33,6 +34,7 @@ use gluon_model::{
     BuildModel, Handle, ImageDef, ImageFormat, ImageSource, PartitionDef, PartitionTable,
     RawSource, RawWrite, ResolvedConfig,
 };
+use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -77,6 +79,7 @@ pub fn build_image(
     image_handle: Handle<ImageDef>,
     ictx: &ImageCtx<'_>,
     stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
     let image = ictx.model.images.get(image_handle).ok_or_else(|| {
         Error::Compile(format!(
@@ -90,16 +93,16 @@ pub fn build_image(
     // Resolve every input. The two image shapes (flat-FS vs
     // partitioned disk) have different resolution surfaces, so each
     // gets its own resolved-entries vec — but both feed the same
-    // composite cache key so invalidation is uniform.
+    // record's declared inputs so invalidation is uniform.
     let flat_entries = resolve_entries(image, ictx)?;
     let partition_resolutions = resolve_partition_entries(image, ictx)?;
     let raw_resolutions = resolve_raw_writes(image, ictx)?;
 
-    // Composite inputs include flat entries, partition entries, and
+    // Declared inputs include flat entries, partition entries, and
     // raw writes — every byte that contributes to the final image
     // needs a fingerprint or a `touch` on the relevant source won't
     // invalidate. We materialise into one `Vec<ResolvedEntry>` so the
-    // per-entry source-kind tags (used for the aux_hash) and the
+    // per-entry source-kind tags (used for the command hash) and the
     // source paths (used for the cache's input set) come from a
     // single iteration. Raw writes get a synthetic dest_path keyed on
     // their LBA so they show up distinctly.
@@ -109,7 +112,7 @@ pub fn build_image(
     }
     stamp_inputs.extend(raw_resolutions.iter().filter_map(|r| r.as_resolved_entry()));
 
-    // Compute the composite aux_hash from (serialised ImageDef without
+    // Compute the command hash from (serialised ImageDef without
     // span) + hadris-fat version + per-entry source kinds. Source kinds
     // are folded in so a crate→file rename in `gluon.rs` invalidates
     // even when the resolved on-disk path happens to match.
@@ -126,13 +129,16 @@ pub fn build_image(
         source_kind_bytes.extend_from_slice(&e.source_kind.aux_bytes());
         source_kind_bytes.push(0);
     }
-    let aux = composite_aux_hash(&[
-        &def_bytes,
-        hadris_fat_version().as_bytes(),
-        &source_kind_bytes,
-    ]);
+    let command = hash_parts(
+        "gluon.image.v1",
+        &[
+            &def_bytes,
+            hadris_fat_version().as_bytes(),
+            &source_kind_bytes,
+        ],
+    );
 
-    // Composite inputs: every source path that contributes to the
+    // Declared inputs: every source path that contributes to the
     // final image. Sort + dedup for deterministic query ordering and
     // to defeat duplicate-entry input lists.
     let mut input_paths: Vec<PathBuf> =
@@ -140,24 +146,26 @@ pub fn build_image(
     input_paths.sort();
     input_paths.dedup();
 
-    let cache_key = format!("image:{}", image.name);
-
-    {
-        let mut cache = ictx
-            .ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
-        let q = CompositeQuery {
-            key: &cache_key,
-            inputs: &input_paths,
-            aux_hash: Some(aux),
-            output_path: &image_path,
-        };
-        if cache.is_composite_fresh(&q) {
-            return Ok((image_path, true));
+    let key = format!("image:{}", image.name);
+    let toolchain = ictx.ctx.toolchain();
+    let outputs = [image_path.clone()];
+    let no_env = BTreeMap::new();
+    let query = FreshnessQuery {
+        key: &key,
+        command,
+        toolchain,
+        declared: &input_paths,
+        outputs: &outputs,
+        command_env: &no_env,
+    };
+    match ictx.ctx.store.check(&query) {
+        Freshness::Fresh(_) => return Ok((image_path, true)),
+        Freshness::Stale(reason) => {
+            ictx.ctx
+                .report_stale(stderr, &format!("image {}", image.name), &reason)
         }
     }
+    let started_at = std::time::SystemTime::now();
 
     // Slow path. Make sure the parent dir exists.
     if let Some(parent) = image_path.parent() {
@@ -229,25 +237,19 @@ pub fn build_image(
         }
     }
 
-    // Persist the cache entry only after the write succeeds — an
-    // interrupted run that's left a half-written image must rebuild on
-    // the next go. We hold the lock across both `mark_composite_built`
-    // and `save` so a concurrent reader can't observe a freshness
-    // claim that hasn't been flushed.
-    {
-        let mut cache = ictx
-            .ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
-        cache.mark_composite_built(CompositeRecord {
-            key: cache_key,
-            inputs: input_paths,
-            aux_hash: Some(aux),
-            output_path: image_path.clone(),
-        })?;
-        cache.save()?;
-    }
+    // Recorded only after the write succeeds: an interrupted run that
+    // left a half-written image rebuilds next time.
+    ictx.ctx.store.record(RecordInput {
+        key: &key,
+        command,
+        toolchain,
+        declared: &input_paths,
+        discovered: &[],
+        env: BTreeMap::new(),
+        outputs: &outputs,
+        started_at,
+        stderr: &[],
+    })?;
 
     Ok((image_path, false))
 }
@@ -870,7 +872,6 @@ fn _writeln_progress(stdout: &mut Vec<u8>, msg: impl AsRef<str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, ImageEntry, ImageSource, PanicStrategy, ProjectDef, ResolvedConfig,
@@ -895,8 +896,7 @@ mod tests {
     fn make_ctx(tmp: &Path) -> CompileCtx {
         let layout = BuildLayout::new(tmp.join("build"), "imgtest");
         std::fs::create_dir_all(tmp.join("build")).unwrap();
-        let cache = Cache::load(tmp.join("build/cache-manifest.json")).0;
-        CompileCtx::new(layout, Arc::new(fake_rustc_info()), cache)
+        CompileCtx::new(layout, Arc::new(fake_rustc_info()))
     }
 
     fn make_resolved(model: &mut BuildModel, project_root: &Path) -> ResolvedConfig {
@@ -939,6 +939,57 @@ mod tests {
         }
     }
 
+    /// An input whose mtime is at or after the start of the image build
+    /// may have been edited while the image was written, so the image
+    /// may hold the old content. The next build must rebuild it. A
+    /// future mtime stands in for an edit made during the build.
+    #[test]
+    fn image_input_modified_during_build_rebuilds_next_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let ctx = make_ctx(tmp.path());
+        let host_file = project_root.join("hello.txt");
+        std::fs::write(&host_file, b"hello\n").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&host_file)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let mut model = BuildModel::default();
+        let resolved = make_resolved(&mut model, &project_root);
+        let (image_h, _) = model.images.insert(
+            "boot".into(),
+            ImageDef {
+                name: "boot".into(),
+                format: Some(ImageFormat::Fat32),
+                size_mb: Some(64),
+                entries: vec![ImageEntry {
+                    source: ImageSource::File("hello.txt".into()),
+                    dest_path: "/hello.txt".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        let artifacts = ArtifactMap::new();
+        let ictx = ImageCtx {
+            ctx: &ctx,
+            model: &model,
+            resolved: &resolved,
+            artifacts: &artifacts,
+        };
+        let mut stdout = Vec::new();
+        let (_, first) = build_image(image_h, &ictx, &mut stdout, &mut Vec::new()).unwrap();
+        assert!(!first);
+        let (_, second) = build_image(image_h, &ictx, &mut stdout, &mut Vec::new()).unwrap();
+        assert!(
+            !second,
+            "image built from a possibly torn read was served from cache"
+        );
+    }
+
     /// Sanity: fat32 image with one file entry produces a non-empty
     /// image whose bytes start with the FAT32 BPB jump (`0xEB`) and
     /// contain the volume label string.
@@ -978,7 +1029,8 @@ mod tests {
         };
 
         let mut stdout = Vec::new();
-        let (out_path, was_cached) = build_image(image_h, &ictx, &mut stdout).unwrap();
+        let (out_path, was_cached) =
+            build_image(image_h, &ictx, &mut stdout, &mut Vec::new()).unwrap();
         assert!(!was_cached, "first build must run the formatter");
         assert!(out_path.exists());
 
@@ -1048,14 +1100,16 @@ mod tests {
             artifacts: &artifacts,
         };
 
-        let (out1, cached1) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
+        let (out1, cached1) =
+            build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap();
         assert!(!cached1);
         let mtime1 = std::fs::metadata(&out1).unwrap().modified().unwrap();
 
         // Tiny sleep so the mtime would tick if a write happened.
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let (out2, cached2) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
+        let (out2, cached2) =
+            build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap();
         assert_eq!(out1, out2);
         assert!(cached2, "second build must hit the stamp cache");
         let mtime2 = std::fs::metadata(&out2).unwrap().modified().unwrap();
@@ -1096,14 +1150,14 @@ mod tests {
             artifacts: &artifacts,
         };
 
-        let (_, cached1) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
+        let (_, cached1) = build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap();
         assert!(!cached1);
 
         // Wait so the mtime tick is observable, then rewrite the source.
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&host_file, b"v2-different-bytes").unwrap();
 
-        let (_, cached2) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
+        let (_, cached2) = build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap();
         assert!(!cached2, "source change must bust the stamp cache");
     }
 
@@ -1134,7 +1188,7 @@ mod tests {
             artifacts: &artifacts,
         };
 
-        let err = build_image(image_h, &ictx, &mut Vec::new()).unwrap_err();
+        let err = build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("partition_table") && msg.contains("write_"),
@@ -1201,7 +1255,7 @@ mod tests {
         };
 
         let mut stdout = Vec::new();
-        let (out_path, _) = build_image(image_h, &ictx, &mut stdout).unwrap();
+        let (out_path, _) = build_image(image_h, &ictx, &mut stdout, &mut Vec::new()).unwrap();
         let bytes = std::fs::read(&out_path).unwrap();
         assert_eq!(bytes.len() as u64, 64 * 1024 * 1024);
 
@@ -1283,7 +1337,7 @@ mod tests {
             resolved: &resolved,
             artifacts: &artifacts,
         };
-        let err = build_image(image_h, &ictx, &mut Vec::new()).unwrap_err();
+        let err = build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("overlaps") && msg.contains("partition('esp')"),
@@ -1291,10 +1345,9 @@ mod tests {
         );
     }
 
-    /// Stage 5: image freshness lives in the unified cache manifest, not
-    /// in a sidecar file. Building an image must NOT leave a
-    /// `<image>.stamp.json` next to the output — that data now belongs
-    /// to the composite cache entry under key `image:<name>`.
+    /// Image freshness lives in the fingerprint record `image:<name>`,
+    /// not in a sidecar file. Building an image must NOT leave a
+    /// `<image>.stamp.json` next to the output.
     #[test]
     fn build_image_writes_no_stamp_json_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1329,7 +1382,8 @@ mod tests {
         };
 
         let mut stdout = Vec::<u8>::new();
-        let (image_path, _was_cached) = build_image(image_h, &ictx, &mut stdout).unwrap();
+        let (image_path, _was_cached) =
+            build_image(image_h, &ictx, &mut stdout, &mut Vec::new()).unwrap();
 
         let stamp_path = image_path.with_extension("stamp.json");
         assert!(
@@ -1380,7 +1434,7 @@ mod tests {
 
         // We need at least one partition or raw_writes for the build
         // to attempt anything; raw_writes alone is fine.
-        let err = build_image(image_h, &ictx, &mut Vec::new()).unwrap_err();
+        let err = build_image(image_h, &ictx, &mut Vec::new(), &mut Vec::new()).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("max_sectors") && msg.contains("2 sectors"),

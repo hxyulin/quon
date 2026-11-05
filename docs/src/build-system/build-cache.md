@@ -8,8 +8,8 @@ not changed, while also never silently using a stale artifact.
 
 ### Fast path: mtime + size
 
-For each source file, Gluon compares the last-modified time and file size
-against the values recorded in the cache manifest. If both match, the file
+For each input file, Gluon compares the last-modified time and file size
+against the values in the node's fingerprint record. If both match, the file
 is considered fresh. This check is nearly free -- it requires only a
 `stat()` call per file.
 
@@ -33,27 +33,45 @@ and skips recompilation.
 A crate is recompiled when **any** of the following change:
 
 - **Source files** -- content change detected via the two-tier model
-  described above.
-- **Rustc flags** -- the assembled command-line flags for the crate are
-  hashed into an `argv_hash`. If the flags change (e.g., a new `--cfg`
-  flag or a different optimization level), the crate is recompiled even
-  if no source files changed.
-- **Dependencies** -- if a dependency was recompiled (producing a new
-  artifact), all of its dependents are invalidated. This is transitive:
-  a change in `core` invalidates everything.
+  described above. The file list comes from rustc's depfile.
+- **The rustc command** -- the assembled flags, environment and program
+  are hashed. A new `--cfg` flag or a different optimization level
+  recompiles the crate even if no source changed.
+- **The toolchain** -- a different rustc binary or `rustc -vV` output.
+- **Dependencies** -- the files passed to rustc for direct dependencies
+  are inputs. A dependency rebuilt with different content recompiles
+  its dependents; one rebuilt to identical bytes does not.
+- **Environment variables** the crate reads with `env!` or
+  `option_env!`.
 
-## Cache manifest
+An input modified while its compile was running also reruns the
+compile on the next build, because the compile may have read the old
+content.
 
-Freshness records are persisted in `build/cache-manifest.json`. This file
-is written after each successful build and loaded at the start of the next
-build. It contains, for each crate:
+`gluon -v build` prints why each node reran, for example
+`rebuilding crate kernel (x86_64-unknown-none, dev): input
+crates/kernel/src/main.rs changed`.
 
-- Source file paths with their cached mtime, size, and SHA-256 hash
-- The `argv_hash` of the rustc invocation
-- The output artifact path
+Warnings are stored with the record and printed again when a later
+build finds the crate fresh.
 
-If the manifest is missing or corrupt, Gluon treats all crates as stale
-and performs a full rebuild.
+## Fingerprint records
+
+Freshness records live in `build/.fingerprint/`, one JSON file per
+node (one per entry for an ESP). A node writes its record as soon as it
+finishes, so a failed build keeps the records of everything that did
+compile. A record holds:
+
+- Input paths with their mtime, size and SHA-256 hash
+- The hash of the command and of the toolchain
+- The environment variables the run read, with their values
+- The output paths
+
+A missing or unreadable record makes that node rebuild. A build
+directory from an older Gluon (with a `build/cache-manifest.json`) is
+cleared once and rebuilt; Gluon prints a note when it does.
+
+See [cache architecture](../architecture/cache.md) for the exact rule.
 
 ## Build output layout
 
@@ -71,7 +89,7 @@ build/
     profile/<profile>/deps/   # Host tools and build-step runners
   tool/check/                 # Output from gluon check
   tool/clippy/                # Output from gluon clippy
-  cache-manifest.json         # Freshness records
+  .fingerprint/               # Freshness records
 ```
 
 Every library file name carries the unit's metadata hash, for example

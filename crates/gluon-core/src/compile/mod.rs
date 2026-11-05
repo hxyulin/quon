@@ -11,8 +11,8 @@
 //! - [`RustcCommandBuilder`] / [`Emit`] — the single point in gluon that
 //!   assembles a rustc invocation, producing both a `Command` and a stable
 //!   cache-key hash.
-//! - [`CompileCtx`] — the triple of layout + rustc info + cache that every
-//!   compile step (sysroot, host crates, cross crates) threads through.
+//! - [`CompileCtx`] — layout, rustc info and fingerprint store, threaded
+//!   through every compile step (sysroot, host crates, cross crates).
 
 pub mod artifact_path;
 pub mod build_step;
@@ -30,11 +30,8 @@ pub mod rustc_info;
 
 pub use driver::DriverKind;
 
-pub(crate) use compile_and_cache::PostCompileStep;
 pub(crate) use compile_and_cache::compile_and_cache as run_compile_and_cache;
-
-// Note: PostCompileStep is re-exported via `pub(crate) use` above so callers in other
-// modules can import it directly from crate::compile as PostCompileStep.
+pub(crate) use compile_and_cache::{PostCompileStep, RustcJob};
 
 pub use compile_crate::{CompileUnitInput, compile as compile_unit};
 pub use extern_map::ArtifactMap;
@@ -57,32 +54,21 @@ pub const HOST_OPT_LEVEL: u8 = 0;
 /// Debug-info setting for host units. See [`HOST_OPT_LEVEL`].
 pub const HOST_DEBUG_INFO: bool = false;
 
-use crate::cache::Cache;
-use std::sync::{Arc, Mutex};
+use crate::cache::{FingerprintStore, StaleReason};
+use std::sync::Arc;
 
-/// The shared context threaded through every compile step.
+/// The shared context threaded through every compile step: path
+/// arithmetic, the probed toolchain, and the fingerprint store.
 ///
-/// Holds:
-/// - a [`BuildLayout`] for path arithmetic,
-/// - an `Arc<RustcInfo>` so the probed host-toolchain metadata can be
-///   cheaply cloned into worker threads without reprobing,
-/// - a [`Cache`] wrapped in a `Mutex` for mutation under shared references.
-///
-/// ### Why `Mutex` rather than `RefCell`
-///
-/// `RefCell` would be sufficient for the single-threaded A4 callers, but
-/// session B will share `CompileCtx` across worker threads from the
-/// scheduler. Introducing the right synchronisation primitive here avoids
-/// a later rework and, in the single-threaded case, the mutex is
-/// effectively free (an uncontended lock-acquire).
-///
-/// Callers that need to mutate the cache should acquire the lock as
-/// narrowly as possible — in particular, **never hold the cache lock
-/// across a rustc spawn**, or parallel workers will serialise on it.
+/// Nothing in it is mutable. Each node reads and writes only its own
+/// fingerprint records, so parallel workers share the context without
+/// a lock.
 pub struct CompileCtx {
     pub layout: BuildLayout,
     pub rustc_info: Arc<RustcInfo>,
-    pub cache: Mutex<Cache>,
+    pub store: FingerprintStore,
+    /// Print why each node reruns (`gluon -v`).
+    pub verbose: bool,
 }
 
 impl CompileCtx {
@@ -93,11 +79,13 @@ impl CompileCtx {
     /// layout means every path-arithmetic call automatically routes
     /// user-crate output into the correct per-driver subtree without
     /// any caller having to thread the driver explicitly.
-    pub fn new(layout: BuildLayout, rustc_info: Arc<RustcInfo>, cache: Cache) -> Self {
+    pub fn new(layout: BuildLayout, rustc_info: Arc<RustcInfo>) -> Self {
+        let store = FingerprintStore::for_layout(&layout);
         Self {
             layout,
             rustc_info,
-            cache: Mutex::new(cache),
+            store,
+            verbose: false,
         }
     }
 
@@ -106,5 +94,20 @@ impl CompileCtx {
     /// binary and emit overrides.
     pub fn driver(&self) -> DriverKind {
         self.layout.driver()
+    }
+
+    /// The toolchain hash every record carries; see
+    /// [`RustcInfo::toolchain_hash`].
+    pub fn toolchain(&self) -> [u8; 32] {
+        self.rustc_info.toolchain_hash()
+    }
+
+    /// Under `gluon -v`, write why `what` reruns to the job's stderr,
+    /// such as `rebuilding crate kernel (x86_64-unknown-none, dev):
+    /// input src/main.rs changed`.
+    pub(crate) fn report_stale(&self, sink: &mut Vec<u8>, what: &str, reason: &StaleReason) {
+        if self.verbose {
+            sink.extend_from_slice(format!("rebuilding {what}: {reason}\n").as_bytes());
+        }
     }
 }

@@ -3,8 +3,8 @@
 //! gluon's cache.
 //!
 //! The semantic shape is the same as a crate compile: a [`FreshnessQuery`]
-//! against the [`Cache`], a slow-path spawn on a miss, and a
-//! [`BuildRecord`] write on success. The differences from
+//! against the fingerprint store, a slow-path spawn on a miss, and a
+//! record written on success. The differences from
 //! [`crate::compile::compile_and_cache`] are:
 //!
 //! - Output path is `<build>/build-steps/<step-name>/<output>`, derived
@@ -16,7 +16,7 @@
 //!
 //! ### Cache key
 //!
-//! `argv_hash` is computed over the deterministic environment we set on
+//! The command hash is computed over the deterministic environment we set on
 //! the child:
 //!
 //!   - `GLUON_OUTPUT_PATH=<absolute output path>`
@@ -32,10 +32,10 @@
 //!     artifact changes)
 //!   - every `file_in` resolved path
 //!
-//! Literal env values participate via `argv_hash` only; they have no
+//! Literal env values participate via the command hash only; they have no
 //! disk presence, and their content is captured in the hash.
 
-use crate::cache::{BuildRecord, FreshnessQuery, hash::hash_argv};
+use crate::cache::{Freshness, FreshnessQuery, RecordInput, hash::hash_argv};
 use crate::compile::CompileCtx;
 use crate::compile::extern_map::ArtifactLookup;
 use crate::error::{Diagnostic, Error, Result};
@@ -151,7 +151,7 @@ pub fn execute_build_step(
         .iter()
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .collect();
-    let argv_hash = hash_argv(
+    let command = hash_argv(
         runner_path,
         &[] as &[OsString],
         &env_pairs,
@@ -160,22 +160,23 @@ pub fn execute_build_step(
     let cache_key = format!("buildstep-{}", step.name);
 
     // --- Cache check ---
-    let is_fresh = {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        cache.is_fresh(&FreshnessQuery {
-            key: &cache_key,
-            argv_hash,
-            sources: &sources,
-            output_path: &output_path,
-            // Runner env is fixed by `env_map`, which is in `argv_hash`.
-            env_deps: &BTreeMap::new(),
-        })
+    let toolchain = ctx.toolchain();
+    let outputs = [output_path.clone()];
+    let query = FreshnessQuery {
+        key: &cache_key,
+        command,
+        toolchain,
+        declared: &sources,
+        outputs: &outputs,
+        // Runner env is fixed by `env_map`, which is in the command
+        // hash, and nothing records env reads.
+        command_env: &env_pairs,
     };
-    if is_fresh && output_path.exists() {
-        return Ok((output_path, true));
+    match ctx.store.check(&query) {
+        Freshness::Fresh(_) => return Ok((output_path, true)),
+        Freshness::Stale(reason) => {
+            ctx.report_stale(stderr_sink, &format!("build step {}", step.name), &reason)
+        }
     }
 
     // --- Slow path: spawn the runner ---
@@ -239,21 +240,18 @@ pub fn execute_build_step(
         ]));
     }
 
-    // --- Mark-built ---
-    {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        cache.mark_built(BuildRecord {
-            key: cache_key,
-            argv_hash,
-            sources,
-            output_path: output_path.clone(),
-            env_deps: BTreeMap::new(),
-            started_at,
-        })?;
-    }
+    // --- Record ---
+    ctx.store.record(RecordInput {
+        key: &cache_key,
+        command,
+        toolchain,
+        declared: &sources,
+        discovered: &[],
+        env: BTreeMap::new(),
+        outputs: &outputs,
+        started_at,
+        stderr: &[],
+    })?;
 
     Ok((output_path, false))
 }
@@ -312,7 +310,6 @@ fn resolve_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, BuildStepDef, CrateDef, CrateType, GroupDef, ProjectDef, ResolvedConfig,
@@ -339,8 +336,7 @@ mod tests {
             rust_src: None,
             mtime_ns: 0,
         });
-        let (cache, _) = Cache::load(layout.cache_manifest());
-        CompileCtx::new(layout, rustc_info, cache)
+        CompileCtx::new(layout, rustc_info)
     }
 
     fn fixture_model_and_resolved(
@@ -522,8 +518,6 @@ mod tests {
             &mut stderr,
         )
         .unwrap();
-        // Persist cache before the second call so freshness can be observed.
-        ctx.cache.lock().unwrap().save().unwrap();
 
         let (_out, was_cached) = execute_build_step(
             &ctx,

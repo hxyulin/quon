@@ -64,8 +64,7 @@ fn raw_binary_emits_elf_sidecar_with_debug_info() {
     let layout = gluon_core::compile::BuildLayout::new(project.join("build"), "raw-binary-minimal");
     let rustc_info =
         gluon_core::compile::RustcInfo::load_or_probe(&layout).expect("RustcInfo probe");
-    let cache = gluon_core::cache::Cache::load(layout.cache_manifest()).0;
-    let ctx = gluon_core::CompileCtx::new(layout, Arc::new(rustc_info), cache);
+    let ctx = gluon_core::CompileCtx::new(layout, Arc::new(rustc_info));
 
     // Run the build. Any error (sysroot compile, rustc spawn, objcopy)
     // will surface here and fail the test with a precise message.

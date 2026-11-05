@@ -239,6 +239,24 @@ impl RustcInfo {
         }
     }
 
+    /// The toolchain identity in every fingerprint record: the compiler
+    /// path plus [`Self::version_hash`]. A different value rebuilds the
+    /// node in place. It is not part of any unit's metadata hash, so a
+    /// toolchain change reuses the same file names.
+    ///
+    /// The path is included because a different rustc binary of the
+    /// same version (another rustup toolchain directory, a local build)
+    /// may still produce different output.
+    pub fn toolchain_hash(&self) -> [u8; 32] {
+        crate::cache::hash_parts(
+            "gluon.toolchain.v1",
+            &[
+                self.rustc_path.as_os_str().as_encoded_bytes(),
+                &self.version_hash(),
+            ],
+        )
+    }
+
     /// Deterministic, paths-free 32-byte fingerprint of the toolchain
     /// identity. Used as a cache-key ingredient by downstream compile
     /// steps: two `RustcInfo` values that compile to the same artefacts

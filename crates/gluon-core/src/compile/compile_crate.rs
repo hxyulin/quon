@@ -12,7 +12,7 @@
 
 use super::command_builder::build_unit_command;
 use crate::compile::extern_map::ArtifactLookup;
-use crate::compile::{CompileCtx, PostCompileStep};
+use crate::compile::{CompileCtx, PostCompileStep, RustcJob};
 use crate::error::{Diagnostic, Error, Result};
 use crate::unit::{Platform, UnitGraph, UnitId, UnitOrigin};
 use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig};
@@ -71,15 +71,9 @@ pub(crate) fn collect_artifact_env_sources(
 /// Compile one unit. Returns the path dependents use and whether the
 /// cache short-circuited rustc.
 ///
-/// ### Cache contract
-///
-/// - Acquire the cache lock, check freshness, drop the lock.
-/// - Fresh and every output present: return without spawning rustc.
-/// - Otherwise spawn rustc, parse the depfile, then lock again to
-///   record the build.
-///
-/// **Never hold the cache lock across a rustc spawn**: parallel compiles
-/// would serialise on it.
+/// Freshness is checked and recorded by `compile_and_cache`. The
+/// declared inputs are the direct deps' outputs and the `artifact_env`
+/// artifacts.
 pub fn compile(
     ctx: &CompileCtx,
     input: CompileUnitInput<'_>,
@@ -92,7 +86,8 @@ pub fn compile(
         .units
         .cache_key(input.unit, &ctx.layout, model, input.resolved)?;
 
-    let extra_sources = match unit.origin {
+    let mut declared = cmd.dep_outputs.clone();
+    declared.extend(match unit.origin {
         UnitOrigin::Crate(h) => {
             let def = model.crates.get(h).ok_or_else(|| {
                 Error::Compile(format!("crate handle {h:?} not found in build model"))
@@ -100,7 +95,8 @@ pub fn compile(
             collect_artifact_env_sources(def, model, input.artifacts)?
         }
         UnitOrigin::Vendor(_) => Vec::new(),
-    };
+    });
+    let label = input.units.label(input.unit, model, input.resolved);
 
     // Owned copies for the error closures, which outlive `unit`.
     let what = match unit.origin {
@@ -158,16 +154,19 @@ pub fn compile(
 
     let (output_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
-        cmd.builder,
-        cache_key.clone(),
-        cmd.output_path,
-        cmd.paths.depfile_path,
-        Some(&cmd.paths.out_dir),
-        extra_sources.clone(),
-        aux_outputs,
-        post_compile_step,
-        rustc_fail_diag(headline_what.clone()),
-        depfile_fail_diag(what.clone(), depfile_for_diag),
+        RustcJob {
+            what: label.clone(),
+            builder: cmd.builder,
+            key: cache_key.clone(),
+            output_path: cmd.output_path,
+            depfile_path: cmd.paths.depfile_path,
+            out_dir: Some(&cmd.paths.out_dir),
+            declared: declared.clone(),
+            aux_outputs,
+            post_compile_step,
+            rustc_fail: rustc_fail_diag(headline_what.clone()),
+            depfile_fail: depfile_fail_diag(what.clone(), depfile_for_diag),
+        },
         stderr_sink,
     )?;
 
@@ -179,16 +178,19 @@ pub fn compile(
     let lint_depfile = lint.paths.depfile_path.clone();
     let (_, lint_cached) = crate::compile::run_compile_and_cache(
         ctx,
-        lint.builder,
-        format!("{cache_key}:clippy"),
-        lint.output_path,
-        lint.paths.depfile_path,
-        Some(&lint.paths.out_dir),
-        extra_sources,
-        Vec::new(),
-        None,
-        rustc_fail_diag(format!("{headline_what} (clippy lint pass)")),
-        depfile_fail_diag(what, lint_depfile),
+        RustcJob {
+            what: format!("{label} (clippy lint pass)"),
+            builder: lint.builder,
+            key: format!("{cache_key}:clippy"),
+            output_path: lint.output_path,
+            depfile_path: lint.paths.depfile_path,
+            out_dir: Some(&lint.paths.out_dir),
+            declared,
+            aux_outputs: Vec::new(),
+            post_compile_step: None,
+            rustc_fail: rustc_fail_diag(format!("{headline_what} (clippy lint pass)")),
+            depfile_fail: depfile_fail_diag(what, lint_depfile),
+        },
         stderr_sink,
     )?;
     Ok((output_path, was_cached && lint_cached))
@@ -232,7 +234,6 @@ fn depfile_fail_diag(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::{BuildRecord, Cache};
     use crate::compile::compile_utils::normalize_crate_name;
     use crate::compile::layout::BuildLayout;
     use crate::compile::{ArtifactMap, RustcCommandBuilder, RustcInfo};
@@ -394,13 +395,8 @@ mod tests {
     ) -> CompileCtx {
         let layout = BuildLayout::with_driver(tmp.join("build"), "testproject", driver);
         let info = fake_rustc_info(rustc_path);
-        // Create the build dir before loading the cache so a later
-        // cache.save() can atomically write-rename into it. Cache::load
-        // tolerates a missing manifest file, so the order there doesn't
-        // matter — but save() does not tolerate a missing parent dir.
         std::fs::create_dir_all(tmp.join("build")).unwrap();
-        let cache = Cache::load(tmp.join("build/cache-manifest.json")).0;
-        CompileCtx::new(layout, Arc::new(info), cache)
+        CompileCtx::new(layout, Arc::new(info))
     }
 
     fn make_target(name: &str, spec: &str, builtin: bool) -> TargetDef {
@@ -1405,7 +1401,6 @@ mod tests {
         // the argv_hash using this SAME path so the BuildRecord we write
         // matches what compile() will compute.
         let bogus_rustc = PathBuf::from("/dev/null/bogus-rustc");
-        let manifest_path = tmp.path().join("build/cache-manifest.json");
 
         // Use a temporary ctx (same bogus path) just to compute the hash
         // and output/depfile paths — this ctx is discarded before calling
@@ -1422,8 +1417,7 @@ mod tests {
             },
         )
         .unwrap();
-        let argv_hash =
-            crate::compile::compile_and_cache::rustc_cache_hash(&builder, &ctx_for_hash.rustc_info);
+        let command = builder.hash();
         let cache_key = build_cache_key(
             &ctx_for_hash.layout,
             &model,
@@ -1432,29 +1426,27 @@ mod tests {
             &crate_ref,
         )
         .unwrap();
-        drop(ctx_for_hash); // release the in-memory cache
-
-        // Create the output file so output_path.exists() is true in is_fresh.
+        // Create the output file so the record's output exists.
         std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
         std::fs::write(&output_path, b"").unwrap();
 
-        // Pre-populate the manifest on disk with a matching BuildRecord.
-        // Sources is empty because no depfile exists → sources_for_query is
-        // also empty, so the set-comparison in is_fresh passes trivially.
-        {
-            let mut cache = Cache::load(&manifest_path).0;
-            cache
-                .mark_built(BuildRecord {
-                    key: cache_key,
-                    argv_hash,
-                    sources: Vec::new(),
-                    output_path: output_path.clone(),
-                    env_deps: BTreeMap::new(),
-                    started_at: std::time::SystemTime::now(),
-                })
-                .expect("mark_built");
-            cache.save().expect("save");
-        }
+        // Write a matching record. A host lib with no deps declares no
+        // inputs, so the declared sets agree.
+        ctx_for_hash
+            .store
+            .record(crate::cache::RecordInput {
+                key: &cache_key,
+                command,
+                toolchain: ctx_for_hash.toolchain(),
+                declared: &[],
+                discovered: &[],
+                env: BTreeMap::new(),
+                outputs: std::slice::from_ref(&output_path),
+                started_at: std::time::SystemTime::now(),
+                stderr: &[],
+            })
+            .expect("record");
+        drop(ctx_for_hash);
 
         // Now build a FRESH ctx (same bogus rustc path so hash matches the
         // pre-populated record). This ctx loads the manifest we just wrote.
@@ -2036,9 +2028,8 @@ mod tests {
 
         let rustc_info = RustcInfo::probe().expect("probe rustc");
         let layout = BuildLayout::new(tmp.path().join("build"), "e2e");
-        let cache = Cache::load(layout.cache_manifest()).0;
         std::fs::create_dir_all(layout.root()).unwrap();
-        let ctx = CompileCtx::new(layout, Arc::new(rustc_info), cache);
+        let ctx = CompileCtx::new(layout, Arc::new(rustc_info));
 
         let mut model = BuildModel::default();
         let th = insert_target(
@@ -2112,11 +2103,10 @@ mod tests {
         let layout = BuildLayout::new(tmp.path().join("build"), "e2e");
         std::fs::create_dir_all(layout.root()).unwrap();
 
-        // Each run loads the cache from disk with the given toolchain
-        // identity, compiles, and saves.
+        // Each run reads and writes the records on disk with the given
+        // toolchain identity.
         let run = |info: RustcInfo| -> bool {
-            let cache = Cache::load(layout.cache_manifest()).0;
-            let ctx = CompileCtx::new(layout.clone(), Arc::new(info), cache);
+            let ctx = CompileCtx::new(layout.clone(), Arc::new(info));
             let mut stderr_sink = Vec::new();
             let (_, was_cached) = compile(
                 &ctx,
@@ -2130,7 +2120,6 @@ mod tests {
                 &mut stderr_sink,
             )
             .expect("compile should succeed");
-            ctx.cache.lock().unwrap().save().unwrap();
             was_cached
         };
 

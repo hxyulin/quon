@@ -27,7 +27,7 @@ pub mod sysroot;
 pub mod unit;
 pub mod vendor;
 
-pub use cache::{BuildRecord, Cache, CacheLock, CacheManifest, FreshnessQuery};
+pub use cache::{CacheLock, FingerprintStore, Freshness, FreshnessQuery, StaleReason};
 pub use compile::{
     ArtifactMap, BuildLayout, CompileCtx, CompileUnitInput, DriverKind, Emit, RustcCommandBuilder,
     RustcInfo, compile_unit,
@@ -85,8 +85,8 @@ pub fn resolve_config(
     config::resolve(model, profile, target, project_root, overrides)
 }
 
-/// Top-level build entry point. Builds the DAG, runs the scheduler,
-/// persists the cache manifest (also after a failed build), and returns a
+/// Top-level build entry point. Builds the DAG, runs the scheduler, and
+/// returns a
 /// [`BuildSummary`] describing how many cacheable steps actually ran
 /// rustc versus how many were short-circuited by the cache.
 ///
@@ -124,17 +124,25 @@ pub fn build_with_workers(
 ) -> Result<BuildSummary> {
     assert!(workers >= 1, "build_with_workers requires workers >= 1");
 
-    // Cross-process lock around the cache manifest. Held for the entire
-    // build so concurrent `gluon build` invocations in the same project
-    // serialise instead of clobbering each other's freshness records.
-    // Released by drop after the final `cache.save()` below — the guard
-    // is intentionally bound to a name so it lives until the end of the
+    // Cross-process lock around the build directory. Held for the
+    // entire build so concurrent `gluon build` invocations in the same
+    // project serialise instead of clobbering each other's outputs and
+    // records. Bound to a name so it lives until the end of the
     // function. See `cache::lock` for the rationale.
     let _cache_guard = CacheLock::acquire(&ctx.layout)?;
 
     let rules = rule::RuleRegistry::with_builtins();
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
+    if cache::remove_legacy_cache(&ctx.layout)? {
+        use std::io::Write as _;
+        let _ = writeln!(
+            stderr,
+            "note: removed the build cache of an older Gluon ({}) and its outputs; \
+             this build starts clean",
+            ctx.layout.legacy_cache_manifest().display()
+        );
+    }
     // Build the cross-target vendor context by reading per-target
     // scratch workspaces populated by `gluon vendor`. For host-only
     // models this short-circuits to an empty context with no cargo
@@ -147,7 +155,9 @@ pub fn build_with_workers(
         &ctx.rustc_info,
         &resolved.project_root,
     )?;
-    let outcome = scheduler::execute_pipeline(
+    // Each node writes its own record when it finishes, so a failed
+    // build keeps the records of every node that did finish.
+    scheduler::execute_pipeline(
         ctx,
         model,
         resolved,
@@ -156,21 +166,7 @@ pub fn build_with_workers(
         workers,
         &mut stdout,
         &mut stderr,
-    );
-    // Persist the cache whether or not the build failed. Each node
-    // records itself in the in-memory cache only after its outputs are
-    // complete, so every record is valid on its own; saving after a
-    // failure keeps the crates that did compile from rebuilding next
-    // time. A failed save is reported only when the build itself
-    // succeeded, so it never hides the build error.
-    let saved = ctx
-        .cache
-        .lock()
-        .map_err(|_| Error::Config("cache mutex poisoned".into()))
-        .and_then(|mut cache| cache.save());
-    let summary = outcome?;
-    saved?;
-    Ok(summary)
+    )
 }
 
 /// Run the compile pipeline as a `gluon check` (metadata-only) pass.
@@ -184,7 +180,7 @@ pub fn build_with_workers(
 /// - the `tool/check/` subdirectory namespace for output, so the run
 ///   does not clobber a parallel `gluon build` cache.
 ///
-/// The sysroot, generated config crate, and cache manifest are
+/// The sysroot, generated config crate, and fingerprint records are
 /// deliberately shared with `gluon build` — running check after build
 /// (or vice versa) hits a hot sysroot cache and never invalidates the
 /// other tool's freshness records.
@@ -228,16 +224,14 @@ pub fn clippy_with_workers(
 /// Remove the gluon build directory.
 ///
 /// When `keep_sysroot` is `false`, the entire `layout.root()` is
-/// removed (including `cache-manifest.json`).
+/// removed.
 ///
-/// When `true`, every entry under `layout.root()` is removed
-/// *except* the `sysroot/` subdirectory and the cache manifest. The
-/// manifest is loaded, filtered to retain only entries whose key
-/// starts with `"sysroot:"` (covers both rustc-side
-/// `sysroot:<target>:<crate>` per-crate keys and composite-side
-/// `sysroot:<target>` keys), and saved back. This preserves the
-/// sysroot fast-path so the next build doesn't need to re-spawn
-/// rustc just because clean wiped its cache state.
+/// When `true`, every entry under `layout.root()` is removed except the
+/// `sysroot/` directory, the lockfile, and the sysroot records in
+/// `.fingerprint/` (the node's `sysroot:<target>` record and the
+/// per-crate `sysroot:<target>:<crate>` records, whose files start with
+/// `sysroot_`). The next build then finds the sysroot fresh instead of
+/// rebuilding it.
 ///
 /// `NotFound` errors on the root are treated as success — "clean"
 /// of an already-clean tree is a no-op.
@@ -254,72 +248,43 @@ pub fn clean(layout: &BuildLayout, keep_sysroot: bool) -> Result<()> {
     let _cache_guard = CacheLock::acquire(layout)?;
 
     if !keep_sysroot {
-        match std::fs::remove_dir_all(root) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(Error::Io {
-                path: root.to_path_buf(),
-                source: e,
-            }),
+        return cache::remove_path(root);
+    }
+    let fingerprints = layout.fingerprint_dir();
+    for path in dir_entries(root)? {
+        let name = path.file_name().unwrap_or_default();
+        if name == "sysroot" || name == ".lock" {
+            continue;
         }
-    } else {
-        // Iterate every direct child and skip the literal `sysroot`
-        // entry AND the cache-manifest.json (which we filter in place
-        // below to retain sysroot:* entries).
-        let manifest_filename = layout
-            .cache_manifest()
-            .file_name()
-            .map(|n| n.to_os_string());
-        let entries = std::fs::read_dir(root).map_err(|e| Error::Io {
-            path: root.to_path_buf(),
-            source: e,
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|e| Error::Io {
-                path: root.to_path_buf(),
-                source: e,
-            })?;
-            if entry.file_name() == "sysroot" {
-                continue;
-            }
-            if manifest_filename.as_ref() == Some(&entry.file_name().to_os_string()) {
-                continue;
-            }
-            let path = entry.path();
-            let metadata = entry.metadata().map_err(|e| Error::Io {
-                path: path.clone(),
-                source: e,
-            })?;
-            let result = if metadata.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            match result {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    return Err(Error::Io {
-                        path: path.clone(),
-                        source: e,
-                    });
+        if path == fingerprints {
+            for record in dir_entries(&fingerprints)? {
+                let keep = record
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("sysroot_"));
+                if !keep {
+                    cache::remove_path(&record)?;
                 }
             }
+            continue;
         }
-
-        // Filter the cache manifest to retain only sysroot:* entries.
-        // Both rustc-side `sysroot:<target>:<crate>` keys (per-crate)
-        // and composite `sysroot:<target>` keys need preservation;
-        // everything else points at artifacts that no longer exist.
-        let manifest_path = layout.cache_manifest();
-        if manifest_path.exists() {
-            let mut cache = crate::cache::Cache::load(&manifest_path).0;
-            cache.retain_sysroot_only();
-            cache.save()?;
-        }
-
-        Ok(())
+        cache::remove_path(&path)?;
     }
+    Ok(())
+}
+
+/// Entries of `dir`, sorted.
+fn dir_entries(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let io = |e| Error::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    };
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(io)? {
+        out.push(entry.map_err(io)?.path());
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Generate a `rust-project.json` file for rust-analyzer at `output`
@@ -426,7 +391,6 @@ pub fn configure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use gluon_model::{BuildModel, PanicStrategy, ProjectDef, ResolvedProfile, TargetDef};
     use std::fs;
     use std::sync::Arc;
@@ -448,8 +412,7 @@ mod tests {
     fn make_ctx(build_root: &Path) -> CompileCtx {
         let layout = BuildLayout::new(build_root, "demo");
         fs::create_dir_all(build_root).unwrap();
-        let cache = Cache::load(layout.cache_manifest()).0;
-        CompileCtx::new(layout, Arc::new(fake_rustc_info()), cache)
+        CompileCtx::new(layout, Arc::new(fake_rustc_info()))
     }
 
     #[test]
@@ -473,7 +436,6 @@ mod tests {
         fs::write(build.join("sysroot/x86_64/stamp"), b"v1").unwrap();
         fs::create_dir_all(build.join("cross/x/y")).unwrap();
         fs::create_dir_all(build.join("host/foo")).unwrap();
-        fs::write(build.join("cache-manifest.json"), b"{}").unwrap();
         let layout = BuildLayout::new(&build, "demo");
 
         clean(&layout, true).expect("clean ok");
@@ -483,63 +445,51 @@ mod tests {
         );
         assert!(!build.join("cross").exists(), "cross must be gone");
         assert!(!build.join("host").exists(), "host must be gone");
-        assert!(
-            build.join("cache-manifest.json").exists(),
-            "cache manifest must be preserved (filtered to sysroot:* entries)"
-        );
     }
 
     #[test]
-    fn clean_keep_sysroot_retains_sysroot_cache_entries() {
-        use crate::cache::Cache;
-        use crate::cache::composite::CompositeRecord;
+    fn clean_keep_sysroot_retains_sysroot_records() {
+        use crate::cache::{FingerprintStore, RecordInput};
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let layout = BuildLayout::new(tmp.path(), "t");
-        std::fs::create_dir_all(layout.root()).expect("mkdir");
-        let manifest = layout.cache_manifest();
+        let store = FingerprintStore::new(layout.fingerprint_dir(), Vec::new());
+        let out = tmp.path().join("out");
+        fs::write(&out, b"x").unwrap();
+        let record = |key: &str, stderr: &[u8]| {
+            store
+                .record(RecordInput {
+                    key,
+                    command: [1; 32],
+                    toolchain: [2; 32],
+                    declared: &[],
+                    discovered: &[],
+                    env: BTreeMap::new(),
+                    outputs: std::slice::from_ref(&out),
+                    started_at: std::time::SystemTime::now(),
+                    stderr,
+                })
+                .unwrap()
+        };
+        record("sysroot:x86_64", b"");
+        record("sysroot:x86_64:core", b"warning\n");
+        record("image:boot", b"");
+        record("crate:cross:kernel:dev:x86_64", b"warning\n");
 
-        // Seed a sysroot composite entry plus a non-sysroot entry.
-        let sysroot_out = layout.root().join("sysroot/x86_64/lib/libcore.rlib");
-        std::fs::create_dir_all(sysroot_out.parent().unwrap()).expect("mkdir");
-        std::fs::write(&sysroot_out, b"fake rlib").expect("write");
-
-        let other_out = layout.root().join("crates/foo.rlib");
-        std::fs::create_dir_all(other_out.parent().unwrap()).expect("mkdir");
-        std::fs::write(&other_out, b"foo").expect("write");
-
-        let mut cache = Cache::load(&manifest).0;
-        cache
-            .mark_composite_built(CompositeRecord {
-                key: "sysroot:x86_64".into(),
-                inputs: vec![],
-                aux_hash: Some([1; 32]),
-                output_path: sysroot_out.clone(),
-            })
-            .unwrap();
-        cache
-            .mark_composite_built(CompositeRecord {
-                key: "image:boot".into(),
-                inputs: vec![],
-                aux_hash: None,
-                output_path: other_out.clone(),
-            })
-            .unwrap();
-        cache.save().unwrap();
-
-        // Clean with keep_sysroot=true.
         crate::clean(&layout, true).unwrap();
 
-        // Manifest should still exist; sysroot:* entries retained,
-        // others removed.
+        let mut left: Vec<String> = fs::read_dir(layout.fingerprint_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left.len(), 3, "{left:?}");
         assert!(
-            manifest.exists(),
-            "manifest deleted under keep_sysroot=true"
+            left.iter().all(|n| n.starts_with("sysroot_")),
+            "only sysroot records may survive: {left:?}"
         );
-        let cache2 = Cache::load(&manifest).0;
-        let composite_keys: Vec<_> = cache2.composite_keys().collect();
-        assert!(composite_keys.iter().any(|k| **k == *"sysroot:x86_64"));
-        assert!(!composite_keys.iter().any(|k| **k == *"image:boot"));
+        assert!(store.record_path("sysroot:x86_64").exists());
+        assert!(store.record_path("sysroot:x86_64:core").exists());
     }
 
     #[test]

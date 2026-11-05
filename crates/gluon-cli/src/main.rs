@@ -82,29 +82,32 @@ fn run() -> Result<()> {
     // artifacts. Same rustc probe path otherwise; both still need the
     // host toolchain.
     if matches!(&cli.command, cli::Command::Check(_)) {
-        let ctx = cmd::build_context_for_driver(
+        let mut ctx = cmd::build_context_for_driver(
             cli.profile.as_deref(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
             gluon_core::DriverKind::Check,
         )?;
+        ctx.ctx.verbose = cli.verbose;
         return cmd::check::run(ctx, cli.jobs);
     }
     if matches!(&cli.command, cli::Command::Clippy(_)) {
-        let ctx = cmd::build_context_for_driver(
+        let mut ctx = cmd::build_context_for_driver(
             cli.profile.as_deref(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
             gluon_core::DriverKind::Clippy,
         )?;
+        ctx.ctx.verbose = cli.verbose;
         return cmd::clippy::run(ctx, cli.jobs);
     }
 
-    let ctx = cmd::build_context(
+    let mut ctx = cmd::build_context(
         cli.profile.as_deref(),
         cli.target.as_deref(),
         cli.config_file.as_deref(),
     )?;
+    ctx.ctx.verbose = cli.verbose;
 
     match cli.command {
         cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs),

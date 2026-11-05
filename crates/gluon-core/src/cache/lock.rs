@@ -27,7 +27,7 @@ pub struct CacheLock {
 impl CacheLock {
     /// Acquire the cache lock for the given build layout.
     ///
-    /// The lockfile lives at `<build_root>/cache-manifest.json.lock`.
+    /// The lockfile lives at `<build_root>/.lock`.
     /// `<build_root>` is created if it doesn't already exist — `build`
     /// is going to need it anyway, and `clean` short-circuits before it
     /// would call this on a missing build dir, so creating it here is
@@ -108,17 +108,11 @@ impl Drop for CacheLock {
     }
 }
 
-/// Compute the lockfile path for a layout. Defined as
-/// `<cache-manifest>.lock` so it's obviously a sibling and `gluon
-/// clean` (which removes the build dir) takes it down too.
+/// The lockfile path for a layout: `<root>/.lock`. One lock covers
+/// every driver, because `gluon check` and `gluon build` share the
+/// fixed-host-profile units, the sysroot and the records.
 fn lockfile_path(layout: &BuildLayout) -> PathBuf {
-    let manifest = layout.cache_manifest();
-    let mut name = manifest
-        .file_name()
-        .map(|s| s.to_os_string())
-        .unwrap_or_else(|| "cache-manifest.json".into());
-    name.push(".lock");
-    manifest.with_file_name(name)
+    layout.root().join(".lock")
 }
 
 #[cfg(test)]
@@ -130,16 +124,10 @@ mod tests {
     }
 
     #[test]
-    fn lockfile_path_is_sibling_of_manifest() {
+    fn lockfile_lives_in_the_build_root() {
         let tmp = tempfile::tempdir().unwrap();
         let layout = make_layout(tmp.path());
-        let lock = lockfile_path(&layout);
-        let manifest = layout.cache_manifest();
-        assert_eq!(lock.parent(), manifest.parent());
-        assert_eq!(
-            lock.file_name().unwrap().to_str().unwrap(),
-            "cache-manifest.json.lock"
-        );
+        assert_eq!(lockfile_path(&layout), layout.root().join(".lock"));
     }
 
     #[test]

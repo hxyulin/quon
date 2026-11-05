@@ -1,207 +1,128 @@
-//! Shared narrow-lock compile-and-cache wrapper.
+//! Check, run and record one rustc invocation.
 //!
-//! Three places in gluon's compile pipeline — `sysroot::build_sysroot_crate`,
-//! `compile::compile_crate::compile`, and
-//! `scheduler::helpers::config_crate::ensure_config_crate` — all drive the
-//! same freshness → rustc → depfile → mark_built dance around a single
-//! [`RustcCommandBuilder`]. Before this helper landed each call site
-//! duplicated ~40 lines of cache-locking, process-spawning, and error
-//! rendering. Keeping that logic in three places is a correctness hazard:
-//! the narrow-lock rule ("never hold the cache lock across a rustc spawn")
-//! is subtle, and any one of the sites drifting from the others would be
-//! easy to miss in review.
+//! Every rustc node (sysroot crate, config crate, build unit) goes
+//! through [`compile_and_cache`]:
 //!
-//! `compile_and_cache` centralises the pattern. Each call site now passes:
+//! 1. Check the job's fingerprint record (see
+//!    [`crate::cache::store`]). The command hash is the builder's hash
+//!    of program, argv, env and cwd; the toolchain is
+//!    [`crate::compile::RustcInfo::toolchain_hash`]. Inputs discovered
+//!    by the previous run (its depfile) come from the record, so a
+//!    fresh check reads one file and stats the inputs.
+//! 2. Fresh: replay the recorded stderr and return without spawning.
+//! 3. Stale: report why under `-v`, spawn rustc, and on success run the
+//!    optional post step (objcopy for raw binaries).
+//! 4. Parse the depfile, then write the record.
 //!
-//! - the already-assembled [`RustcCommandBuilder`] (consumed into a
-//!   [`std::process::Command`] internally),
-//! - the expected output path and depfile path,
-//! - the cache key (the argv hash is computed here from the builder and
-//!   the toolchain identity, see [`rustc_cache_hash`]),
-//! - two small closures that build the per-site error diagnostics (rustc
-//!   exit failure headline, depfile-parse failure diagnostic),
-//! - the optional list of `aux_outputs` (sidecar files that must also
-//!   exist for a freshness hit — e.g. `RawBinary`'s `<name>.elf`),
-//! - an optional `post_compile_step` callback that runs after a
-//!   successful rustc spawn and before `mark_built` (used by `RawBinary`
-//!   to invoke `rust-objcopy`).
-//!
-//! The helper handles:
-//!
-//! 1. Seeding `sources_for_query` from the previous run's depfile (empty on
-//!    cold builds, which is fine — the cache entry also doesn't exist).
-//! 2. Narrow-lock freshness check (including `aux_outputs.iter().all(|p| p.exists())` so a deleted sidecar forces a re-run) → drop.
-//! 3. Early return on a cache hit (no rustc spawn).
-//! 4. Rendering the rustc command to a string **before** consuming the
-//!    builder, so the error path can include the full invocation.
-//! 5. Spawning rustc and surfacing stderr + command in the diagnostic on
-//!    failure.
-//! 6. Optional `post_compile_step` callback runs after rustc success but
-//!    before depfile parse + cache update. A failure here propagates as
-//!    the function's error and leaves the cache stale, so the next run
-//!    re-spawns rustc and retries the callback.
-//! 7. Parsing the depfile **before** updating the cache (ordering matters:
-//!    if parsing fails, the rlib is on disk but the cache stays stale, so
-//!    the next run re-runs rustc rather than silently using a stale entry).
-//! 8. Narrow-lock `mark_built` → drop.
-//!
-//! ## Out-dir creation
-//!
-//! Callers that need an output directory created on the slow path pass it
-//! via `out_dir_to_create`. `sysroot::build_sysroot` creates its
-//! `sysroot_lib_dir` once per target before building individual crates, so
-//! it passes `None`; `compile_crate` and `ensure_config_crate` pass `Some(..)`
-//! because each crate's out-dir is per-crate and only needed on the slow
-//! path.
-//!
-//! ## Why two closures
-//!
-//! The error headlines differ between call sites (host vs cross naming,
-//! sysroot crate vs user crate vs config crate wording), and the depfile-
-//! parse failure diagnostic has site-specific notes. Closures let each site
-//! keep its existing error text verbatim — behaviour parity with the
-//! pre-extraction code was the explicit goal of C4a.
+//! Any failure before step 4 leaves the old record, which no longer
+//! matches, so the next build reruns the job. In particular a depfile
+//! that cannot be parsed costs a rerun, never a stale hit.
 
-use crate::cache::{BuildRecord, DepInfo, FreshnessQuery, parse_depfile, sha256_bytes};
-use crate::compile::{CompileCtx, RustcCommandBuilder, RustcInfo};
+use crate::cache::{Freshness, FreshnessQuery, RecordInput, parse_depfile};
+use crate::compile::{CompileCtx, RustcCommandBuilder};
 use crate::error::{Error, Result};
-use std::collections::BTreeMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
-/// Shape of the error diagnostic emitted when the slow-path rustc spawn
-/// exits with a non-zero status. Called with the full [`Output`] so the
-/// caller can decide how much of stderr/status to surface.
+/// Builds the error for a rustc run that exited non-zero. Called with
+/// the process output and the rendered command line.
 pub(crate) type RustcFailDiag = dyn FnOnce(&Output, &str) -> Error;
 
-/// Shape of the error diagnostic emitted when depfile parsing fails after
-/// a successful rustc spawn. The caller receives the underlying I/O error
-/// so it can render a note pointing at the on-disk path.
+/// Builds the error for a depfile that could not be read after a
+/// successful run.
 pub(crate) type DepfileFailDiag = dyn FnOnce(&crate::error::Error) -> Error;
 
-/// Shape of the optional post-compile transform invoked after a successful
-/// rustc spawn but before `mark_built`. The canonical use case is
-/// `RawBinary`: invoking `rust-objcopy` to convert `<name>.elf` into the
-/// flat `<name>.bin`. A failure inside the callback is propagated as the
-/// function's error and leaves the cache stale, so the next run re-spawns
-/// rustc and retries the post-compile step.
+/// Runs after a successful rustc spawn and before the record is
+/// written. `RawBinary` uses it to objcopy `<name>.elf` into
+/// `<name>.bin`. A failure leaves the record stale, so the next build
+/// reruns rustc and the step.
 pub(crate) type PostCompileStep = Box<dyn FnOnce() -> Result<()>>;
 
-/// Run the freshness → rustc → depfile → mark_built sequence for a single
-/// rustc invocation. See the module docs for the full contract.
-///
-/// `extra_sources` is a list of files that must be considered "inputs"
-/// of this compile even though rustc's depfile won't list them. The
-/// canonical use case is `artifact_env`: a bootloader crate that injects
-/// `KERNEL_PATH=<kernel.efi>` needs the kernel binary's mtime to
-/// participate in freshness checks, so that rebuilding the kernel
-/// invalidates the bootloader's cache. Cross Bin crates have stable
-/// output paths (no extra-filename hash), so the rustc argv hash alone
-/// would miss a kernel content change. Pass an empty slice for callers
-/// with no out-of-band inputs (sysroot, config crate, crates without
-/// `artifact_env`).
-///
-/// `aux_outputs` lists files that must also exist for a freshness hit.
-/// The canonical use case is `RawBinary`: rustc emits `<name>.elf` and a
-/// post-link objcopy step produces `<name>.bin`. The `.bin` is the
-/// primary `output_path`; the `.elf` lives in `aux_outputs` so deleting
-/// just the sidecar (or having objcopy crash mid-run) forces a recompile.
-/// Pass an empty vector for callers that only produce one artifact.
-///
-/// `post_compile_step` is a callback that runs after a successful rustc
-/// spawn but before `mark_built`. The canonical use case is again
-/// `RawBinary`: invoking `rust-objcopy` to produce the `.bin` from the
-/// `.elf`. A failure here is propagated as the function's error and
-/// leaves the cache stale, so the next run re-spawns rustc and retries.
-/// Pass `None` for callers with no post-link transform.
-///
-/// Returns `(output_path, was_cached)`:
-/// - `was_cached = true` ⇒ the freshness check short-circuited rustc and
-///   no new process was spawned.
-/// - `was_cached = false` ⇒ rustc ran and the cache was updated.
-#[allow(clippy::too_many_arguments)]
+/// One rustc invocation and how to check and record it.
+pub(crate) struct RustcJob<'a> {
+    /// Names the node in `-v` stale reasons.
+    pub what: String,
+    pub builder: RustcCommandBuilder,
+    pub key: String,
+    /// The path handed to dependents. Must exist for a hit.
+    pub output_path: PathBuf,
+    pub depfile_path: PathBuf,
+    /// Created before the spawn.
+    pub out_dir: Option<&'a Path>,
+    /// Inputs known before the run that rustc's depfile may not list:
+    /// direct deps' outputs, `artifact_env` artifacts. The builder's
+    /// own file inputs (linker script, target spec) are added here.
+    pub declared: Vec<PathBuf>,
+    /// Other files that must exist for a hit, such as a raw binary's
+    /// `.elf`.
+    pub aux_outputs: Vec<PathBuf>,
+    pub post_compile_step: Option<PostCompileStep>,
+    pub rustc_fail: Box<RustcFailDiag>,
+    pub depfile_fail: Box<DepfileFailDiag>,
+}
+
+/// Check, run and record `job`; see the module docs. Returns the
+/// output path and whether the record was fresh (no spawn).
 pub(crate) fn compile_and_cache(
     ctx: &CompileCtx,
-    builder: RustcCommandBuilder,
-    cache_key: String,
-    output_path: PathBuf,
-    depfile_path: PathBuf,
-    out_dir_to_create: Option<&Path>,
-    extra_sources: Vec<PathBuf>,
-    aux_outputs: Vec<PathBuf>,
-    post_compile_step: Option<PostCompileStep>,
-    rustc_fail: Box<RustcFailDiag>,
-    depfile_fail: Box<DepfileFailDiag>,
+    job: RustcJob<'_>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
-    // Files the builder knows rustc reads but the depfile will not
-    // list (linker script, custom target spec) are tracked the same
-    // way as caller-supplied extra sources.
-    let mut extra_sources = extra_sources;
-    extra_sources.extend(builder.file_inputs());
-    let argv_hash = rustc_cache_hash(&builder, &ctx.rustc_info);
+    let RustcJob {
+        what,
+        builder,
+        key,
+        output_path,
+        depfile_path,
+        out_dir,
+        mut declared,
+        aux_outputs,
+        post_compile_step,
+        rustc_fail,
+        depfile_fail,
+    } = job;
+    declared.extend(builder.file_inputs());
+    declared.sort();
+    declared.dedup();
+    let command = builder.hash();
+    let toolchain = ctx.toolchain();
+    let mut outputs = Vec::with_capacity(1 + aux_outputs.len());
+    outputs.push(output_path.clone());
+    outputs.extend(aux_outputs);
 
-    // Seed the source list from the previous run's depfile if it exists.
-    // On a cold build this is empty — the cache entry is also missing,
-    // so `is_fresh` returns false regardless.
-    //
-    // `extra_sources` is appended unconditionally — these are always
-    // known to the caller and are not tracked by rustc's depfile.
-    let previous = if depfile_path.exists() {
-        parse_depfile(&depfile_path).unwrap_or_default()
-    } else {
-        DepInfo::default()
+    let query = FreshnessQuery {
+        key: &key,
+        command,
+        toolchain,
+        declared: &declared,
+        outputs: &outputs,
+        command_env: builder.envs(),
     };
-    let mut sources_for_query = previous.files;
-    sources_for_query.extend(extra_sources.iter().cloned());
-    let env_for_query = current_env_values(previous.env.keys(), builder.envs());
-
-    // --- Narrow cache-lock acquisition (read) ---
-    let is_fresh = {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        cache.is_fresh(&FreshnessQuery {
-            key: &cache_key,
-            argv_hash,
-            sources: &sources_for_query,
-            output_path: &output_path,
-            env_deps: &env_for_query,
-        })
-    };
-
-    // A freshness hit requires every declared output to be present on disk.
-    // If the primary output exists but an aux sidecar (e.g. the raw `.bin`
-    // produced by a post-link objcopy) was deleted, we must recompile so
-    // the post_compile_step can regenerate it.
-    let aux_present = aux_outputs.iter().all(|p| p.exists());
-    if is_fresh && output_path.exists() && aux_present {
-        return Ok((output_path, true));
+    match ctx.store.check(&query) {
+        Freshness::Fresh(fp) => {
+            // Warnings are part of the build's output, as in Cargo:
+            // a cache hit prints them again.
+            stderr_sink.extend_from_slice(&ctx.store.stderr(&fp));
+            return Ok((output_path, true));
+        }
+        Freshness::Stale(reason) => ctx.report_stale(stderr_sink, &what, &reason),
     }
 
-    // Slow path: optionally create the output directory, then spawn rustc.
-    if let Some(dir) = out_dir_to_create {
+    if let Some(dir) = out_dir {
         std::fs::create_dir_all(dir).map_err(|e| Error::Io {
             path: dir.to_path_buf(),
             source: e,
         })?;
     }
 
-    // Render the argv to a shell-friendly string BEFORE consuming the
-    // builder with `into_command()`, so the error path has the full rustc
-    // invocation available without needing to reconstruct it. Allocating
-    // here is unconditional (the snapshot is cheap), but the string is
-    // only formatted on the failure path inside `rustc_fail`.
-    let rustc_path = ctx.rustc_info.rustc_path.clone();
-    let argv_snapshot: Vec<std::ffi::OsString> = builder.args().to_vec();
+    // Rendered before `into_command` consumes the builder, for the
+    // failure diagnostic.
+    let rustc_path = builder.rustc_path().to_path_buf();
+    let argv_snapshot = builder.args().to_vec();
     let render_cmd = || -> String {
         let mut s = rustc_path.display().to_string();
         for arg in &argv_snapshot {
             s.push(' ');
-            // Debug formatting gives robust cross-platform quoting of
-            // OsStr values that may contain spaces or shell metachars.
             s.push_str(&format!("{arg:?}"));
         }
         s
@@ -210,95 +131,36 @@ pub(crate) fn compile_and_cache(
     let mut cmd = builder.into_command();
     let started_at = std::time::SystemTime::now();
     let output = cmd.output().map_err(|e| Error::Io {
-        path: ctx.rustc_info.rustc_path.clone(),
+        path: rustc_path.clone(),
         source: e,
     })?;
     if !output.status.success() {
-        let rendered = render_cmd();
-        return Err(rustc_fail(&output, &rendered));
+        return Err(rustc_fail(&output, &render_cmd()));
     }
-    // Surface rustc's stderr (warnings, lint messages) to the per-job
-    // buffer. The worker pool drains this to the user's stderr sink as
-    // soon as the job completes, atomically per job — so warnings on
-    // parallel compiles never interleave. The failure path above embeds
-    // stderr into the diagnostic instead, so we only forward on success.
+    // The worker pool prints the job's buffer atomically when it
+    // finishes, so parallel compiles never interleave. On failure the
+    // diagnostic carries stderr instead.
     stderr_sink.extend_from_slice(&output.stderr);
 
-    // Post-compile transform (e.g. RawBinary's rustc → ELF → objcopy →
-    // flat .bin). Runs BEFORE depfile parse + mark_built so a failure
-    // here leaves the cache stale; the next run re-spawns rustc and
-    // re-attempts the post step.
     if let Some(post) = post_compile_step {
         post()?;
     }
 
-    // Parse the depfile BEFORE calling `mark_built` so the cache is only
-    // updated once we have the source list in hand. If parsing fails,
-    // the rlib is on disk but the cache stays stale — the next run will
-    // miss the cache and re-spawn rustc. That's merely wasteful, not
-    // incorrect.
-    //
-    // Append `extra_sources` so they participate in future freshness
-    // checks exactly as they did in this run's query. Without this,
-    // a kernel rebuild would invalidate the bootloader cache on the
-    // first invocation (because the query included the kernel) but be
-    // silently forgotten on the next (because the stored record didn't).
     let depinfo = match parse_depfile(&depfile_path) {
         Ok(d) => d,
         Err(e) => return Err(depfile_fail(&e)),
     };
-    let mut sources = depinfo.files;
-    sources.extend(extra_sources.iter().cloned());
-
-    // --- Narrow cache-lock acquisition (write) ---
-    {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        cache.mark_built(BuildRecord {
-            key: cache_key,
-            argv_hash,
-            sources,
-            output_path: output_path.clone(),
-            // The values rustc saw, as it recorded them.
-            env_deps: depinfo.env,
-            started_at,
-        })?;
-    }
-
+    ctx.store.record(RecordInput {
+        key: &key,
+        command,
+        toolchain,
+        declared: &declared,
+        discovered: &depinfo.files,
+        // The values rustc saw, as it recorded them.
+        env: depinfo.env,
+        outputs: &outputs,
+        started_at,
+        stderr: &output.stderr,
+    })?;
     Ok((output_path, false))
-}
-
-/// Cache key hash for a rustc invocation: the builder's argv hash plus
-/// the toolchain identity.
-///
-/// The argv hash covers the rustc *path* only. A toolchain upgrade that
-/// keeps the path (rustup updating `nightly` in place) changes the
-/// compiler without changing argv, so the version hash is mixed in
-/// here, once, for every rustc node.
-pub(crate) fn rustc_cache_hash(builder: &RustcCommandBuilder, info: &RustcInfo) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(96);
-    buf.extend_from_slice(b"gluon.rustc-node.v1\0");
-    buf.extend_from_slice(&builder.hash());
-    buf.extend_from_slice(&info.version_hash());
-    sha256_bytes(&buf)
-}
-
-/// Values the next rustc run would see for each env var in `names`:
-/// the builder's own override if it sets one, else this process's
-/// environment. Non-UTF-8 values count as unset, matching `env!`.
-fn current_env_values<'a>(
-    names: impl Iterator<Item = &'a String>,
-    builder_env: &BTreeMap<OsString, OsString>,
-) -> BTreeMap<String, Option<String>> {
-    names
-        .map(|name| {
-            let value = match builder_env.get(std::ffi::OsStr::new(name)) {
-                Some(v) => v.to_str().map(str::to_owned),
-                None => std::env::var(name).ok(),
-            };
-            (name.clone(), value)
-        })
-        .collect()
 }

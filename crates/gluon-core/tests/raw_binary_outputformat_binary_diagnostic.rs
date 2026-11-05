@@ -68,8 +68,7 @@ fn output_format_binary_in_linker_script_produces_specific_error() {
         gluon_core::compile::BuildLayout::new(project.join("build"), "raw-binary-bad-linker");
     let rustc_info =
         gluon_core::compile::RustcInfo::load_or_probe(&layout).expect("RustcInfo probe");
-    let cache = gluon_core::cache::Cache::load(layout.cache_manifest()).0;
-    let ctx = gluon_core::CompileCtx::new(layout, Arc::new(rustc_info), cache);
+    let ctx = gluon_core::CompileCtx::new(layout, Arc::new(rustc_info));
 
     // Build must fail because the post-link objcopy step's magic-byte
     // pre-check rejects the supposed `.elf` (which is actually a flat

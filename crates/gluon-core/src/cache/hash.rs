@@ -9,7 +9,7 @@
 //! - [`sha256_file`] — streams a file through the hasher in 64 KiB chunks.
 //!   Rustc-produced source trees can contain multi-megabyte files (think
 //!   `core/src/intrinsics`), and we hash them on the mtime-fallback path in
-//!   [`crate::cache::Cache::is_fresh`]. Loading them whole into memory just
+//!   [`crate::cache::FingerprintStore::check`]. Loading them whole into memory just
 //!   to hash would waste both cycles and RSS; the streaming loop keeps the
 //!   peak allocation bounded regardless of file size.
 //! - [`hash_argv`] — the canonical cache key for a single `rustc`
@@ -123,10 +123,37 @@ pub fn hash_argv(
     hasher.finalize().into()
 }
 
+/// Domain-separated SHA-256 over `tag` and length-prefixed `parts`.
+///
+/// The command hash of nodes that spawn no process (sysroot, ESP entry,
+/// image): each part is one input that defines the node. Each part is
+/// prefixed with its length, and the part count comes first, so
+/// `["foo", "bar"]`, `["foob", "ar"]` and `["foo", "bar", ""]` differ.
+pub fn hash_parts(tag: &str, parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(tag.as_bytes());
+    hasher.update([0u8]);
+    hasher.update((parts.len() as u64).to_le_bytes());
+    for part in parts {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn hash_parts_separates_parts_and_counts() {
+        let h = |p: &[&[u8]]| hash_parts("t", p);
+        assert_eq!(h(&[b"foo", b"bar"]), h(&[b"foo", b"bar"]));
+        assert_ne!(h(&[b"foo", b"bar"]), h(&[b"foob", b"ar"]));
+        assert_ne!(h(&[b"foo"]), h(&[b"foo", b""]));
+        assert_ne!(hash_parts("a", &[b"x"]), hash_parts("b", &[b"x"]));
+    }
 
     /// RFC 6234 / Wikipedia known answer for SHA-256("abc").
     const ABC_DIGEST_HEX: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";

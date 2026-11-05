@@ -167,13 +167,12 @@ fn gluon_build_cold_then_cache_hit() {
         "first build summary should be 'built N, cached 0', got: {first_stderr}"
     );
 
-    // After Stage 5 the sysroot freshness signal lives in the cache
-    // manifest as a composite entry, not in a sidecar stamp file.
-    let manifest = std::fs::read_to_string(fixture.join("build").join("cache-manifest.json"))
-        .expect("read cache-manifest.json");
+    // The sysroot's freshness lives in its fingerprint record, not in
+    // a sidecar stamp file.
+    let store = gluon_core::FingerprintStore::new(fixture.join("build/.fingerprint"), Vec::new());
     assert!(
-        manifest.contains("sysroot:x86_64-unknown-none"),
-        "expected sysroot composite entry in cache manifest after cold build"
+        store.record_path("sysroot:x86_64-unknown-none").is_file(),
+        "expected the sysroot record after a cold build"
     );
 
     // Kernel binary should exist at cross/<target>/<profile>/final/kernel.
@@ -370,20 +369,16 @@ fn gluon_clean_removes_build_dir() {
 }
 
 /// `gluon clean --keep-sysroot` must remove build state but leave the
-/// sysroot subtree AND the cache manifest's `sysroot:*` entries intact.
+/// sysroot subtree and its fingerprint records intact.
 /// Runs without rustc because `clean` uses the layout-only context.
 #[test]
 fn gluon_clean_keep_sysroot_preserves_sysroot() {
     let (_tmp, fixture) = setup_fixture();
 
-    // Fabricate a fake pre-built state: a real sysroot rlib (the
-    // canonical post-Stage-5 sentinel that the cache layer's
-    // `output_path.exists()` check looks for), a cache manifest with
-    // both a sysroot:* and a non-sysroot composite entry, plus some
-    // other build artifact. The sysroot subtree should survive; the
-    // sysroot:* manifest entry should survive (filtered); the
-    // non-sysroot manifest entry and the other artifact should both
-    // be deleted.
+    // Fabricate a fake pre-built state: a sysroot rlib, a sysroot
+    // record and another record, plus some other build artifact. The
+    // sysroot subtree and its record should survive; the other record
+    // and the other artifact should be deleted.
     let build_dir = fixture.join("build");
     let sysroot_lib_dir = build_dir
         .join("sysroot")
@@ -397,33 +392,14 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
     fs::create_dir_all(other.parent().unwrap()).expect("mkdir cross");
     fs::write(&other, b"junk").expect("write junk");
 
-    // Hand-write a v2 manifest with one sysroot:* and one non-sysroot
-    // composite entry. We avoid linking gluon-core just to construct
-    // it through the public API — the JSON shape is stable enough that
-    // a literal payload is the clearest expression of the test's
-    // intent.
-    let manifest_path = build_dir.join("cache-manifest.json");
-    let manifest_body = format!(
-        r#"{{
-            "version": 2,
-            "rustc": {{}},
-            "composite": {{
-                "sysroot:x86_64-unknown-none": {{
-                    "inputs": {{}},
-                    "output_path": "{}",
-                    "built_at": 0
-                }},
-                "image:boot": {{
-                    "inputs": {{}},
-                    "output_path": "{}",
-                    "built_at": 0
-                }}
-            }}
-        }}"#,
-        core_rlib.display(),
-        other.display(),
-    );
-    fs::write(&manifest_path, manifest_body).expect("write manifest");
+    // One sysroot record and one other record. Their content does not
+    // matter to clean, which keeps records by file name.
+    let store = gluon_core::FingerprintStore::new(build_dir.join(".fingerprint"), Vec::new());
+    let sysroot_record = store.record_path("sysroot:x86_64-unknown-none");
+    let other_record = store.record_path("image:boot");
+    fs::create_dir_all(store.dir()).expect("mkdir .fingerprint");
+    fs::write(&sysroot_record, b"{}").expect("write sysroot record");
+    fs::write(&other_record, b"{}").expect("write other record");
 
     let output = gluon_command(&fixture)
         .arg("clean")
@@ -446,20 +422,13 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
         "non-sysroot build state should have been removed"
     );
 
-    // Manifest should still exist; sysroot:* entries retained,
-    // others removed. (The clean path filters via Cache::retain_sysroot_only.)
     assert!(
-        manifest_path.exists(),
-        "cache manifest should be preserved (filtered) by --keep-sysroot"
-    );
-    let after = fs::read_to_string(&manifest_path).expect("read manifest");
-    assert!(
-        after.contains("sysroot:x86_64-unknown-none"),
-        "sysroot:* composite entry should survive --keep-sysroot, got: {after}"
+        sysroot_record.exists(),
+        "the sysroot record should survive --keep-sysroot"
     );
     assert!(
-        !after.contains("image:boot"),
-        "non-sysroot composite entry should be filtered out, got: {after}"
+        !other_record.exists(),
+        "other records should be removed by --keep-sysroot"
     );
 }
 
@@ -1312,4 +1281,139 @@ fn gluon_check_library_using_library() {
         .expect("spawn gluon check");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "gluon check failed:\n{stderr}");
+}
+
+/// A second build with nothing changed spawns no rustc, with one worker
+/// and with several.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn noop_build_spawns_no_rustc() {
+    let Some(()) = require_rustc_or_skip("noop_build_spawns_no_rustc") else {
+        return;
+    };
+    for jobs in ["1", "8"] {
+        let (tmp, fixture) = setup_fixture();
+        let log = tmp.path().join("rustc-spawns.log");
+        let rustc = rustc_spawn_logger(tmp.path(), &log);
+        let build = || {
+            let _ = fs::remove_file(&log);
+            let out = gluon_command(&fixture)
+                .args(["-j", jobs, "build"])
+                .env("RUSTC", &rustc)
+                .output()
+                .expect("spawn gluon build");
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(out.status.success(), "-j{jobs} build failed:\n{stderr}");
+            fs::read_to_string(&log).unwrap_or_default()
+        };
+        assert!(!build().is_empty(), "-j{jobs}: cold build spawned no rustc");
+        let second = build();
+        assert!(
+            second.is_empty(),
+            "-j{jobs}: no-op build spawned rustc:\n{second}"
+        );
+    }
+}
+
+/// Warnings from a compile are printed again when a later build finds
+/// the crate fresh, as Cargo does.
+#[test]
+#[ignore]
+fn cached_build_replays_warnings() {
+    let Some(()) = require_rustc_or_skip("cached_build_replays_warnings") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
+    src.push_str("\nfn gluon_test_never_called() {}\n");
+    fs::write(&main_rs, src).expect("write main.rs");
+
+    let first = build_ok(&fixture, &[]);
+    assert!(
+        first.contains("gluon_test_never_called"),
+        "cold build did not print the warning:\n{first}"
+    );
+    let second = build_ok(&fixture, &[]);
+    assert_eq!(built_count(&second), 0, "no-op build rebuilt:\n{second}");
+    assert!(
+        second.contains("gluon_test_never_called"),
+        "cached build did not replay the warning:\n{second}"
+    );
+}
+
+/// `gluon -v build` names each rebuilt node and the input that made it
+/// stale.
+#[test]
+#[ignore]
+fn verbose_build_names_stale_reason() {
+    let Some(()) = require_rustc_or_skip("verbose_build_names_stale_reason") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    build_ok(&fixture, &[]);
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
+    src.push_str("\n// edited\n");
+    fs::write(&main_rs, src).expect("write main.rs");
+
+    let out = gluon_command(&fixture)
+        .args(["-v", "build"])
+        .output()
+        .expect("spawn gluon -v build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "gluon -v build failed:\n{stderr}");
+    let line = stderr
+        .lines()
+        .find(|l| l.contains("rebuilding crate kernel (x86_64-unknown-none, dev)"))
+        .unwrap_or_else(|| panic!("no stale reason for the kernel:\n{stderr}"));
+    assert!(
+        line.contains("main.rs changed"),
+        "stale reason does not name the edited file: {line}"
+    );
+    assert!(
+        !stderr.contains("rebuilding crate minimal_derive"),
+        "fresh proc macro reported as rebuilt:\n{stderr}"
+    );
+}
+
+/// A build directory from a Gluon that kept every record in
+/// `cache-manifest.json` is cleared once, with one note, and builds.
+/// `final/` and `esp/` directories survive.
+#[test]
+#[ignore]
+fn legacy_cache_manifest_is_removed_once() {
+    let Some(()) = require_rustc_or_skip("legacy_cache_manifest_is_removed_once") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    let build = fixture.join("build");
+    let old_dep = build.join("host/deps/libold-gluon-old.rlib");
+    let old_cross = build.join("cross/x86_64-unknown-none/dev/deps/libold.rlib");
+    let kept = build.join("cross/x86_64-unknown-none/dev/esp/boot/keep.txt");
+    for f in [&old_dep, &old_cross, &kept] {
+        fs::create_dir_all(f.parent().unwrap()).expect("mkdir");
+        fs::write(f, b"old").expect("write old artifact");
+    }
+    let manifest = build.join("cache-manifest.json");
+    fs::write(&manifest, br#"{"version":2,"rustc":{},"composite":{}}"#).expect("write manifest");
+
+    let first = build_ok(&fixture, &[]);
+    assert!(
+        first.contains("cache-manifest.json"),
+        "no migration note:\n{first}"
+    );
+    assert!(!manifest.exists(), "old manifest survived");
+    assert!(!old_dep.exists(), "old host artifact survived");
+    assert!(!old_cross.exists(), "old cross artifact survived");
+    assert!(kept.exists(), "esp/ was removed");
+    assert!(kernel_bin(&fixture).exists(), "kernel not built");
+
+    let second = build_ok(&fixture, &[]);
+    assert!(
+        !second.contains("cache-manifest.json"),
+        "migration note repeated:\n{second}"
+    );
+    assert_eq!(built_count(&second), 0, "second build rebuilt:\n{second}");
 }

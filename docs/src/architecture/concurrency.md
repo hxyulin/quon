@@ -3,32 +3,29 @@
 Gluon runs in two concurrent dimensions:
 
 - **Multi-process.** Two `gluon build` invocations against the same
-  project can race on the shared cache manifest. A scripted
+  project can race on the shared build directory. A scripted
   editor-on-save, a terminal rebuild, and a CI pre-commit hook can
   all hit the same project simultaneously.
 - **In-process.** A single `gluon build -j>1` runs many rustc
-  invocations in parallel, all consuming and producing entries in
-  the in-memory `Cache`.
+  invocations in parallel, each checking and writing its own
+  fingerprint records.
 
 Each dimension uses a different mechanism. Together they keep the
-cache consistent, the manifest uncorrupted, and per-node helpers
-safe from shared mutable state.
+records consistent and per-node helpers free of shared mutable state.
 
 ## Multi-process: advisory flock
 
-`CacheLock` is an advisory exclusive lock held on a sibling lockfile
-for the entire duration of a build:
-
-```
-<build_root>/cache-manifest.json       # the actual manifest
-<build_root>/cache-manifest.json.lock  # the lockfile (never read)
-```
+`CacheLock` is an advisory exclusive lock on `<build_root>/.lock`,
+held for the entire duration of a build. The file is never read or
+written.
 
 `CacheLock::acquire` is called once at the top of `build` and `clean`,
 held until the guard drops. While the lock is held, no other gluon
-process in the same project can read+modify+write the manifest.
-Concurrent builds serialise on the lock instead of clobbering each
-other.
+process in the same project can write outputs or records. Concurrent
+builds serialise on the lock instead of clobbering each other. One
+lock covers every driver, because `gluon check`, `gluon clippy` and
+`gluon build` share the sysroot, the fixed-host-profile units and the
+record directory.
 
 ### Acquisition strategy
 
@@ -44,15 +41,11 @@ The notice prevents the user from staring at a frozen terminal
 wondering why nothing is happening — the most common confusing
 failure mode of locking systems.
 
-### Why advisory and not the manifest itself?
+### Why a separate lockfile?
 
-We need to lock *across* the read and the write, with the manifest
-file being deleted/recreated by the atomic rename in between (see
-[cache architecture](./cache.md#atomic-persistence)). A lock on the
-manifest itself would be invalidated the moment `save_atomic` did
-its rename.
-
-A separate lockfile is also a good place to add liveness tags later
+Records are replaced by an atomic rename (see
+[cache architecture](./cache.md#records-on-disk)), so a lock on a
+record file would be lost at the rename. A separate lockfile is also a good place to add liveness tags later
 (PID, hostname, "this build is still running") if we ever want
 richer wait diagnostics. For now the file is just a coordination
 point — its contents are never read or written.
@@ -71,9 +64,8 @@ builder is in the middle of writing.
 
 ### Lockfile lifecycle
 
-The lockfile path is `<cache-manifest>.lock` so it's obviously a
-sibling and `gluon clean` (which removes the build dir) takes it
-down too. The held `File` is intentionally private — there's
+The lockfile lives in the build root, so `gluon clean` (which removes
+the build dir) takes it down too. The held `File` is intentionally private — there's
 nothing to read or write inside it; the file exists purely as a
 stable inode for the kernel's lock table.
 
@@ -81,23 +73,14 @@ stable inode for the kernel's lock table.
 descriptor would also drop the lock, so a failure to explicitly
 unlock is harmless.
 
-## Atomic manifest writes
+## Atomic record writes
 
-Multi-process safety also depends on atomic persistence. See
-[cache architecture](./cache.md#atomic-persistence) for the full
-write-temp + fsync + rename protocol. Two key properties:
-
-- **Truncation safety.** A crash mid-write can never leave a
-  truncated manifest. Worst case is the temp file is left orphaned;
-  a successful subsequent build cleans it up.
-- **Concurrent-temp safety.** The `<pid>.<nonce>` suffix on temp
-  filenames means concurrent processes (which the flock makes
-  impossible-in-practice but possible-in-theory if the lockfile is
-  bypassed or removed) can't clobber each other's writes.
-
-The flock and the atomic rename are layered: the flock prevents
-concurrent build logic; the atomic rename is the last-mile defence
-against truncation if the flock is somehow defeated.
+Each record is written to `<file>.tmp.<pid>.<nonce>` and renamed into
+place, so a reader never sees a partial record. There is no fsync: after
+a crash a record is the old one, the new one, or unparsable, and an
+unparsable record is stale, so the node reruns. The flock prevents
+concurrent build logic; the rename is the last-mile defence if the
+flock is somehow bypassed.
 
 ## In-process: result slots
 
@@ -144,18 +127,16 @@ list is sorted by `NodeId`, so two simultaneous failures are reported
 in the same order whichever finished first. Job output is still
 printed live, in completion order.
 
-`build_with_workers` saves the cache manifest after a failed build as
-well. A node records itself in the in-memory cache only after its
-outputs are complete, so the records of nodes that finished stay valid
-and those nodes do not rebuild next time.
+Each node writes its own record file when it finishes, after its
+outputs are complete. A failed or interrupted build therefore keeps
+the records of every node that finished, and those nodes do not
+rebuild next time.
 
-## Mutex poisoning
+## No shared locks
 
-The one in-process mutex left is the cache's (`CompileCtx::cache`).
-Callers convert a poisoned lock into `Error::Config("cache mutex
-poisoned")` rather than panicking, so a panic in one worker fails the
-build with a diagnostic instead of aborting. The lock is held only
-across in-memory record reads and writes, never across a rustc spawn.
+No in-process mutex guards the cache. Each node reads and writes only
+its own record files (an ESP node owns one per entry), and keys are
+unique per node, so two workers never touch the same file.
 
 ## Determinism interaction
 

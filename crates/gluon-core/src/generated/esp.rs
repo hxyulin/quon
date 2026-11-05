@@ -16,19 +16,18 @@
 //!
 //! ### Freshness
 //!
-//! Each `(esp_name, dest_path)` pair is keyed in the unified cache
-//! as `"esp:<esp_name>:<dest_path>"`. Inputs are the single source
-//! artefact's file fingerprint; aux_hash folds in the esp name,
-//! dest path, and source kind tag so a crate→file rename in
-//! `gluon.rs` would still invalidate. The helper walks every entry,
-//! calls `Cache::is_composite_fresh` per entry, copies the stale
-//! ones, and marks each Composite built. Same syscall budget as the
-//! old per-entry stamp file; same incremental-copy granularity.
+//! Each `(esp_name, dest_path)` pair has its own fingerprint record,
+//! keyed `esp:<esp_name>:<dest_path>`. The declared input is the
+//! source artifact; the command hashes the ESP name, dest path and
+//! source kind tag, so a crate→file rename in `gluon.rs` invalidates.
+//! The helper checks every entry, copies the stale ones, and records
+//! each one after its copy.
 
-use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
+use crate::cache::{Freshness, FreshnessQuery, RecordInput, hash_parts};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use gluon_model::{BuildModel, EspDef, Handle, ResolvedConfig};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -53,6 +52,7 @@ pub fn ensure_esp(
     esp_handle: Handle<EspDef>,
     artifacts: &dyn ArtifactLookup,
     stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
     let esp = model.esps.get(esp_handle).ok_or_else(|| {
         Error::Compile(format!(
@@ -115,35 +115,37 @@ pub fn ensure_esp(
     })?;
 
     let mut copied = 0usize;
+    let toolchain = ctx.toolchain();
+    let no_env = BTreeMap::new();
 
     for e in &entries {
         let dest_abs = esp_dir.join(e.dest_path);
-        let cache_key = format!("esp:{}:{}", esp.name, e.dest_path);
-        // aux_hash folds in the esp name, dest path, and source kind
-        // tag so a crate→file rename in gluon.rs would still invalidate
-        // even if the on-disk source path happened to coincide. ESP
-        // entries are crate-sourced today; if other source kinds appear,
-        // derive a per-source-kind tag here.
-        let aux = composite_aux_hash(&[esp.name.as_bytes(), e.dest_path.as_bytes(), b"crate"]);
-        let inputs = vec![e.source_path.clone()];
-
-        // Take the cache mutex only for the freshness query; release
-        // before any I/O so a slow copy can't starve other scheduler
-        // threads that need cache access.
-        {
-            let mut cache = ctx
-                .cache
-                .lock()
-                .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
-            let q = CompositeQuery {
-                key: &cache_key,
-                inputs: &inputs,
-                aux_hash: Some(aux),
-                output_path: &dest_abs,
-            };
-            if cache.is_composite_fresh(&q) {
-                continue;
-            }
+        let key = format!("esp:{}:{}", esp.name, e.dest_path);
+        // The command folds in the ESP name, dest path and source kind
+        // tag, so a crate→file rename in gluon.rs invalidates even if
+        // the on-disk source path happens to coincide. ESP entries are
+        // crate-sourced today; other source kinds need their own tag.
+        let command = hash_parts(
+            "gluon.esp-entry.v1",
+            &[esp.name.as_bytes(), e.dest_path.as_bytes(), b"crate"],
+        );
+        let declared = [e.source_path.clone()];
+        let outputs = [dest_abs.clone()];
+        let query = FreshnessQuery {
+            key: &key,
+            command,
+            toolchain,
+            declared: &declared,
+            outputs: &outputs,
+            command_env: &no_env,
+        };
+        match ctx.store.check(&query) {
+            Freshness::Fresh(_) => continue,
+            Freshness::Stale(reason) => ctx.report_stale(
+                stderr,
+                &format!("esp {} entry {}", esp.name, e.dest_path),
+                &reason,
+            ),
         }
 
         if let Some(parent) = dest_abs.parent() {
@@ -152,6 +154,7 @@ pub fn ensure_esp(
                 source: err,
             })?;
         }
+        let started_at = std::time::SystemTime::now();
         std::fs::copy(&e.source_path, &dest_abs).map_err(|err| Error::Io {
             path: e.source_path.clone(),
             source: err,
@@ -162,35 +165,19 @@ pub fn ensure_esp(
             "    Copied {} -> esp/{}/{}",
             e.source_name, esp.name, e.dest_path
         );
-
-        // Mark this entry built (in-memory only). The single
-        // `cache.save()` after the loop persists everything atomically;
-        // a mid-loop crash forfeits the run, mirroring the rustc-half
-        // all-or-nothing semantics. The per-entry mark vs deferred
-        // save split keeps the per-entry path cheap (no fsync per copy)
-        // while preserving the "stamp written after the work" invariant
-        // at the granularity of the whole `ensure_esp` call.
-        {
-            let mut cache = ctx
-                .cache
-                .lock()
-                .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
-            cache.mark_composite_built(CompositeRecord {
-                key: cache_key,
-                inputs,
-                aux_hash: Some(aux),
-                output_path: dest_abs,
-            })?;
-        }
-    }
-
-    // One save at the end — atomic-write semantics make this cheap.
-    {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Compile("cache mutex poisoned".into()))?;
-        cache.save()?;
+        // Each entry's record is written right after its copy, so a
+        // failure on a later entry keeps the earlier ones.
+        ctx.store.record(RecordInput {
+            key: &key,
+            command,
+            toolchain,
+            declared: &declared,
+            discovered: &[],
+            env: BTreeMap::new(),
+            outputs: &outputs,
+            started_at,
+            stderr: &[],
+        })?;
     }
 
     // If nothing changed, report this as a cache hit so the summary
@@ -201,7 +188,6 @@ pub fn ensure_esp(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, CrateDef, CrateType, EspEntry, GroupDef, ProjectDef, ResolvedConfig,
@@ -228,8 +214,7 @@ mod tests {
     fn make_ctx(tmp: &Path) -> CompileCtx {
         let layout = BuildLayout::new(tmp.join("build"), "t");
         std::fs::create_dir_all(tmp.join("build")).unwrap();
-        let cache = Cache::load(tmp.join("build/cache-manifest.json")).0;
-        CompileCtx::new(layout, Arc::new(fake_rustc_info()), cache)
+        CompileCtx::new(layout, Arc::new(fake_rustc_info()))
     }
 
     fn make_model_with_esp_two_entries(
@@ -438,23 +423,28 @@ mod tests {
         artifacts.insert(bl_h, source_path.clone());
 
         let mut out = Vec::<u8>::new();
-        let (esp_dir, was_cached) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (esp_dir, was_cached) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         assert!(!was_cached, "cold run must not report cached");
         let dest = esp_dir.join("EFI/BOOT/BOOTX64.EFI");
         assert!(dest.exists(), "dest file must exist: {}", dest.display());
         let dest_bytes = std::fs::read(&dest).unwrap();
         assert_eq!(dest_bytes, b"EFI\x00bootloader bytes");
-        // Freshness lives in the unified cache manifest (per-entry
-        // Composite key `esp:<esp_name>:<dest_path>`), not in a sidecar
-        // stamp file.
-        let cache = ctx.cache.lock().unwrap();
-        let keys: Vec<&String> = cache.composite_keys().collect();
+        // Each entry has its own record, not a sidecar stamp file.
         assert!(
-            keys.iter()
-                .any(|k| k.as_str() == "esp:default:EFI/BOOT/BOOTX64.EFI"),
-            "composite manifest must contain the per-entry ESP key; got {keys:?}"
+            ctx.store
+                .record_path("esp:default:EFI/BOOT/BOOTX64.EFI")
+                .exists(),
+            "the ESP entry must have its own record"
         );
     }
 
@@ -474,13 +464,29 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         // First run: cold
-        let (_dir, cached1) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (_dir, cached1) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(!cached1);
 
         // Second run: source unchanged → cached
-        let (_dir, cached2) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (_dir, cached2) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(cached2, "second run with unchanged source must be cached");
     }
 
@@ -499,7 +505,16 @@ mod tests {
         artifacts.insert(bl_h, source_path.clone());
 
         let mut out = Vec::<u8>::new();
-        let (esp_dir, _) = ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (esp_dir, _) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         // Mutate source content AND bump mtime. Filesystems can report
         // the same mtime for two writes within the same second, so we
@@ -507,7 +522,16 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(&source_path, b"v2-with-more-bytes").unwrap();
 
-        let (_, cached) = ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (_, cached) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(!cached, "changed source must trigger a re-copy");
         let dest_bytes = std::fs::read(esp_dir.join("EFI/BOOT/BOOTX64.EFI")).unwrap();
         assert_eq!(dest_bytes, b"v2-with-more-bytes");
@@ -531,7 +555,16 @@ mod tests {
         artifacts.insert(bl_h, source_path.clone());
 
         let mut out = Vec::<u8>::new();
-        let (esp_dir, _) = ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (esp_dir, _) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
 
         let stamp = esp_dir.join(".esp-stamp.json");
         assert!(
@@ -565,8 +598,16 @@ mod tests {
 
         let mut out = Vec::<u8>::new();
         // Cold run.
-        let (esp_dir, cold_cached) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (esp_dir, cold_cached) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(!cold_cached);
 
         // Capture dest_b's mtime before the second run.
@@ -580,8 +621,16 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(&src_a, b"alpha-2-with-more-bytes").unwrap();
 
-        let (_, second_cached) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (_, second_cached) = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(
             !second_cached,
             "esp must report not-cached when one entry changed"
@@ -614,7 +663,16 @@ mod tests {
         let artifacts = ArtifactMap::new();
 
         let mut out = Vec::<u8>::new();
-        let err = ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap_err();
+        let err = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut out,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
         let msg = format!("{err:?}");
         assert!(
             msg.contains("ArtifactMap") || msg.contains("DAG edge"),

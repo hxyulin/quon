@@ -8,11 +8,12 @@
 //! match the recorded ones returns the recorded hash; any mismatch
 //! rehashes the file and records the new fingerprint.
 //!
-//! Freshness rule: same as [`crate::cache::Cache::is_fresh`]. An edit
+//! Freshness rule: the mtime-and-size tier of
+//! [`crate::cache::FingerprintStore::check`]. An edit
 //! that keeps both the nanosecond mtime and the size is not detected.
 //! A missing, unreadable or corrupt memo file is treated as empty.
 
-use crate::cache::{FileFingerprint, sha256_file};
+use crate::cache::{FileStamp, sha256_file};
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use std::time::UNIX_EPOCH;
 
 pub(crate) struct FileHashes {
     path: PathBuf,
-    entries: BTreeMap<PathBuf, FileFingerprint>,
+    entries: BTreeMap<PathBuf, FileStamp>,
     dirty: bool,
 }
 
@@ -52,9 +53,8 @@ impl FileHashes {
         if let (Some(mtime_ns), Some(fp)) = (mtime_ns, self.entries.get(file))
             && fp.mtime_ns == mtime_ns
             && fp.size == meta.len()
-            && let Some(sha) = fp.sha256
         {
-            return Ok(sha);
+            return Ok(fp.sha256);
         }
 
         let sha = sha256_file(file).map_err(|e| match e {
@@ -69,10 +69,11 @@ impl FileHashes {
         if let Some(mtime_ns) = mtime_ns {
             self.entries.insert(
                 file.to_path_buf(),
-                FileFingerprint {
+                FileStamp {
                     mtime_ns,
                     size: meta.len(),
-                    sha256: Some(sha),
+                    sha256: sha,
+                    dirty: false,
                 },
             );
             self.dirty = true;

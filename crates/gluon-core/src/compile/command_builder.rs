@@ -53,6 +53,12 @@ pub(crate) struct UnitCommand {
     /// load) and executables write nothing, so their depfile stands
     /// in.
     pub(crate) output_path: PathBuf,
+    /// Files passed with `--extern` for direct deps and the config
+    /// crate. They are declared freshness inputs: a dep rebuilt with
+    /// different content reruns this unit, even where its path and so
+    /// this command are unchanged (cross executables, prebuilt
+    /// artifacts).
+    pub(crate) dep_outputs: Vec<PathBuf>,
 }
 
 /// Assemble the rustc invocation for `input.unit`.
@@ -120,6 +126,7 @@ fn build_command(
         driver.program(&ctx.rustc_info)
     };
     let mut builder = RustcCommandBuilder::new(&program);
+    let mut dep_outputs = Vec::new();
 
     builder.input(&unit.src);
     builder
@@ -172,6 +179,7 @@ fn build_command(
     {
         let config_extern_name = crate::generated::config_crate::config_crate_name(resolved);
         builder.extern_crate(&config_extern_name, config_path);
+        dep_outputs.push(config_path.to_path_buf());
     }
 
     // Executables produce no metadata anyone links against. Proc macros
@@ -208,6 +216,7 @@ fn build_command(
                     ))
                 })?;
                 builder.extern_crate(&dep.extern_name, path);
+                dep_outputs.push(path.to_path_buf());
             }
             DepTarget::Prebuilt {
                 path,
@@ -220,8 +229,10 @@ fn build_command(
                 let rmeta = path.with_extension("rmeta");
                 if path.extension().is_some_and(|e| e == "rlib") && rmeta.is_file() {
                     builder.extern_crate(&dep.extern_name, &rmeta);
+                    dep_outputs.push(rmeta);
                 }
                 builder.extern_crate(&dep.extern_name, path);
+                dep_outputs.push(path.clone());
                 search_dirs.extend(dirs.iter().cloned());
             }
             DepTarget::Missing { package } => {
@@ -330,6 +341,7 @@ fn build_command(
         builder,
         paths,
         output_path,
+        dep_outputs,
     })
 }
 

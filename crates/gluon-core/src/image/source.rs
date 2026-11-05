@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Tag identifying where an image entry's source came from. After
 /// Stage 5 the stamp file is gone, but this tag is folded into the
-/// composite entry's `aux_hash` so a crate→file rename in
+/// record's command hash so a crate→file rename in
 /// `gluon.rs` is still visible even if the resolved on-disk path
 /// happens to match.
 ///
@@ -26,10 +26,10 @@ pub enum StampSource {
 
 impl StampSource {
     /// Encode the variant as a stable byte string for inclusion in a
-    /// composite `aux_hash`. The encoding is `<tag>\0<payload>` —
-    /// length-prefixing happens at the `composite_aux_hash` level.
-    /// Used by `image/mod.rs` when building the image's composite
-    /// aux_hash from the per-entry source kinds.
+    /// command hash. The encoding is `<tag>\0<payload>` —
+    /// length-prefixing happens at the `hash_parts` level.
+    /// Used by `image/mod.rs` when building the image's command hash
+    /// from the per-entry source kinds.
     pub fn aux_bytes(&self) -> Vec<u8> {
         match self {
             StampSource::Crate { name } => {

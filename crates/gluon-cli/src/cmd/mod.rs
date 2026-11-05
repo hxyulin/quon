@@ -46,7 +46,7 @@ use gluon_core::config::{
 use gluon_core::model::{BuildModel, ResolvedConfig};
 use gluon_core::vendor as core_vendor;
 use gluon_core::{
-    BuildLayout, Cache, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model,
+    BuildLayout, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model,
     resolve_config,
 };
 use std::path::{Path, PathBuf};
@@ -140,11 +140,7 @@ pub fn build_context_at_for_driver(
     let rustc_info = Arc::new(
         RustcInfo::load_or_probe(&layout).context("failed to load or probe rustc metadata")?,
     );
-    let (cache, cache_warnings) = Cache::load(layout.cache_manifest());
-    for w in &cache_warnings {
-        eprintln!("{w}");
-    }
-    let ctx = CompileCtx::new(layout, rustc_info, cache);
+    let ctx = CompileCtx::new(layout, rustc_info);
 
     Ok(CmdContext {
         model,

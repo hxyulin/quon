@@ -8,42 +8,67 @@
 //!
 //! ### Fast path vs slow path
 //!
-//! Freshness is a Composite cache entry keyed `"sysroot:<target_name>"`;
-//! see `docs/src/architecture/cache.md` for the entry shape. The entry's
-//! `output_path` is the canonical `libcore-gluon-core.rlib` so the
-//! cache's existence check doubles as a "sysroot dir is still intact"
-//! sentinel — `rm -rf <sysroot>` forces a rebuild.
+//! Freshness is one fingerprint record keyed `sysroot:<target_name>`.
+//! Its command hashes what decides how every sysroot crate compiles:
+//! the target spec, the panic strategy and the rust-src path. Its
+//! declared inputs are the rustc binary and a custom target's JSON, and
+//! its outputs are the three rlibs, so `rm -rf <sysroot>` forces a
+//! rebuild.
 //!
-//! - **Fast path.** If the composite entry is fresh, return immediately
-//!   — no rustc spawn, no per-crate cache work. This is the common case
-//!   on every build after the first.
+//! - **Fast path.** If the record is fresh, return immediately — no
+//!   rustc spawn, no per-crate checks. This is the common case on every
+//!   build after the first.
 //! - **Slow path.** Otherwise compile the three sysroot crates in
-//!   dependency order (`core` → `compiler_builtins` → `alloc`), routing
-//!   each through the shared [`crate::cache::Cache`] so individual
-//!   crates can be skipped when their inputs haven't changed. After all
-//!   three succeed we record the composite entry and save the cache
-//!   once.
+//!   dependency order (`core` → `compiler_builtins` → `alloc`), each with
+//!   its own record, so a crate whose inputs did not change is skipped.
+//!   After all three succeed the node's record is written.
 //!
-//! If the build is interrupted before `mark_composite_built` runs, the
-//! next invocation simply finds no composite entry and re-enters the
-//! slow path, which is itself cache-driven and near-free on a clean
-//! tree.
+//! If the build is interrupted before the node's record is written, the
+//! next invocation re-enters the slow path, which is itself
+//! record-driven and near-free on a clean tree.
 //!
 //! `RUSTC_BOOTSTRAP=1` and `-Z force-unstable-if-unmarked` are set on
 //! every sysroot rustc invocation; see
 //! `docs/src/architecture/external-deps.md` for the rationale.
 
-use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
-use crate::compile::{CompileCtx, Emit, PostCompileStep, RustcCommandBuilder};
+use crate::cache::{Freshness, FreshnessQuery, RecordInput, hash_parts};
+use crate::compile::{CompileCtx, Emit, RustcCommandBuilder, RustcJob};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateType, Handle, TargetDef};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// The crates in every sysroot, in build order.
+const SYSROOT_CRATES: [&str; 3] = ["core", "compiler_builtins", "alloc"];
+
+/// Command hash of the sysroot node: everything that changes how the
+/// sysroot crates compile and is not a file input. The `v1` tag stands
+/// for the flags `build_sysroot_crate` passes; change it when they
+/// change, or the fast path keeps serving sysroots built the old way.
+fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] {
+    let rust_src = ctx
+        .rustc_info
+        .rust_src
+        .as_deref()
+        .map(|p| p.as_os_str().as_encoded_bytes())
+        .unwrap_or_default();
+    let panic = target.panic_strategy.map(|p| p.as_str()).unwrap_or("");
+    hash_parts(
+        "gluon.sysroot.v1",
+        &[
+            target.spec.as_bytes(),
+            &[u8::from(target.builtin)],
+            panic.as_bytes(),
+            rust_src,
+        ],
+    )
+}
 
 /// Ensure a usable custom sysroot exists for `target` and return its
 /// directory plus whether the result came from the cache fast-path.
 ///
 /// Returns `(ctx.layout.sysroot_dir(target), was_cached)` on success.
-/// `was_cached` is `true` when the `"sysroot:<target>"` composite cache
+/// `was_cached` is `true` when the `sysroot:<target>` record
 /// entry was fresh (no rustc spawned). See the module docs for the
 /// fast-path/slow-path split.
 ///
@@ -58,41 +83,35 @@ pub fn ensure_sysroot(
     let sysroot_dir = ctx.layout.sysroot_dir(target);
     let sysroot_lib_dir = ctx.layout.sysroot_lib_dir(target);
 
-    // Fast-path inputs. The Composite entry uses the rustc binary path
-    // (plus the target spec, for custom targets) as its file inputs — the cache layer's mtime+size+sha256
-    // fingerprinting catches toolchain swaps. The `aux_hash` rolls in
-    // the version_hash, which catches commit-hash bumps that share the
-    // same on-disk file fingerprint (e.g. a binary rebuilt at the same
-    // path with the same mtime+size). The `output_path` is the
-    // canonical libcore rlib (the same file `build_sysroot_crate("core",
-    // ...)` writes) so the cache layer's `output_path.exists()` check
-    // doubles as a sentinel: `rm -rf <sysroot>` forces a rebuild.
-    let core_rlib_sentinel = sysroot_lib_dir.join("libcore-gluon-core.rlib");
-    let aux = composite_aux_hash(&[&ctx.rustc_info.version_hash()]);
-    let cache_key = format!("sysroot:{}", target.name);
-    // A custom target spec changes how every sysroot crate compiles,
-    // and rustc's depfile does not list it, so it is an input too.
-    let mut inputs = vec![ctx.rustc_info.rustc_path.clone()];
-    inputs.extend(crate::compile::rustc::target_spec_file(
+    let rlibs: Vec<PathBuf> = SYSROOT_CRATES
+        .iter()
+        .map(|c| sysroot_lib_dir.join(format!("lib{c}-gluon-{c}.rlib")))
+        .collect();
+    let command = sysroot_command(ctx, target);
+    let toolchain = ctx.toolchain();
+    let key = format!("sysroot:{}", target.name);
+    let what = format!("sysroot {}", target.name);
+    // rustc's depfiles list neither the compiler nor a custom target
+    // spec, and both change how every sysroot crate compiles.
+    let mut declared = vec![ctx.rustc_info.rustc_path.clone()];
+    declared.extend(crate::compile::rustc::target_spec_file(
         &target.spec,
         target.builtin,
     ));
-
-    {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        let q = CompositeQuery {
-            key: &cache_key,
-            inputs: &inputs,
-            aux_hash: Some(aux),
-            output_path: &core_rlib_sentinel,
-        };
-        if cache.is_composite_fresh(&q) {
-            return Ok((sysroot_dir, true));
-        }
+    let no_env = BTreeMap::new();
+    let query = FreshnessQuery {
+        key: &key,
+        command,
+        toolchain,
+        declared: &declared,
+        outputs: &rlibs,
+        command_env: &no_env,
+    };
+    match ctx.store.check(&query) {
+        Freshness::Fresh(_) => return Ok((sysroot_dir, true)),
+        Freshness::Stale(reason) => ctx.report_stale(stderr_sink, &what, &reason),
     }
+    let started_at = std::time::SystemTime::now();
 
     // rust-src must be present before we can compile anything.
     let rust_src = match ctx.rustc_info.rust_src.as_ref() {
@@ -151,24 +170,18 @@ pub fn ensure_sysroot(
         stderr_sink,
     )?;
 
-    // Record the composite entry and persist the cache once, after all
-    // three crates succeeded. A mid-operation crash leaves no composite
-    // entry, which causes the next run to re-enter the slow path — and
-    // that path is itself cache-driven, so it's near-free on a clean
-    // tree.
-    {
-        let mut cache = ctx
-            .cache
-            .lock()
-            .map_err(|_| Error::Config("cache mutex poisoned".into()))?;
-        cache.mark_composite_built(CompositeRecord {
-            key: cache_key,
-            inputs,
-            aux_hash: Some(aux),
-            output_path: core_rlib_sentinel,
-        })?;
-        cache.save()?;
-    }
+    // The node's record goes last, after all three crates succeeded.
+    ctx.store.record(RecordInput {
+        key: &key,
+        command,
+        toolchain,
+        declared: &declared,
+        discovered: &[],
+        env: BTreeMap::new(),
+        outputs: &rlibs,
+        started_at,
+        stderr: &[],
+    })?;
 
     Ok((sysroot_dir, false))
 }
@@ -323,7 +336,7 @@ fn build_sysroot_crate(
 
     let cache_key = format!("sysroot:{}:{}", target.name, crate_name);
 
-    // Delegate the freshness → spawn → depfile → mark_built sequence to
+    // Delegate the check → spawn → depfile → record sequence to
     // the shared helper. Sysroot crates create their `sysroot_lib_dir`
     // once per target in `build_sysroot` above, so `out_dir_to_create`
     // is `None` here — there is nothing for the helper to mkdir.
@@ -334,44 +347,47 @@ fn build_sysroot_crate(
     let depfile_for_diag = depfile_path.clone();
     let (path, _was_cached) = crate::compile::run_compile_and_cache(
         ctx,
-        builder,
-        cache_key,
-        output_rlib,
-        depfile_path,
-        None,
-        Vec::new(),              // sysroot crates have no out-of-band inputs
-        Vec::new(),              // aux_outputs
-        None::<PostCompileStep>, // post_compile_step
-        Box::new(move |output, rendered| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "rustc failed while building sysroot crate '{}' for target '{}': exit={:?}",
-                    crate_name_fail,
-                    target_name_fail,
-                    output.status.code(),
-                ))
-                .with_note(format!(
-                    "stderr:\n{}",
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .with_note(format!("command: {rendered}")),
-            ])
-        }),
-        Box::new(move |e| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "built sysroot crate '{}' for target '{}' but its depfile at {} could not be read",
-                    crate_name_depfile,
-                    target_name_depfile,
-                    depfile_for_diag.display(),
-                ))
-                .with_note(format!("underlying error: {e}"))
-                .with_note(
-                    "the rlib is on disk but the cache was not updated; \
-                     the next run will re-spawn rustc for this crate",
-                ),
-            ])
-        }),
+        RustcJob {
+            what: format!("sysroot crate {crate_name} ({})", target.name),
+            builder,
+            key: cache_key,
+            output_path: output_rlib,
+            depfile_path,
+            out_dir: None,
+            declared: Vec::new(),
+            aux_outputs: Vec::new(),
+            post_compile_step: None,
+            rustc_fail: Box::new(move |output, rendered| {
+                Error::Diagnostics(vec![
+                    Diagnostic::error(format!(
+                        "rustc failed while building sysroot crate '{}' for target '{}': exit={:?}",
+                        crate_name_fail,
+                        target_name_fail,
+                        output.status.code(),
+                    ))
+                    .with_note(format!(
+                        "stderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                    .with_note(format!("command: {rendered}")),
+                ])
+            }),
+            depfile_fail: Box::new(move |e| {
+                Error::Diagnostics(vec![
+                    Diagnostic::error(format!(
+                        "built sysroot crate '{}' for target '{}' but its depfile at {} could not be read",
+                        crate_name_depfile,
+                        target_name_depfile,
+                        depfile_for_diag.display(),
+                    ))
+                    .with_note(format!("underlying error: {e}"))
+                    .with_note(
+                        "the rlib is on disk but the cache was not updated; \
+                         the next run will re-spawn rustc for this crate",
+                    ),
+                ])
+            }),
+        },
         stderr_sink,
     )?;
     Ok(path)
@@ -380,7 +396,6 @@ fn build_sysroot_crate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
     use crate::compile::{BuildLayout, RustcInfo};
     use std::sync::Arc;
     use std::time::Instant;
@@ -414,8 +429,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let layout = BuildLayout::new(tmp.path(), "sysroot-unit");
         let info = fake_rustc_info(PathBuf::from("/usr/bin/rustc"), None);
-        let cache = Cache::load(layout.cache_manifest()).0;
-        let ctx = CompileCtx::new(layout, Arc::new(info), cache);
+        let ctx = CompileCtx::new(layout, Arc::new(info));
 
         let target = make_target();
         let mut stderr_sink: Vec<u8> = Vec::new();
@@ -462,30 +476,9 @@ mod tests {
         // metadata() check.
         let real_path = which_binary("cat").unwrap_or_else(|| PathBuf::from("/bin/sh"));
         let info = fake_rustc_info(real_path.clone(), Some(PathBuf::from("/nope")));
-        let sysroot_lib_dir = layout.sysroot_lib_dir(&target);
-        std::fs::create_dir_all(&sysroot_lib_dir).expect("mkdir");
-        std::fs::write(sysroot_lib_dir.join("libcore-gluon-core.rlib"), b"")
-            .expect("write fake rlib");
-
-        // Pre-mark the sysroot composite entry as if a previous build
-        // succeeded with this rustc.
-        use crate::cache::{CompositeRecord, composite_aux_hash};
-        let manifest_path = layout.cache_manifest();
-        let mut cache = Cache::load(&manifest_path).0;
-        let aux = composite_aux_hash(&[&info.version_hash()]);
-        cache
-            .mark_composite_built(CompositeRecord {
-                key: format!("sysroot:{}", target.name),
-                inputs: vec![real_path.clone()],
-                aux_hash: Some(aux),
-                output_path: sysroot_lib_dir.join("libcore-gluon-core.rlib"),
-            })
-            .expect("mark");
-        cache.save().expect("save");
-
-        let cache = Cache::load(&manifest_path).0;
+        write_fake_rlibs(&layout, &target);
         let layout_for_check = layout.clone();
-        let ctx = CompileCtx::new(layout, Arc::new(info), cache);
+        let ctx = record_sysroot_for_test(layout, info, &target);
         let mut stderr_sink: Vec<u8> = Vec::new();
         let (_dir, was_cached) =
             ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
@@ -498,6 +491,72 @@ mod tests {
             "ensure_sysroot must not write a sidecar stamp file: {}",
             stamp.display()
         );
+    }
+
+    /// Changing the target's panic strategy changes how every sysroot
+    /// crate compiles, so a sysroot recorded for the old strategy is
+    /// stale. Here the slow path then fails on the missing rust-src,
+    /// which shows the record was not served.
+    #[test]
+    fn panic_strategy_change_invalidates_sysroot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = BuildLayout::new(tmp.path(), "panic-change");
+        let target = make_target();
+        let real_path = which_binary("cat").unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let info = fake_rustc_info(real_path.clone(), None);
+        write_fake_rlibs(&layout, &target);
+        let ctx = record_sysroot_for_test(layout, info, &target);
+        let mut stderr_sink = Vec::new();
+        let (_, cached) = ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
+        assert!(cached, "unchanged target must hit the record");
+
+        let mut abort = target.clone();
+        abort.panic_strategy = Some(gluon_model::PanicStrategy::Abort);
+        let result = ensure_sysroot(&ctx, &abort, &mut stderr_sink);
+        assert!(
+            !matches!(result, Ok((_, true))),
+            "sysroot built for another panic strategy was served from cache"
+        );
+    }
+
+    fn write_fake_rlibs(layout: &BuildLayout, target: &TargetDef) {
+        let dir = layout.sysroot_lib_dir(target);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        for c in SYSROOT_CRATES {
+            std::fs::write(dir.join(format!("lib{c}-gluon-{c}.rlib")), b"").expect("write rlib");
+        }
+    }
+
+    /// A context whose store holds a sysroot record for `target` as a
+    /// previous successful build would have written it.
+    fn record_sysroot_for_test(
+        layout: BuildLayout,
+        info: RustcInfo,
+        target: &TargetDef,
+    ) -> CompileCtx {
+        let ctx = CompileCtx::new(layout, Arc::new(info));
+        let rlibs: Vec<PathBuf> = SYSROOT_CRATES
+            .iter()
+            .map(|c| {
+                ctx.layout
+                    .sysroot_lib_dir(target)
+                    .join(format!("lib{c}-gluon-{c}.rlib"))
+            })
+            .collect();
+        ctx.store
+            .record(RecordInput {
+                key: &format!("sysroot:{}", target.name),
+                command: sysroot_command(&ctx, target),
+                toolchain: ctx.toolchain(),
+                declared: std::slice::from_ref(&ctx.rustc_info.rustc_path),
+                discovered: &[],
+                env: BTreeMap::new(),
+                outputs: &rlibs,
+                started_at: std::time::SystemTime::now(),
+                stderr: &[],
+            })
+            .expect("record");
+        ctx
     }
 
     /// End-to-end sysroot build against the host toolchain. Gated with
@@ -522,8 +581,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let layout = BuildLayout::new(tmp.path(), "sysroot-e2e");
         let target = make_target();
-        let cache = Cache::load(layout.cache_manifest()).0;
-        let ctx = CompileCtx::new(layout, Arc::new(info), cache);
+        let ctx = CompileCtx::new(layout, Arc::new(info));
 
         let mut stderr_sink: Vec<u8> = Vec::new();
         let (sysroot_dir, first_cached) =
@@ -534,20 +592,16 @@ mod tests {
             let rlib = lib_dir.join(format!("lib{crate_name}-gluon-{crate_name}.rlib"));
             assert!(rlib.exists(), "expected {rlib:?} to exist after build");
         }
-        // Cache manifest must contain the sysroot composite entry. The
-        // version_hash equivalent now lives inside the manifest's
-        // binary `aux_hash` and isn't byte-comparable in the same way
-        // the old stamp file was.
-        let manifest_bytes =
-            std::fs::read_to_string(ctx.layout.cache_manifest()).expect("read manifest");
         assert!(
-            manifest_bytes.contains(&format!("sysroot:{}", target.name)),
-            "expected sysroot composite entry in manifest"
+            ctx.store
+                .record_path(&format!("sysroot:{}", target.name))
+                .exists(),
+            "expected the sysroot node's record"
         );
 
         // Second call must hit the cache fast path and be effectively
         // instant. 100ms is a generous upper bound for a single
-        // composite-entry freshness check.
+        // record check.
         let start = Instant::now();
         let (sysroot_dir2, second_cached) =
             ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("second build");
@@ -583,9 +637,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let layout = BuildLayout::new(tmp.path(), "sysroot-downstream");
         let target = make_target();
-        let cache = Cache::load(layout.cache_manifest()).0;
         let rustc_path = info.rustc_path.clone();
-        let ctx = CompileCtx::new(layout, Arc::new(info), cache);
+        let ctx = CompileCtx::new(layout, Arc::new(info));
 
         let mut stderr_sink: Vec<u8> = Vec::new();
         let sysroot_dir = match ensure_sysroot(&ctx, &target, &mut stderr_sink) {

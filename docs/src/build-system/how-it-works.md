@@ -69,8 +69,9 @@ For each crate node the scheduler dispatches, Gluon:
 4. **Parses the depfile.** Rustc emits a `.d` dependency file listing
    every source file the crate touched. Gluon records these for future
    cache invalidation.
-5. **Records the result.** On success, the artifact path and freshness
-   metadata are written to the cache manifest.
+5. **Records the result.** On success, the crate's fingerprint record
+   (inputs, command hash, outputs, warnings) is written to
+   `build/.fingerprint/`.
 
 ## Key difference from Cargo
 

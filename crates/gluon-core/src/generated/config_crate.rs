@@ -30,7 +30,7 @@
 //! their own copy, and switching between them rebuilds nothing.
 
 use crate::compile::compile_utils::sanitise_crate_name;
-use crate::compile::{CompileCtx, Emit, PostCompileStep, RustcCommandBuilder};
+use crate::compile::{CompileCtx, Emit, RustcCommandBuilder, RustcJob};
 use crate::error::{Diagnostic, Error, Result};
 use crate::unit::Metadata;
 use gluon_model::{BuildModel, CrateType, Handle, ResolvedConfig, ResolvedValue, TargetDef};
@@ -197,10 +197,8 @@ pub(crate) fn config_crate_name(resolved: &ResolvedConfig) -> String {
 ///
 /// ### Cache integration
 ///
-/// Mirrors `sysroot::build_sysroot_crate` and `compile::compile_crate`:
-/// narrow lock acquire → `is_fresh` → drop; slow path spawns rustc then
-/// re-acquires narrowly to `mark_built`. The mutex is **never held across
-/// a rustc spawn**.
+/// Goes through `compile_and_cache` like every rustc node. The
+/// generated `lib.rs` is a declared input.
 pub fn ensure_config_crate(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -318,43 +316,47 @@ pub fn ensure_config_crate(
 
     let (output_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
-        builder,
-        cache_key,
-        output_path,
-        depfile_path,
-        Some(&out_dir),
-        Vec::new(),              // config crate has no out-of-band inputs
-        Vec::new(),              // aux_outputs
-        None::<PostCompileStep>, // post_compile_step
-        Box::new(move |output, rendered| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "rustc failed while building config crate '{}' for target '{}': exit={:?}",
-                    crate_name_fail,
-                    target_name_fail,
-                    output.status.code(),
-                ))
-                .with_note(format!(
-                    "stderr:\n{}",
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .with_note(format!("command: {rendered}")),
-            ])
-        }),
-        Box::new(move |e| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "built config crate '{}' but its depfile at {} could not be read",
-                    crate_name_depfile,
-                    depfile_for_diag.display(),
-                ))
-                .with_note(format!("underlying error: {e}"))
-                .with_note(
-                    "config crate rlib is on disk but cache not updated; \
+        RustcJob {
+            what: format!("config crate ({})", target.name),
+            builder,
+            key: cache_key,
+            output_path,
+            depfile_path,
+            out_dir: Some(&out_dir),
+            // The generated source; rustc's depfile lists it too.
+            declared: vec![src_path],
+            aux_outputs: Vec::new(),
+            post_compile_step: None,
+            rustc_fail: Box::new(move |output, rendered| {
+                Error::Diagnostics(vec![
+                    Diagnostic::error(format!(
+                        "rustc failed while building config crate '{}' for target '{}': exit={:?}",
+                        crate_name_fail,
+                        target_name_fail,
+                        output.status.code(),
+                    ))
+                    .with_note(format!(
+                        "stderr:\n{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    ))
+                    .with_note(format!("command: {rendered}")),
+                ])
+            }),
+            depfile_fail: Box::new(move |e| {
+                Error::Diagnostics(vec![
+                    Diagnostic::error(format!(
+                        "built config crate '{}' but its depfile at {} could not be read",
+                        crate_name_depfile,
+                        depfile_for_diag.display(),
+                    ))
+                    .with_note(format!("underlying error: {e}"))
+                    .with_note(
+                        "config crate rlib is on disk but cache not updated; \
              the next run will re-spawn rustc for this crate",
-                ),
-            ])
-        }),
+                    ),
+                ])
+            }),
+        },
         stderr_sink,
     )?;
 
