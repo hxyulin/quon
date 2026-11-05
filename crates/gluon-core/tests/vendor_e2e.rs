@@ -236,7 +236,15 @@ fn full_fixture_vendors_bitflags_from_crates_io() {
     // The bitflags entry must have a checksum (path deps don't).
     let bf = lock.packages.iter().find(|p| p.name == "bitflags").unwrap();
     assert!(bf.checksum.is_some());
-    assert!(bf.version.starts_with("2.11"), "version: {}", bf.version);
+    // `.version("2.11")` is a caret requirement, so any 2.x at or
+    // above 2.11 satisfies it; crates.io moves on over time.
+    let minor: u32 = bf
+        .version
+        .strip_prefix("2.")
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|m| m.parse().ok())
+        .unwrap_or_else(|| panic!("version: {}", bf.version));
+    assert!(minor >= 11, "version: {}", bf.version);
 
     // cargo vendor populated vendor/bitflags/ (modern cargo uses
     // bare crate names — no version suffix — when there's only one

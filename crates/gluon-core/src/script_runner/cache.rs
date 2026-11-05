@@ -8,14 +8,15 @@
 //!
 //! ## Cache key
 //!
-//! `sha256(rustc_version || sha256(gluon.rs) || sha256(gluon_config_rlib))`
+//! `sha256(rustc_version || sha256(gluon.rs) || sha256(gluon_config_rlib)
+//! || sha256(gluon_config_rmeta))`, the last only when cargo wrote one
 //!
 //! - `rustc_version` covers "the user upgraded their toolchain".
 //! - The script-source hash covers any edit to `gluon.rs`.
-//! - The rlib hash covers a rebuild of `gluon-config` (which would
-//!   change ABI/layout and require relinking the script).
+//! - The rlib and rmeta hashes cover a rebuild of `gluon-config`
+//!   (which would change ABI/layout and require relinking the script).
 //!
-//! Anything outside that triple — env vars, working directory, etc. —
+//! Anything outside those inputs — env vars, working directory, etc. —
 //! does NOT invalidate. That's deliberate: those don't affect the
 //! compiled binary's behaviour. Re-running a cached binary is free, so
 //! the cost of a missed invalidation is bounded.
@@ -51,7 +52,9 @@ pub fn ensure_script_binary(
     rlib: &RlibPaths,
 ) -> Result<PathBuf> {
     let cache_root = build_dir.join("script-runner").join("scripts");
-    let key = compute_key(script_path, &rustc_info.version, &rlib.gluon_config_rlib)?;
+    let mut gluon_config_files = vec![rlib.gluon_config_rlib.as_path()];
+    gluon_config_files.extend(rlib.gluon_config_rmeta.as_deref());
+    let key = compute_key(script_path, &rustc_info.version, &gluon_config_files)?;
     let entry_dir = cache_root.join(&key);
     let bin_path = entry_dir.join(SCRIPT_BIN_NAME);
 
@@ -174,7 +177,15 @@ fn write_transitive_fingerprint(entry_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn compute_key(script_path: &Path, rustc_version: &str, rlib: &Path) -> Result<String> {
+/// `gluon_config_files` is the rlib followed by its `.rmeta`, if any.
+/// The `.rmeta` is hashed too because on cargo 1.101+ it, not the
+/// stub rlib, carries the metadata (generic bodies, inline MIR) that
+/// the script compiles against.
+fn compute_key(
+    script_path: &Path,
+    rustc_version: &str,
+    gluon_config_files: &[&Path],
+) -> Result<String> {
     use crate::cache::sha256_file;
     use sha2::{Digest, Sha256};
 
@@ -188,14 +199,16 @@ fn compute_key(script_path: &Path, rustc_version: &str, rlib: &Path) -> Result<S
         other => other,
     })?;
     h.update(s);
-    let r = sha256_file(rlib).map_err(|e| match e {
-        Error::Io { source, .. } => Error::Io {
-            path: rlib.to_path_buf(),
-            source,
-        },
-        other => other,
-    })?;
-    h.update(r);
+    for file in gluon_config_files {
+        let r = sha256_file(file).map_err(|e| match e {
+            Error::Io { source, .. } => Error::Io {
+                path: file.to_path_buf(),
+                source,
+            },
+            other => other,
+        })?;
+        h.update(r);
+    }
     Ok(format!("{:x}", h.finalize()))
 }
 
@@ -209,7 +222,21 @@ fn compile_script(
     use std::process::Command;
 
     let extern_arg = format!("gluon_config={}", rlib.gluon_config_rlib.display());
-    let l_dependency = format!("dependency={}", rlib.deps_dir.display());
+    // Cargo 1.101+ rlibs carry only a metadata stub; rustc reads the
+    // real metadata from the `.rmeta`. Passing the same extern name
+    // twice is how cargo hands rustc both files.
+    let rmeta_extern_args = rlib.gluon_config_rmeta.iter().flat_map(|m| {
+        let mut arg = OsString::from("gluon_config=");
+        arg.push(m.as_os_str());
+        [OsString::from("--extern"), arg]
+    });
+    // One `-L dependency=` per directory: nightly cargo gives every
+    // unit its own output directory, so there is no single deps dir.
+    let l_dependency_args = rlib.dep_dirs.iter().flat_map(|dir| {
+        let mut arg = OsString::from("dependency=");
+        arg.push(dir.as_os_str());
+        [OsString::from("-L"), arg]
+    });
 
     // Pinning the depfile path explicitly (rather than letting rustc derive
     // `<crate-name>.d`) decouples the cache from any future `-C extra-filename`
@@ -243,8 +270,8 @@ fn compile_script(
         .arg("2024")
         .arg("--extern")
         .arg(&extern_arg)
-        .arg("-L")
-        .arg(&l_dependency)
+        .args(rmeta_extern_args)
+        .args(l_dependency_args)
         .arg("--crate-type")
         .arg("bin")
         .arg("--crate-name")
@@ -286,8 +313,8 @@ mod tests {
         fs::write(&s2, b"fn main() { /* different */ }").unwrap();
         fs::write(&rlib, b"fake rlib bytes").unwrap();
 
-        let k1 = compute_key(&s1, "rustc 1", &rlib).expect("k1");
-        let k2 = compute_key(&s2, "rustc 1", &rlib).expect("k2");
+        let k1 = compute_key(&s1, "rustc 1", &[&rlib]).expect("k1");
+        let k2 = compute_key(&s2, "rustc 1", &[&rlib]).expect("k2");
         assert_ne!(k1, k2, "different scripts must produce different keys");
     }
 
@@ -301,8 +328,8 @@ mod tests {
         fs::write(&r1, b"first").unwrap();
         fs::write(&r2, b"second").unwrap();
 
-        let k1 = compute_key(&s, "rustc 1", &r1).expect("k1");
-        let k2 = compute_key(&s, "rustc 1", &r2).expect("k2");
+        let k1 = compute_key(&s, "rustc 1", &[&r1]).expect("k1");
+        let k2 = compute_key(&s, "rustc 1", &[&r2]).expect("k2");
         assert_ne!(k1, k2, "different rlibs must produce different keys");
     }
 
@@ -314,8 +341,8 @@ mod tests {
         fs::write(&s, b"fn main() {}").unwrap();
         fs::write(&r, b"rlib").unwrap();
 
-        let k1 = compute_key(&s, "rustc 1.85", &r).expect("k1");
-        let k2 = compute_key(&s, "rustc 1.86", &r).expect("k2");
+        let k1 = compute_key(&s, "rustc 1.85", &[&r]).expect("k1");
+        let k2 = compute_key(&s, "rustc 1.86", &[&r]).expect("k2");
         assert_ne!(
             k1, k2,
             "different rustc versions must produce different keys"

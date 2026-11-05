@@ -292,17 +292,33 @@ pub(crate) fn build_rustc_command(
                 if let Some(parent) = path.parent() {
                     external_dep_dirs.insert(parent.to_path_buf());
                 }
+                if ext.target == gluon_model::TargetSpec::Host {
+                    external_dep_dirs.extend(model.external_search_dirs.iter().cloned());
+                }
+                // Nightly cargo (1.101+) writes rlibs with only a
+                // metadata stub and the real metadata in a sibling
+                // `.rmeta`. rustc needs both, and cargo passes both
+                // under the same extern name, so we do the same.
+                // Stable cargo writes the `.rmeta` too; passing it is
+                // harmless there.
+                let rmeta = path.with_extension("rmeta");
+                if path.extension().is_some_and(|e| e == "rlib") && rmeta.is_file() {
+                    builder.extern_crate(extern_name, &rmeta);
+                }
                 path.clone()
             }
         };
         builder.extern_crate(extern_name, &artifact_path);
     }
 
-    // Transitive vendored deps. Cargo built the user's external deps
-    // in one workspace, so any crate's transitive deps live alongside
-    // it in `target/release/deps/`. Adding `-L dependency=<dir>` lets
-    // rustc resolve those (e.g. `unicode-ident` behind `syn`) without
-    // forcing the user to declare them in `cfg.dependency()`.
+    // Transitive vendored deps. Adding `-L dependency=<dir>` lets
+    // rustc resolve a vendored crate's own deps (e.g. `unicode-ident`
+    // behind `syn`) without forcing the user to declare them in
+    // `cfg.dependency()`. Stable cargo keeps every unit in
+    // `target/release/deps/`, so the direct dep's parent was enough.
+    // Nightly cargo (1.101+) gives each unit its own directory, so
+    // host external deps also bring in every directory `gluon vendor`
+    // recorded in `gluon.lock` (`model.external_search_dirs`).
     //
     // Sorted iteration: BTreeSet is already deterministic, but state
     // it explicitly — argv order matters for cache-key stability.
@@ -327,11 +343,9 @@ pub(crate) fn build_rustc_command(
     // libs (rlibs in `build/cross/<target>/<profile>/<crate>/`)
     // need to be reachable; one BTreeSet handles both.
     //
-    // External deps don't need walking — vendored artifacts live
-    // alongside each other in cargo's `target/release/deps/`, so
-    // adding the one parent dir for each direct External (above)
-    // already exposes their transitive siblings (e.g. `unicode-ident`
-    // behind `syn`).
+    // External deps don't need walking — the search dirs added for
+    // them above already cover their transitive deps (e.g.
+    // `unicode-ident` behind `syn`).
     let mut transitive_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
     let mut visited: std::collections::BTreeSet<gluon_model::Handle<gluon_model::CrateDef>> =
         Default::default();

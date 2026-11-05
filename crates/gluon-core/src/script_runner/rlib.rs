@@ -6,25 +6,27 @@
 //! with rustc directly (we do not want to drag a `Cargo.toml` into every
 //! kernel project), we must hand rustc:
 //!
-//! - the absolute path to a `libgluon_config-<hash>.rlib`, and
-//! - a `-L dependency=<dir>` pointing at every transitive rlib gluon-config
-//!   needs to link against (`libgluon_model.rlib`, `libserde.rlib`, etc.).
+//! - the absolute path to a `libgluon_config-<hash>.rlib` and, where
+//!   cargo writes one, its sibling `.rmeta` (both go to `--extern`), and
+//! - one `-L dependency=<dir>` for every directory holding a transitive
+//!   library gluon-config links against (`libgluon_model`, `libserde`,
+//!   etc.).
 //!
 //! The simplest reliable way to obtain both is to delegate the build to
-//! cargo (`cargo build --release -p gluon-config --message-format=json`),
-//! parse the JSON output stream for the `compiler-artifact` message
-//! whose target is `gluon-config`, and pluck `filenames[0]` — the rlib —
-//! out of it. The deps directory is the rlib's parent.
+//! cargo (`cargo build --release -p gluon-config --message-format=json`)
+//! and read the `compiler-artifact` messages. Cargo emits one per unit,
+//! including units that were already fresh, so the stream always lists
+//! every library in the graph. See [`parse_cargo_output`] for how the
+//! paths are picked and why both cargo build-dir layouts work.
 //!
 //! ## Caching
 //!
-//! Cargo already incrementally caches the compile, but we still need a
-//! lightweight side-cache because the JSON we parse to *find* the rlib
-//! is only emitted on a cache miss; on a cargo cache hit the JSON
-//! stream is empty. Rather than scan `target/release/deps` heuristically
-//! for the latest matching rlib, we persist the resolved paths under
-//! `<build_dir>/script-runner/rlib/<hash>/manifest.json` so subsequent
-//! invocations skip cargo entirely and read the manifest directly.
+//! Cargo already incrementally caches the compile, but running it costs
+//! a cargo startup and a lock on the target dir. We persist the resolved
+//! paths under `<build_dir>/script-runner/rlib/<hash>/manifest.json` so
+//! subsequent invocations skip cargo entirely and read the manifest
+//! directly. A manifest is only trusted while every path it records
+//! still exists.
 //!
 //! Cache key is `sha256(rustc_version || sources_of(gluon-config) ||
 //! sources_of(gluon-model))`. Touching either crate's sources or the
@@ -41,6 +43,7 @@
 
 use crate::compile::RustcInfo;
 use crate::error::{Error, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Paths consumed by `cache::ensure_script_binary`'s rustc invocation.
@@ -48,9 +51,14 @@ use std::path::{Path, PathBuf};
 pub struct RlibPaths {
     /// Absolute path to `libgluon_config-<hash>.rlib`.
     pub gluon_config_rlib: PathBuf,
-    /// Absolute path to the deps directory containing all transitive rlibs.
-    /// Passed to rustc as `-L dependency=<this>`.
-    pub deps_dir: PathBuf,
+    /// Absolute path to the `.rmeta` beside the rlib, if cargo reported
+    /// one. Nightly cargo (1.101+) writes rlibs with only a metadata
+    /// stub, so rustc needs this file too; cargo itself passes both as
+    /// `--extern` when linking a binary.
+    pub gluon_config_rmeta: Option<PathBuf>,
+    /// Directories holding the transitive libraries, sorted and
+    /// deduplicated. Each is passed to rustc as `-L dependency=<dir>`.
+    pub dep_dirs: Vec<PathBuf>,
 }
 
 /// Build (or find-cached) the `gluon-config` rlib + deps directory.
@@ -74,13 +82,23 @@ pub fn ensure_gluon_config_rlib(build_dir: &Path, rustc_info: &RustcInfo) -> Res
     // then fail on with a confusing `No such file or directory`.
     if let Some(paths) = read_cached_manifest(&manifest_path)
         && paths.gluon_config_rlib.is_file()
-        && paths.deps_dir.is_dir()
+        && paths
+            .gluon_config_rmeta
+            .as_ref()
+            .is_none_or(|m| m.is_file())
+        && paths.dep_dirs.iter().all(|d| d.is_dir())
     {
         return Ok(paths);
     }
 
     // Cache miss: build via cargo and persist the resolved paths.
     let paths = run_cargo_build(&workspace)?;
+    if !paths.gluon_config_rlib.is_file() {
+        return Err(Error::Config(format!(
+            "cargo build -p gluon-config reported {} but the file does not exist",
+            paths.gluon_config_rlib.display()
+        )));
+    }
 
     std::fs::create_dir_all(&entry_dir).map_err(|e| Error::Io {
         path: entry_dir.clone(),
@@ -183,17 +201,22 @@ fn compute_cache_key(workspace_dir: &Path, rustc_version: &str) -> Result<String
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// On-disk shape of `manifest.json`. A manifest written by an older
+/// gluon (single `deps_dir` field) fails to deserialize, which
+/// [`read_cached_manifest`] treats as a cache miss.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CachedManifest {
     gluon_config_rlib: PathBuf,
-    deps_dir: PathBuf,
+    gluon_config_rmeta: Option<PathBuf>,
+    dep_dirs: Vec<PathBuf>,
 }
 
 impl From<RlibPaths> for CachedManifest {
     fn from(p: RlibPaths) -> Self {
         Self {
             gluon_config_rlib: p.gluon_config_rlib,
-            deps_dir: p.deps_dir,
+            gluon_config_rmeta: p.gluon_config_rmeta,
+            dep_dirs: p.dep_dirs,
         }
     }
 }
@@ -202,7 +225,8 @@ impl From<CachedManifest> for RlibPaths {
     fn from(m: CachedManifest) -> Self {
         Self {
             gluon_config_rlib: m.gluon_config_rlib,
-            deps_dir: m.deps_dir,
+            gluon_config_rmeta: m.gluon_config_rmeta,
+            dep_dirs: m.dep_dirs,
         }
     }
 }
@@ -251,32 +275,43 @@ fn run_cargo_build(workspace_dir: &Path) -> Result<RlibPaths> {
 }
 
 /// Walk the JSON message stream and locate (a) the `gluon-config` rlib
-/// path and (b) the directory that contains the *transitive* deps
-/// (`libgluon_model.rlib`, `libserde.rlib`, …) needed to link against
-/// it.
+/// to pass as `--extern` and (b) every directory that holds a library
+/// unit, for `-L dependency=`.
 ///
-/// ## Why these two paths come from different artefacts
+/// ## Cargo build-dir layouts
 ///
-/// Cargo emits two filenames for the package being explicitly built
-/// (`-p gluon-config` here):
+/// Stable cargo puts every unit in `<target>/release/deps/` and
+/// uplifts the explicitly built package to `<target>/release/`:
 ///
-/// - `<target>/release/libgluon_config.rlib`            (no hash; "public" artefact)
-/// - `<target>/release/deps/libgluon_config-<svh>.rmeta`(rmeta only)
+/// - `<target>/release/libgluon_config.rlib`        (uplifted, no hash)
+/// - `<target>/release/deps/libgluon_config-<h>.rmeta`
 ///
-/// The first one is sufficient as an `--extern` target. **But its
-/// parent directory is `<target>/release/`, NOT `<target>/release/deps/`**
-/// — so we cannot derive `deps_dir` from it. The transitive rlibs the
-/// user's `gluon.rs` needs (`libgluon_model-<svh>.rlib`, etc.) live in
-/// `<target>/release/deps/`.
+/// Nightly cargo (1.101+) gives each unit its own directory and no
+/// longer embeds full metadata in rlibs:
 ///
-/// The deps dir is reliably derivable from any *transitive* artefact's
-/// filename — those always land in `<target>/release/deps/`. We pick
-/// `gluon-model` because it's a guaranteed dep of `gluon-config` and
-/// always emitted as part of the build. If a future restructure removes
-/// gluon-model as a direct dep, this parser must be revisited.
+/// - `<target>/release/build/gluon-config/<h>/out/libgluon_config-<h>.rlib`
+/// - `<target>/release/build/gluon-config/<h>/out/libgluon_config-<h>.rmeta`
+///
+/// There the rlib holds only a metadata stub, and rustc reads the real
+/// metadata from the sibling `.rmeta`. An uplifted rlib has no sibling,
+/// so rustc rejects it with "only metadata stub found".
+///
+/// ## Selection rules
+///
+/// - The gluon-config rlib is the one next to its `.rmeta`: the
+///   `.rmeta` path from `filenames` with the extension swapped. Cargo
+///   writes that rlib in both layouts (stable hardlinks the uplifted
+///   copy from it). Both files are returned, and the caller passes
+///   both to `--extern` as cargo does. Only when cargo reports no
+///   `.rmeta` do we fall back to the first `.rlib` in `filenames`.
+/// - Dependency directories are the parents of every `.rmeta` and
+///   proc-macro dylib of every library unit. `.rmeta` files never sit
+///   in the uplift directory, so the stub-only uplifted rlib is never
+///   put on a search path. On stable this yields the single `deps/`
+///   directory; on nightly one directory per unit.
 fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
-    let mut gluon_config_rlib: Option<PathBuf> = None;
-    let mut deps_dir: Option<PathBuf> = None;
+    let mut gluon_config: Option<(PathBuf, Option<PathBuf>)> = None;
+    let mut dep_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let stdout_str = std::str::from_utf8(stdout)
         .map_err(|e| Error::Config(format!("cargo stdout was not utf-8: {e}")))?;
 
@@ -298,34 +333,51 @@ fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
         let is_lib = kinds
             .iter()
             .any(|k| matches!(k.as_str(), Some("lib") | Some("rlib")));
-        if !is_lib {
+        let is_proc_macro = kinds.iter().any(|k| k.as_str() == Some("proc-macro"));
+        if !is_lib && !is_proc_macro {
             continue;
         }
-        let filenames = v["filenames"].as_array().cloned().unwrap_or_default();
-        let first_rlib = filenames
-            .iter()
-            .filter_map(|f| f.as_str())
-            .find(|s| s.ends_with(".rlib"))
-            .map(PathBuf::from);
+        let filenames: Vec<PathBuf> = v["filenames"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| f.as_str())
+                    .map(PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_ext = |p: &Path, exts: &[&str]| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        };
+
+        for f in &filenames {
+            let search_ext: &[&str] = if is_proc_macro {
+                &["dylib", "so", "dll"]
+            } else {
+                &["rmeta"]
+            };
+            if has_ext(f, search_ext)
+                && let Some(parent) = f.parent()
+            {
+                dep_dirs.insert(parent.to_path_buf());
+            }
+        }
 
         // Cargo emits both `gluon-config` (the package name) and
         // `gluon_config` (the crate name) interchangeably across versions.
-        if name == "gluon-config" || name == "gluon_config" {
-            if let Some(p) = first_rlib.clone() {
-                gluon_config_rlib = Some(p);
+        if is_lib && (name == "gluon-config" || name == "gluon_config") {
+            let rmeta = filenames.iter().find(|f| has_ext(f, &["rmeta"]));
+            if let Some(m) = rmeta {
+                gluon_config = Some((m.with_extension("rlib"), Some(m.clone())));
+            } else if let Some(r) = filenames.iter().find(|f| has_ext(f, &["rlib"])) {
+                gluon_config = Some((r.clone(), None));
             }
-        }
-        // gluon-model is a transitive dep — its rlib reliably lives in
-        // `<target>/release/deps/`, which is the deps_dir we need.
-        if (name == "gluon-model" || name == "gluon_model")
-            && let Some(p) = first_rlib
-            && let Some(parent) = p.parent()
-        {
-            deps_dir = Some(parent.to_path_buf());
         }
     }
 
-    let gluon_config_rlib = gluon_config_rlib.ok_or_else(|| {
+    let (gluon_config_rlib, gluon_config_rmeta) = gluon_config.ok_or_else(|| {
         Error::Config(
             "cargo build did not produce a gluon-config rlib artifact \
              (no compiler-artifact message found)"
@@ -333,31 +385,10 @@ fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
         )
     })?;
 
-    // Fallback: if cargo didn't emit a gluon-model artifact (already
-    // fully cached → no recompile messages), derive the deps_dir from
-    // the gluon-config rlib's neighbour `deps/` directory. This is a
-    // documented stable cargo layout: `<target>/release/deps/` always
-    // exists alongside `<target>/release/libgluon_config.rlib`.
-    let deps_dir = match deps_dir {
-        Some(d) => d,
-        None => {
-            let parent = gluon_config_rlib
-                .parent()
-                .ok_or_else(|| Error::Config("rlib path has no parent directory".into()))?;
-            // If the rlib is already inside `deps/`, parent IS the deps dir.
-            // Otherwise (the public-artefact case at `<target>/release/`),
-            // append `deps`.
-            if parent.file_name().and_then(|n| n.to_str()) == Some("deps") {
-                parent.to_path_buf()
-            } else {
-                parent.join("deps")
-            }
-        }
-    };
-
     Ok(RlibPaths {
         gluon_config_rlib,
-        deps_dir,
+        gluon_config_rmeta,
+        dep_dirs: dep_dirs.into_iter().collect(),
     })
 }
 
@@ -366,56 +397,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_cargo_output_picks_gluon_config_rlib() {
+    fn parse_cargo_output_stable_deps_layout() {
+        // Stable cargo: every unit in `deps/`, the root package uplifted
+        // to `release/`. The uplifted rlib is ignored in favour of the
+        // hashed one next to the `.rmeta`, and `release/` is not a
+        // search path.
         let stream = r#"
-{"reason":"compiler-artifact","target":{"name":"serde","kind":["lib"]},"filenames":["/tmp/release/deps/libserde.rlib"]}
-{"reason":"compiler-artifact","target":{"name":"gluon-model","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_model-x.rlib","/tmp/release/deps/libgluon_model-x.rmeta"]}
-{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_config-abc.rlib","/tmp/release/deps/libgluon_config-abc.rmeta"]}
+{"reason":"compiler-artifact","target":{"name":"serde","kind":["lib"]},"filenames":["/t/release/deps/libserde-s.rlib","/t/release/deps/libserde-s.rmeta"]}
+{"reason":"compiler-artifact","target":{"name":"serde_derive","kind":["proc-macro"]},"filenames":["/t/release/deps/libserde_derive-d.dylib"]}
+{"reason":"compiler-artifact","target":{"name":"gluon-model","kind":["lib"]},"filenames":["/t/release/deps/libgluon_model-m.rlib","/t/release/deps/libgluon_model-m.rmeta"]}
+{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"]},"filenames":["/t/release/libgluon_config.rlib","/t/release/deps/libgluon_config-c.rmeta"]}
 {"reason":"build-finished","success":true}
 "#;
         let paths = parse_cargo_output(stream.as_bytes()).expect("parse ok");
         assert_eq!(
             paths.gluon_config_rlib,
-            PathBuf::from("/tmp/release/deps/libgluon_config-abc.rlib")
+            PathBuf::from("/t/release/deps/libgluon_config-c.rlib")
         );
-        // deps_dir comes from gluon-model's parent (a transitive dep is
-        // always emitted into `<target>/release/deps/`).
-        assert_eq!(paths.deps_dir, PathBuf::from("/tmp/release/deps"));
+        assert_eq!(
+            paths.gluon_config_rmeta,
+            Some(PathBuf::from("/t/release/deps/libgluon_config-c.rmeta"))
+        );
+        assert_eq!(paths.dep_dirs, vec![PathBuf::from("/t/release/deps")]);
     }
 
     #[test]
-    fn parse_cargo_output_handles_public_artifact_layout() {
-        // Real-world cargo output: gluon-config (the explicitly-built
-        // package) is emitted at `<target>/release/libgluon_config.rlib`
-        // (no hash, NOT inside deps/), while gluon-model lives in
-        // `<target>/release/deps/`. The deps_dir must point at the
-        // latter, not the former.
+    fn parse_cargo_output_per_unit_layout() {
+        // Nightly cargo 1.101+: each unit in its own directory, rlib
+        // beside its `.rmeta`. Every unit directory is a search path.
         let stream = r#"
-{"reason":"compiler-artifact","target":{"name":"gluon-model","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_model-8ae.rlib"]}
-{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"]},"filenames":["/tmp/release/libgluon_config.rlib"]}
+{"reason":"compiler-artifact","target":{"name":"build-script-build","kind":["custom-build"]},"filenames":["/t/release/build/serde/b/out/build_script_build"]}
+{"reason":"compiler-artifact","target":{"name":"serde","kind":["lib"]},"filenames":["/t/release/build/serde/s/out/libserde-s.rlib","/t/release/build/serde/s/out/libserde-s.rmeta"],"fresh":true}
+{"reason":"compiler-artifact","target":{"name":"serde_derive","kind":["proc-macro"]},"filenames":["/t/release/build/serde_derive/d/out/libserde_derive-d.dylib"],"fresh":true}
+{"reason":"compiler-artifact","target":{"name":"gluon_model","kind":["lib"]},"filenames":["/t/release/build/gluon-model/m/out/libgluon_model-m.rlib","/t/release/build/gluon-model/m/out/libgluon_model-m.rmeta"],"fresh":true}
+{"reason":"compiler-artifact","target":{"name":"gluon_config","kind":["lib"]},"filenames":["/t/release/build/gluon-config/c/out/libgluon_config-c.rlib","/t/release/build/gluon-config/c/out/libgluon_config-c.rmeta"],"fresh":true}
 {"reason":"build-finished","success":true}
 "#;
         let paths = parse_cargo_output(stream.as_bytes()).expect("parse ok");
         assert_eq!(
             paths.gluon_config_rlib,
-            PathBuf::from("/tmp/release/libgluon_config.rlib")
+            PathBuf::from("/t/release/build/gluon-config/c/out/libgluon_config-c.rlib")
         );
         assert_eq!(
-            paths.deps_dir,
-            PathBuf::from("/tmp/release/deps"),
-            "deps_dir must come from the transitive dep, not the public artefact's parent"
+            paths.gluon_config_rmeta,
+            Some(PathBuf::from(
+                "/t/release/build/gluon-config/c/out/libgluon_config-c.rmeta"
+            ))
         );
-    }
-
-    #[test]
-    fn parse_cargo_output_falls_back_to_sibling_deps_dir() {
-        // If only the gluon-config artifact is emitted (e.g. the rest
-        // were fully cached), derive deps_dir as `<parent>/deps`.
-        let stream = r#"
-{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"]},"filenames":["/tmp/release/libgluon_config.rlib"]}
-"#;
-        let paths = parse_cargo_output(stream.as_bytes()).expect("parse ok");
-        assert_eq!(paths.deps_dir, PathBuf::from("/tmp/release/deps"));
+        assert_eq!(
+            paths.dep_dirs,
+            vec![
+                PathBuf::from("/t/release/build/gluon-config/c/out"),
+                PathBuf::from("/t/release/build/gluon-model/m/out"),
+                PathBuf::from("/t/release/build/serde/s/out"),
+                PathBuf::from("/t/release/build/serde_derive/d/out"),
+            ]
+        );
     }
 
     #[test]

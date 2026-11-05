@@ -416,9 +416,10 @@ pub fn vendor_sync(
     // crates that depend on a path dep will fail with a "missing
     // artifact" diagnostic at compile time. Lepton-os doesn't use
     // path-sourced external deps, so this is fine for v1.
+    let mut search_dirs = Vec::new();
     if has_non_path_dep {
         let cargo_target_dir = workspace_dir.join("target");
-        let artifacts = cargo_cmd::run_cargo_build_vendor(
+        let built = cargo_cmd::run_cargo_build_vendor(
             &workspace_dir,
             &cargo_target_dir,
             &vendor_dir,
@@ -426,12 +427,14 @@ pub fn vendor_sync(
                 offline: opts.offline,
             },
         )?;
-        attach_artifact_paths(&mut packages, &artifacts);
+        attach_artifact_paths(&mut packages, &built.artifacts);
+        search_dirs = built.search_dirs.into_iter().collect();
     }
 
     let lock = VendorLock {
         version: VendorLock::CURRENT_VERSION,
         fingerprint,
+        search_dirs,
         packages,
     };
     lock.save_atomic(&lock_path)?;
@@ -668,6 +671,11 @@ pub fn auto_register_vendored_deps(
         };
         model.external_artifacts.insert(key, path.clone());
     }
+    // Only host-pipeline deps use cargo's output directories, so the
+    // search dirs are keyed implicitly under `Host`.
+    model
+        .external_search_dirs
+        .extend(lock.search_dirs.iter().cloned());
 
     if !diags.is_empty() {
         return Err(Error::Diagnostics(diags));
@@ -1102,6 +1110,7 @@ mod tests {
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
@@ -1148,6 +1157,7 @@ mod tests {
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
@@ -1188,6 +1198,7 @@ mod tests {
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
@@ -1229,6 +1240,7 @@ mod tests {
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),

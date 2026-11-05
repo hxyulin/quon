@@ -25,9 +25,24 @@
 //! error.
 
 use crate::error::{Diagnostic, Error, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// What [`run_cargo_build_vendor`] learned from cargo's message stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CargoBuildArtifacts {
+    /// Primary artifact per cargo target name. See
+    /// [`parse_cargo_build_artifacts`] for the selection rules.
+    pub artifacts: BTreeMap<String, PathBuf>,
+    /// Every directory that holds a library unit of the build, for
+    /// `-L dependency=` on consumers. Stable cargo puts all units in
+    /// `<target>/release/deps/`, so this is one directory there.
+    /// Nightly cargo (1.101+) gives each unit its own
+    /// `<target>/release/build/<pkg>/<hash>/out/`, so the parent of a
+    /// direct dep no longer exposes its transitive deps.
+    pub search_dirs: BTreeSet<PathBuf>,
+}
 
 /// Flags that modulate the `cargo vendor` invocation.
 #[derive(Debug, Clone, Copy, Default)]
@@ -132,7 +147,7 @@ pub fn run_cargo_build_vendor(
     target_dir: &Path,
     vendor_dir: &Path,
     flags: VendorFlags,
-) -> Result<BTreeMap<String, PathBuf>> {
+) -> Result<CargoBuildArtifacts> {
     let cargo = resolve_cargo();
 
     let mut cmd = Command::new(&cargo);
@@ -197,7 +212,8 @@ pub fn run_cargo_build_vendor(
 
 /// Parse the JSON-lines stdout of `cargo build --message-format=json`
 /// and extract the primary artifact path per `compiler-artifact`
-/// message of kind `lib` or `proc-macro`.
+/// message of kind `lib` or `proc-macro`, plus the set of directories
+/// those units live in.
 ///
 /// Pure function — split out from [`run_cargo_build_vendor`] so unit
 /// tests can exercise the parsing logic against canned cargo output
@@ -218,6 +234,11 @@ pub fn run_cargo_build_vendor(
 /// - When a target appears more than once (cargo can re-emit on
 ///   incremental rebuilds), the last entry wins. Cargo guarantees
 ///   the final artifact matches what's on disk.
+/// - `search_dirs` gets the parent of every selected artifact and
+///   every `.rmeta`, so a crate whose name collides (two versions of
+///   one crate) still has its directory on the search path. Cargo
+///   emits `compiler-artifact` for fresh units too, so a no-op
+///   rebuild still reports the full set.
 ///
 /// Malformed lines (non-JSON, missing fields) are silently skipped
 /// rather than erroring — `--message-format=json` interleaves
@@ -225,8 +246,8 @@ pub fn run_cargo_build_vendor(
 /// and cargo's vocabulary may grow over time. The selection criteria
 /// are positive (we only keep things we recognise), so unknown
 /// reasons are inherently safe.
-pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
-    let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
+pub fn parse_cargo_build_artifacts(stdout: &str) -> CargoBuildArtifacts {
+    let mut out = CargoBuildArtifacts::default();
     for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() || !line.starts_with('{') {
@@ -260,6 +281,13 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
         let Some(filenames) = value.get("filenames").and_then(|v| v.as_array()) else {
             continue;
         };
+        for f in filenames.iter().filter_map(|f| f.as_str()) {
+            if f.to_ascii_lowercase().ends_with(".rmeta")
+                && let Some(parent) = Path::new(f).parent()
+            {
+                out.search_dirs.insert(parent.to_path_buf());
+            }
+        }
         let pick: Option<PathBuf> = filenames.iter().filter_map(|f| f.as_str()).find_map(|p| {
             // Proc-macros are dylibs that the compiler dlopens, so the
             // platform-specific extension matters; libs are always
@@ -272,7 +300,10 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
             (proc_macro_ext || lib_ext).then(|| PathBuf::from(p))
         });
         if let Some(path) = pick {
-            out.insert(name.to_string(), path);
+            if let Some(parent) = path.parent() {
+                out.search_dirs.insert(parent.to_path_buf());
+            }
+            out.artifacts.insert(name.to_string(), path);
         }
     }
     out
@@ -404,7 +435,7 @@ mod tests {
         // readability. Real cargo output has many more fields; only
         // the ones we read are required.
         let stdout = r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#syn@2.0.117","target":{"name":"syn","kind":["lib"]},"filenames":["/tmp/build/release/deps/libsyn-abcdef.rlib","/tmp/build/release/deps/libsyn-abcdef.rmeta"]}"#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.get("syn"),
@@ -415,7 +446,7 @@ mod tests {
     #[test]
     fn parse_picks_dylib_for_proc_macro_artifact() {
         let stdout = r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106","target":{"name":"proc_macro2","kind":["proc-macro"]},"filenames":["/tmp/build/release/deps/libproc_macro2-xyz.dylib","/tmp/build/release/deps/libproc_macro2-xyz.rmeta"]}"#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert_eq!(map.len(), 1);
         // Note the underscore — cargo normalises the package's hyphen.
         assert_eq!(
@@ -430,7 +461,7 @@ mod tests {
     fn parse_handles_so_and_dll_for_proc_macro() {
         let so_line = r#"{"reason":"compiler-artifact","target":{"name":"foo","kind":["proc-macro"]},"filenames":["/x/libfoo-1.so"]}"#;
         let dll_line = r#"{"reason":"compiler-artifact","target":{"name":"bar","kind":["proc-macro"]},"filenames":["C:\\x\\bar-1.dll"]}"#;
-        let map = parse_cargo_build_artifacts(&format!("{so_line}\n{dll_line}\n"));
+        let map = parse_cargo_build_artifacts(&format!("{so_line}\n{dll_line}\n")).artifacts;
         assert_eq!(map.len(), 2);
         assert_eq!(
             map.get("foo").map(|p| p.to_string_lossy().into_owned()),
@@ -451,7 +482,7 @@ mod tests {
 {"reason":"compiler-message","package_id":"x","message":{"rendered":"warning: ..."}}
 {"reason":"build-finished","success":true}
 "#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert!(map.is_empty(), "got: {map:?}");
     }
 
@@ -462,7 +493,7 @@ mod tests {
         // consumer would ever --extern against it.
         let stdout = r#"{"reason":"compiler-artifact","target":{"name":"gluon-vendor-workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-x.rlib"]}
 {"reason":"compiler-artifact","target":{"name":"gluon_vendor_workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-y.rlib"]}"#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert!(map.is_empty(), "stub leaked: {map:?}");
     }
 
@@ -470,7 +501,7 @@ mod tests {
     fn parse_skips_bin_and_test_kinds() {
         let stdout = r#"{"reason":"compiler-artifact","target":{"name":"runme","kind":["bin"]},"filenames":["/tmp/runme"]}
 {"reason":"compiler-artifact","target":{"name":"my_test","kind":["test"]},"filenames":["/tmp/test-bin"]}"#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert!(map.is_empty(), "got: {map:?}");
     }
 
@@ -480,11 +511,41 @@ mod tests {
         // is the one that matches what's on disk now.
         let stdout = r#"{"reason":"compiler-artifact","target":{"name":"syn","kind":["lib"]},"filenames":["/tmp/old/libsyn-old.rlib"]}
 {"reason":"compiler-artifact","target":{"name":"syn","kind":["lib"]},"filenames":["/tmp/new/libsyn-new.rlib"]}"#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert_eq!(
             map.get("syn"),
             Some(&PathBuf::from("/tmp/new/libsyn-new.rlib")),
             "later entry must override earlier"
+        );
+    }
+
+    #[test]
+    fn parse_collects_search_dirs_per_unit_layout() {
+        // Nightly cargo 1.101+: one directory per unit. Every lib and
+        // proc-macro directory must be a search path; the scratch
+        // workspace stub and build scripts must not.
+        let stdout = r#"{"reason":"compiler-artifact","target":{"name":"build-script-build","kind":["custom-build"]},"filenames":["/t/release/build/syn/b/out/build_script_build"]}
+{"reason":"compiler-artifact","target":{"name":"unicode_ident","kind":["lib"]},"filenames":["/t/release/build/unicode-ident/u/out/libunicode_ident-u.rlib","/t/release/build/unicode-ident/u/out/libunicode_ident-u.rmeta"],"fresh":true}
+{"reason":"compiler-artifact","target":{"name":"syn","kind":["lib"]},"filenames":["/t/release/build/syn/s/out/libsyn-s.rlib","/t/release/build/syn/s/out/libsyn-s.rmeta"],"fresh":true}
+{"reason":"compiler-artifact","target":{"name":"derive","kind":["proc-macro"]},"filenames":["/t/release/build/derive/d/out/libderive-d.dylib"]}
+{"reason":"compiler-artifact","target":{"name":"gluon_vendor_workspace","kind":["lib"]},"filenames":["/t/release/build/gluon-vendor-workspace/w/out/libgluon_vendor_workspace-w.rlib","/t/release/build/gluon-vendor-workspace/w/out/libgluon_vendor_workspace-w.rmeta"]}"#;
+        let parsed = parse_cargo_build_artifacts(stdout);
+        assert_eq!(
+            parsed.artifacts.get("syn"),
+            Some(&PathBuf::from("/t/release/build/syn/s/out/libsyn-s.rlib"))
+        );
+        let dirs: Vec<&str> = parsed
+            .search_dirs
+            .iter()
+            .map(|p| p.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            dirs,
+            [
+                "/t/release/build/derive/d/out",
+                "/t/release/build/syn/s/out",
+                "/t/release/build/unicode-ident/u/out",
+            ]
         );
     }
 
@@ -495,7 +556,7 @@ not json at all
 {"reason":"compiler-artifact","target":{"name":"x","kind":["lib"]},"filenames":["/p/libx-1.rlib"]}
 
 "#;
-        let map = parse_cargo_build_artifacts(stdout);
+        let map = parse_cargo_build_artifacts(stdout).artifacts;
         assert_eq!(map.len(), 1);
         assert!(map.contains_key("x"));
     }

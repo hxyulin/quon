@@ -2,7 +2,7 @@ use crate::handle::{Arena, Handle, Named};
 use crate::kconfig::{ConfigOptionDef, ConfigValue, PresetDef};
 use crate::source::SourceSpan;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 pub(crate) fn default_true() -> bool {
@@ -45,6 +45,13 @@ pub struct BuildModel {
     /// would otherwise impose.
     #[serde(skip)]
     pub external_artifacts: BTreeMap<ExternalArtifactKey, PathBuf>,
+    /// Directories holding the host vendor build's libraries,
+    /// transitive deps included. `compile::command_builder` adds one
+    /// `-L dependency=` per entry to any crate with a host external
+    /// dep. Populated from `gluon.lock` alongside
+    /// [`Self::external_artifacts`]; runtime-only for the same reasons.
+    #[serde(skip)]
+    pub external_search_dirs: BTreeSet<PathBuf>,
     /// EFI System Partition declarations. Each entry describes a set of
     /// compiled artifacts to be assembled into a FAT-layout directory
     /// under `build/cross/<target>/<profile>/esp/<name>/`. Consumed by

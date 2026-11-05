@@ -20,7 +20,7 @@ gluon-model.workspace = true
 #    workspace's compile graph.
 # 2. The `script_runner` integration test compiles a `gluon.rs` that
 #    `use`s `gluon_config`; declaring the dep here ensures `cargo build`
-#    has produced the rlib in `target/release/deps/` before the test
+#    has produced the rlib under `target/release/` before the test
 #    spawns a fresh `cargo build -p gluon-config` (saving wall time and
 #    avoiding a cold compile in CI).
 #

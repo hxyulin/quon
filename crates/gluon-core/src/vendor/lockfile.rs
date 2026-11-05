@@ -160,6 +160,15 @@ pub struct VendorLock {
     /// see [`super::fingerprint`]. A mismatch between this and the
     /// live model means the user edited deps without re-vendoring.
     pub fingerprint: String,
+    /// Directories holding every library cargo built for the host
+    /// vendor workspace, transitive deps included. Consumers of a
+    /// host external dep get one `-L dependency=` per entry so rustc
+    /// can load the dep's own deps. Nightly cargo (1.101+) gives each
+    /// unit its own directory, so the parent of `artifact_path` alone
+    /// is not enough. Absent in lockfiles from older gluon versions
+    /// and in path-only models; additive, so no schema bump.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub search_dirs: Vec<PathBuf>,
     /// Vendored packages, serialised as a TOML array of tables.
     #[serde(rename = "package", default)]
     pub packages: Vec<VendorLockPackage>,
@@ -195,6 +204,7 @@ impl VendorLock {
         Self {
             version: Self::CURRENT_VERSION,
             fingerprint: fingerprint.into(),
+            search_dirs: Vec::new(),
             packages: Vec::new(),
         }
     }
@@ -278,6 +288,7 @@ impl VendorLock {
         let to_write = VendorLock {
             version: Self::CURRENT_VERSION,
             fingerprint: self.fingerprint.clone(),
+            search_dirs: self.search_dirs.clone(),
             packages: self.packages.clone(),
         };
 
@@ -367,6 +378,7 @@ mod tests {
         VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint: "sha256:deadbeef".into(),
+            search_dirs: vec![PathBuf::from("/build/target/release/deps")],
             packages: vec![
                 VendorLockPackage {
                     name: "bitflags".into(),
@@ -566,6 +578,7 @@ fingerprint = "sha256:xx"
         let lock = VendorLock {
             version: 42, // bogus
             fingerprint: "sha256:cafe".into(),
+            search_dirs: Vec::new(),
             packages: Vec::new(),
         };
         lock.save_atomic(&p).expect("save");
@@ -637,6 +650,7 @@ fingerprint = "sha256:xx"
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint: "sha256:x".into(),
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "syn".into(),
                 version: "2.0.117".into(),
@@ -659,6 +673,7 @@ fingerprint = "sha256:xx"
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint: "sha256:x".into(),
+            search_dirs: Vec::new(),
             packages: vec![VendorLockPackage {
                 name: "local".into(),
                 version: "0.1.0".into(),

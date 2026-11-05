@@ -48,12 +48,12 @@
 //!   a redundant rebuild rather than corruption (`std::fs::write` is
 //!   atomic on POSIX). Stage 1.7 follow-up may add explicit locking via
 //!   the existing `crate::cache::lock::CacheLock` infrastructure.
-//! - **`Cargo.lock` is hashed into the cache key but `target/deps/`
-//!   files are not.** If a transitive rlib in deps_dir is replaced with
+//! - **`Cargo.lock` is hashed into the cache key but cargo's transitive
+//!   library files are not.** If a transitive rlib in a dep dir is replaced with
 //!   a different SVH that happens to compile cleanly against the
 //!   user's `gluon.rs`, the cache may serve a stale binary. In practice
 //!   cargo's incremental rebuild keeps the deps in sync — the only path
-//!   where this matters is hand-deletion of files in `target/deps/`.
+//!   where this matters is hand-deletion of files under `target/`.
 //!
 //! ## Error surface
 //!
