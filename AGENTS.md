@@ -48,4 +48,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+For a change that touches building, caching or running, also run the
+end-to-end tests. They spawn rustc and are `#[ignore]`d by default.
+Use cargo-nextest, which runs them in parallel, plus the doctests it
+skips:
+
+```sh
+cargo nextest run --workspace --run-ignored all
+cargo test --workspace --doc
+```
+
 Commit messages follow the format in [CONTRIBUTING.md](CONTRIBUTING.md).
