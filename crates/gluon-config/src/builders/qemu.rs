@@ -88,6 +88,18 @@ impl<'cfg> QemuBuilder<'cfg> {
         self
     }
 
+    /// Treat QEMU exit status `code` as success in `gluon run`.
+    ///
+    /// QEMU's `isa-debug-exit` device makes QEMU exit with
+    /// `(value << 1) | 1`, where `value` is what the kernel wrote to the
+    /// port. A kernel that writes `0x10` therefore needs
+    /// `.success_exit_code(33)`. Once set, every other status, 0
+    /// included, is reported as a failure.
+    pub fn success_exit_code(mut self, code: i32) -> Self {
+        self.modify(|q| q.success_exit_code = Some(code));
+        self
+    }
+
     /// Set the boot mode. Accepts `"direct"`, `"uefi"`, or `"bios"` (exact
     /// case, mirroring the engine). Unknown values push a diagnostic and leave
     /// the field unchanged.
@@ -317,6 +329,24 @@ mod tests {
             ],
         );
         assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn success_exit_code_round_trips() {
+        let mut cfg = Config::new();
+        cfg.qemu("q").success_exit_code(33);
+        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
+        assert_eq!(q.success_exit_code, Some(33));
+        let json = serde_json::to_string(&cfg.raw).unwrap();
+        assert!(json.contains("\"success_exit_code\":33"), "got: {json}");
+    }
+
+    #[test]
+    fn success_exit_code_unset_by_default() {
+        let mut cfg = Config::new();
+        cfg.qemu("q");
+        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
+        assert_eq!(q.success_exit_code, None);
     }
 
     #[test]

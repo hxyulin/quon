@@ -30,6 +30,23 @@ or specified as an absolute path.
 | `.serial_stdio()`   | Redirect the serial port to the terminal        |
 | `.boot_mode(mode)`  | `"direct"` (default) or `"uefi"`                |
 | `.extra_args(list)` | Additional QEMU arguments passed verbatim       |
+| `.success_exit_code(n)` | Exit status that `gluon run` reports as success |
+
+### Exit status
+
+`gluon run` succeeds when QEMU exits with status 0. A kernel that stops
+QEMU through the `isa-debug-exit` device cannot produce 0: QEMU exits
+with `(value << 1) | 1`, where `value` is what the kernel wrote to the
+port. Set the status that means success:
+
+```rust
+cfg.qemu("qemu-system-x86_64")
+    .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+    .success_exit_code(33); // the kernel writes 0x10
+```
+
+With `.success_exit_code(n)` set, status `n` makes `gluon run` exit 0.
+Every other status, 0 included, fails the run.
 
 ## Running
 

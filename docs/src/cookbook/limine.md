@@ -42,7 +42,8 @@ fn main() -> Result<()> {
         .memory(256)
         .serial_stdio()
         .boot_mode("uefi")
-        .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+        .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+        .success_exit_code(33);
 
     cfg.emit()
 }
@@ -89,8 +90,9 @@ gluon run
 Gluon finds OVMF next to the QEMU binary, so `nix shell nixpkgs#qemu`
 is enough on Nix. The kernel prints the bootloader's name and version
 on the serial port, then writes `0x10` to the `isa-debug-exit` port.
-QEMU exits with status 33, `(0x10 << 1) | 1`, and `gluon run` reports
-"QEMU exited with status 33".
+QEMU exits with status 33, `(0x10 << 1) | 1`. The config sets
+`.success_exit_code(33)`, so `gluon run` exits 0. Any other status, such
+as 35 from the kernel's failure path, fails the run.
 
 ## Runnable example
 

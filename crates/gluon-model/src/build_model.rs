@@ -997,6 +997,13 @@ pub struct QemuDef {
     /// Defaults to `0x10` at resolve time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_success_code: Option<u8>,
+    /// QEMU process exit status that `gluon run` reports as success.
+    /// `None` means only status 0 succeeds. With `isa-debug-exit`, a
+    /// kernel that writes `v` makes QEMU exit with `(v << 1) | 1`, so a
+    /// kernel writing `0x10` needs `Some(33)`. When set, every other
+    /// status, 0 included, is a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_exit_code: Option<i32>,
     /// Seconds before a test run is killed. Applied at resolve time when
     /// the runner spawns QEMU for `gluon test`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

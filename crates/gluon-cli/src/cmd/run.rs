@@ -9,6 +9,7 @@ use crate::cli::RunArgs;
 use anyhow::{Result, bail};
 use gluon_core::Error as CoreError;
 use gluon_core::model::BootMode;
+use std::process::ExitStatus;
 use std::time::Duration;
 
 /// Execute the `gluon run` pipeline against the prepared context.
@@ -49,10 +50,20 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
 
     let status = gluon_core::run(&ctx.ctx, &ctx.model, &ctx.resolved, opts)?;
 
-    if args.dry_run || status.success() {
+    if args.dry_run {
         return Ok(());
     }
+    let success_exit_code = ctx.model.qemu.as_ref().and_then(|q| q.success_exit_code);
+    check_exit_status(status, success_exit_code)
+}
 
+/// Map QEMU's exit status to the result of `gluon run`.
+///
+/// With `success_exit_code` unset, only status 0 succeeds. With it set,
+/// only that status succeeds, so a kernel that leaves through
+/// `isa-debug-exit` can report success and every other status,
+/// including a plain 0 from a guest power-off, is a failure.
+fn check_exit_status(status: ExitStatus, success_exit_code: Option<i32>) -> Result<()> {
     // Distinguish three non-success cases so the user gets a
     // diagnostic that tells them what actually happened:
     //
@@ -72,5 +83,61 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
         }
     }
     let code = status.code().unwrap_or(-1);
-    bail!("QEMU exited with status {code}");
+    match success_exit_code {
+        None if code == 0 => Ok(()),
+        Some(expected) if code == expected => Ok(()),
+        Some(expected) => {
+            bail!("QEMU exited with status {code}, expected success status {expected}")
+        }
+        None => bail!("QEMU exited with status {code}"),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::check_exit_status;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    /// Build the status a process that called `exit(code)` reports.
+    fn exited(code: i32) -> ExitStatus {
+        ExitStatus::from_raw(code << 8)
+    }
+
+    #[test]
+    fn zero_succeeds_without_success_code() {
+        assert!(check_exit_status(exited(0), None).is_ok());
+    }
+
+    #[test]
+    fn nonzero_fails_without_success_code() {
+        let err = check_exit_status(exited(33), None).unwrap_err();
+        assert_eq!(err.to_string(), "QEMU exited with status 33");
+    }
+
+    #[test]
+    fn success_code_succeeds() {
+        assert!(check_exit_status(exited(33), Some(33)).is_ok());
+    }
+
+    #[test]
+    fn other_status_fails_with_success_code() {
+        let err = check_exit_status(exited(35), Some(33)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "QEMU exited with status 35, expected success status 33"
+        );
+    }
+
+    #[test]
+    fn zero_fails_with_success_code() {
+        assert!(check_exit_status(exited(0), Some(33)).is_err());
+    }
+
+    #[test]
+    fn signal_fails_with_success_code() {
+        // SIGKILL: the low 7 bits of a raw wait status hold the signal.
+        let err = check_exit_status(ExitStatus::from_raw(9), Some(33)).unwrap_err();
+        assert_eq!(err.to_string(), "QEMU killed by signal 9");
+    }
 }

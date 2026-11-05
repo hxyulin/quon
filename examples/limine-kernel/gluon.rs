@@ -8,8 +8,8 @@
 //
 // The kernel prints the bootloader's name and version on the serial
 // port, then exits QEMU through `isa-debug-exit` with status 33
-// ((0x10 << 1) | 1), which `gluon run` reports as "QEMU exited with
-// status 33". The kernel depends on the `limine` crate from
+// ((0x10 << 1) | 1). `success_exit_code(33)` makes `gluon run` treat
+// that status as success and exit 0. The kernel depends on the `limine` crate from
 // crates.io, declared in crates/kernel/Cargo.toml.
 
 use gluon_config::{Config, Result};
@@ -56,7 +56,8 @@ fn main() -> Result<()> {
         .cores(1)
         .serial_stdio()
         .boot_mode("uefi")
-        .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]);
+        .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+        .success_exit_code(33);
 
     cfg.emit()
 }
