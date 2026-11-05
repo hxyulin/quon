@@ -18,7 +18,9 @@ incompatibly, this document is the inventory of impact sites.
 `--emit=dep-info`.
 
 Rustc writes a Makefile-style fragment whose first target-line lists
-the output followed by every source file it compiled:
+the output followed by every source file it compiled. Gluon passes
+`-Zbinary-dep-depinfo`, so the line also lists every rlib, rmeta and
+proc-macro dylib rustc loaded:
 
 ```make
 target/foo.rlib: src/lib.rs src/util.rs path\ with\ space.rs

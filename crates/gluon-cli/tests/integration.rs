@@ -928,3 +928,50 @@ fn new_module_file_is_tracked() {
         "foo.rs edit did not rebuild:\n{stderr}"
     );
 }
+
+fn kernel_bin(fixture: &Path) -> PathBuf {
+    fixture.join("build/cross/x86_64-unknown-none/dev/final/kernel")
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Append a `#[used]` static to the kernel so `value` (a `&str`
+/// expression) ends up in the binary's bytes.
+fn embed_in_kernel(fixture: &Path, value: &str) {
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
+    src.push_str(&format!(
+        "\n#[used]\n#[no_mangle]\npub static GLUON_TEST_EMBED: &str = {value};\n"
+    ));
+    fs::write(&main_rs, src).expect("write main.rs");
+}
+
+/// Editing the proc macro must change the kernel binary. Output paths
+/// are fixed, so the kernel's argv does not change when the proc-macro
+/// dylib is rebuilt; the dylib itself must be a tracked input.
+#[test]
+#[ignore]
+fn proc_macro_edit_rebuilds_dependent() {
+    let Some(()) = require_rustc_or_skip("proc_macro_edit_rebuilds_dependent") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    embed_in_kernel(&fixture, "HELLO");
+    build_ok(&fixture, &[]);
+    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
+    assert!(contains_bytes(&bin, b"hello"));
+
+    let pm = fixture.join("crates/proc_macro/src/lib.rs");
+    let src = fs::read_to_string(&pm).expect("read proc macro");
+    fs::write(&pm, src.replace("\\\"hello\\\"", "\\\"proc-macro-v2\\\""))
+        .expect("write proc macro");
+
+    build_ok(&fixture, &[]);
+    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
+    assert!(
+        contains_bytes(&bin, b"proc-macro-v2"),
+        "kernel binary does not reflect the proc-macro edit"
+    );
+}

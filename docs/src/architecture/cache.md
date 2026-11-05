@@ -166,9 +166,18 @@ understands the segments, and only equality is ever checked.
 ## rustc dep-info inputs
 
 Rustc's `--emit=dep-info` produces a Makefile fragment whose first
-target-line lists every source file the crate compiled. Gluon parses
-that file (see `cache::depinfo`) into the `sources` slice for
-`FreshnessQuery` / `BuildRecord`. The parser only handles the subset
+target-line lists every source file the crate compiled. Gluon also
+passes `-Zbinary-dep-depinfo` whenever it asks for dep-info, so the
+same line lists every rlib, rmeta and proc-macro dylib rustc loaded,
+sysroot crates included. Gluon parses that file (see `cache::depinfo`)
+into the `sources` slice for `FreshnessQuery` / `BuildRecord`.
+
+The binary dependencies matter because output paths are fixed by
+`-C extra-filename=-gluon-<name>`. A rebuilt dependency is written to
+the same path, so the dependent's argv hash does not change. Tracking
+the dependency's file makes its new content invalidate the dependent.
+A dependency rebuilt to identical bytes passes the hash fallback and
+does not cascade. The parser only handles the subset
 of Make syntax rustc actually emits — see
 [external dependencies](./external-deps.md) for the format details.
 
