@@ -16,7 +16,8 @@
 //! - the already-assembled [`RustcCommandBuilder`] (consumed into a
 //!   [`std::process::Command`] internally),
 //! - the expected output path and depfile path,
-//! - the cache key and precomputed argv hash,
+//! - the cache key (the argv hash is computed here from the builder and
+//!   the toolchain identity, see [`rustc_cache_hash`]),
 //! - two small closures that build the per-site error diagnostics (rustc
 //!   exit failure headline, depfile-parse failure diagnostic),
 //! - the optional list of `aux_outputs` (sidecar files that must also
@@ -61,8 +62,8 @@
 //! keep its existing error text verbatim — behaviour parity with the
 //! pre-extraction code was the explicit goal of C4a.
 
-use crate::cache::{BuildRecord, DepInfo, FreshnessQuery, parse_depfile};
-use crate::compile::{CompileCtx, RustcCommandBuilder};
+use crate::cache::{BuildRecord, DepInfo, FreshnessQuery, parse_depfile, sha256_bytes};
+use crate::compile::{CompileCtx, RustcCommandBuilder, RustcInfo};
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -123,7 +124,6 @@ pub(crate) type PostCompileStep = Box<dyn FnOnce() -> Result<()>>;
 pub(crate) fn compile_and_cache(
     ctx: &CompileCtx,
     builder: RustcCommandBuilder,
-    argv_hash: [u8; 32],
     cache_key: String,
     output_path: PathBuf,
     depfile_path: PathBuf,
@@ -140,6 +140,7 @@ pub(crate) fn compile_and_cache(
     // way as caller-supplied extra sources.
     let mut extra_sources = extra_sources;
     extra_sources.extend(builder.file_inputs());
+    let argv_hash = rustc_cache_hash(&builder, &ctx.rustc_info);
 
     // Seed the source list from the previous run's depfile if it exists.
     // On a cold build this is empty — the cache entry is also missing,
@@ -265,6 +266,21 @@ pub(crate) fn compile_and_cache(
     }
 
     Ok((output_path, false))
+}
+
+/// Cache key hash for a rustc invocation: the builder's argv hash plus
+/// the toolchain identity.
+///
+/// The argv hash covers the rustc *path* only. A toolchain upgrade that
+/// keeps the path (rustup updating `nightly` in place) changes the
+/// compiler without changing argv, so the version hash is mixed in
+/// here, once, for every rustc node.
+pub(crate) fn rustc_cache_hash(builder: &RustcCommandBuilder, info: &RustcInfo) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(96);
+    buf.extend_from_slice(b"gluon.rustc-node.v1\0");
+    buf.extend_from_slice(&builder.hash());
+    buf.extend_from_slice(&info.version_hash());
+    sha256_bytes(&buf)
 }
 
 /// Values the next rustc run would see for each env var in `names`:

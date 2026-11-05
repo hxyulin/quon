@@ -542,7 +542,6 @@ fn dispatch_vendor_crate(
             build.crate_id.name,
         ))
     })?;
-    let argv_hash = builder.hash();
     let cache_key = build_vendor_cache_key(model, resolved, build, &ctx.layout)?;
 
     // --- Cache + spawn ---
@@ -563,7 +562,6 @@ fn dispatch_vendor_crate(
     let (out_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
         builder,
-        argv_hash,
         cache_key,
         output_path,
         depfile_path,

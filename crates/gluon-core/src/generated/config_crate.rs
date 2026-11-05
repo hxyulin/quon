@@ -286,7 +286,6 @@ pub fn ensure_config_crate(
         .raw_arg(format!("extra-filename={extra_filename}"));
 
     // --- Cache integration (delegated to compile::compile_and_cache) ---
-    let argv_hash = builder.hash();
     let cache_key = format!("config_crate:{}:{}", crate_name, target.name);
 
     let crate_name_fail = crate_name.clone();
@@ -297,7 +296,6 @@ pub fn ensure_config_crate(
     let (output_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
         builder,
-        argv_hash,
         cache_key,
         output_path,
         depfile_path,

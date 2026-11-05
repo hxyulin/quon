@@ -321,7 +321,6 @@ fn build_sysroot_crate(
         .raw_arg("-C")
         .raw_arg(format!("extra-filename={extra_filename}"));
 
-    let argv_hash = builder.hash();
     let cache_key = format!("sysroot:{}:{}", target.name, crate_name);
 
     // Delegate the freshness → spawn → depfile → mark_built sequence to
@@ -336,7 +335,6 @@ fn build_sysroot_crate(
     let (path, _was_cached) = crate::compile::run_compile_and_cache(
         ctx,
         builder,
-        argv_hash,
         cache_key,
         output_rlib,
         depfile_path,

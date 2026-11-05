@@ -112,7 +112,6 @@ struct CompileContext {
     /// step without re-resolving the `CrateDef` from the model.
     crate_type: CrateType,
     cache_key: String,
-    argv_hash: [u8; 32],
     builder: RustcCommandBuilder,
     extra_sources: Vec<PathBuf>,
 }
@@ -138,7 +137,6 @@ fn prepare_compile_context(
     })?;
 
     let (builder, output_path, depfile_path) = build_rustc_command(ctx, input)?;
-    let argv_hash = builder.hash();
     let cache_key = build_cache_key(&ctx.layout, model, resolved, crate_def, crate_ref)?;
 
     // `out_dir` must exist on disk before rustc spawns; the
@@ -175,7 +173,6 @@ fn prepare_compile_context(
         debug_elf_path,
         crate_type: crate_def.crate_type,
         cache_key,
-        argv_hash,
         builder,
         extra_sources,
     })
@@ -281,7 +278,6 @@ pub fn compile(
     crate::compile::run_compile_and_cache(
         ctx,
         cc.builder,
-        cc.argv_hash,
         cc.cache_key,
         cc.output_path,
         cc.depfile_path,
@@ -1351,7 +1347,8 @@ mod tests {
             },
         )
         .unwrap();
-        let argv_hash = builder.hash();
+        let argv_hash =
+            crate::compile::compile_and_cache::rustc_cache_hash(&builder, &ctx_for_hash.rustc_info);
         drop(ctx_for_hash); // release the in-memory cache
 
         // Create the output file so output_path.exists() is true in is_fresh.
@@ -1984,6 +1981,71 @@ mod tests {
         assert!(
             std::fs::metadata(&output_path).unwrap().len() > 0,
             "rlib must be non-empty"
+        );
+    }
+
+    /// A rustc upgrade at the same path (same argv) must rebuild user
+    /// crates. Gated with `#[ignore]` because it spawns rustc.
+    #[test]
+    #[ignore]
+    fn e2e_rustc_version_change_rebuilds_host_crate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("crates/trivial/src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), b"pub fn hi() {}").unwrap();
+
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("host", "x86_64-unknown-linux-gnu", true),
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "trivial".into(),
+                path: "crates/trivial".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Lib,
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, tmp.path().to_path_buf());
+        let crate_ref = host_ref(ch, th);
+        let artifacts = ArtifactMap::new();
+        let layout = BuildLayout::new(tmp.path().join("build"), "e2e");
+        std::fs::create_dir_all(layout.root()).unwrap();
+
+        // Each run loads the cache from disk with the given toolchain
+        // identity, compiles, and saves.
+        let run = |info: RustcInfo| -> bool {
+            let cache = Cache::load(layout.cache_manifest()).0;
+            let ctx = CompileCtx::new(layout.clone(), Arc::new(info), cache);
+            let mut stderr_sink = Vec::new();
+            let (_, was_cached) = compile(
+                &ctx,
+                CompileCrateInput {
+                    model: &model,
+                    resolved: &resolved,
+                    crate_ref: &crate_ref,
+                    artifacts: &artifacts,
+                    sysroot_dir: None,
+                },
+                &mut stderr_sink,
+            )
+            .expect("compile should succeed");
+            ctx.cache.lock().unwrap().save().unwrap();
+            was_cached
+        };
+
+        let info = RustcInfo::probe().expect("probe rustc");
+        assert!(!run(info.clone()), "cold build must compile");
+        assert!(run(info.clone()), "same toolchain must hit the cache");
+
+        let mut upgraded = info;
+        upgraded.version.push_str(" (upgraded)");
+        assert!(
+            !run(upgraded),
+            "a different rustc version at the same path must rebuild"
         );
     }
 }

@@ -195,7 +195,10 @@ of Make syntax rustc actually emits — see
 ## Canonical rustc-flag token order
 
 The cache key for a rustc compile is `hash_argv` over the assembled
-argv. Any reordering of the flag set changes the hash and invalidates
+argv, combined with `RustcInfo::version_hash` in
+`compile_and_cache::rustc_cache_hash`. The argv only names the rustc
+path, so without the version hash a toolchain upgraded in place would
+keep every crate cached. Any reordering of the flag set changes the hash and invalidates
 every existing cache entry, so the order is fixed:
 
 ```
