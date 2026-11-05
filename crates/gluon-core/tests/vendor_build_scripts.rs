@@ -7,6 +7,9 @@
 //!
 //! The build spawns rustc and builds a sysroot, so it is `#[ignore]`d
 //! like the other build tests.
+//!
+//! The tests behind the `network-tests` feature vendor real crates
+//! (zerocopy, bytemuck_derive and the syn stack) from crates.io.
 
 use gluon_core::compile::BuildLayout;
 use gluon_model::TargetSpec;
@@ -223,4 +226,161 @@ fn vendored_build_scripts_run_and_rerun_only_when_their_inputs_change() {
     // unchanged output leaves the owner fresh.
     p.edit("hello-derive/README.md", "edited\n");
     assert_eq!(p.build().0, 1, "only hello-derive's run");
+}
+
+// ------------------------------------------------------------------
+// Network-gated: real crates.io packages through `cargo vendor`.
+// ------------------------------------------------------------------
+
+/// Copy `fixture`, optionally install `gluon_file` as its `gluon.rs`,
+/// vendor its cross deps from crates.io, and build it. Returns the
+/// project root, or `None` when the toolchain cannot build sysroots.
+#[cfg(feature = "network-tests")]
+fn vendor_and_build(
+    tmp: &Path,
+    fixture: &str,
+    gluon_file: Option<&str>,
+    prepare: impl FnOnce(&Path),
+) -> Option<PathBuf> {
+    match gluon_core::RustcInfo::probe() {
+        Ok(info) if info.rust_src.is_some() => {}
+        _ => {
+            eprintln!("skipped: needs rustc with the rust-src component");
+            return None;
+        }
+    }
+    let root = tmp.join(fixture);
+    copy_dir_recursive(&fixture_dir(fixture), &root);
+    if let Some(file) = gluon_file {
+        fs::copy(root.join(file), root.join("gluon.rs")).expect("install gluon.rs");
+    }
+    prepare(&root);
+    let model = gluon_core::load_build_model(&root).expect("load_build_model");
+    let resolved =
+        gluon_core::resolve_config(&model, "dev", None, &root, None).expect("resolve_config");
+    let layout = BuildLayout::new(root.join("build"), fixture);
+    gluon_core::vendor::cross::populate_cross_vendor_workspaces(
+        &model,
+        &layout,
+        gluon_core::vendor::VendorOptions::default(),
+    )
+    .expect("cargo vendor (network)");
+    let rustc_info = Arc::new(gluon_core::RustcInfo::load_or_probe(&layout).expect("probe"));
+    let ctx = gluon_core::CompileCtx::new(layout, rustc_info);
+    gluon_core::build_with_workers(&ctx, &model, &resolved, 4).expect("gluon build");
+    Some(root)
+}
+
+/// The host build scripts of the syn stack ran, and none of it was
+/// built for the target.
+#[cfg(feature = "network-tests")]
+fn assert_syn_stack_is_host_only(build: &Path) {
+    let host_runs = build.join("host/build");
+    for pkg in ["proc-macro2-", "quote-"] {
+        let run = only_run_dir(&host_runs, pkg);
+        assert!(run.join("output").is_file(), "{}", run.display());
+    }
+    for name in ["libsyn", "libproc_macro2", "libquote"] {
+        assert!(
+            files_containing(&build.join("cross"), name).is_empty(),
+            "{name} built for the target"
+        );
+    }
+}
+
+/// The host dylib of proc macro `crate_name` under `build/host/deps`.
+#[cfg(feature = "network-tests")]
+fn host_dylib(build: &Path, crate_name: &str) -> PathBuf {
+    let dylibs: Vec<PathBuf> = files_containing(&build.join("host/deps"), crate_name)
+        .into_iter()
+        .filter(|p| p.extension() == Some(std::ffi::OsStr::new(std::env::consts::DLL_EXTENSION)))
+        .collect();
+    assert_eq!(dylibs.len(), 1, "{dylibs:?}");
+    dylibs.into_iter().next().unwrap()
+}
+
+/// A kernel crate that uses `bytemuck_derive` directly, as hadron's
+/// crates use their derive crates.
+#[cfg(feature = "network-tests")]
+#[test]
+fn syn_based_proc_macro_builds_on_the_host_for_a_kernel_crate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Some(root) = vendor_and_build(tmp.path(), "vendor-proc-macro-syn", None, |_| {}) else {
+        return;
+    };
+    let build = root.join("build");
+    assert_syn_stack_is_host_only(&build);
+    host_dylib(&build, "bytemuck_derive-");
+    assert!(build.join(format!("cross/{TARGET}/dev/deps")).is_dir());
+}
+
+/// zerocopy's script for a target: the run sits with the target units,
+/// prints its `--check-cfg` lines and, on a current toolchain, no
+/// `no_zerocopy_*` cfg.
+#[cfg(feature = "network-tests")]
+fn assert_zerocopy_ran_for(build: &Path, target_dir: &str) {
+    let run = only_run_dir(
+        &build.join(format!("cross/{target_dir}/dev/build")),
+        "zerocopy-",
+    );
+    let output = fs::read_to_string(run.join("output")).expect("zerocopy output");
+    assert!(output.contains("rustc-check-cfg="), "{output}");
+    assert!(!output.contains("rustc-cfg=no_zerocopy"), "{output}");
+    assert_syn_stack_is_host_only(build);
+    host_dylib(build, "zerocopy_derive-");
+}
+
+#[cfg(feature = "network-tests")]
+#[test]
+fn zerocopy_with_derive_builds_for_a_builtin_target() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let Some(root) = vendor_and_build(tmp.path(), "vendor-zerocopy", None, |_| {}) else {
+        return;
+    };
+    assert_zerocopy_ran_for(&root.join("build"), TARGET);
+}
+
+/// The same with a custom JSON target, copied from the builtin spec, so
+/// the script sees the spec's stem in `TARGET` and `RUST_TARGET_PATH`.
+#[cfg(feature = "network-tests")]
+#[test]
+fn zerocopy_with_derive_builds_for_a_json_target() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let write_spec = |root: &Path| {
+        let rustc = gluon_core::RustcInfo::probe().expect("probe").rustc_path;
+        let out = Command::new(rustc)
+            .args(["-Zunstable-options", "--print", "target-spec-json"])
+            .args(["--target", TARGET])
+            .output()
+            .expect("spawn rustc");
+        assert!(
+            out.status.success(),
+            "rustc --print target-spec-json failed"
+        );
+        // rustc refuses a custom spec that claims to be builtin.
+        let mut spec: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        spec.as_object_mut().unwrap().remove("is-builtin");
+        let spec_path = root.join("targets/x86_64-gluon-test.json");
+        fs::create_dir_all(spec_path.parent().unwrap()).unwrap();
+        fs::write(&spec_path, serde_json::to_vec_pretty(&spec).unwrap()).unwrap();
+        // A relative spec path resolves against the working directory,
+        // which is the project root under the CLI but not in this test
+        // process, so point gluon.rs at the absolute path.
+        let gluon_rs = root.join("gluon.rs");
+        let text = fs::read_to_string(&gluon_rs).unwrap();
+        let text = text.replace(
+            "\"targets/x86_64-gluon-test.json\"",
+            &format!("{:?}", spec_path.to_str().unwrap()),
+        );
+        fs::write(&gluon_rs, text).unwrap();
+    };
+    let Some(root) = vendor_and_build(
+        tmp.path(),
+        "vendor-zerocopy",
+        Some("gluon.json-target.rs"),
+        write_spec,
+    ) else {
+        return;
+    };
+    assert_zerocopy_ran_for(&root.join("build"), "x86_64-gluon-test");
 }
