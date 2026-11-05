@@ -340,11 +340,30 @@ pub fn configure(
         (None, None)
     };
 
-    let json = analyzer::generate_rust_project_json_with_script(
+    // Lower with the vendor context the build uses, so `cfg.dependency()`
+    // crates get entries and their dependents' paths match the build.
+    // Before `gluon vendor` has run there is no context; the file then
+    // leaves those crates out instead of failing.
+    let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(
         model,
-        resolved,
         &ctx.layout,
         &ctx.rustc_info,
+        &resolved.project_root,
+    )
+    .unwrap_or_default();
+    let units = unit::lower(model, resolved, &vendor_ctx)?;
+    let script_outputs =
+        analyzer::read_script_outputs(&units, &ctx.store, &ctx.layout, model, resolved);
+    let json = analyzer::generate_rust_project_json_with_script(
+        &analyzer::AnalyzerInput {
+            model,
+            resolved,
+            layout: &ctx.layout,
+            rustc_info: &ctx.rustc_info,
+            units: &units,
+            vendor_ctx: &vendor_ctx,
+            script_outputs: &script_outputs,
+        },
         opt_rs.as_deref(),
         opt_lib_rs.as_deref(),
     );

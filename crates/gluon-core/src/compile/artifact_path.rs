@@ -15,12 +15,6 @@
 //! different metadata hash here than in the build, and its predicted
 //! path is wrong. Cross executables (the usual `artifact_env` target)
 //! have no hash in their path and are unaffected.
-//!
-//! The primary consumer today is [`crate::analyzer`], which needs to
-//! emit `env!("KERNEL_PATH") → /path/to/kernel` mappings into
-//! `rust-project.json` *before* any build has been kicked off, so that
-//! `env!()` macros resolve under rust-analyzer to the same path rustc
-//! will eventually use.
 
 use crate::compile::BuildLayout;
 use crate::error::{Error, Result};

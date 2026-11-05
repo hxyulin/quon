@@ -511,4 +511,83 @@ fn hadron_shaped_workspace_builds_proc_macros_and_zerocopy() {
 
     let (_, second) = gluon_ok(&project, &["build"], &[]);
     assert_eq!(summary(&second), (0, built), "{second}");
+
+    // After the build, `gluon configure` gives rust-analyzer the proc
+    // macros' dylibs and each build script's cfgs and `OUT_DIR`.
+    let crates = configure_crates(&project);
+    for package in ["hello-derive", "zerocopy-derive"] {
+        let entry = crate_entry(&crates, package, None);
+        let dylib = entry["proc_macro_dylib_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{package}: no proc_macro_dylib_path: {entry:#}"));
+        assert!(Path::new(dylib).is_file(), "{package}: {dylib} missing");
+    }
+    for (package, platform_dir, target) in [
+        ("proc-macro2", &host, None),
+        ("zerocopy", &cross, Some("x86_64-unknown-none")),
+    ] {
+        let entry = crate_entry(&crates, package, target);
+        // Registry packages are indexed from Cargo's registry cache.
+        let root = entry["root_module"].as_str().unwrap();
+        assert!(root.contains("/registry/src/"), "{package}: {root}");
+        let out_dir = entry["env"]["OUT_DIR"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{package}: no OUT_DIR: {entry:#}"));
+        assert!(Path::new(out_dir).is_dir(), "{package}: {out_dir} missing");
+        // Every `rustc-cfg` the run printed, after the features.
+        let output = &run_outputs(platform_dir, package)[0];
+        let script_cfgs: Vec<&str> = output
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("cargo::rustc-cfg=")
+                    .or_else(|| l.strip_prefix("cargo:rustc-cfg="))
+            })
+            .collect();
+        let cfgs: Vec<&str> = entry["cfg"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c.as_str())
+            .filter(|c| !c.starts_with("feature="))
+            .collect();
+        assert_eq!(cfgs, script_cfgs, "{package}: {entry:#}");
+    }
+    // proc-macro2's script sets cfgs on every toolchain, so the
+    // comparison above is not vacuous.
+    assert!(run_outputs(&host, "proc-macro2")[0].contains("rustc-cfg="));
+}
+
+/// Run `gluon configure` in `project` and return the `crates` array of
+/// the `rust-project.json` it writes.
+fn configure_crates(project: &Path) -> Vec<serde_json::Value> {
+    gluon_ok(project, &["configure"], &[]);
+    let text = fs::read_to_string(project.join("rust-project.json")).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    json["crates"].as_array().unwrap().clone()
+}
+
+/// The entry of registry or path package `package` with `target`
+/// (`None` for host), found by its source directory name.
+fn crate_entry<'a>(
+    crates: &'a [serde_json::Value],
+    package: &str,
+    target: Option<&str>,
+) -> &'a serde_json::Value {
+    crates
+        .iter()
+        .find(|c| {
+            let dir = c["source"]["include_dirs"][0].as_str().unwrap_or("");
+            let name = Path::new(dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // Registry directories are `<name>-<version>`.
+            let matches = name == package
+                || name
+                    .strip_prefix(package)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|v| v.starts_with(|ch: char| ch.is_ascii_digit()));
+            matches && c["target"].as_str() == target
+        })
+        .unwrap_or_else(|| panic!("no rust-project.json entry for {package} ({target:?})"))
 }

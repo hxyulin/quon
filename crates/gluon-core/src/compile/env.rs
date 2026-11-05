@@ -10,10 +10,10 @@
 //!    of an upstream crate that the scheduler has already produced.
 //!
 //! 2. `crate::analyzer` — at `rust-project.json` generation time, with
-//!    a closure that derives the deterministic future path from
-//!    [`crate::compile::artifact_path::expected_crate_artifact_path`].
-//!    No build has happened yet, so we are predicting the path; the
-//!    layout makes this safe.
+//!    a closure that reads the path from the unit table
+//!    ([`crate::unit::UnitGraph::paths`]). No build may have happened
+//!    yet, so this predicts the path; lowering is pure, so the
+//!    prediction matches the build.
 //!
 //! By centralising the resolution here we guarantee both call sites
 //! produce *exactly the same* env-var name/value pairs in the same
