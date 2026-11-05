@@ -9,6 +9,7 @@
 //! `rust-objcopy`-1.86" mismatches.
 
 use crate::error::{Error, Result};
+use std::ffi::OsStr;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -25,13 +26,20 @@ use std::path::{Path, PathBuf};
 /// Returns the resolved absolute path, or an error with a `rustup
 /// component add llvm-tools-preview` hint if none of the above resolve.
 pub fn probe_rust_objcopy(rustc_path: &Path) -> Result<PathBuf> {
+    probe_with_path(rustc_path, std::env::var_os("PATH").as_deref())
+}
+
+/// [`probe_rust_objcopy`] with `$PATH` passed in, so tests can supply
+/// their own search path without mutating the process environment
+/// (which races with any parallel test that spawns a subprocess).
+fn probe_with_path(rustc_path: &Path, path_var: Option<&OsStr>) -> Result<PathBuf> {
     if let Some(p) = sibling_of(rustc_path, "rust-objcopy") {
         return Ok(p);
     }
-    if let Some(p) = which_on_path("rust-objcopy") {
+    if let Some(p) = which_on_path(path_var, "rust-objcopy") {
         return Ok(p);
     }
-    if let Some(p) = which_on_path("llvm-objcopy") {
+    if let Some(p) = which_on_path(path_var, "llvm-objcopy") {
         return Ok(p);
     }
     Err(Error::Config(
@@ -63,10 +71,9 @@ fn sibling_of(rustc_path: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
-fn which_on_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
+fn which_on_path(path_var: Option<&OsStr>, name: &str) -> Option<PathBuf> {
     let exe = exe_name(name);
-    for dir in std::env::split_paths(&path_var) {
+    for dir in std::env::split_paths(path_var?) {
         let candidate = dir.join(&exe);
         if candidate.is_file() {
             return Some(candidate);
@@ -184,12 +191,7 @@ mod tests {
         let path_hit = path_dir.join(exe_name("rust-objcopy"));
         touch_executable(&path_hit);
 
-        // temp_env scopes the PATH override to this closure; the global
-        // mutex inside the crate serialises tests that touch PATH.
-        let resolved = temp_env::with_var("PATH", Some(path_dir.as_os_str()), || {
-            probe_rust_objcopy(&rustc)
-        })
-        .expect("probe");
+        let resolved = probe_with_path(&rustc, Some(path_dir.as_os_str())).expect("probe");
         assert_eq!(resolved, path_hit);
     }
 
@@ -199,8 +201,7 @@ mod tests {
         let rustc = tmp.path().join(exe_name("rustc"));
         touch_executable(&rustc);
 
-        let err = temp_env::with_var("PATH", Some(""), || probe_rust_objcopy(&rustc))
-            .expect_err("probe must fail");
+        let err = probe_with_path(&rustc, Some(OsStr::new(""))).expect_err("probe must fail");
         let msg = format!("{err}");
         assert!(
             msg.contains("rustup component add llvm-tools-preview"),
@@ -218,10 +219,7 @@ mod tests {
 
         let bin_out = tmp.path().join("out.bin");
         // The magic-byte pre-check in run_objcopy_to_binary fires BEFORE the
-        // rust-objcopy spawn, so we don't need a real binary here. Hardcoding
-        // a non-existent path also avoids racing the global $PATH mutex with
-        // `probe_errors_with_install_hint_when_nothing_resolves` (which sets
-        // PATH=""), making this test parallel-safe.
+        // rust-objcopy spawn, so we don't need a real binary here.
         let fake_objcopy = PathBuf::from("/nonexistent/objcopy");
         let err = run_objcopy_to_binary(&fake_objcopy, &fake_elf, &bin_out)
             .expect_err("non-ELF input must fail");
