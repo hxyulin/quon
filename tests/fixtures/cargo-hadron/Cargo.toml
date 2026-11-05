@@ -1,0 +1,34 @@
+# Shaped like Hadron's workspace: members under `crates/*/*`,
+# `[workspace.package]` and `[workspace.lints]` inheritance, `zerocopy`
+# with `derive` from `[workspace.dependencies]`, and a path proc macro
+# built on `syn`, `quote` and `proc-macro2`. Registry versions are
+# Hadron's, pinned by Cargo.lock.
+
+[workspace]
+resolver = "2"
+members = ["crates/*/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["gluon"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+header = { path = "crates/parse/header" }
+hello-derive = { path = "crates/macros/hello-derive" }
+
+proc-macro2 = "1"
+quote = "1"
+syn = "2"
+zerocopy = { version = "0.8", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -414,3 +414,101 @@ fn build_scripts_of_path_packages_run_and_rerun_on_their_inputs() {
     assert!(summary(&fourth).0 > 0, "{fourth}");
     assert!(reran_scripts(&fourth).is_empty(), "{fourth}");
 }
+
+// ---------------------------------------------------------------------
+// Hadron-shaped workspace (`tests/fixtures/cargo-hadron`)
+// ---------------------------------------------------------------------
+
+/// Every file under `dir` whose name starts with `prefix`.
+fn files_named(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(files_named(&path, prefix));
+        } else if entry.file_name().to_string_lossy().starts_with(prefix) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// The `output` files of the runs of `package`'s build script under
+/// `platform_dir`.
+fn run_outputs(platform_dir: &Path, package: &str) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(platform_dir.join("build")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_prefix(package)
+                .is_some_and(|rest| rest.starts_with('-'))
+        })
+        .filter_map(|e| fs::read_to_string(e.path().join("output")).ok())
+        .collect()
+}
+
+/// A workspace shaped like Hadron's, with Hadron's registry versions
+/// pinned in its Cargo.lock: a path proc macro on `syn`, `quote` and
+/// `proc-macro2`, and a `no_std` crate deriving zerocopy traits, built
+/// for `x86_64-unknown-none`. Sources come from Cargo's registry cache.
+/// Runs offline when the cache holds them; otherwise needs crates.io,
+/// and skips when neither works.
+#[test]
+#[ignore]
+fn hadron_shaped_workspace_builds_proc_macros_and_zerocopy() {
+    let name = "hadron_shaped_workspace_builds_proc_macros_and_zerocopy";
+    let Some(()) = require_rustc_or_skip(name) else {
+        return;
+    };
+    let (_tmp, project) = setup("tests/fixtures/cargo-hadron");
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let cached = Command::new(&cargo)
+        .args(["fetch", "--locked", "--offline"])
+        .current_dir(&project)
+        .output()
+        .expect("spawn cargo")
+        .status
+        .success();
+    if !cached && !crates_io_reachable() {
+        eprintln!("{name}: skipped — registry sources not cached and crates.io unreachable");
+        return;
+    }
+
+    let (_, first) = gluon_ok(&project, &["build"], &[]);
+    let (built, cached) = summary(&first);
+    assert_eq!(cached, 0, "{first}");
+    let build = project.join("build");
+    assert!(
+        build
+            .join("cross/x86_64-unknown-none/dev/final/kernel")
+            .is_file()
+    );
+
+    // The build scripts of the proc macro's deps ran for the host.
+    let host = build.join("host");
+    for package in ["proc-macro2", "quote"] {
+        assert_eq!(run_outputs(&host, package).len(), 1, "{package}: {first}");
+    }
+    // zerocopy's ran for the target, and on a current toolchain sets
+    // only check-cfgs.
+    let cross = build.join("cross/x86_64-unknown-none/dev");
+    let zerocopy = run_outputs(&cross, "zerocopy");
+    assert_eq!(zerocopy.len(), 1, "{first}");
+    assert!(zerocopy[0].contains("rustc-check-cfg="), "{}", zerocopy[0]);
+    assert!(!zerocopy[0].contains("rustc-cfg="), "{}", zerocopy[0]);
+
+    // Proc macros and their deps are host-only.
+    assert!(!files_named(&host.join("deps"), "libhello_derive-").is_empty());
+    assert!(!files_named(&host.join("deps"), "libzerocopy_derive-").is_empty());
+    assert!(!files_named(&host.join("deps"), "libsyn-").is_empty());
+    assert!(files_named(&build.join("cross"), "libsyn-").is_empty());
+
+    let (_, second) = gluon_ok(&project, &["build"], &[]);
+    assert_eq!(summary(&second), (0, built), "{second}");
+}
