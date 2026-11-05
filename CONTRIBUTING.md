@@ -79,5 +79,7 @@ mdbook serve --open
 
 ## License
 
-By contributing, you agree that your contributions will be licensed
-under the [GPL-3.0-or-later](LICENSE) license.
+Unless you state otherwise, any contribution you intentionally submit
+for inclusion in Gluon, as defined in the Apache-2.0 license, is dual
+licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+without any additional terms or conditions.

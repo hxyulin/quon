@@ -148,4 +148,9 @@ cd docs && mdbook serve
 
 ## License
 
-Gluon is licensed under the [GNU General Public License v3.0](LICENSE).
+Gluon is licensed under either of
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](LICENSE-MIT)
+
+at your option.
