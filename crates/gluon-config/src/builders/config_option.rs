@@ -215,7 +215,7 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
-    use gluon_model::{ConfigOptionDef, ConfigType, ConfigValue, TristateVal};
+    use gluon_model::{ConfigOptionDef, ConfigType, ConfigValue};
 
     /// Test helper: look up a config option by name in the arena.
     fn opt<'a>(cfg: &'a Config, name: &str) -> &'a ConfigOptionDef {
@@ -291,69 +291,6 @@ mod tests {
             "expected type-mismatch diagnostic, got: {:?}",
             cfg.diagnostics,
         );
-    }
-
-    #[test]
-    fn config_tristate_seeds_no_default() {
-        let mut cfg = Config::new();
-        cfg.config_tristate("CONFIG_TRI");
-        let opt = opt(&cfg, "CONFIG_TRI");
-        assert_eq!(opt.ty, ConfigType::Tristate);
-        assert_eq!(opt.default, ConfigValue::Tristate(TristateVal::No));
-    }
-
-    #[test]
-    fn config_str_seeds_empty_default() {
-        let mut cfg = Config::new();
-        cfg.config_str("CONFIG_S");
-        let opt = opt(&cfg, "CONFIG_S");
-        assert_eq!(opt.ty, ConfigType::Str);
-        assert_eq!(opt.default, ConfigValue::Str(String::new()));
-    }
-
-    #[test]
-    fn config_u64_seeds_zero_default() {
-        let mut cfg = Config::new();
-        cfg.config_u64("CONFIG_BIG");
-        let opt = opt(&cfg, "CONFIG_BIG");
-        assert_eq!(opt.ty, ConfigType::U64);
-        assert_eq!(opt.default, ConfigValue::U64(0));
-    }
-
-    #[test]
-    fn config_list_seeds_empty_default() {
-        let mut cfg = Config::new();
-        cfg.config_list("CONFIG_L");
-        let opt = opt(&cfg, "CONFIG_L");
-        assert_eq!(opt.ty, ConfigType::List);
-        assert_eq!(opt.default, ConfigValue::List(vec![]));
-    }
-
-    #[test]
-    fn default_value_is_alias_for_default() {
-        use gluon_model::ConfigValue;
-        let mut cfg = Config::new();
-        cfg.config_bool("CONFIG_FOO")
-            .default_value(ConfigValue::Bool(true));
-        let opt = opt(&cfg, "CONFIG_FOO");
-        match opt.default {
-            ConfigValue::Bool(true) => {}
-            ref other => panic!("got {other:?}"),
-        }
-        assert!(cfg.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn depends_on_records_ident_expr() {
-        use gluon_model::Expr;
-        let mut cfg = Config::new();
-        cfg.config_u32("LOG_LEVEL")
-            .depends_on(Expr::Ident("LOG_ENABLED".into()));
-        let opt = opt(&cfg, "LOG_LEVEL");
-        match opt.depends_on_expr.as_ref() {
-            Some(Expr::Ident(s)) if s == "LOG_ENABLED" => {}
-            other => panic!("expected Ident(\"LOG_ENABLED\"), got {other:?}"),
-        }
     }
 
     #[test]

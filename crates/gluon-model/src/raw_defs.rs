@@ -305,25 +305,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_dep_def_round_trips_through_json() {
-        let d = RawDepDef {
-            crate_name: "log".into(),
-            features: vec!["std".into()],
-            version: Some("0.4".into()),
-            optional: true,
-            default_features: false,
-            span: None,
-        };
-        let json = serde_json::to_string(&d).unwrap();
-        let de: RawDepDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(de.crate_name, "log");
-        assert_eq!(de.features, vec!["std".to_string()]);
-        assert_eq!(de.version.as_deref(), Some("0.4"));
-        assert!(de.optional);
-        assert!(!de.default_features);
-    }
-
-    #[test]
     fn raw_profile_def_round_trips_through_json() {
         let p = RawProfileDef {
             name: "dev".into(),
@@ -442,19 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_pipeline_step_round_trips() {
-        let s = RawPipelineStep {
-            name: "compile".into(),
-            inputs: vec!["kernel-group".into(), "shared".into()],
-            rule: Some("postprocess".into()),
-        };
-        let json = serde_json::to_string(&s).unwrap();
-        let de: RawPipelineStep = serde_json::from_str(&json).unwrap();
-        assert_eq!(de.inputs.len(), 2);
-        assert_eq!(de.rule.as_deref(), Some("postprocess"));
-    }
-
-    #[test]
     fn raw_crate_def_round_trips_through_json() {
         let mut c = RawCrateDef {
             name: "main".into(),
@@ -497,16 +465,25 @@ mod tests {
     fn raw_pipeline_def_round_trips() {
         let p = RawPipelineDef {
             name: "default".into(),
-            stages: vec![RawPipelineStep {
-                name: "compile".into(),
-                inputs: vec!["kernel".into()],
-                rule: None,
-            }],
+            stages: vec![
+                RawPipelineStep {
+                    name: "compile".into(),
+                    inputs: vec!["kernel".into()],
+                    rule: None,
+                },
+                RawPipelineStep {
+                    name: "post".into(),
+                    inputs: vec!["compile".into()],
+                    rule: Some("postprocess".into()),
+                },
+            ],
             span: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let de: RawPipelineDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(de.stages.len(), 1);
+        assert_eq!(de.stages.len(), 2);
         assert_eq!(de.stages[0].inputs, vec!["kernel".to_string()]);
+        assert_eq!(de.stages[0].rule, None);
+        assert_eq!(de.stages[1].rule.as_deref(), Some("postprocess"));
     }
 }

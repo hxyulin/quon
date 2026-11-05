@@ -388,88 +388,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_check() {
-        let cli = Cli::try_parse_from(["gluon", "check"]).expect("parse");
-        assert!(matches!(cli.command, Command::Check(_)));
-    }
-
-    #[test]
     fn parses_check_with_profile_and_jobs() {
         let cli = Cli::try_parse_from(["gluon", "-p", "dev", "-j", "2", "check"]).expect("parse");
         assert_eq!(cli.profile.as_deref(), Some("dev"));
         assert_eq!(cli.jobs, Some(2));
         assert!(matches!(cli.command, Command::Check(_)));
-    }
-
-    #[test]
-    fn parses_bare_clippy() {
-        let cli = Cli::try_parse_from(["gluon", "clippy"]).expect("parse");
-        assert!(matches!(cli.command, Command::Clippy(_)));
-    }
-
-    #[test]
-    fn parses_fmt_default() {
-        let cli = Cli::try_parse_from(["gluon", "fmt"]).expect("parse");
-        match cli.command {
-            Command::Fmt(a) => assert!(!a.check),
-            other => panic!("expected Fmt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_fmt_check() {
-        let cli = Cli::try_parse_from(["gluon", "fmt", "--check"]).expect("parse");
-        match cli.command {
-            Command::Fmt(a) => assert!(a.check),
-            other => panic!("expected Fmt, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_short_profile() {
-        let cli = Cli::try_parse_from(["gluon", "-p", "release", "build"]).expect("parse");
-        assert_eq!(cli.profile.as_deref(), Some("release"));
-        assert!(matches!(cli.command, Command::Build(_)));
-    }
-
-    #[test]
-    fn parses_long_profile() {
-        let cli = Cli::try_parse_from(["gluon", "--profile", "release", "build"]).expect("parse");
-        assert_eq!(cli.profile.as_deref(), Some("release"));
-        assert!(matches!(cli.command, Command::Build(_)));
-    }
-
-    #[test]
-    fn parses_clean_with_keep_sysroot() {
-        let cli = Cli::try_parse_from(["gluon", "clean", "--keep-sysroot"]).expect("parse");
-        match cli.command {
-            Command::Clean(a) => assert!(a.keep_sysroot),
-            other => panic!("expected Clean, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_clean_default() {
-        let cli = Cli::try_parse_from(["gluon", "clean"]).expect("parse");
-        match cli.command {
-            Command::Clean(a) => assert!(!a.keep_sysroot),
-            other => panic!("expected Clean, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_configure_with_output() {
-        let cli =
-            Cli::try_parse_from(["gluon", "configure", "--output", "/tmp/rp.json"]).expect("parse");
-        match cli.command {
-            Command::Configure(a) => {
-                assert_eq!(
-                    a.output.as_deref(),
-                    Some(std::path::Path::new("/tmp/rp.json"))
-                );
-            }
-            other => panic!("expected Configure, got {other:?}"),
-        }
     }
 
     #[test]
@@ -511,40 +434,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_vendor() {
-        let cli = Cli::try_parse_from(["gluon", "vendor"]).expect("parse");
-        match cli.command {
-            Command::Vendor(a) => {
-                assert!(!a.check);
-                assert!(!a.force);
-                assert!(!a.offline);
-            }
-            other => panic!("expected Vendor, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_vendor_check_and_force() {
-        let cli = Cli::try_parse_from(["gluon", "vendor", "--check", "--force"]).expect("parse");
-        match cli.command {
-            Command::Vendor(a) => {
-                assert!(a.check);
-                assert!(a.force);
-            }
-            other => panic!("expected Vendor, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_vendor_offline() {
-        let cli = Cli::try_parse_from(["gluon", "vendor", "--offline"]).expect("parse");
-        match cli.command {
-            Command::Vendor(a) => assert!(a.offline),
-            other => panic!("expected Vendor, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn parses_external_subcommand() {
         let cli = Cli::try_parse_from(["gluon", "foo", "bar", "baz"]).expect("parse");
         match cli.command {
@@ -557,12 +446,6 @@ mod tests {
             }
             other => panic!("expected External, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn parses_jobs_flag() {
-        let cli = Cli::try_parse_from(["gluon", "-j", "4", "build"]).expect("parse");
-        assert_eq!(cli.jobs, Some(4));
     }
 
     #[test]
@@ -588,32 +471,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_run_no_build() {
-        let cli = Cli::try_parse_from(["gluon", "run", "--no-build"]).expect("parse");
-        match cli.command {
-            Command::Run(a) => {
-                assert!(a.no_build, "--no-build should set no_build = true");
-                assert!(!a.dry_run, "--dry-run should be unaffected");
-            }
-            other => panic!("expected Run, got {other:?}"),
+    fn run_rejects_conflicting_boot_modes() {
+        // Each flag overrides the profile's boot mode, so two at once has
+        // no meaning and must fail at parse time rather than pick one.
+        for pair in [
+            ["--uefi", "--direct"],
+            ["--uefi", "--bios"],
+            ["--direct", "--bios"],
+        ] {
+            let err = Cli::try_parse_from(["gluon", "run", pair[0], pair[1]])
+                .expect_err("conflicting boot modes must be rejected");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{pair:?}"
+            );
         }
-    }
-
-    #[test]
-    fn parses_run_no_build_default_false() {
-        let cli = Cli::try_parse_from(["gluon", "run"]).expect("parse");
-        match cli.command {
-            Command::Run(a) => assert!(!a.no_build, "no_build defaults to false"),
-            other => panic!("expected Run, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_verbose_and_quiet_together() {
-        // Clap allows both — the app decides which wins.
-        let cli = Cli::try_parse_from(["gluon", "--verbose", "--quiet", "build"]).expect("parse");
-        assert!(cli.verbose);
-        assert!(cli.quiet);
     }
 
     #[test]

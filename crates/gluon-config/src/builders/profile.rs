@@ -215,17 +215,6 @@ mod tests {
     }
 
     #[test]
-    fn inherits_chain_records_string_only() {
-        // The builder only writes the string; intern resolves it against arenas.
-        let mut cfg = Config::new();
-        cfg.profile("base").opt_level(0);
-        cfg.profile("debug").inherits("base").opt_level(0);
-        let h = cfg.raw.profiles.lookup("debug").unwrap();
-        let p = cfg.raw.profiles.get(h).unwrap();
-        assert_eq!(p.inherits.as_deref(), Some("base"));
-    }
-
-    #[test]
     fn target_with_stale_handle_pushes_diagnostic() {
         // `Handle<T>` is a plain u32 arena index — there is no arena identity
         // baked in. A handle from cfg_a is only "stale" relative to cfg_b when

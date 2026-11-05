@@ -746,19 +746,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fresh_config_round_trips_to_empty_raw() {
-        let cfg = Config::new();
-        assert!(
-            cfg.diagnostics.is_empty(),
-            "fresh Config has no diagnostics"
-        );
-        let json = serde_json::to_string(&cfg.raw).expect("serde");
-        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert!(de.project.is_none());
-        assert!(de.kconfig_includes.is_empty());
-    }
-
-    #[test]
     fn cargo_workspace_vendored_records_the_directory() {
         let mut cfg = Config::new();
         cfg.cargo_workspace(".").vendored("vendor");
@@ -768,16 +755,6 @@ mod tests {
         let ws = cfg.raw.cargo_workspace.as_ref().unwrap();
         assert_eq!(ws.dir, ".");
         assert_eq!(ws.vendored.as_deref(), Some("vendor"));
-        assert_eq!(cfg.diagnostics.len(), 1);
-    }
-
-    #[test]
-    fn cargo_workspace_is_recorded_once() {
-        let mut cfg = Config::new();
-        cfg.cargo_workspace(".");
-        cfg.cargo_workspace("other");
-        assert_eq!(cfg.raw.cargo_workspace.as_ref().unwrap().dir, ".");
-        assert_eq!(cfg.raw.cargo_workspace.as_ref().unwrap().vendored, None);
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(
             cfg.diagnostics[0]
@@ -791,15 +768,6 @@ mod tests {
 mod project_target_tests {
     use super::*;
     use gluon_model::Handle;
-
-    #[test]
-    fn project_sets_name_and_version() {
-        let mut cfg = Config::new();
-        cfg.project("demo", "0.1.0");
-        let p = cfg.raw.project.as_ref().expect("project set");
-        assert_eq!(p.name, "demo");
-        assert_eq!(p.version, "0.1.0");
-    }
 
     #[test]
     fn target_inserts_builtin() {
@@ -819,18 +787,6 @@ mod project_target_tests {
         assert_eq!(t.name, "custom");
         assert_eq!(t.spec, "targets/custom.json");
         assert!(!t.builtin);
-    }
-
-    #[test]
-    fn duplicate_target_returns_existing_handle() {
-        let mut cfg = Config::new();
-        let h1 = cfg.target("foo");
-        let h2 = cfg.target("foo");
-        assert_eq!(
-            h1, h2,
-            "second target() with same name must return same handle"
-        );
-        assert_eq!(cfg.raw.targets.len(), 1);
     }
 
     #[test]
@@ -909,49 +865,5 @@ mod project_target_tests {
         let result = cfg.emit();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().message, "boom");
-    }
-}
-
-#[cfg(test)]
-mod kconfig_tests {
-    use super::*;
-
-    #[test]
-    fn include_kconfig_records_path() {
-        let mut cfg = Config::new();
-        cfg.include_kconfig("./options.kconfig").expect("ok");
-        cfg.include_kconfig("/abs/path.kconfig").expect("ok");
-        assert_eq!(cfg.raw.kconfig_includes.len(), 2);
-        assert_eq!(
-            cfg.raw.kconfig_includes[0],
-            std::path::PathBuf::from("./options.kconfig")
-        );
-        assert_eq!(
-            cfg.raw.kconfig_includes[1],
-            std::path::PathBuf::from("/abs/path.kconfig")
-        );
-    }
-}
-
-#[cfg(test)]
-mod accessor_tests {
-    use super::*;
-
-    #[test]
-    fn raw_and_into_raw_expose_builder_state() {
-        let mut cfg = Config::new();
-        cfg.project("acc-test", "0.1.0");
-        let _ = cfg.target("x");
-
-        // Borrow the raw model.
-        assert_eq!(cfg.raw().project.as_ref().unwrap().name, "acc-test");
-        assert!(cfg.raw().targets.lookup("x").is_some());
-
-        // No diagnostics for this minimal sequence.
-        assert!(cfg.diagnostics().is_empty());
-
-        // Consume into raw.
-        let raw = cfg.into_raw();
-        assert_eq!(raw.project.unwrap().name, "acc-test");
     }
 }

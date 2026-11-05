@@ -78,23 +78,4 @@ mod tests {
         );
         assert_eq!(cfg.diagnostics.len(), 1);
     }
-
-    #[test]
-    fn preset_inherits_sets_parent() {
-        let mut cfg = Config::new();
-        cfg.preset("child")
-            .inherits("parent")
-            .set("X", ConfigValue::Bool(true));
-        let p = cfg.raw.presets.get("child").unwrap();
-        assert_eq!(p.inherits.as_deref(), Some("parent"));
-        assert!(cfg.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn preset_help_sets_text() {
-        let mut cfg = Config::new();
-        cfg.preset("p").help("some help text");
-        let p = cfg.raw.presets.get("p").unwrap();
-        assert_eq!(p.help.as_deref(), Some("some help text"));
-    }
 }

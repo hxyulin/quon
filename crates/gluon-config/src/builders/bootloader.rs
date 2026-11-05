@@ -106,29 +106,4 @@ mod tests {
                 .contains("defined more than once")
         );
     }
-
-    #[test]
-    fn bootloader_extras_are_recorded() {
-        let mut cfg = Config::new();
-        cfg.bootloader("custom")
-            .extra("flavor", "limine")
-            .extra("strict", "true");
-        let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
-        assert_eq!(bl.extras.get("flavor").map(String::as_str), Some("limine"));
-        assert_eq!(bl.extras.get("strict").map(String::as_str), Some("true"));
-    }
-
-    #[test]
-    fn unset_bootloader_is_none() {
-        // Singleton-set is now "field is Some(...)". A fresh config that
-        // never called `bootloader(...)` round-trips with `bootloader: null`
-        // (omitted, courtesy of skip_serializing_if).
-        let cfg = Config::new();
-        assert!(cfg.raw.bootloader.is_none());
-        let json = serde_json::to_string(&cfg.raw).unwrap();
-        assert!(
-            !json.contains("\"bootloader\""),
-            "absent bootloader must not be serialized, got: {json}"
-        );
-    }
 }

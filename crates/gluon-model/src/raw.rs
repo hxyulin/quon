@@ -63,48 +63,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn raw_build_model_round_trips_empty() {
-        let raw = RawBuildModel::default();
-        let json = serde_json::to_string(&raw).expect("serde");
-        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert!(de.project.is_none());
-        assert!(de.profiles.is_empty());
-        assert!(de.kconfig_includes.is_empty());
-    }
-
-    #[test]
-    fn raw_build_model_round_trips_with_data() {
-        let mut raw = RawBuildModel {
-            project: Some(ProjectDef {
-                name: "demo".into(),
-                version: "0.1.0".into(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        raw.profiles.insert(
-            "dev".into(),
-            RawProfileDef {
-                name: "dev".into(),
-                target: Some("x86_64".into()),
-                ..Default::default()
-            },
-        );
-        raw.kconfig_includes
-            .push(PathBuf::from("./options.kconfig"));
-
-        let json = serde_json::to_string(&raw).expect("serde");
-        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
-        assert_eq!(de.project.as_ref().unwrap().name, "demo");
-        let h = de.profiles.lookup("dev").expect("dev profile");
-        assert_eq!(
-            de.profiles.get(h).unwrap().target.as_deref(),
-            Some("x86_64")
-        );
-        assert_eq!(de.kconfig_includes.len(), 1);
-    }
-
-    #[test]
     fn singleton_options_default_to_none() {
         // Phase G of Stage 4: bootloader and qemu are `Option<...>` and
         // their absence is communicated by `None`, not by sidecar
@@ -122,5 +80,13 @@ mod tests {
             !json.contains("\"bootloader\""),
             "absent bootloader must not be serialized, got: {json}"
         );
+        // gluon.rs output reaches gluon-core as this JSON, so every field
+        // skipped above must also carry `#[serde(default)]` to read back.
+        let de: RawBuildModel = serde_json::from_str(&json).expect("de");
+        assert!(de.project.is_none());
+        assert!(de.bootloader.is_none());
+        assert!(de.qemu.is_none());
+        assert!(de.kconfig_includes.is_empty());
+        assert!(de.cargo_workspace.is_none());
     }
 }

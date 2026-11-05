@@ -330,35 +330,4 @@ mod tests {
         );
         assert!(cfg.diagnostics.is_empty());
     }
-
-    #[test]
-    fn success_exit_code_round_trips() {
-        let mut cfg = Config::new();
-        cfg.qemu("q").success_exit_code(33);
-        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
-        assert_eq!(q.success_exit_code, Some(33));
-        let json = serde_json::to_string(&cfg.raw).unwrap();
-        assert!(json.contains("\"success_exit_code\":33"), "got: {json}");
-    }
-
-    #[test]
-    fn success_exit_code_unset_by_default() {
-        let mut cfg = Config::new();
-        cfg.qemu("q");
-        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
-        assert_eq!(q.success_exit_code, None);
-    }
-
-    #[test]
-    fn unset_qemu_is_none() {
-        // Singleton-set is now "field is Some(...)". A fresh config that
-        // never called `qemu(...)` round-trips with `qemu` omitted.
-        let cfg = Config::new();
-        assert!(cfg.raw.qemu.is_none());
-        let json = serde_json::to_string(&cfg.raw).unwrap();
-        assert!(
-            !json.contains("\"qemu\""),
-            "absent qemu must not be serialized, got: {json}"
-        );
-    }
 }

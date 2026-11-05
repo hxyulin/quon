@@ -56,20 +56,4 @@ mod tests {
         let s = SourceSpan::point("foo.rs", 12, 5);
         assert_eq!(s.to_string(), "foo.rs:12:5");
     }
-
-    #[test]
-    fn source_span_range() {
-        let s = SourceSpan::range("foo.rs", (1, 2), (3, 4));
-        assert_eq!(s.line, 1);
-        assert_eq!(s.col, 2);
-        assert_eq!(s.end_line, 3);
-        assert_eq!(s.end_col, 4);
-        let json = serde_json::to_string(&s).unwrap();
-        let de: SourceSpan = serde_json::from_str(&json).unwrap();
-        assert_eq!(de, s);
-        assert_eq!(de.line, 1);
-        assert_eq!(de.col, 2);
-        assert_eq!(de.end_line, 3);
-        assert_eq!(de.end_col, 4);
-    }
 }

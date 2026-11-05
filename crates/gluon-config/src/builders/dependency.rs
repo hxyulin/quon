@@ -229,10 +229,16 @@ mod tests {
     }
 
     #[test]
-    fn dependency_target_host_explicit_matches_default() {
+    fn dependency_target_host_overrides_cross_target() {
+        // Start from a cross target so the test fails if `target_host()`
+        // does nothing; host is also the default.
         use gluon_model::TargetSpec;
         let mut cfg = Config::new();
-        cfg.dependency("serde").version("1").target_host();
+        let kernel = cfg.target("x86_64-unknown-none");
+        cfg.dependency("serde")
+            .version("1")
+            .target(kernel)
+            .target_host();
         let h = cfg.raw.external_deps.lookup("serde").unwrap();
         let d = cfg.raw.external_deps.get(h).unwrap();
         assert_eq!(d.target, TargetSpec::Host);

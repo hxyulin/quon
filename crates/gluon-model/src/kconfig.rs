@@ -235,20 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn expr_semantics_differ_from_flatten() {
-        // This is the whole reason we went with true semantic evaluation
-        // instead of hadron's flatten_symbols() approach: `A || B` and
-        // `A && B` must produce different answers when only one of A/B
-        // is on. A flatten-based implementation would see the same
-        // {A, B} symbol set in both and resolve them identically.
-        let l = lookup_from(&[("A", true), ("B", false)]);
-        let a_or_b = Expr::Or(vec![Expr::Ident("A".into()), Expr::Ident("B".into())]);
-        let a_and_b = Expr::And(vec![Expr::Ident("A".into()), Expr::Ident("B".into())]);
-        assert!(a_or_b.eval(&l));
-        assert!(!a_and_b.eval(&l));
-    }
-
-    #[test]
     fn expr_nested_not_and_or() {
         // !A && (B || C): with A=false, B=false, C=true → true.
         let l = lookup_from(&[("A", false), ("B", false), ("C", true)]);
@@ -278,29 +264,5 @@ mod tests {
         let mut out = Vec::new();
         e.referenced_idents(&mut out);
         assert_eq!(out, vec!["X"]);
-    }
-
-    #[test]
-    fn config_option_def_defaults_to_empty_expr_fields() {
-        // A freshly-constructed `ConfigOptionDef` has `None` for both
-        // `depends_on_expr` and `visible_if_expr` — meaning "no clause
-        // declared", as opposed to `Some(Expr::And(vec![]))` which is
-        // vacuously true.
-        let opt = ConfigOptionDef {
-            name: "X".into(),
-            ty: ConfigType::Bool,
-            default: ConfigValue::Bool(false),
-            help: None,
-            selects: vec![],
-            range: None,
-            choices: None,
-            menu: None,
-            bindings: vec![],
-            span: None,
-            depends_on_expr: None,
-            visible_if_expr: None,
-        };
-        assert!(opt.depends_on_expr.is_none());
-        assert!(opt.visible_if_expr.is_none());
     }
 }

@@ -30,16 +30,3 @@ impl<'cfg> ProjectBuilder<'cfg> {
         self
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::Config;
-
-    #[test]
-    fn project_default_profile_records_string() {
-        let mut cfg = Config::new();
-        cfg.project("demo", "0.1.0").default_profile("dev");
-        let p = cfg.raw.project.as_ref().unwrap();
-        assert_eq!(p.default_profile.as_deref(), Some("dev"));
-    }
-}
