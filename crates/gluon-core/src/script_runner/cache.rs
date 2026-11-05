@@ -105,7 +105,7 @@ fn transitive_fingerprint(depfile: &Path) -> Result<String> {
     use crate::cache::{parse_depfile, sha256_file};
     use sha2::{Digest, Sha256};
 
-    let sources = parse_depfile(depfile)?;
+    let sources = parse_depfile(depfile)?.files;
     let mut h = Sha256::new();
     for src in &sources {
         // Include the path bytes so two files with identical contents

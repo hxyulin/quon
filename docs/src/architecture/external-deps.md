@@ -29,9 +29,13 @@ src/util.rs:
 # env-dep:RUSTC_BOOTSTRAP=1
 ```
 
-Gluon only cares about the **first target-line**. The subsequent
-per-prereq stubs and `# env-dep:` comments are informational; rustc
-regenerates them deterministically.
+Gluon reads the **first target-line** and the `# env-dep:` comment
+lines. The per-prereq stubs are ignored. An env-dep line is
+`# env-dep:NAME=value`, or `# env-dep:NAME` when the variable was
+unset. rustc escapes `\`, newline and carriage return in names and
+values as `\\`, `\n` and `\r`; the parser undoes that escaping and
+reads these lines before folding line continuations, so a value
+ending in a backslash is not mistaken for one.
 
 The parser handles three edge cases rustc actually produces:
 

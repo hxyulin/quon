@@ -169,6 +169,8 @@ pub fn execute_build_step(
             argv_hash,
             sources: &sources,
             output_path: &output_path,
+            // Runner env is fixed by `env_map`, which is in `argv_hash`.
+            env_deps: &BTreeMap::new(),
         })
     };
     if is_fresh && output_path.exists() {
@@ -246,6 +248,7 @@ pub fn execute_build_step(
             argv_hash,
             sources,
             output_path: output_path.clone(),
+            env_deps: BTreeMap::new(),
         })?;
     }
 

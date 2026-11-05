@@ -1370,6 +1370,7 @@ mod tests {
                     argv_hash,
                     sources: Vec::new(),
                     output_path: output_path.clone(),
+                    env_deps: BTreeMap::new(),
                 })
                 .expect("mark_built");
             cache.save().expect("save");

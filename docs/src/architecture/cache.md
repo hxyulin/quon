@@ -35,10 +35,16 @@ For a `FreshnessQuery` against a `rustc` entry, the entry is fresh iff:
 2. The recorded `argv_hash` matches the query (same rustc flags,
    environment, cwd).
 3. The declared `output_path` still exists on disk.
-4. The recorded source set exactly matches the query's source set.
+4. The recorded environment variables match their current values.
+   These are the `# env-dep:NAME=value` lines rustc writes for
+   `env!`, `option_env!` and tracked proc-macro env reads. A variable
+   that changed, became set or became unset is a change. The current
+   value is the one the next rustc run would see: the builder's own
+   override, else gluon's environment.
+5. The recorded source set exactly matches the query's source set.
    Adding or removing a source file is always a change, even if every
    remaining file's hash is unchanged.
-5. Every source file passes the **two-tier freshness check**.
+6. Every source file passes the **two-tier freshness check**.
 
 Directory mtimes are not tracked. They change whenever an editor
 creates and deletes a swap file, which caused needless rebuilds. A

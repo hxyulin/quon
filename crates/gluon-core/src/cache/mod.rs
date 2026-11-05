@@ -11,7 +11,7 @@ pub mod lock;
 pub mod manifest;
 
 pub use composite::{CompositeEntry, CompositeQuery, CompositeRecord, composite_aux_hash};
-pub use depinfo::parse_depfile;
+pub use depinfo::{DepInfo, parse_depfile};
 pub use hash::{hash_argv, sha256_bytes, sha256_file};
 pub use lock::CacheLock;
 pub use manifest::{CacheManifest, FileFingerprint, RustcEntry};
@@ -45,6 +45,10 @@ pub struct FreshnessQuery<'a> {
     pub sources: &'a [PathBuf],
     /// Artefact the caller expects to find; absence ⇒ stale.
     pub output_path: &'a Path,
+    /// Current values of the environment variables the previous build
+    /// read (from its depfile's `# env-dep:` lines). Must equal the
+    /// recorded map exactly; `None` means unset.
+    pub env_deps: &'a BTreeMap<String, Option<String>>,
 }
 
 /// Input for [`Cache::mark_built`]. Same rationale as [`FreshnessQuery`].
@@ -54,6 +58,8 @@ pub struct BuildRecord {
     pub argv_hash: [u8; 32],
     pub sources: Vec<PathBuf>,
     pub output_path: PathBuf,
+    /// Environment variables the build read and the values it saw.
+    pub env_deps: BTreeMap<String, Option<String>>,
 }
 
 impl Cache {
@@ -101,6 +107,11 @@ impl Cache {
             return false;
         }
         if !q.output_path.exists() {
+            return false;
+        }
+        // `env!`/`option_env!` values are compiled into the output, so a
+        // changed, newly set or newly unset variable is a change.
+        if entry.env_deps != *q.env_deps {
             return false;
         }
 
@@ -238,6 +249,7 @@ impl Cache {
         let entry = RustcEntry {
             argv_hash: rec.argv_hash,
             source_files,
+            env_deps: rec.env_deps,
             output_path: rec.output_path,
             built_at,
         };
@@ -465,6 +477,8 @@ mod tests {
         }
     }
 
+    static NO_ENV: BTreeMap<String, Option<String>> = BTreeMap::new();
+
     fn basic_query<'a>(
         key: &'a str,
         argv_hash: [u8; 32],
@@ -476,6 +490,7 @@ mod tests {
             argv_hash,
             sources,
             output_path: output,
+            env_deps: &NO_ENV,
         }
     }
 
@@ -490,6 +505,7 @@ mod tests {
             argv_hash,
             sources,
             output_path: output,
+            env_deps: BTreeMap::new(),
         }
     }
 
@@ -723,6 +739,34 @@ mod tests {
 
         let sources = vec![a.clone(), a];
         assert!(cache.is_fresh(&basic_query("k", argv, &sources, &out)));
+    }
+
+    #[test]
+    fn env_dep_change_invalidates() {
+        let fx = Fixture::new();
+        let a = fx.write("a.rs", b"x");
+        let out = fx.touch_output("a.rlib");
+        let argv = [13u8; 32];
+        let recorded: BTreeMap<String, Option<String>> =
+            [("V".to_string(), Some("one".to_string()))].into();
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        let mut rec = record("k", argv, vec![a.clone()], out.clone());
+        rec.env_deps = recorded.clone();
+        cache.mark_built(rec).expect("mark");
+
+        let sources = vec![a];
+        let query = |env: &BTreeMap<String, Option<String>>, cache: &mut Cache| {
+            cache.is_fresh(&FreshnessQuery {
+                env_deps: env,
+                ..basic_query("k", argv, &sources, &out)
+            })
+        };
+        assert!(query(&recorded, &mut cache));
+        let changed = [("V".to_string(), Some("two".to_string()))].into();
+        assert!(!query(&changed, &mut cache));
+        let unset = [("V".to_string(), None)].into();
+        assert!(!query(&unset, &mut cache));
     }
 
     #[test]

@@ -41,6 +41,12 @@ pub struct RustcEntry {
     /// Source files consumed by the build, with per-file fingerprints.
     /// `BTreeMap` for deterministic iteration / serialisation order.
     pub source_files: BTreeMap<PathBuf, FileFingerprint>,
+    /// Environment variables the build read (`# env-dep:` lines in its
+    /// depfile) and the values it saw; `None` means unset. Missing in
+    /// older manifests, which then mismatch any crate that reads env
+    /// and rebuild once.
+    #[serde(default)]
+    pub env_deps: BTreeMap<String, Option<String>>,
     /// Path to the artefact this entry declares as built. `is_fresh`
     /// requires this file to exist for the entry to be considered fresh.
     pub output_path: PathBuf,
@@ -290,6 +296,7 @@ mod tests {
         RustcEntry {
             argv_hash: [0xAB; 32],
             source_files: files,
+            env_deps: BTreeMap::new(),
             output_path: PathBuf::from("build/foo.rlib"),
             built_at: 999_999,
         }

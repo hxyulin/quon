@@ -1034,3 +1034,49 @@ fn target_spec_edit_rebuilds() {
         "target spec edit did not rebuild the sysroot, config crate and kernel:\n{stderr}"
     );
 }
+
+/// Changing a variable read through `option_env!` must rebuild the crate.
+/// rustc records it as a `# env-dep:` line in the depfile.
+#[test]
+#[ignore]
+fn env_dep_change_rebuilds() {
+    let Some(()) = require_rustc_or_skip("env_dep_change_rebuilds") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    embed_in_kernel(
+        &fixture,
+        r#"match option_env!("GLUON_TEST_ENV_DEP") { Some(v) => v, None => "env-unset" }"#,
+    );
+    const VAR: &str = "GLUON_TEST_ENV_DEP";
+
+    build_ok(&fixture, &[(VAR, "env-value-one")]);
+    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
+    assert!(contains_bytes(&bin, b"env-value-one"));
+
+    let stderr = build_ok(&fixture, &[(VAR, "env-value-one")]);
+    assert_eq!(built_count(&stderr), 0, "unchanged env rebuilt:\n{stderr}");
+
+    build_ok(&fixture, &[(VAR, "env-value-two")]);
+    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
+    assert!(
+        contains_bytes(&bin, b"env-value-two"),
+        "kernel binary does not reflect the env var change"
+    );
+
+    let out = gluon_command(&fixture)
+        .arg("build")
+        .env_remove(VAR)
+        .output()
+        .expect("spawn gluon build");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
+    assert!(
+        contains_bytes(&bin, b"env-unset"),
+        "kernel binary does not reflect the env var being unset"
+    );
+}

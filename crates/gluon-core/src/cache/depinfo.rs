@@ -5,11 +5,25 @@
 //! that subset is a toolchain bug; we surface it as [`Error::Config`].
 
 use crate::error::{Error, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Parse a rustc dep-info file and return the prereq paths from its first
-/// target-line.
+/// Contents of a rustc dep-info file that matter for freshness.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DepInfo {
+    /// Prereq paths from the first target-line: sources, plus every
+    /// rlib/rmeta/dylib rustc loaded when `-Zbinary-dep-depinfo` is set.
+    pub files: Vec<PathBuf>,
+    /// Environment variables the crate read through `env!`,
+    /// `option_env!` or tracked proc-macro env access, from the
+    /// `# env-dep:NAME=value` lines. `None` means the variable was unset
+    /// when rustc ran (`# env-dep:NAME` with no `=`).
+    pub env: BTreeMap<String, Option<String>>,
+}
+
+/// Parse a rustc dep-info file: the prereq paths from its first
+/// target-line and the `# env-dep:` comment lines.
 ///
 /// See the module docs for the exact subset of Make syntax we recognise.
 ///
@@ -22,16 +36,63 @@ use std::path::{Path, PathBuf};
 /// on Unix and via UTF-8 validation on Windows (where rustc writes
 /// depfiles in UTF-8 and the OS path encoding is UTF-16, so a UTF-8
 /// round-trip is the only sensible bridge).
-pub fn parse_depfile(path: &Path) -> Result<Vec<PathBuf>> {
+pub fn parse_depfile(path: &Path) -> Result<DepInfo> {
     let bytes = std::fs::read(path).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
     })?;
+    // Read env-dep lines from the raw bytes, before continuation folding:
+    // rustc escapes `\` in values as `\\`, so a value ending in a
+    // backslash would otherwise look like a line continuation.
+    let env = parse_env_deps(&bytes);
+    let files = parse_prereqs(&bytes, path)?;
+    Ok(DepInfo { files, env })
+}
 
+/// Collect `# env-dep:NAME=value` and `# env-dep:NAME` lines.
+fn parse_env_deps(bytes: &[u8]) -> BTreeMap<String, Option<String>> {
+    let mut env = BTreeMap::new();
+    for raw in bytes.split(|b| *b == b'\n') {
+        let line = trim_leading_ascii_whitespace(raw);
+        let Some(rest) = line.strip_prefix(b"# env-dep:") else {
+            continue;
+        };
+        let rest = String::from_utf8_lossy(rest);
+        // rustc escapes `\`, `\n` and `\r` in both name and value, so
+        // the first `=` always separates them.
+        match rest.split_once('=') {
+            Some((name, value)) => env.insert(unescape_env(name), Some(unescape_env(value))),
+            None => env.insert(unescape_env(&rest), None),
+        };
+    }
+    env
+}
+
+/// Undo rustc's `escape_dep_env`: `\\` → `\`, `\n` → newline,
+/// `\r` → carriage return.
+fn unescape_env(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn parse_prereqs(bytes: &[u8], path: &Path) -> Result<Vec<PathBuf>> {
     // Fold `\<newline>` continuations. We turn each `\<newline>` into a
     // single space so the resulting buffer contains one logical line per
     // physical `\n` — which keeps the outer line walker simple.
-    let folded = fold_continuations(&bytes);
+    let folded = fold_continuations(bytes);
 
     let mut lineno = 0usize;
     for raw in folded.split(|b| *b == b'\n') {
@@ -213,7 +274,7 @@ mod tests {
     #[test]
     fn simple_three_prereqs() {
         let (_tmp, p) = write_tmp("out/foo.rlib: src/a.rs src/b.rs src/c.rs\n");
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(
             got,
             vec![
@@ -227,7 +288,7 @@ mod tests {
     #[test]
     fn escaped_spaces_in_paths() {
         let (_tmp, p) = write_tmp("out/foo.rlib: path/with\\ space/a.rs path/b.rs\n");
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(
             got,
             vec![
@@ -240,7 +301,7 @@ mod tests {
     #[test]
     fn line_continuation_joined() {
         let (_tmp, p) = write_tmp("out/foo.rlib: src/a.rs \\\n src/b.rs src/c.rs\n");
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(
             got,
             vec![
@@ -254,7 +315,7 @@ mod tests {
     #[test]
     fn leading_blank_and_comment_lines_skipped() {
         let (_tmp, p) = write_tmp("\n# comment line\n\nout/foo.rlib: src/a.rs\n");
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(got, vec![PathBuf::from("src/a.rs")]);
     }
 
@@ -264,7 +325,7 @@ mod tests {
         // We must stop at the first target-line and never see these.
         let content = "out/foo.rlib: src/a.rs src/b.rs\nsrc/a.rs:\nsrc/b.rs:\n";
         let (_tmp, p) = write_tmp(content);
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(
             got,
             vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
@@ -306,7 +367,7 @@ mod tests {
         // got corrupted by a `b as char` cast that truncated multi-byte
         // codepoints to U+00xx.
         let (_tmp, p) = write_tmp("out/foo.rlib: /tmp/ülrich/src/main.rs /tmp/a.rs\n");
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(
             got,
             vec![
@@ -333,7 +394,7 @@ mod tests {
         let p = tmp.path().join("foo.d");
         std::fs::write(&p, &content).unwrap();
 
-        let got = parse_depfile(&p).expect("parse");
+        let got = parse_depfile(&p).expect("parse").files;
         assert_eq!(got.len(), 1);
         let parsed_bytes = got[0].as_os_str().as_bytes();
         assert_eq!(parsed_bytes, b"/tmp/\xFFname/main.rs");
@@ -354,5 +415,35 @@ mod tests {
             }
             other => panic!("expected Error::Config, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn env_deps_parsed_with_values_and_unset() {
+        let content = "out/l.rlib: l.rs\n\nl.rs:\n\n\
+                       # env-dep:FOO\n\
+                       # env-dep:HOME=/home/u\n\
+                       # env-dep:EQ=a=b\n";
+        let (_tmp, p) = write_tmp(content);
+        let got = parse_depfile(&p).expect("parse");
+        assert_eq!(got.files, vec![PathBuf::from("l.rs")]);
+        let expected: BTreeMap<String, Option<String>> = [
+            ("EQ".to_string(), Some("a=b".to_string())),
+            ("FOO".to_string(), None),
+            ("HOME".to_string(), Some("/home/u".to_string())),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(got.env, expected);
+    }
+
+    #[test]
+    fn env_dep_values_are_unescaped() {
+        // rustc writes a newline as `\n` and a backslash as `\\`. A value
+        // ending in a backslash must not be read as a line continuation.
+        let content = "out: a.rs\n# env-dep:V=x\\ny\\\\\n# env-dep:W=1\n";
+        let (_tmp, p) = write_tmp(content);
+        let got = parse_depfile(&p).expect("parse");
+        assert_eq!(got.env["V"].as_deref(), Some("x\ny\\"));
+        assert_eq!(got.env["W"].as_deref(), Some("1"));
     }
 }

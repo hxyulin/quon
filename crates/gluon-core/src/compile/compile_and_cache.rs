@@ -61,9 +61,11 @@
 //! keep its existing error text verbatim — behaviour parity with the
 //! pre-extraction code was the explicit goal of C4a.
 
-use crate::cache::{BuildRecord, FreshnessQuery, parse_depfile};
+use crate::cache::{BuildRecord, DepInfo, FreshnessQuery, parse_depfile};
 use crate::compile::{CompileCtx, RustcCommandBuilder};
 use crate::error::{Error, Result};
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
@@ -145,15 +147,14 @@ pub(crate) fn compile_and_cache(
     //
     // `extra_sources` is appended unconditionally — these are always
     // known to the caller and are not tracked by rustc's depfile.
-    let sources_for_query: Vec<PathBuf> = {
-        let mut v = if depfile_path.exists() {
-            parse_depfile(&depfile_path).unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        v.extend(extra_sources.iter().cloned());
-        v
+    let previous = if depfile_path.exists() {
+        parse_depfile(&depfile_path).unwrap_or_default()
+    } else {
+        DepInfo::default()
     };
+    let mut sources_for_query = previous.files;
+    sources_for_query.extend(extra_sources.iter().cloned());
+    let env_for_query = current_env_values(previous.env.keys(), builder.envs());
 
     // --- Narrow cache-lock acquisition (read) ---
     let is_fresh = {
@@ -166,6 +167,7 @@ pub(crate) fn compile_and_cache(
             argv_hash,
             sources: &sources_for_query,
             output_path: &output_path,
+            env_deps: &env_for_query,
         })
     };
 
@@ -239,13 +241,12 @@ pub(crate) fn compile_and_cache(
     // a kernel rebuild would invalidate the bootloader cache on the
     // first invocation (because the query included the kernel) but be
     // silently forgotten on the next (because the stored record didn't).
-    let sources = match parse_depfile(&depfile_path) {
-        Ok(mut s) => {
-            s.extend(extra_sources.iter().cloned());
-            s
-        }
+    let depinfo = match parse_depfile(&depfile_path) {
+        Ok(d) => d,
         Err(e) => return Err(depfile_fail(&e)),
     };
+    let mut sources = depinfo.files;
+    sources.extend(extra_sources.iter().cloned());
 
     // --- Narrow cache-lock acquisition (write) ---
     {
@@ -258,8 +259,28 @@ pub(crate) fn compile_and_cache(
             argv_hash,
             sources,
             output_path: output_path.clone(),
+            // The values rustc saw, as it recorded them.
+            env_deps: depinfo.env,
         })?;
     }
 
     Ok((output_path, false))
+}
+
+/// Values the next rustc run would see for each env var in `names`:
+/// the builder's own override if it sets one, else this process's
+/// environment. Non-UTF-8 values count as unset, matching `env!`.
+fn current_env_values<'a>(
+    names: impl Iterator<Item = &'a String>,
+    builder_env: &BTreeMap<OsString, OsString>,
+) -> BTreeMap<String, Option<String>> {
+    names
+        .map(|name| {
+            let value = match builder_env.get(std::ffi::OsStr::new(name)) {
+                Some(v) => v.to_str().map(str::to_owned),
+                None => std::env::var(name).ok(),
+            };
+            (name.clone(), value)
+        })
+        .collect()
 }
