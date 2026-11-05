@@ -1,4 +1,4 @@
-// examples/with-config.rs
+// examples/with-config/gluon.rs
 //
 // Project using Gluon's Kconfig-style configuration system.
 //
@@ -9,10 +9,11 @@
 //     gluon build
 //     gluon build --preset verbose
 //
-// This file is illustrative — it is not a runnable project on its
-// own.
+// The kernel package comes from the Cargo workspace in this
+// directory; see crates/kernel/src/main.rs for the config crate in
+// use.
 
-use gluon_config::{Config, ConfigValue, CrateType, Expr, Result};
+use gluon_config::{Config, ConfigValue, Expr, Result};
 
 fn main() -> Result<()> {
     let mut cfg = Config::new();
@@ -20,11 +21,13 @@ fn main() -> Result<()> {
     cfg.project("configurable_kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
+    cfg.cargo_workspace(".");
 
     cfg.profile("default")
         .target(target)
         .opt_level(0)
-        .debug_info(true);
+        .debug_info(true)
+        .boot_binary("kernel");
 
     // ── Config options ────────────────────────────────────────────
     // Typed configuration options. Each becomes a constant in the
@@ -78,13 +81,14 @@ fn main() -> Result<()> {
     cfg.preset("quiet")
         .set("LOG_ENABLED", ConfigValue::Bool(false));
 
-    // ── Group + crate ─────────────────────────────────────────────
+    // ── Group + package ───────────────────────────────────────────
+    // `config(true)` links the generated config crate into the
+    // group's packages. Their workspace dependencies do not link it.
     cfg.group("kernel")
         .target(target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs");
+        .config(true)
+        .package("kernel")
+        .linker_script("crates/kernel/kernel.ld");
 
     // ── Using config in Rust ──────────────────────────────────────
     // The generated config crate is named `<project>_config`, so:

@@ -90,5 +90,6 @@ forwarded to your terminal via `.serial_stdio()`.
 - Add a UEFI bootloader: see [UEFI Bootloader + Kernel](./uefi-bootloader.md)
 - Set up your editor: see [Editor Setup](../tooling/editor-setup.md)
 
-This example is based on the `examples/basic-kernel.rs` file in the Gluon
-repository.
+`examples/basic-kernel/` in the Gluon repository is a runnable version of
+this project. It declares the kernel in a Cargo workspace and builds it
+with `cfg.cargo_workspace(".")` and `group.package("kernel")`.

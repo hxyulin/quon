@@ -5,3 +5,6 @@
 docs/book/
 tests/fixtures/*/build/
 tests/fixtures/*/esp/
+examples/*/build/
+examples/*/esp/
+examples/*/rust-project.json

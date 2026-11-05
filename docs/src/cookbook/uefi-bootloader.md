@@ -153,5 +153,7 @@ their group's `.target()` setting. The dependency graph spans target boundaries
 -- the bootloader (UEFI target) depends on the kernel (bare-metal target) via
 `artifact_env`.
 
-This example is based on `examples/uefi-with-bootloader.rs` in the Gluon
-repository.
+`examples/uefi-with-bootloader/` in the Gluon repository is a runnable
+version of this project. Its kernel and bootloader are Cargo workspace
+packages that share a `boot-info` package, which Gluon compiles once
+for each target.

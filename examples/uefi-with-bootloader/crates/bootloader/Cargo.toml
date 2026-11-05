@@ -1,0 +1,7 @@
+[package]
+name = "bootloader"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+boot-info = { workspace = true }

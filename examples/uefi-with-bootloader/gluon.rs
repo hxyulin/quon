@@ -1,4 +1,4 @@
-// examples/uefi-with-bootloader.rs
+// examples/uefi-with-bootloader/gluon.rs
 //
 // UEFI project with a bootloader that embeds a kernel binary.
 //
@@ -11,13 +11,17 @@
 //     gluon build
 //     gluon run --uefi
 //
-// This file is illustrative — it is not a runnable project on its
-// own.
+// Both packages come from the Cargo workspace in this directory and
+// depend on the `boot-info` package. Gluon resolves features once per
+// target, so `boot-info` is compiled once for each target: as
+// `boot-info` for the kernel's target and `boot-info@x86_64-unknown-uefi`
+// for the bootloader's.
 
-use gluon_config::{Config, CrateType, Result};
+use gluon_config::{Config, Result};
 
 fn main() -> Result<()> {
     let mut cfg = Config::new();
+    cfg.cargo_workspace(".");
 
     cfg.project("my-os", "0.1.0").default_profile("debug");
 
@@ -40,10 +44,7 @@ fn main() -> Result<()> {
     // ── Kernel group ──────────────────────────────────────────────
     cfg.group("kernel")
         .target(kernel_target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs")
+        .package("kernel")
         .linker_script("crates/kernel/kernel.ld");
 
     // ── Bootloader group ──────────────────────────────────────────
@@ -55,10 +56,7 @@ fn main() -> Result<()> {
     //      compiles before the bootloader group.
     cfg.group("uefi")
         .target(uefi_target)
-        .edition("2021")
-        .add("bootloader", "crates/bootloader")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs")
+        .package("bootloader")
         .artifact_env("KERNEL_PATH", "kernel");
 
     // ── ESP assembly ──────────────────────────────────────────────

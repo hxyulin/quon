@@ -146,4 +146,5 @@ Both approaches produce the same generated config crate. Use whichever fits
 your project better -- inline declarations for small projects, Kconfig files
 for larger ones with many options.
 
-This example is based on `examples/with-config.rs` in the Gluon repository.
+`examples/with-config/` in the Gluon repository is a runnable version of
+this project, with the kernel declared in a Cargo workspace.

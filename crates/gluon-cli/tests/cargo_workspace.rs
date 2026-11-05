@@ -1,6 +1,6 @@
 //! End-to-end builds of projects whose crates come from a Cargo
 //! workspace (`cfg.cargo_workspace` and `group.package`): the
-//! `cargo-build` fixture.
+//! `cargo-build` fixture and every example under `examples/`.
 //!
 //! Each test copies its project into a temp dir and runs the real
 //! `gluon` binary there. They spawn rustc and build sysroots, so they
@@ -128,4 +128,17 @@ fn manifest_feature_edit_rebuilds_dependents() {
     let stderr = build_ok(&project);
     // kernel@lib and the kernel bin.
     assert_eq!(summary(&stderr).0, 2, "{stderr}");
+}
+
+#[test]
+#[ignore]
+fn examples_build() {
+    let Some(()) = require_rustc_or_skip("examples_build") else {
+        return;
+    };
+    for example in ["basic-kernel", "with-config", "uefi-with-bootloader"] {
+        let (_tmp, project) = setup(&format!("examples/{example}"));
+        let stderr = build_ok(&project);
+        assert_eq!(summary(&stderr).1, 0, "{example}: {stderr}");
+    }
 }

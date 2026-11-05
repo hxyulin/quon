@@ -1,0 +1,4 @@
+[package]
+name = "boot-info"
+version.workspace = true
+edition.workspace = true
