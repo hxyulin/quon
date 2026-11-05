@@ -5,9 +5,11 @@
 //! incremental build). The result is layout-derived and identical across
 //! runs — it does not require the build to have happened.
 //!
-//! Delegates to [`crate::compile::CrateArtifactShape`] — the single
-//! source of truth for crate path arithmetic, also used by
-//! `command_builder` when assembling rustc invocations.
+//! Both functions lower the unit table ([`crate::unit::lower`]) and read
+//! the path from it, so they agree with the command builder by
+//! construction. Lowering is pure and builds nothing. Vendored crates
+//! are not part of the lowered table here, which does not change any
+//! declared crate's path.
 //!
 //! The primary consumer today is [`crate::analyzer`], which needs to
 //! emit `env!("KERNEL_PATH") → /path/to/kernel` mappings into
@@ -15,10 +17,38 @@
 //! `env!()` macros resolve under rust-analyzer to the same path rustc
 //! will eventually use.
 
-use crate::compile::{BuildLayout, CrateArtifactShape};
+use crate::compile::BuildLayout;
 use crate::error::{Error, Result};
+use crate::unit::{UnitPaths, lower};
+use crate::vendor::cross::context::VendorBuildContext;
 use gluon_model::{BuildModel, CrateDef, Handle, ResolvedConfig};
 use std::path::PathBuf;
+
+/// `caller` names the public function in error messages.
+fn crate_paths(
+    caller: &str,
+    layout: &BuildLayout,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    crate_handle: Handle<CrateDef>,
+) -> Result<UnitPaths> {
+    let crate_def = model.crates.get(crate_handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "{caller}: handle {:?} not in build model",
+            crate_handle
+        ))
+    })?;
+    let units = lower(model, resolved, &VendorBuildContext::new())?;
+    let unit = units.unit_of(crate_handle).ok_or_else(|| {
+        Error::Compile(format!(
+            "{caller}: crate '{}' is not in the resolved \
+             crate set for the active profile (so its artifact path is not \
+             well-defined for this build)",
+            crate_def.name,
+        ))
+    })?;
+    units.paths(unit, layout, model, resolved)
+}
 
 /// Compute the deterministic on-disk path of the primary artifact
 /// produced by compiling the crate referenced by `crate_handle`.
@@ -32,67 +62,37 @@ pub fn expected_crate_artifact_path(
     resolved: &ResolvedConfig,
     crate_handle: Handle<CrateDef>,
 ) -> Result<PathBuf> {
-    let crate_def = model.crates.get(crate_handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "expected_crate_artifact_path: handle {:?} not in build model",
-            crate_handle
-        ))
-    })?;
-
-    let cref = resolved
-        .crates
-        .iter()
-        .find(|r| r.handle == crate_handle)
-        .ok_or_else(|| {
-            Error::Compile(format!(
-                "expected_crate_artifact_path: crate '{}' is not in the resolved \
-                 crate set for the active profile (so its artifact path is not \
-                 well-defined for this build)",
-                crate_def.name,
-            ))
-        })?;
-
-    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, cref)?;
-    Ok(shape.output_path)
+    Ok(crate_paths(
+        "expected_crate_artifact_path",
+        layout,
+        model,
+        resolved,
+        crate_handle,
+    )?
+    .output_path)
 }
 
-/// Read-side counterpart to `CrateArtifactShape::debug_elf_path`. Returns
-/// `Some(<name>.elf)` for `CrateType::RawBinary`, `None` for every other
-/// crate type.
+/// Returns `Some(<name>.elf)` for `CrateType::RawBinary`, `None` for
+/// every other crate type.
 ///
 /// Exists because `RawBinary` crates strip all ELF headers and debug
 /// sections when the flat `<name>.bin` is produced — the `.elf` is the
 /// debugger-facing sidecar that preserves symbols for `gdb`,
-/// `addr2line`, `objdump`, and `readelf`. Mirrors the write-side
-/// derivation in `artifact_shape.rs`.
+/// `addr2line`, `objdump`, and `readelf`.
 pub fn expected_debug_elf_path(
     layout: &BuildLayout,
     model: &BuildModel,
     resolved: &ResolvedConfig,
     crate_handle: Handle<CrateDef>,
 ) -> Result<Option<PathBuf>> {
-    let crate_def = model.crates.get(crate_handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "expected_debug_elf_path: handle {:?} not in build model",
-            crate_handle
-        ))
-    })?;
-
-    let cref = resolved
-        .crates
-        .iter()
-        .find(|r| r.handle == crate_handle)
-        .ok_or_else(|| {
-            Error::Compile(format!(
-                "expected_debug_elf_path: crate '{}' is not in the resolved \
-                 crate set for the active profile (so its artifact path is not \
-                 well-defined for this build)",
-                crate_def.name,
-            ))
-        })?;
-
-    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, cref)?;
-    Ok(shape.debug_elf_path)
+    Ok(crate_paths(
+        "expected_debug_elf_path",
+        layout,
+        model,
+        resolved,
+        crate_handle,
+    )?
+    .debug_elf_path)
 }
 
 #[cfg(test)]

@@ -15,7 +15,6 @@
 //!   compile step (sysroot, host crates, cross crates) threads through.
 
 pub mod artifact_path;
-pub mod artifact_shape;
 pub mod build_step;
 pub mod command_builder;
 pub mod compile_and_cache;
@@ -28,7 +27,6 @@ pub mod layout;
 pub mod objcopy;
 pub mod rustc;
 pub mod rustc_info;
-pub mod vendor_command;
 
 pub use driver::DriverKind;
 
@@ -38,22 +36,22 @@ pub(crate) use compile_and_cache::compile_and_cache as run_compile_and_cache;
 // Note: PostCompileStep is re-exported via `pub(crate) use` above so callers in other
 // modules can import it directly from crate::compile as PostCompileStep.
 
-pub use artifact_shape::CrateArtifactShape;
-pub use compile_crate::{CompileCrateInput, compile as compile_crate};
+pub use compile_crate::{CompileUnitInput, compile as compile_unit};
 pub use extern_map::ArtifactMap;
 pub use layout::BuildLayout;
 pub use rustc::{Emit, RustcCommandBuilder};
 pub use rustc_info::RustcInfo;
 
-/// Optimisation level for host units: proc macros, the crates linked
-/// into them, and (later) build scripts and their build-deps.
+/// Optimisation level for host units on the fixed host profile: proc
+/// macros, vendored host crates, the crates linked into them, and
+/// (later) build scripts and their build-deps.
 ///
-/// Host units use a fixed profile instead of the active gluon profile,
-/// matching Cargo's `build-override` defaults. Switching between
-/// `dev` and `release` then does not rebuild host tools, and their
-/// output directories (`host/vendor-deps/<crate>/`) can stay
-/// profile-independent without serving an artifact built with the
-/// other profile's flags.
+/// These units use a fixed profile instead of the active gluon profile,
+/// matching Cargo's `build-override` defaults. Switching between `dev`
+/// and `release` then does not rebuild them, and their output
+/// directories can stay profile-independent without serving an
+/// artifact built with the other profile's flags. Host tools declared
+/// in `gluon.rs` use the active profile; see [`crate::unit`].
 pub const HOST_OPT_LEVEL: u8 = 0;
 
 /// Debug-info setting for host units. See [`HOST_OPT_LEVEL`].

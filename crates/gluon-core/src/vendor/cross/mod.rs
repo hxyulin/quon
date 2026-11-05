@@ -23,11 +23,8 @@
 //!   by the user; keying it externally keeps the model faithful to the
 //!   user's `gluon.rs`.
 //!
-//! Future modules (next slices, per the design spec):
-//!
-//! - scheduler integration — a `DagNode::VendorCrate(VendorBuildId)`
-//!   variant plus a dispatcher that turns each `VendorCrateBuild` into
-//!   a rustc invocation against gluon's per-target sysroot.
+//! [`crate::unit::lower`] turns each `VendorCrateBuild` into a build
+//! unit, which the scheduler compiles like any declared crate.
 
 pub mod context;
 pub mod graph;

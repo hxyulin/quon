@@ -1119,3 +1119,56 @@ fn failed_build_keeps_records_of_finished_nodes() {
         "nodes that finished before the failure rebuilt:\n{stderr}"
     );
 }
+
+/// Switching profiles does not rebuild the proc macro: proc macros use
+/// the fixed host profile and a profile-independent output path.
+/// Building `dev`, `release`, then `dev` again leaves its dylib
+/// untouched. (The config crate is shared by all profiles and still
+/// rebuilds in place on each switch.)
+#[test]
+#[ignore]
+fn profile_switch_does_not_rebuild_proc_macro() {
+    let Some(()) = require_rustc_or_skip("profile_switch_does_not_rebuild_proc_macro") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    let gluon_rs = fixture.join("gluon.rs");
+    let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
+    let script = script.replace(
+        "    cfg.qemu(",
+        "    cfg.profile(\"release\")\n        .target(target)\n        .opt_level(3)\n        \
+         .debug_info(false)\n        .boot_binary(\"kernel\");\n\n    cfg.qemu(",
+    );
+    fs::write(&gluon_rs, script).expect("write gluon.rs");
+
+    let build = |profile: &str| {
+        let out = gluon_command(&fixture)
+            .args(["--profile", profile, "build"])
+            .output()
+            .expect("spawn gluon build");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "{profile} build failed:\n{stderr}");
+        stderr
+    };
+    let dylib_mtime = || {
+        let dylib = fixture.join("build/host/minimal_derive").join(format!(
+            "{}minimal_derive-gluon-minimal_derive.{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_EXTENSION
+        ));
+        fs::metadata(&dylib)
+            .and_then(|m| m.modified())
+            .unwrap_or_else(|e| panic!("mtime of {dylib:?}: {e}"))
+    };
+
+    build("dev");
+    let before = dylib_mtime();
+    build("release");
+    assert_eq!(
+        dylib_mtime(),
+        before,
+        "release build rebuilt the proc macro"
+    );
+    build("dev");
+    assert_eq!(dylib_mtime(), before, "dev build rebuilt the proc macro");
+}

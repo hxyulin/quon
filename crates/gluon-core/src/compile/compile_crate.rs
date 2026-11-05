@@ -1,67 +1,47 @@
-//! Per-crate compilation dispatch.
+//! Compilation of one build unit.
 //!
-//! [`compile`] is the single entry point for building a user crate (as
-//! opposed to a sysroot crate handled by [`crate::sysroot`]). It mirrors
-//! the cache integration pattern of `build_sysroot_crate` in
-//! `sysroot/mod.rs` — read that function first if you are new to this
-//! module.
+//! [`compile`] is the single entry point for building a crate unit,
+//! whether it was declared in `gluon.rs` or comes from the vendor
+//! pipeline (sysroot crates and the config crate have their own paths
+//! in [`crate::sysroot`] and [`crate::generated::config_crate`]). It
+//! assembles the command with
+//! `command_builder::build_unit_command` and runs it through
+//! `compile_and_cache`.
 //!
-//! ### Host vs cross dispatch
-//!
-//! The `host` flag on [`ResolvedCrateRef`] determines which code path runs:
-//!
-//! - **Host crates** are compiled for the build machine. They get no
-//!   `--sysroot`, no `--target`, and their outputs land in
-//!   `<build>/host/<crate>/`.
-//! - **Cross crates** are compiled for the profile's target. They get
-//!   `--sysroot`, `--target`, implicit `--extern core/alloc/compiler_builtins`
-//!   from the sysroot, and outputs under
-//!   `<build>/cross/<target>/<profile>/<crate>/`.
-//!
-//! See `docs/src/architecture/cache.md` for the canonical rustc-flag
-//! token order that determines the cache key hash.
+//! See `docs/src/architecture/cache.md` for the freshness rules.
 
-use super::artifact_shape::CrateArtifactShape;
-use super::command_builder::build_rustc_command;
-#[cfg(test)]
-use crate::cache::BuildRecord;
+use super::command_builder::build_unit_command;
 use crate::compile::extern_map::ArtifactLookup;
-use crate::compile::layout::BuildLayout;
-use crate::compile::rustc::RustcCommandBuilder;
 use crate::compile::{CompileCtx, PostCompileStep};
 use crate::error::{Diagnostic, Error, Result};
-use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig, ResolvedCrateRef};
+use crate::unit::{Platform, UnitGraph, UnitId, UnitOrigin};
+use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig};
 use std::path::{Path, PathBuf};
 
-/// Input bundle for [`compile`]. Grouped into a struct so the function
-/// signature stays legible as the number of inputs grows.
-pub struct CompileCrateInput<'a> {
-    /// The full build model (needed to resolve target/dep handles).
+/// Input bundle for [`compile`].
+pub struct CompileUnitInput<'a> {
     pub model: &'a BuildModel,
-    /// The resolved configuration for this build invocation.
     pub resolved: &'a ResolvedConfig,
-    /// The specific crate to compile (with its resolved target binding).
-    pub crate_ref: &'a ResolvedCrateRef,
-    /// Map of already-built crate artifacts. The caller (scheduler) must
-    /// have populated every dependency of `crate_ref` before calling.
+    /// The unit table for this build.
+    pub units: &'a UnitGraph,
+    /// The unit to compile.
+    pub unit: UnitId,
+    /// Outputs of finished nodes. Every dep of `unit` must be present.
     pub artifacts: &'a dyn ArtifactLookup,
-    /// Path to the pre-built sysroot directory for the active target.
-    /// **Required** for cross crates; ignored for host crates.
+    /// The built sysroot for the unit's target. Required when the unit
+    /// links the sysroot; ignored otherwise.
     pub sysroot_dir: Option<&'a Path>,
 }
 
-/// Walk a crate's `artifact_env` and return the list of referenced
-/// artifact output paths. Used by [`compile`] to seed the cache
-/// freshness query with artifact-dep mtimes, so that a kernel rebuild
-/// (which updates the kernel binary's mtime but may leave its output
-/// *path* unchanged — cross Bin crates have no extra-filename hash)
-/// invalidates the consuming bootloader's cache.
+/// Walk a crate's `artifact_env` and return the referenced artifact
+/// paths. They are extra freshness inputs: a kernel rebuild changes the
+/// kernel binary but not its path (cross executables have no
+/// extra-filename hash), so the consuming bootloader's argv alone would
+/// miss it.
 ///
-/// Returns an empty vec for crates that don't use `artifact_env`.
-///
-/// Callers must have already built every referenced artifact; the
-/// DAG edge from `artifact_deps` guarantees this at scheduler time.
-/// Missing artifacts here are a scheduler bug.
+/// Callers must have built every referenced artifact; the DAG edge from
+/// `artifact_deps` guarantees this. A missing artifact is a scheduler
+/// bug.
 pub(crate) fn collect_artifact_env_sources(
     crate_def: &CrateDef,
     model: &BuildModel,
@@ -79,7 +59,7 @@ pub(crate) fn collect_artifact_env_sources(
         let artifact_path = artifacts.get(dep_handle).ok_or_else(|| {
             Error::Compile(format!(
                 "crate '{}' artifact_env references '{}' but its artifact is not \
-                 available in ArtifactMap (scheduler bug)",
+                 available (scheduler bug)",
                 crate_def.name, dep_name,
             ))
         })?;
@@ -88,237 +68,117 @@ pub(crate) fn collect_artifact_env_sources(
     Ok(out)
 }
 
-/// Everything `compile()` needs after argument resolution but before
-/// spawning rustc. Built once by [`prepare_compile_context`]; consumed
-/// by the [`crate::compile::run_compile_and_cache`] call at the tail
-/// of `compile()`.
-struct CompileContext {
-    crate_name: String,
-    /// `Some(target_name)` for cross crates; `None` for host crates.
-    /// Captured here so the per-crate error closures don't need to
-    /// re-resolve the target handle from the model.
-    target_name_for_fail: Option<String>,
-    is_host: bool,
-    out_dir: PathBuf,
-    output_path: PathBuf,
-    depfile_path: PathBuf,
-    /// On-disk path of the auxiliary debug ELF, when one exists.
-    /// Populated for `CrateType::RawBinary` from `CrateArtifactShape`;
-    /// `None` for every other crate type. Threaded through to the
-    /// `run_compile_and_cache` call site so the post-link objcopy
-    /// step can target it.
-    debug_elf_path: Option<PathBuf>,
-    /// The crate-type, captured here so the dispatch in `compile()`
-    /// can decide whether to wire the RawBinary post-compile objcopy
-    /// step without re-resolving the `CrateDef` from the model.
-    crate_type: CrateType,
-    cache_key: String,
-    builder: RustcCommandBuilder,
-    extra_sources: Vec<PathBuf>,
-}
-
-/// Gather every input `compile()` needs after argument resolution but
-/// before spawning rustc. Pulls together the rustc command builder,
-/// cache key, output directory, and artifact-env source paths in one
-/// place — leaving `compile()` itself as a thin wrapper that builds
-/// error closures and dispatches to `run_compile_and_cache`.
-fn prepare_compile_context(
-    ctx: &CompileCtx,
-    input: &CompileCrateInput<'_>,
-) -> Result<CompileContext> {
-    let model = input.model;
-    let resolved = input.resolved;
-    let crate_ref = input.crate_ref;
-
-    let crate_def: &CrateDef = model.crates.get(crate_ref.handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "crate handle {:?} not found in build model",
-            crate_ref.handle
-        ))
-    })?;
-
-    let (builder, output_path, depfile_path) = build_rustc_command(ctx, input)?;
-    let cache_key = build_cache_key(&ctx.layout, model, resolved, crate_def, crate_ref)?;
-
-    // `out_dir` must exist on disk before rustc spawns; the
-    // run_compile_and_cache helper takes care of the mkdir given
-    // this path. Sourcing it from `CrateArtifactShape` keeps the
-    // dispatch (host / cross-final / cross-artifact) in exactly
-    // one place — the same place `command_builder` and
-    // `artifact_path` consult.
-    let shape = CrateArtifactShape::for_crate(&ctx.layout, model, resolved, crate_def, crate_ref)?;
-    let out_dir = shape.out_dir;
-    let debug_elf_path = shape.debug_elf_path;
-
-    let target_name_for_fail = if crate_ref.host {
-        None
-    } else {
-        Some(
-            model
-                .targets
-                .get(crate_ref.target)
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
-    };
-
-    let extra_sources = collect_artifact_env_sources(crate_def, model, input.artifacts)?;
-
-    Ok(CompileContext {
-        crate_name: crate_def.name.clone(),
-        target_name_for_fail,
-        is_host: crate_ref.host,
-        out_dir,
-        output_path,
-        depfile_path,
-        debug_elf_path,
-        crate_type: crate_def.crate_type,
-        cache_key,
-        builder,
-        extra_sources,
-    })
-}
-
-/// Build the cache key for a single crate compilation.
-///
-/// The key shape — `"crate:host:<name>[:driver]"` for host crates and
-/// `"crate:cross:<name>:<profile>:<target>[:driver]"` for cross-compiled
-/// — is part of the on-disk cache contract: changing it invalidates all
-/// existing cache entries. The `<driver>` suffix gives `gluon build`,
-/// `gluon check`, and `gluon clippy` their own slots so they cannot
-/// race over a single `BuildRecord`.
-fn build_cache_key(
-    layout: &BuildLayout,
-    model: &BuildModel,
-    resolved: &ResolvedConfig,
-    crate_def: &CrateDef,
-    cref: &ResolvedCrateRef,
-) -> Result<String> {
-    let suffix = layout.cache_key_suffix();
-    if cref.host {
-        return Ok(format!("crate:host:{}{suffix}", crate_def.name));
-    }
-    let target = model.targets.get(cref.target).ok_or_else(|| {
-        Error::Compile(format!(
-            "crate '{}': target handle {:?} not found in build model",
-            crate_def.name, cref.target
-        ))
-    })?;
-    Ok(format!(
-        "crate:cross:{}:{}:{}{}",
-        crate_def.name, resolved.profile.name, target.name, suffix
-    ))
-}
-
-/// Compile a single crate. Returns the absolute path of the produced
-/// artifact and a boolean indicating whether the result came from the
-/// cache (`true` = freshness check short-circuited rustc). Cached via
-/// `ctx.cache` following the narrow-lock pattern established by
-/// `sysroot::build_sysroot_crate`.
+/// Compile one unit. Returns the path dependents use and whether the
+/// cache short-circuited rustc.
 ///
 /// ### Cache contract
 ///
-/// - Acquire cache lock → call `is_fresh` → drop immediately.
-/// - If fresh and output exists: return early without spawning rustc.
-/// - Else: spawn rustc, parse depfile, re-acquire lock → `mark_built` → drop.
+/// - Acquire the cache lock, check freshness, drop the lock.
+/// - Fresh and every output present: return without spawning rustc.
+/// - Otherwise spawn rustc, parse the depfile, then lock again to
+///   record the build.
 ///
-/// **Never hold the cache lock across a rustc spawn** — doing so would
-/// serialise parallel compilation on the cache mutex.
+/// **Never hold the cache lock across a rustc spawn**: parallel compiles
+/// would serialise on it.
 pub fn compile(
     ctx: &CompileCtx,
-    input: CompileCrateInput<'_>,
+    input: CompileUnitInput<'_>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
-    let cc = prepare_compile_context(ctx, &input)?;
+    let model = input.model;
+    let unit = input.units.get(input.unit);
+    let cmd = build_unit_command(ctx, &input)?;
+    let cache_key = input
+        .units
+        .cache_key(input.unit, &ctx.layout, model, input.resolved)?;
 
-    // Capture state into owned values so the error closures (which
-    // outlive `cc`) can reference it. For cross crates we name the
-    // target in the spawn-fail headline so multi-target builds don't
-    // force the user to dig through the command to see which
-    // invocation failed.
-    let crate_name_fail = cc.crate_name.clone();
-    let crate_name_depfile = cc.crate_name.clone();
-    let is_host = cc.is_host;
-    let target_name_for_fail = cc.target_name_for_fail.clone();
-    let depfile_for_diag = cc.depfile_path.clone();
-
-    // RawBinary needs a post-link objcopy step: rustc has emitted
-    // <name>.elf into cross_final_dir, and we now run rust-objcopy
-    // -O binary to produce <name>.bin (the build model's primary
-    // artifact). The .elf is also listed as an auxiliary freshness
-    // input so deleting just the sidecar (or having a previous
-    // objcopy crash mid-run) forces a recompile rather than silently
-    // returning a stale cache hit. Other crate types pass the no-op
-    // (empty aux + None) variant.
-    let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) = if cc.crate_type
-        == CrateType::RawBinary
-    {
-        let elf_path = cc.debug_elf_path.clone().ok_or_else(|| {
-                Error::Compile(format!(
-                    "BUG: CrateArtifactShape did not populate debug_elf_path for RawBinary crate '{}' — \
-                     this is an internal invariant violation in artifact_shape.rs",
-                    cc.crate_name
-                ))
+    let extra_sources = match unit.origin {
+        UnitOrigin::Crate(h) => {
+            let def = model.crates.get(h).ok_or_else(|| {
+                Error::Compile(format!("crate handle {h:?} not found in build model"))
             })?;
-        let elf_for_aux = elf_path.clone();
-        let bin_path = cc.output_path.clone();
-        let rustc_path = ctx.rustc_info.rustc_path.clone();
-        let rustlib_bin = crate::compile::objcopy::rustlib_bin_dir(
-            &ctx.rustc_info.sysroot,
-            &ctx.rustc_info.host_triple,
-        );
-        let post: PostCompileStep = Box::new(move || {
-            // TODO: memoise the probe on RustcInfo so it runs once per
-            // gluon invocation rather than once per RawBinary compile.
-            // Cost today is microseconds per crate; the fix is to add
-            // `rust_objcopy_path: PathBuf` to RustcInfo and consume it here.
-            let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path, &rustlib_bin)?;
-            crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
-        });
-        (vec![elf_for_aux], Some(post))
-    } else {
-        (Vec::new(), None)
+            collect_artifact_env_sources(def, model, input.artifacts)?
+        }
+        UnitOrigin::Vendor(_) => Vec::new(),
     };
+
+    // Owned copies for the error closures, which outlive `unit`.
+    let what = match unit.origin {
+        UnitOrigin::Crate(_) => format!("crate '{}'", unit.name),
+        UnitOrigin::Vendor(_) => format!("vendored crate '{}'", unit.package.name),
+    };
+    let headline_what = match unit.platform {
+        Platform::Host => match unit.origin {
+            UnitOrigin::Crate(_) => format!("host crate '{}'", unit.name),
+            UnitOrigin::Vendor(_) => format!("vendored crate '{}' for host", unit.package.name),
+        },
+        Platform::Cross(t) => {
+            let target = model
+                .targets
+                .get(t)
+                .map(|t| t.name.as_str())
+                .unwrap_or("<unknown>");
+            format!("{what} for target '{target}'")
+        }
+    };
+    let depfile_for_diag = cmd.paths.depfile_path.clone();
+
+    // A raw binary needs a post-link objcopy: rustc writes `<name>.elf`
+    // and `rust-objcopy -O binary` produces `<name>.bin`, the primary
+    // artifact. The `.elf` is also an aux output, so deleting it (or an
+    // objcopy that crashed mid-run) forces a recompile instead of a
+    // stale cache hit.
+    let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) =
+        match (unit.kind, cmd.paths.debug_elf_path.clone()) {
+            (CrateType::RawBinary, Some(elf_path)) => {
+                let bin_path = cmd.output_path.clone();
+                let rustc_path = ctx.rustc_info.rustc_path.clone();
+                let rustlib_bin = crate::compile::objcopy::rustlib_bin_dir(
+                    &ctx.rustc_info.sysroot,
+                    &ctx.rustc_info.host_triple,
+                );
+                let elf_for_post = elf_path.clone();
+                let post: PostCompileStep = Box::new(move || {
+                    let objcopy =
+                        crate::compile::objcopy::probe_rust_objcopy(&rustc_path, &rustlib_bin)?;
+                    crate::compile::objcopy::run_objcopy_to_binary(
+                        &objcopy,
+                        &elf_for_post,
+                        &bin_path,
+                    )
+                });
+                (vec![elf_path], Some(post))
+            }
+            _ => (Vec::new(), None),
+        };
 
     crate::compile::run_compile_and_cache(
         ctx,
-        cc.builder,
-        cc.cache_key,
-        cc.output_path,
-        cc.depfile_path,
-        Some(&cc.out_dir),
-        cc.extra_sources,
+        cmd.builder,
+        cache_key,
+        cmd.output_path,
+        cmd.paths.depfile_path,
+        Some(&cmd.paths.out_dir),
+        extra_sources,
         aux_outputs,
         post_compile_step,
         Box::new(move |output, rendered| {
-            let headline = if is_host {
-                format!(
-                    "rustc failed while building host crate '{}': exit={:?}",
-                    crate_name_fail,
-                    output.status.code(),
-                )
-            } else {
-                format!(
-                    "rustc failed while building crate '{}' for target '{}': exit={:?}",
-                    crate_name_fail,
-                    target_name_for_fail.as_deref().unwrap_or("<unknown>"),
-                    output.status.code(),
-                )
-            };
             Error::Diagnostics(vec![
-                Diagnostic::error(headline)
-                    .with_note(format!(
-                        "stderr:\n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ))
-                    .with_note(format!("command: {rendered}")),
+                Diagnostic::error(format!(
+                    "rustc failed while building {headline_what}: exit={:?}",
+                    output.status.code(),
+                ))
+                .with_note(format!(
+                    "stderr:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .with_note(format!("command: {rendered}")),
             ])
         }),
         Box::new(move |e| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(
-                    "built crate '{}' but its depfile at {} could not be read",
-                    crate_name_depfile,
+                    "built {what} but its depfile at {} could not be read",
                     depfile_for_diag.display(),
                 ))
                 .with_note(format!("underlying error: {e}"))
@@ -335,18 +195,137 @@ pub fn compile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cache::Cache;
-    use crate::compile::command_builder::build_rustc_command;
+    use crate::cache::{BuildRecord, Cache};
     use crate::compile::compile_utils::normalize_crate_name;
-    use crate::compile::{ArtifactMap, BuildLayout, RustcCommandBuilder, RustcInfo};
+    use crate::compile::layout::BuildLayout;
+    use crate::compile::{ArtifactMap, RustcCommandBuilder, RustcInfo};
+    use crate::unit::lower;
+    use crate::vendor::cross::context::VendorBuildContext;
     use gluon_model::{
         BuildModel, CrateDef, CrateType, DepDef, DepResolution, GroupDef, Handle, PanicStrategy,
         ProjectDef, ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::borrow::Cow;
     use std::collections::BTreeMap;
-    use std::path::Path;
     use std::sync::Arc;
+
+    // ---------------------------------------------------------------------------
+    // Shims: compile one declared crate the way the scheduler does, by
+    // lowering it into a unit first.
+    // ---------------------------------------------------------------------------
+
+    /// One crate to compile, with its deps' artifacts recorded by crate
+    /// handle.
+    struct CompileCrateInput<'a> {
+        model: &'a BuildModel,
+        resolved: &'a ResolvedConfig,
+        crate_ref: &'a ResolvedCrateRef,
+        artifacts: &'a ArtifactMap,
+        sysroot_dir: Option<&'a Path>,
+    }
+
+    /// Lower `crate_ref` plus its direct deps and every crate recorded
+    /// in `artifacts`, and copy the recorded crate artifacts onto their
+    /// units.
+    fn lower_for(input: &CompileCrateInput<'_>) -> (ResolvedConfig, UnitGraph, ArtifactMap) {
+        let model = input.model;
+        let mut resolved = input.resolved.clone();
+        resolved.crates.push(input.crate_ref.clone());
+        let mut add = |h: Handle<CrateDef>| {
+            if resolved.crates.iter().any(|r| r.handle == h) {
+                return;
+            }
+            let (host, target) = match model.crates.get(h).map(|c| c.target) {
+                Some(TargetSpec::Cross(t)) => (false, t),
+                _ => (true, resolved.profile.target),
+            };
+            resolved.crates.push(ResolvedCrateRef {
+                handle: h,
+                target,
+                host,
+            });
+        };
+        if let Some(def) = model.crates.get(input.crate_ref.handle) {
+            for dep in def.deps.values() {
+                if let DepResolution::Project(h) = dep.resolution {
+                    add(h);
+                }
+            }
+        }
+        for (h, _) in input.artifacts.iter() {
+            add(h);
+        }
+        let units = lower(model, &resolved, &VendorBuildContext::new()).expect("lower");
+        let mut artifacts = input.artifacts.clone();
+        for (h, path) in input.artifacts.iter() {
+            if let Some(u) = units.unit_of(h) {
+                artifacts.insert_unit(u, path.to_path_buf());
+            }
+        }
+        (resolved, units, artifacts)
+    }
+
+    fn build_rustc_command(
+        ctx: &CompileCtx,
+        input: &CompileCrateInput<'_>,
+    ) -> Result<(RustcCommandBuilder, PathBuf, PathBuf)> {
+        let (resolved, units, artifacts) = lower_for(input);
+        let cmd = build_unit_command(
+            ctx,
+            &CompileUnitInput {
+                model: input.model,
+                resolved: &resolved,
+                units: &units,
+                unit: units.unit_of(input.crate_ref.handle).expect("unit"),
+                artifacts: &artifacts,
+                sysroot_dir: input.sysroot_dir,
+            },
+        )?;
+        Ok((cmd.builder, cmd.output_path, cmd.paths.depfile_path))
+    }
+
+    fn compile(
+        ctx: &CompileCtx,
+        input: CompileCrateInput<'_>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<(PathBuf, bool)> {
+        let (resolved, units, artifacts) = lower_for(&input);
+        super::compile(
+            ctx,
+            CompileUnitInput {
+                model: input.model,
+                resolved: &resolved,
+                units: &units,
+                unit: units.unit_of(input.crate_ref.handle).expect("unit"),
+                artifacts: &artifacts,
+                sysroot_dir: input.sysroot_dir,
+            },
+            stderr,
+        )
+    }
+
+    fn build_cache_key(
+        layout: &BuildLayout,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+        _crate_def: &CrateDef,
+        cref: &ResolvedCrateRef,
+    ) -> Result<String> {
+        let artifacts = ArtifactMap::new();
+        let (resolved, units, _) = lower_for(&CompileCrateInput {
+            model,
+            resolved,
+            crate_ref: cref,
+            artifacts: &artifacts,
+            sysroot_dir: None,
+        });
+        units.cache_key(
+            units.unit_of(cref.handle).unwrap(),
+            layout,
+            model,
+            &resolved,
+        )
+    }
 
     // ---------------------------------------------------------------------------
     // Test fixtures
@@ -556,6 +535,7 @@ mod tests {
             CrateDef {
                 name: "demo".into(),
                 path: "demo".into(),
+                crate_type: CrateType::ProcMacro,
                 ..test_crate_defaults()
             },
         );
@@ -579,6 +559,7 @@ mod tests {
             CrateDef {
                 name: "demo".into(),
                 path: "demo".into(),
+                crate_type: CrateType::ProcMacro,
                 ..test_crate_defaults()
             },
         );
@@ -589,6 +570,32 @@ mod tests {
         let cref = host_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
         assert_eq!(key, "crate:host:demo:check");
+    }
+
+    /// A host crate no proc macro depends on (a host tool) uses the
+    /// active profile, so its key names the profile.
+    #[test]
+    fn build_cache_key_host_root_includes_profile() {
+        let mut model = BuildModel::default();
+        let th = insert_target(
+            &mut model,
+            make_target("host-tgt", "x86_64-unknown-linux-gnu", true),
+        );
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "mktool".into(),
+                path: "mktool".into(),
+                crate_type: CrateType::Bin,
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, PathBuf::from("/tmp/proj"));
+        let layout = BuildLayout::new("/tmp/build", "demo");
+        let crate_def = model.crates.get(ch).unwrap();
+        let key =
+            build_cache_key(&layout, &model, &resolved, crate_def, &host_ref(ch, th)).unwrap();
+        assert_eq!(key, "crate:host:mktool:debug");
     }
 
     #[test]
@@ -1363,7 +1370,9 @@ mod tests {
         // Pre-populate the manifest on disk with a matching BuildRecord.
         // Sources is empty because no depfile exists → sources_for_query is
         // also empty, so the set-comparison in is_fresh passes trivially.
-        let cache_key = "crate:host:cached_crate".to_string();
+        // A host lib no proc macro depends on uses the active profile,
+        // whose name ("debug") is part of its key.
+        let cache_key = "crate:host:cached_crate:debug".to_string();
         {
             let mut cache = Cache::load(&manifest_path).0;
             cache
@@ -2052,6 +2061,206 @@ mod tests {
         assert!(
             !run(upgraded),
             "a different rustc version at the same path must rebuild"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Vendored units go through the same command builder
+    // ---------------------------------------------------------------------------
+
+    fn vendor_unit(
+        name: &str,
+        target: TargetSpec,
+        kind: crate::vendor::cross::metadata::CrateKind,
+        deps: &[(&str, TargetSpec)],
+    ) -> crate::vendor::cross::graph::VendorCrateBuild {
+        use crate::vendor::cross::graph::{VendorCrateBuild, VendorDepEdge};
+        use crate::vendor::cross::metadata::CrateId;
+        VendorCrateBuild {
+            crate_id: CrateId {
+                name: name.into(),
+                version: "1.0.0".into(),
+            },
+            cargo_target_name: name.into(),
+            target,
+            kind,
+            manifest_dir: PathBuf::from(format!("/vendor/{name}")),
+            lib_path: PathBuf::from(format!("/vendor/{name}/src/lib.rs")),
+            edition: "2021".into(),
+            features: vec!["std".into()],
+            deps: deps
+                .iter()
+                .map(|(dep, target)| VendorDepEdge {
+                    extern_name: dep.to_string(),
+                    crate_id: CrateId {
+                        name: dep.to_string(),
+                        version: "1.0.0".into(),
+                    },
+                    target: *target,
+                })
+                .collect(),
+        }
+    }
+
+    /// Build the command for one vendored unit, with every other unit
+    /// "built" at `/built/<unit name>/artifact`.
+    fn vendor_command(
+        ctx: &CompileCtx,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+        vctx: &VendorBuildContext,
+        which: crate::vendor::cross::context::VendorBuildId,
+    ) -> (Vec<String>, PathBuf, PathBuf) {
+        let units = lower(model, resolved, vctx).unwrap();
+        let mut artifacts = ArtifactMap::new();
+        for (id, unit) in units.iter() {
+            artifacts.insert_unit(id, PathBuf::from(format!("/built/{}/artifact", unit.name)));
+        }
+        let sysroot = PathBuf::from("/sysroot");
+        let cmd = build_unit_command(
+            ctx,
+            &CompileUnitInput {
+                model,
+                resolved,
+                units: &units,
+                unit: units.unit_of_vendor(which).unwrap(),
+                artifacts: &artifacts,
+                sysroot_dir: Some(&sysroot),
+            },
+        )
+        .unwrap();
+        (
+            args_as_strings(&cmd.builder),
+            cmd.output_path,
+            cmd.builder.rustc_path().to_path_buf(),
+        )
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn vendored_host_proc_macro_uses_host_profile_and_plain_rustc() {
+        use crate::vendor::cross::metadata::CrateKind;
+        let tmp = tempfile::tempdir().unwrap();
+        // Under `gluon check`, vendored units still get plain rustc and a
+        // full emit: dependents need the real dylib.
+        let ctx = make_ctx_with_driver(
+            tmp.path(),
+            "/usr/bin/rustc",
+            crate::compile::DriverKind::Clippy,
+        );
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let mut resolved = make_resolved(th, tmp.path().to_path_buf());
+        resolved.profile.opt_level = 3;
+        let mut vctx = VendorBuildContext::new();
+        let syn = vctx
+            .add(vendor_unit(
+                "syn",
+                TargetSpec::Host,
+                CrateKind::ProcMacro,
+                &[],
+            ))
+            .unwrap();
+
+        let (args, output, program) = vendor_command(&ctx, &model, &resolved, &vctx, syn);
+        assert_eq!(program, PathBuf::from("/usr/bin/rustc"));
+        assert!(
+            !args.iter().any(|a| a == "--target" || a == "--sysroot"),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "opt-level=0"), "{args:?}");
+        assert!(args.iter().any(|a| a == "debuginfo=0"), "{args:?}");
+        assert!(has_pair(&args, "--cap-lints", "allow"), "{args:?}");
+        assert!(has_pair(&args, "--cfg", "feature=\"std\""), "{args:?}");
+        assert!(has_pair(&args, "--extern", "proc_macro"), "{args:?}");
+        assert!(
+            args.iter().any(|a| a.starts_with("--emit=link")),
+            "{args:?}"
+        );
+        assert_eq!(
+            output,
+            tmp.path()
+                .join("build/tool/clippy/host/vendor-deps/syn")
+                .join(crate::compile::compile_utils::proc_macro_file_name("syn"))
+        );
+    }
+
+    #[test]
+    fn vendored_cross_lib_links_sysroot_deps_and_transitive_dirs() {
+        use crate::vendor::cross::metadata::CrateKind;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let mut resolved = make_resolved(th, tmp.path().to_path_buf());
+        resolved.profile.opt_level = 3;
+        let cross = TargetSpec::Cross(th);
+        let host = TargetSpec::Host;
+        // top → a → b (cross libs); top → derive (host proc macro) → quote.
+        let mut vctx = VendorBuildContext::new();
+        vctx.add(vendor_unit("b", cross, CrateKind::Lib, &[]))
+            .unwrap();
+        vctx.add(vendor_unit("a", cross, CrateKind::Lib, &[("b", cross)]))
+            .unwrap();
+        vctx.add(vendor_unit("quote", host, CrateKind::Lib, &[]))
+            .unwrap();
+        vctx.add(vendor_unit(
+            "derive",
+            host,
+            CrateKind::ProcMacro,
+            &[("quote", host)],
+        ))
+        .unwrap();
+        let top = vctx
+            .add(vendor_unit(
+                "top",
+                cross,
+                CrateKind::Lib,
+                &[("a", cross), ("derive", host)],
+            ))
+            .unwrap();
+
+        let (args, output, _) = vendor_command(&ctx, &model, &resolved, &vctx, top);
+        assert!(
+            args.iter().any(|a| a == "--target=x86_64-unknown-none"),
+            "{args:?}"
+        );
+        assert!(has_pair(&args, "--sysroot", "/sysroot"), "{args:?}");
+        assert!(args.iter().any(|a| a == "opt-level=3"), "{args:?}");
+        assert!(
+            has_pair(&args, "--extern", "a=/built/a/artifact"),
+            "{args:?}"
+        );
+        assert!(
+            has_pair(&args, "--extern", "derive=/built/derive/artifact"),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("_config")),
+            "vendored crates do not link the config crate: {args:?}"
+        );
+        // Transitive deps are on the search path, except what is linked
+        // into the proc macro.
+        let search: Vec<&str> = args
+            .windows(2)
+            .filter(|w| w[0] == "-L")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            search,
+            vec![
+                "dependency=/built/a",
+                "dependency=/built/b",
+                "dependency=/built/derive",
+            ]
+        );
+        assert_eq!(
+            output,
+            tmp.path()
+                .join("build/cross/x86/debug/vendor-deps/top/libtop.rlib")
         );
     }
 }

@@ -212,13 +212,17 @@ every existing cache entry, so the order is fixed:
 
 ```
 input → crate-name → crate-type → edition → sysroot? → target? →
-out-dir → emit → implicit-externs? → explicit-externs → opt-level →
-debug-info → lto? → cfg-flags → panic-strategy? → extra-rustc-flags →
-incremental → linker-script? → extra-filename
+out-dir → implicit-externs? → config-crate-extern? → emit →
+explicit-externs → dependency-search-dirs → proc-macro-extern? →
+opt-level → debug-info → lto? → feature-cfgs → cfg-flags →
+cap-lints? → panic-strategy? → extra-rustc-flags → incremental? →
+linker-script? → raw-binary-output? → extra-filename?
 ```
 
 `?` marks tokens that appear only when applicable (host crates skip
-`sysroot`/`target`, host build steps skip `linker-script`, etc.).
+`sysroot`/`target`, vendored crates skip `incremental` and add
+`cap-lints`, etc.). Declared and vendored crates share this order: both
+are build units assembled by `compile::command_builder::build_unit_command`.
 
 Keeping this order stable is **non-negotiable**: any reordering
 invalidates every on-disk cache entry. Adding a new flag means

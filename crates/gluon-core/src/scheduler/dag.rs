@@ -23,10 +23,10 @@
 //! **Do not change `edges_out` to `Vec` under any circumstances.**
 
 use crate::error::{Error, Result};
-use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
+use crate::unit::{DepTarget, Platform, UnitGraph, UnitId, UnitOrigin};
 use gluon_model::{
-    BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepResolution, EspDef, Handle, ImageDef,
-    ImageSource, ResolvedConfig, RuleDef, TargetDef,
+    BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, Handle, ImageDef, ImageSource,
+    ResolvedConfig, RuleDef, TargetDef,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -34,23 +34,24 @@ use std::collections::{BTreeMap, BTreeSet};
 // DagNode
 // ---------------------------------------------------------------------------
 
-/// A work node in the scheduler DAG. Four kinds map onto the four kinds
-/// of work the MVP-M pipeline performs.
+/// A work node in the scheduler DAG.
 ///
 /// The scheduler treats these as opaque identities — it only tracks edges and
-/// in-degrees. The pipeline dispatcher (Chunk B4) matches on the variant to
-/// decide what work to perform.
+/// in-degrees. The pipeline dispatcher matches on the variant to decide what
+/// work to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum DagNode {
     /// Build the custom sysroot for a specific target triple.
     Sysroot(Handle<TargetDef>),
     /// Generate + compile the `<project>_config` crate for a specific target.
-    /// One per distinct cross target in `resolved.crates` — each target gets
+    /// One per distinct cross target whose units link it — each target gets
     /// its own config crate rlib so all cross crates can `--extern` it
     /// regardless of which target they compile for.
     ConfigCrate(Handle<TargetDef>),
-    /// Compile a user-declared crate (host or cross).
-    Crate(Handle<CrateDef>),
+    /// Compile one build unit: a crate declared in `gluon.rs` or a
+    /// vendored crate, for host or for a cross target. See
+    /// [`crate::unit::BuildUnit`].
+    Compile(UnitId),
     /// Run a user-declared rule via the rule registry.
     Rule(Handle<RuleDef>),
     /// Assemble an EFI System Partition directory from the primary build
@@ -58,10 +59,9 @@ pub enum DagNode {
     /// crate referenced by the ESP's entries. See [`EspDef`].
     Esp(Handle<EspDef>),
     /// Assemble a bootable disk image from compiled crate artifacts,
-    /// host files, and (in Phase 3+) raw byte placements + nested
-    /// partitions. Depends on every source crate referenced by the
-    /// image's entries, and on every ESP referenced via
-    /// `ImageSource::Esp`. See [`ImageDef`].
+    /// host files, raw byte placements and nested partitions. Depends on
+    /// every source crate referenced by the image's entries, and on every
+    /// ESP referenced via `ImageSource::Esp`. See [`ImageDef`].
     Image(Handle<ImageDef>),
     /// Invoke a host-bin runner with curated env vars and capture its
     /// single output file as a named artifact. Depends on the runner
@@ -70,14 +70,6 @@ pub enum DagNode {
     /// raw writes, qemu `disk_ref`, etc.) get edges *to* this node.
     /// See [`BuildStepDef`].
     BuildStep(Handle<BuildStepDef>),
-    /// Compile a vendored external crate via gluon-driven rustc.
-    /// One node per registered build in the [`VendorBuildContext`]
-    /// passed to [`build_dag`]. Depends on its own dep edges (other
-    /// vendor crates) and, for cross-targeted vendor builds, on the
-    /// per-target sysroot. Consumed by user crates that declare
-    /// `cfg.dependency(...).target(t)`. See
-    /// [`crate::vendor::cross::graph::VendorCrateBuild`].
-    VendorCrate(VendorBuildId),
 }
 
 // ---------------------------------------------------------------------------
@@ -200,508 +192,212 @@ impl Default for Dag {
 // build_dag
 // ---------------------------------------------------------------------------
 
-/// Build the scheduler DAG from a resolved configuration and the underlying
-/// build model.
+/// Build the scheduler DAG from a resolved configuration, the build model
+/// and the unit table from [`crate::unit::lower`].
 ///
-/// ### Edge rules
+/// Construction has two passes. The first inserts every node in a fixed
+/// order, so `NodeId`s are stable across runs:
 ///
-/// 1. **Cross crate → Sysroot**: Every cross crate depends on the sysroot for
-///    its target. The sysroot must be built before any cross compilation can
-///    start.
-/// 2. **Cross crate → ConfigCrate**: Every cross crate depends on the config
-///    crate (the generated `<project>_config` rlib). The config crate exposes
-///    the resolved `CONFIG_*` flags as constants — downstream cross crates
-///    `--extern` it.
-/// 3. **ConfigCrate → Sysroot**: The config crate is compiled for the
-///    profile's cross target, so it also depends on the sysroot.
-/// 4. **Crate → Crate (deps)**: Every crate depends on every entry in its
-///    `CrateDef::deps` map whose `resolution` is `DepResolution::Project`
-///    AND whose referenced crate appears in `resolved.crates`. External
-///    deps and resolutions to crates not in `resolved.crates` are silently
-///    skipped — this function's contract is to build edges for resolvable
-///    project deps; surfacing missing handles is the resolver's job.
-///    Both host→host and cross→cross (and host→cross for proc-macros) are
-///    modelled here; cross→host is architecturally nonsensical but not
-///    explicitly rejected.
+/// 1. `Sysroot` and `ConfigCrate` for the profile's target (the config
+///    crate is unconditional), then for each target a unit links.
+/// 2. One `Compile` per unit, in unit order.
+/// 3. Every ESP, image and build step, in arena order.
+/// 4. One `Rule` per pipeline stage that names a rule.
 ///
-/// 4a. **Crate → Crate (artifact_deps)**: Every crate depends on every
-///   entry in its `CrateDef::artifact_deps` list that resolves to a crate
-///   present in `resolved.crates`. Unlike regular `deps`, artifact deps do
-///   not produce `--extern` flags — they exist purely to enforce build
-///   ordering across crates that reference each other's build outputs (e.g.
-///   a bootloader that `include_bytes!`es a kernel ELF via an
-///   `artifact_env` injected `KERNEL_PATH`). Edges are group- and
-///   target-agnostic; a `x86_64-unknown-uefi` bootloader can
-///   artifact-depend on a `x86_64-unknown-none` kernel and the cross-group
-///   edge is added here. Dangling names (no matching crate in the model)
-///   are a resolver-level error surfaced by
-///   `validate::check_artifact_deps_resolve`; this function silently skips
-///   them as a belt-and-braces backstop.
-/// 5. **Pipeline stage barrier**: Each stage in each pipeline becomes one or
-///    more rule nodes. Every node in stage N depends on every node in
-///    stage N−1 (bipartite barrier). In MVP-M each stage has at most one rule
-///    node (`PipelineStep::rule`); stages with `rule: None` are skipped.
-/// 6. **Rule → group crates**: For each group handle in a stage's
-///    `PipelineStep::inputs`, the rule node depends on every crate
-///    in `resolved.crates` whose `CrateDef::group` matches.
+/// The second pass asks [`inputs`] for each node's inputs and adds an edge
+/// from each.
 ///
-/// ### Empty crates list
+/// ### Gated crates
 ///
-/// Legal: `build_dag` constructs the DAG with only a `Sysroot` and
-/// `ConfigCrate` node when `resolved.crates` is empty.
+/// A crate that exists in the model but not in this build (gated out by
+/// the profile or config) has no unit. Every lookup by crate handle or
+/// name goes through [`UnitGraph::unit_of`], so such a crate is skipped
+/// in one place: ESP entries, image entries, build-step inputs and rule
+/// groups that name it get no edge. Units only refer to units in the
+/// table, so `Compile` edges need no check.
 ///
 /// ### Cycle detection
 ///
 /// NOT performed here. Malformed models that contain cycles will simply fail
 /// to make progress at scheduling time (the worker pool detects deadlock and
 /// returns an error).
-pub fn build_dag(
-    resolved: &ResolvedConfig,
-    model: &BuildModel,
-    vendor_ctx: &VendorBuildContext,
-) -> Result<Dag> {
+pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel, units: &UnitGraph) -> Result<Dag> {
     let mut dag = Dag::new();
 
-    // Helper: look up whether a crate's group has `no_sysroot=true`.
-    // Returns false if the group handle isn't set (defensive: a crate
-    // without a resolved group is a resolver bug, but we'd rather fall
-    // back to the safe behaviour — wire up the sysroot edges — than
-    // silently drop them and produce a broken build).
-    let crate_no_sysroot = |handle: Handle<CrateDef>| -> bool {
-        let crate_def = match model.crates.get(handle) {
-            Some(c) => c,
-            None => return false,
-        };
-        model
-            .groups
-            .get(crate_def.group)
-            .map(|g| g.no_sysroot)
-            .unwrap_or(false)
+    let insert_target = |dag: &mut Dag, t: Handle<TargetDef>, config: bool| {
+        dag.insert_node(DagNode::Sysroot(t));
+        if config {
+            dag.insert_node(DagNode::ConfigCrate(t));
+        }
     };
-
-    // -----------------------------------------------------------------------
-    // Step 1: Insert cross Sysroot nodes for every target in use.
-    // -----------------------------------------------------------------------
-    // Each distinct target used by at least one resolved cross crate gets
-    // its own Sysroot node. A project with two targets (e.g. x86_64-unknown-uefi
-    // for the bootloader and x86_64-unknown-none for the kernel) produces
-    // two independent sysroot builds. `insert_node` is idempotent so
-    // inserting the same target twice is a no-op.
-    //
-    // The profile's target always gets a sysroot node (for the config crate);
-    // additional targets appear if any resolved crate references them.
-    //
-    // Crates whose group sets `no_sysroot=true` are excluded — their
-    // target may be incompatible with `core`/`alloc`/`compiler_builtins`
-    // (e.g. 16-bit real-mode boot sector targets). The user is
-    // responsible for ensuring that no `no_sysroot` group's target is
-    // also used by a sysroot-dependent crate.
-    dag.insert_node(DagNode::Sysroot(resolved.profile.target));
-    for crate_ref in &resolved.crates {
-        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
-            dag.insert_node(DagNode::Sysroot(crate_ref.target));
+    insert_target(&mut dag, resolved.profile.target, true);
+    for (_, unit) in units.iter() {
+        if let (true, Platform::Cross(t)) = (unit.sysroot, unit.platform) {
+            insert_target(&mut dag, t, unit.config_crate);
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Step 2: Insert one ConfigCrate node per distinct cross target.
-    // Each ConfigCrate depends on its own target's sysroot.
-    // -----------------------------------------------------------------------
-    // Collect distinct cross targets. The profile target always gets one
-    // (even if no crate uses it — the config crate is unconditional);
-    // additional targets appear from resolved.crates. `no_sysroot`
-    // crates are again excluded — they don't link the config crate.
-    let mut config_targets: BTreeSet<Handle<TargetDef>> = BTreeSet::new();
-    config_targets.insert(resolved.profile.target);
-    for crate_ref in &resolved.crates {
-        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
-            config_targets.insert(crate_ref.target);
-        }
+    for (id, _) in units.iter() {
+        dag.insert_node(DagNode::Compile(id));
     }
-    for &target in &config_targets {
-        let sysroot_id = dag.insert_node(DagNode::Sysroot(target));
-        let config_id = dag.insert_node(DagNode::ConfigCrate(target));
-        dag.add_edge(sysroot_id, config_id);
+    for (h, _) in model.esps.iter() {
+        dag.insert_node(DagNode::Esp(h));
     }
-
-    // -----------------------------------------------------------------------
-    // Step 3: Insert every crate in resolved.crates.
-    // -----------------------------------------------------------------------
-    // Collect the set of handles present in resolved.crates so we can skip
-    // dangling dep handles later (rule 4).
-    let resolved_handles: BTreeSet<Handle<CrateDef>> =
-        resolved.crates.iter().map(|cr| cr.handle).collect();
-
-    for crate_ref in &resolved.crates {
-        let crate_id = dag.insert_node(DagNode::Crate(crate_ref.handle));
-
-        // Edge rule 1 + 2: cross crates depend on Sysroot and ConfigCrate.
-        // Host crates (proc-macros, build scripts) are compiled for the build
-        // machine and do not use the custom sysroot or config crate.
-        // `no_sysroot` group crates also skip both edges — they declare
-        // `#![no_core]` (or equivalent) and provide their own runtime
-        // primitives; wiring them to a sysroot they can't link against
-        // would force a doomed build.
-        if !crate_ref.host && !crate_no_sysroot(crate_ref.handle) {
-            // Rule 1: cross crate → sysroot FOR ITS OWN TARGET (not
-            // necessarily the profile target — multi-target projects have
-            // independent sysroots per target).
-            let crate_sysroot_id = dag.insert_node(DagNode::Sysroot(crate_ref.target));
-            dag.add_edge(crate_sysroot_id, crate_id);
-            // Rule 2: cross crate → config crate for its own target.
-            // Each target has its own ConfigCrate node so there is no
-            // target-mismatch risk.
-            let config_id = dag.insert_node(DagNode::ConfigCrate(crate_ref.target));
-            dag.add_edge(config_id, crate_id);
-        }
-
-        // Edge rule 4: crate → its dependency crates.
-        let crate_def: &CrateDef = model.crates.get(crate_ref.handle).ok_or_else(|| {
-            Error::Compile(format!(
-                "build_dag: crate handle {:?} present in resolved.crates but not in \
-                 build model (internal consistency error — this is a resolver bug)",
-                crate_ref.handle
-            ))
-        })?;
-
-        for (extern_name, dep) in &crate_def.deps {
-            let dep_handle = match dep.resolution {
-                DepResolution::Project(h) => h,
-                DepResolution::External(ext_handle) => {
-                    // External deps live outside the user-crate arena.
-                    // Two pipelines own them: V1 (host-targeted) goes
-                    // through the cargo wrapper and produces artifacts
-                    // before the scheduler runs, so it's invisible to
-                    // the DAG; V2 (cross-targeted, the new vendor
-                    // pipeline) registers a `VendorCrateBuild` in
-                    // `vendor_ctx` per `(target, cargo_target_name)`.
-                    //
-                    // We look up the dep in `vendor_ctx` using
-                    // `(ExternalDepDef::target, extern_name)`. The
-                    // extern name is the BTreeMap key here — that's
-                    // the rust extern form (`--extern <name>=<path>`),
-                    // which is the cargo-normalised (underscored) form
-                    // and therefore matches `VendorBuildContext::lookup`'s
-                    // expectations.
-                    //
-                    // A miss is silent: V1 host externals never appear
-                    // in `vendor_ctx`, and during the migration window
-                    // every caller passes `VendorBuildContext::new()`,
-                    // so a hard error here would break the workspace.
-                    // Once the V2 pipeline becomes the only path, a
-                    // missing entry will become a resolver-level
-                    // diagnostic upstream of this function.
-                    let Some(ext_def) = model.external_deps.get(ext_handle) else {
-                        continue;
-                    };
-                    if let Some(vendor_id) = vendor_ctx.lookup(ext_def.target, extern_name) {
-                        let v_node = dag.insert_node(DagNode::VendorCrate(vendor_id));
-                        dag.add_edge(v_node, crate_id);
-                    }
-                    continue;
-                }
-            };
-            // Skip deps that are not part of this build (dangling handles).
-            if !resolved_handles.contains(&dep_handle) {
-                continue;
-            }
-            let dep_id = dag.insert_node(DagNode::Crate(dep_handle));
-            // The dep must complete before this crate can compile.
-            dag.add_edge(dep_id, crate_id);
-        }
-
-        // Edge rule 4a: crate → its artifact-dep crates (ordering-only,
-        // no --extern). Unknown names are skipped silently; validate.rs
-        // is responsible for surfacing them as a diagnostic before we
-        // get here.
-        for dep_name in &crate_def.artifact_deps {
-            let dep_handle = match model.crates.lookup(dep_name) {
-                Some(h) => h,
-                None => continue, // dangling — validate surfaces this
-            };
-            if !resolved_handles.contains(&dep_handle) {
-                continue;
-            }
-            let dep_id = dag.insert_node(DagNode::Crate(dep_handle));
-            dag.add_edge(dep_id, crate_id);
-        }
+    for (h, _) in model.images.iter() {
+        dag.insert_node(DagNode::Image(h));
     }
-
-    // -----------------------------------------------------------------------
-    // Step 3.5: Vendored crate nodes + their internal/sysroot edges.
-    // -----------------------------------------------------------------------
-    // Insert one VendorCrate node per registered build in vendor_ctx. The
-    // node identity is the VendorBuildId (assigned in registration order
-    // by `vendor_sync` — itself deterministic), so DAG iteration stays
-    // stable across runs.
-    //
-    // Edges added here:
-    //   - **Vendor → vendor** (from each `VendorDepEdge`). Misses are a
-    //     hard error: the vendor graph is internally produced by
-    //     `build_vendor_nodes` from a single resolved cargo metadata
-    //     output, so an unresolvable edge means the lowering is broken,
-    //     not a user mistake. Failing loudly here is preferable to
-    //     letting the scheduler deadlock later.
-    //   - **Sysroot → cross vendor**. Cross-targeted vendor builds need
-    //     gluon's per-target sysroot just like user cross crates.
-    //     Host-targeted vendor builds (proc-macros and their deps) skip
-    //     this edge — they compile against the host toolchain.
-    //     `insert_node` is idempotent, so a sysroot referenced *only* by
-    //     vendor crates (e.g. a multi-target project where bitflags
-    //     targets the kernel target but no user crate does) is created
-    //     here with no other consumers. That's harmless: the sysroot
-    //     just gets built earlier than otherwise.
-    //
-    // **No vendor → ConfigCrate edge.** Vendor crates are external
-    // (crates.io) deps, unaware of the user's `CONFIG_*` constants;
-    // wiring them to the config crate would force a phantom dependency
-    // that delays vendor builds for no reason.
-    //
-    // Consumer-side (user crate → vendor) edges live in Step 3 above,
-    // wired during the user-crate dep walk so we can use the user
-    // crate's `BTreeMap` extern-name keys directly.
-    for (id, build) in vendor_ctx.iter() {
-        let v_node = dag.insert_node(DagNode::VendorCrate(id));
-
-        for edge in &build.deps {
-            let dep_id = vendor_ctx
-                .lookup(edge.target, &edge.extern_name)
-                .ok_or_else(|| {
-                    Error::Compile(format!(
-                        "build_dag: vendor build {id} ({}) references unresolved dep \
-                         ({:?}, {}) — vendor graph lowering produced an inconsistent edge",
-                        build.crate_id, edge.target, edge.extern_name
-                    ))
-                })?;
-            let dep_node = dag.insert_node(DagNode::VendorCrate(dep_id));
-            dag.add_edge(dep_node, v_node);
-        }
-
-        if let gluon_model::TargetSpec::Cross(target) = build.target {
-            let sysroot_id = dag.insert_node(DagNode::Sysroot(target));
-            dag.add_edge(sysroot_id, v_node);
-        }
+    for (h, _) in model.build_steps.iter() {
+        dag.insert_node(DagNode::BuildStep(h));
     }
-
-    // -----------------------------------------------------------------------
-    // Step 3b: EspBuild nodes.
-    // -----------------------------------------------------------------------
-    // Each declared ESP becomes one node. The node depends on every source
-    // crate referenced by its entries. Entries whose source crate did not
-    // resolve at intern time were already dropped (with a diagnostic), so
-    // every entry here carries a real handle. Entries whose source crate
-    // exists but is not in `resolved.crates` (e.g. gated behind a disabled
-    // config option) are skipped, same policy as regular deps. An ESP
-    // with zero resolvable entries still gets a node — the helper will
-    // produce an empty directory, which is harmless and makes the
-    // failure mode observable.
-    for (esp_handle, esp) in model.esps.iter() {
-        let esp_id = dag.insert_node(DagNode::Esp(esp_handle));
-        for entry in &esp.entries {
-            let src_handle = entry.source_crate;
-            if !resolved_handles.contains(&src_handle) {
-                continue;
-            }
-            let src_id = dag.insert_node(DagNode::Crate(src_handle));
-            dag.add_edge(src_id, esp_id);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Step 3c: Image nodes.
-    // -----------------------------------------------------------------------
-    // Each declared image becomes one node. Edge sources:
-    //   - `ImageSource::Crate(name)` → DagNode::Crate(handle).
-    //   - `ImageSource::Esp(name)`   → DagNode::Esp(handle) (the ESP
-    //     directory must be assembled before the image packs it).
-    //   - `ImageSource::File(path)`  → no edge (host-side file with no
-    //     build dependency).
-    //
-    // Mirrors the ESP loop's policy: source names that don't resolve
-    // are skipped silently (validate.rs surfaces them via diagnostic),
-    // and missing handles in `resolved.crates` (e.g. gated behind a
-    // disabled config option) are skipped too. An image with zero
-    // resolvable entries still gets a node — its dispatcher will
-    // produce an empty image, which is observable rather than silent.
-    for (image_handle, image) in model.images.iter() {
-        let image_id = dag.insert_node(DagNode::Image(image_handle));
-        // Helper closure used by every entry slot — top-level `entries`,
-        // each partition's nested `entries`, and the raw_writes' crate
-        // sources all share the same edge logic.
-        //
-        // Names are looked up in the unified artifact namespace: a
-        // crate first, then a build step. Validate has already
-        // rejected name collisions, so at most one of the two
-        // resolves. Build-step name resolution makes
-        // `image().add_crate("disk-image", ...)` work even when
-        // `disk-image` is a build step rather than a literal crate —
-        // the unified namespace promised in the design doc.
-        let wire_image_source_crate = |dag: &mut Dag, name: &str| {
-            if let Some(src_handle) = model.crates.lookup(name) {
-                if resolved_handles.contains(&src_handle) {
-                    let src_id = dag.insert_node(DagNode::Crate(src_handle));
-                    dag.add_edge(src_id, image_id);
-                }
-                return;
-            }
-            if let Some(bs_handle) = model.build_steps.lookup(name) {
-                let src_id = dag.insert_node(DagNode::BuildStep(bs_handle));
-                dag.add_edge(src_id, image_id);
-            }
-        };
-        let wire_image_source_esp = |dag: &mut Dag, name: &str| {
-            if let Some(esp_handle) = model.esps.lookup(name) {
-                let src_id = dag.insert_node(DagNode::Esp(esp_handle));
-                dag.add_edge(src_id, image_id);
-            }
-        };
-        let wire_entries = |dag: &mut Dag, entries: &[gluon_model::ImageEntry]| {
-            for entry in entries {
-                match &entry.source {
-                    ImageSource::Crate(name) => wire_image_source_crate(dag, name),
-                    ImageSource::Esp(name) => wire_image_source_esp(dag, name),
-                    ImageSource::File(_) => {
-                        // No build dependency: host files exist on disk
-                        // before gluon runs. Mtime-based cache
-                        // invalidation happens inside the image
-                        // dispatcher.
-                    }
-                }
-            }
-        };
-
-        // Top-level entries (flat-FS image shape).
-        wire_entries(&mut dag, &image.entries);
-
-        // Each partition's entries (partitioned-disk shape). Same
-        // resolution, just nested.
-        for partition in &image.partitions {
-            wire_entries(&mut dag, &partition.entries);
-        }
-
-        // Raw writes targeting compiled crates (typically a BIOS boot
-        // sector or a stage blob built as `crate_type("raw_binary")`).
-        // File and Bytes sources have no build dependency.
-        for rw in &image.raw_writes {
-            if let gluon_model::RawSource::Crate { name } = &rw.source {
-                wire_image_source_crate(&mut dag, name);
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Step 3d: BuildStep nodes.
-    // -----------------------------------------------------------------------
-    // Each declared build step becomes one node. Edge sources:
-    //   - The runner crate (must be a host bin) → BuildStep node. The
-    //     runner has to be compiled before gluon can invoke it.
-    //   - Each `BuildStepInput::Crate { handle }` → BuildStep node. The
-    //     input artifact must exist on disk before the runner can read
-    //     it. `File` and `Literal` inputs add no edges.
-    //
-    // Reachability filtering: today every declared build step is
-    // inserted unconditionally. Profile-aware reachability filtering
-    // (only enqueue build steps the active profile transitively
-    // references) is straightforward to add in `config::resolve` — see
-    // the plan §"Profile reachability". For the MVP we accept that
-    // unreachable build steps just won't have their consumers, so the
-    // node sits at in-degree 0 and runs eagerly. That matches today's
-    // behaviour for crates / images / esps that are similarly
-    // unreferenced.
-    //
-    // Build steps with unresolved runners/inputs do not reach this loop
-    // — intern drops the entire step or the dangling input, leaving
-    // post-intern handles always-resolved. The `resolved_handles` gate
-    // below still applies (a runner that exists in the model but isn't
-    // in the active resolved crate set, e.g. profile-gated, is treated
-    // as absent for DAG purposes).
-    for (bs_handle, step) in model.build_steps.iter() {
-        let bs_id = dag.insert_node(DagNode::BuildStep(bs_handle));
-
-        // Runner crate → BuildStep edge.
-        //
-        // Only add the edge when the runner is actually in the resolved
-        // crate set (e.g. not gated out by profile or config).
-        // Otherwise the edge would point at a Crate node that never
-        // runs, leaving the BuildStep deadlocked.
-        if resolved_handles.contains(&step.runner) {
-            let runner_id = dag.insert_node(DagNode::Crate(step.runner));
-            dag.add_edge(runner_id, bs_id);
-        }
-
-        // Crate inputs → BuildStep edges.
-        for input in step.inputs.values() {
-            if let BuildStepInput::Crate {
-                handle: input_handle,
-            } = input
-            {
-                if resolved_handles.contains(input_handle) {
-                    let input_id = dag.insert_node(DagNode::Crate(*input_handle));
-                    dag.add_edge(input_id, bs_id);
-                }
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Step 4: Pipeline stage barriers and rule → group edges.
-    // -----------------------------------------------------------------------
-    for (_pipeline_handle, pipeline) in model.pipelines.iter() {
-        // Track the rule NodeIds from the previous stage so we can wire the
-        // bipartite barrier between consecutive stages.
-        let mut prev_stage_rule_ids: Vec<NodeId> = Vec::new();
-
+    for (_, pipeline) in model.pipelines.iter() {
         for step in &pipeline.stages {
-            // Stages without a rule are skipped (MVP-M invariant: each
-            // participating stage names exactly one rule).
-            let rule_name = match &step.rule {
-                Some(name) => name,
-                None => {
-                    // This stage produces no rule node. Leave prev_stage_rule_ids
-                    // unchanged so the next non-None stage inherits the same
-                    // predecessor set — the barrier is preserved across skipped
-                    // stages. MVP-M doesn't exercise None stages, but the safer
-                    // behaviour is the one a future contributor would expect.
-                    continue;
-                }
+            let Some(rule_name) = &step.rule else {
+                continue;
             };
-
-            let rule_handle = model.rules.lookup(rule_name).ok_or_else(|| {
+            let rule = model.rules.lookup(rule_name).ok_or_else(|| {
                 Error::Compile(format!(
                     "build_dag: pipeline '{}' stage '{}' references unknown rule '{}'",
                     pipeline.name, step.name, rule_name
                 ))
             })?;
-            let rule_id = dag.insert_node(DagNode::Rule(rule_handle));
-
-            // Edge rule 5: bipartite barrier — rule depends on all rules in
-            // the previous stage.
-            for &prev_id in &prev_stage_rule_ids {
-                dag.add_edge(prev_id, rule_id);
-            }
-
-            // Edge rule 6: rule depends on every crate in each referenced group.
-            for &group_handle in &step.inputs {
-                for crate_ref in &resolved.crates {
-                    let crate_def = model.crates.get(crate_ref.handle).ok_or_else(|| {
-                        Error::Compile(format!(
-                            "build_dag: crate handle {:?} present in resolved.crates but \
-                             not in build model (internal consistency error)",
-                            crate_ref.handle
-                        ))
-                    })?;
-                    if crate_def.group == group_handle {
-                        let crate_id = dag.insert_node(DagNode::Crate(crate_ref.handle));
-                        dag.add_edge(crate_id, rule_id);
-                    }
-                }
-            }
-
-            prev_stage_rule_ids = vec![rule_id];
+            dag.insert_node(DagNode::Rule(rule));
         }
     }
 
+    for to in 0..dag.len() as NodeId {
+        for input in inputs(dag.nodes[to as usize], units, model) {
+            let from = dag.insert_node(input);
+            dag.add_edge(from, to);
+        }
+    }
     Ok(dag)
+}
+
+/// The nodes `node` reads outputs from, or must run after.
+///
+/// | Node | Inputs |
+/// |---|---|
+/// | `Compile(u)` | `Sysroot(t)` if the unit links the sysroot; `ConfigCrate(t)` if it links the config crate; `Compile` of each dep unit and each order dep (`artifact_deps`) |
+/// | `ConfigCrate(t)` | `Sysroot(t)` |
+/// | `Esp(e)` | `Compile` of each entry's source crate |
+/// | `Image(i)` | per entry and raw write: crate name → `Compile`, else build-step name → `BuildStep`; ESP name → `Esp`. Host files have no node |
+/// | `BuildStep(s)` | `Compile` of the runner and of each crate input |
+/// | `Rule(r)` | the rule of the previous rule-bearing stage in each pipeline that uses `r`, and `Compile` of every declared crate in the stage's input groups |
+/// | `Sysroot(t)` | none |
+///
+/// Vendored crates are units like any other: a declared crate's edge to
+/// a vendored dep is a `Compile` → `Compile` edge, resolved in
+/// [`crate::unit::lower`]. Vendored units link the sysroot but not the
+/// config crate.
+pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNode> {
+    let compile_of = |h: Handle<CrateDef>| units.unit_of(h).map(DagNode::Compile);
+    // Names are looked up in the unified artifact namespace: a crate
+    // first, then a build step. Validate rejects name collisions, so at
+    // most one resolves. A crate that exists but is gated out of this
+    // build gets no edge and does not fall back to a build step.
+    let by_name = |name: &str| -> Option<DagNode> {
+        match model.crates.lookup(name) {
+            Some(h) => compile_of(h),
+            None => model.build_steps.lookup(name).map(DagNode::BuildStep),
+        }
+    };
+    match node {
+        DagNode::Sysroot(_) => Vec::new(),
+        DagNode::ConfigCrate(t) => vec![DagNode::Sysroot(t)],
+        DagNode::Compile(id) => {
+            let unit = units.get(id);
+            let mut out = Vec::new();
+            if let Platform::Cross(t) = unit.platform {
+                if unit.sysroot {
+                    out.push(DagNode::Sysroot(t));
+                }
+                if unit.config_crate {
+                    out.push(DagNode::ConfigCrate(t));
+                }
+            }
+            for dep in &unit.deps {
+                if let DepTarget::Unit(d) = dep.target {
+                    out.push(DagNode::Compile(d));
+                }
+            }
+            out.extend(unit.order_deps.iter().map(|&d| DagNode::Compile(d)));
+            out
+        }
+        DagNode::Esp(h) => model
+            .esps
+            .get(h)
+            .map(|esp| {
+                esp.entries
+                    .iter()
+                    .filter_map(|e| compile_of(e.source_crate))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        DagNode::Image(h) => {
+            let Some(image) = model.images.get(h) else {
+                return Vec::new();
+            };
+            let entries = image
+                .entries
+                .iter()
+                .chain(image.partitions.iter().flat_map(|p| p.entries.iter()));
+            let mut out: Vec<DagNode> = entries
+                .filter_map(|entry| match &entry.source {
+                    ImageSource::Crate(name) => by_name(name),
+                    ImageSource::Esp(name) => model.esps.lookup(name).map(DagNode::Esp),
+                    // Host files exist before gluon runs; the image node
+                    // checks their freshness itself.
+                    ImageSource::File(_) => None,
+                })
+                .collect();
+            // Raw writes of compiled crates (a boot sector or stage blob
+            // built as `raw_binary`). File and byte sources have no node.
+            out.extend(image.raw_writes.iter().filter_map(|rw| match &rw.source {
+                gluon_model::RawSource::Crate { name } => by_name(name),
+                _ => None,
+            }));
+            out
+        }
+        DagNode::BuildStep(h) => {
+            let Some(step) = model.build_steps.get(h) else {
+                return Vec::new();
+            };
+            let mut out: Vec<DagNode> = compile_of(step.runner).into_iter().collect();
+            out.extend(step.inputs.values().filter_map(|input| match input {
+                BuildStepInput::Crate { handle } => compile_of(*handle),
+                _ => None,
+            }));
+            out
+        }
+        DagNode::Rule(r) => {
+            let mut out = Vec::new();
+            for (_, pipeline) in model.pipelines.iter() {
+                // Stages without a rule are skipped and keep the previous
+                // rule as the barrier for the next rule-bearing stage.
+                let mut prev: Option<Handle<RuleDef>> = None;
+                for step in &pipeline.stages {
+                    let Some(rule) = step.rule.as_deref().and_then(|n| model.rules.lookup(n))
+                    else {
+                        continue;
+                    };
+                    if rule == r {
+                        out.extend(prev.map(DagNode::Rule));
+                        for (id, unit) in units.iter() {
+                            if let UnitOrigin::Crate(h) = unit.origin
+                                && model
+                                    .crates
+                                    .get(h)
+                                    .is_some_and(|c| step.inputs.contains(&c.group))
+                            {
+                                out.push(DagNode::Compile(id));
+                            }
+                        }
+                    }
+                    prev = Some(rule);
+                }
+            }
+            out
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +407,7 @@ pub fn build_dag(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gluon_model::DepResolution;
     use gluon_model::{
         BuildModel, CrateDef, CrateType, DepDef, GroupDef, PipelineDef, PipelineStep, ProjectDef,
         ResolvedCrateRef, RuleDef, RuleHandler, TargetDef, TargetSpec,
@@ -723,6 +420,49 @@ mod tests {
     #[cfg(test)]
     mod test_support {
         use super::*;
+        use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
+
+        /// A built DAG plus the unit table it was built from, so tests
+        /// can name `Compile` nodes by crate handle or vendor build.
+        #[derive(Debug)]
+        pub struct TestDag {
+            pub dag: Dag,
+            pub units: UnitGraph,
+        }
+
+        impl std::ops::Deref for TestDag {
+            type Target = Dag;
+            fn deref(&self) -> &Dag {
+                &self.dag
+            }
+        }
+
+        impl TestDag {
+            /// The `Compile` node of a declared crate. Panics when the
+            /// crate has no unit (not in `resolved.crates`).
+            pub fn crate_node(&self, h: Handle<CrateDef>) -> DagNode {
+                DagNode::Compile(self.units.unit_of(h).expect("crate has a unit"))
+            }
+
+            pub fn vendor_node(&self, id: VendorBuildId) -> DagNode {
+                DagNode::Compile(
+                    self.units
+                        .unit_of_vendor(id)
+                        .expect("vendor build has a unit"),
+                )
+            }
+        }
+
+        /// Lower the units and build the DAG, as `execute_pipeline` does.
+        pub fn test_dag(
+            resolved: &ResolvedConfig,
+            model: &BuildModel,
+            vendor_ctx: &VendorBuildContext,
+        ) -> Result<TestDag> {
+            let units = crate::unit::lower(model, resolved, vendor_ctx)?;
+            let dag = build_dag(resolved, model, &units)?;
+            Ok(TestDag { dag, units })
+        }
         use gluon_model::{ResolvedConfig, ResolvedProfile};
         use std::path::PathBuf;
 
@@ -935,8 +675,9 @@ mod tests {
 
         // Insert three nodes with no edges — all have in-degree 0.
         let id0 = dag.insert_node(DagNode::Sysroot(th));
-        let id1 = dag.insert_node(DagNode::Crate(ch1));
-        let id2 = dag.insert_node(DagNode::Crate(ch2));
+        let _ = (ch1, ch2);
+        let id1 = dag.insert_node(DagNode::Compile(UnitId(0)));
+        let id2 = dag.insert_node(DagNode::Compile(UnitId(1)));
 
         let ready = dag.ready();
         assert_eq!(
@@ -989,7 +730,7 @@ mod tests {
             }],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // All three node kinds must be present.
         let sysroot_id = *dag
@@ -1000,7 +741,7 @@ mod tests {
             .node_index
             .get(&DagNode::ConfigCrate(th))
             .expect("ConfigCrate node");
-        let crate_id = *dag.node_index.get(&DagNode::Crate(ch)).expect("Crate node");
+        let crate_id = *dag.node_index.get(&dag.crate_node(ch)).expect("Crate node");
 
         assert_eq!(dag.len(), 3);
 
@@ -1088,12 +829,12 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let sysroot_id = *dag.node_index.get(&DagNode::Sysroot(th)).unwrap();
         let config_id = *dag.node_index.get(&DagNode::ConfigCrate(th)).unwrap();
-        let host_id = *dag.node_index.get(&DagNode::Crate(host_h)).unwrap();
-        let cross_id = *dag.node_index.get(&DagNode::Crate(cross_h)).unwrap();
+        let host_id = *dag.node_index.get(&dag.crate_node(host_h)).unwrap();
+        let cross_id = *dag.node_index.get(&dag.crate_node(cross_h)).unwrap();
 
         // Host crate must NOT depend on Sysroot or ConfigCrate.
         let sysroot_outs = dag.edges_out.get(&sysroot_id).unwrap();
@@ -1225,11 +966,11 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
-        let c_id = *dag.node_index.get(&DagNode::Crate(c_h)).unwrap();
-        let b_id = *dag.node_index.get(&DagNode::Crate(b_h)).unwrap();
-        let a_id = *dag.node_index.get(&DagNode::Crate(a_h)).unwrap();
+        let c_id = *dag.node_index.get(&dag.crate_node(c_h)).unwrap();
+        let b_id = *dag.node_index.get(&dag.crate_node(b_h)).unwrap();
+        let a_id = *dag.node_index.get(&dag.crate_node(a_h)).unwrap();
 
         // C → B edge.
         let c_outs = dag.edges_out.get(&c_id).unwrap();
@@ -1297,7 +1038,7 @@ mod tests {
         );
 
         let resolved = make_resolved(th, vec![]);
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let rule0_id = *dag.node_index.get(&DagNode::Rule(rule0_h)).unwrap();
         let rule1_id = *dag.node_index.get(&DagNode::Rule(rule1_h)).unwrap();
@@ -1407,11 +1148,11 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let rule_id = *dag.node_index.get(&DagNode::Rule(rule_h)).unwrap();
-        let cx_id = *dag.node_index.get(&DagNode::Crate(cx_h)).unwrap();
-        let cy_id = *dag.node_index.get(&DagNode::Crate(cy_h)).unwrap();
+        let cx_id = *dag.node_index.get(&dag.crate_node(cx_h)).unwrap();
+        let cy_id = *dag.node_index.get(&dag.crate_node(cy_h)).unwrap();
 
         // Both crates' outs must contain the rule.
         let cx_outs = dag.edges_out.get(&cx_id).expect("crate-x has outs");
@@ -1495,15 +1236,15 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let kernel_id = *dag
             .node_index
-            .get(&DagNode::Crate(kernel_h))
+            .get(&dag.crate_node(kernel_h))
             .expect("kernel node present");
         let bootloader_id = *dag
             .node_index
-            .get(&DagNode::Crate(bootloader_h))
+            .get(&dag.crate_node(bootloader_h))
             .expect("bootloader node present");
 
         // The critical assertion: kernel → bootloader edge exists.
@@ -1530,7 +1271,7 @@ mod tests {
     //
     // A single EspDef with one entry (source_crate = "bootloader") must
     // produce a `DagNode::Esp` node with an incoming edge from the
-    // bootloader crate's `DagNode::Crate` node. The esp's `entries`
+    // bootloader crate's `Compile` node. The esp's `entries`
     // must have been interned with a `source_crate_handle` before
     // `build_dag` runs — we simulate that by setting it explicitly.
     #[test]
@@ -1577,9 +1318,9 @@ mod tests {
             }],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
-        let bl_id = *dag.node_index.get(&DagNode::Crate(bl_h)).unwrap();
+        let bl_id = *dag.node_index.get(&dag.crate_node(bl_h)).unwrap();
         let esp_id = *dag
             .node_index
             .get(&DagNode::Esp(esp_h))
@@ -1634,10 +1375,10 @@ mod tests {
         );
 
         // Must not return Err.
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new())
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new())
             .expect("unknown artifact_dep must not abort");
         // Consumer's in-degree: Sysroot + ConfigCrate only (no artifact edge).
-        let consumer_id = *dag.node_index.get(&DagNode::Crate(consumer_h)).unwrap();
+        let consumer_id = *dag.node_index.get(&dag.crate_node(consumer_h)).unwrap();
         assert_eq!(*dag.in_degree.get(&consumer_id).unwrap(), 2);
     }
 
@@ -1747,14 +1488,14 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         let img_id = *dag
             .node_index
             .get(&DagNode::Image(img_h))
             .expect("Image node must exist");
         let esp_id = *dag.node_index.get(&DagNode::Esp(esp_h)).unwrap();
-        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&dag.crate_node(kernel_h)).unwrap();
 
         // Esp → Image edge present.
         let esp_outs = dag.edges_out.get(&esp_id).unwrap();
@@ -1862,10 +1603,10 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
         let img_id = *dag.node_index.get(&DagNode::Image(img_h)).unwrap();
-        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
-        let boot_id = *dag.node_index.get(&DagNode::Crate(boot_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&dag.crate_node(kernel_h)).unwrap();
+        let boot_id = *dag.node_index.get(&dag.crate_node(boot_h)).unwrap();
 
         // partition.entries crate → image edge.
         assert!(
@@ -1976,7 +1717,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // The bios target must NOT have a Sysroot or ConfigCrate node.
         assert!(
@@ -2004,8 +1745,8 @@ mod tests {
         // The boot-sector crate's in-degree must be 0 (no edges from
         // Sysroot or ConfigCrate). The kernel crate's in-degree must
         // include both.
-        let bs_id = *dag.node_index.get(&DagNode::Crate(bs_h)).unwrap();
-        let kernel_id = *dag.node_index.get(&DagNode::Crate(kernel_h)).unwrap();
+        let bs_id = *dag.node_index.get(&dag.crate_node(bs_h)).unwrap();
+        let kernel_id = *dag.node_index.get(&dag.crate_node(kernel_h)).unwrap();
         assert_eq!(
             *dag.in_degree.get(&bs_id).unwrap(),
             0,
@@ -2046,7 +1787,7 @@ mod tests {
             ],
         );
 
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).unwrap();
 
         // Two distinct ConfigCrate nodes.
         let cfg1_id = *dag
@@ -2063,8 +1804,8 @@ mod tests {
         );
 
         // Each cross crate depends on its own ConfigCrate.
-        let c1_id = *dag.node_index.get(&DagNode::Crate(c1)).unwrap();
-        let c2_id = *dag.node_index.get(&DagNode::Crate(c2)).unwrap();
+        let c1_id = *dag.node_index.get(&dag.crate_node(c1)).unwrap();
+        let c2_id = *dag.node_index.get(&dag.crate_node(c2)).unwrap();
 
         let cfg1_outs = dag.edges_out.get(&cfg1_id).unwrap();
         assert!(cfg1_outs.contains(&c1_id), "ConfigCrate(t1) → crate-one");
@@ -2133,7 +1874,7 @@ mod tests {
                 },
             ],
         );
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         let bs_id = *dag
             .node_index
@@ -2141,11 +1882,11 @@ mod tests {
             .expect("BuildStep node must be inserted");
         let runner_id = *dag
             .node_index
-            .get(&DagNode::Crate(runner_h))
+            .get(&dag.crate_node(runner_h))
             .expect("runner crate node must exist");
         let kernel_id = *dag
             .node_index
-            .get(&DagNode::Crate(kernel_h))
+            .get(&dag.crate_node(kernel_h))
             .expect("kernel crate node must exist");
 
         // Runner → BuildStep edge.
@@ -2211,7 +1952,7 @@ mod tests {
                 host: true,
             }],
         );
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         let bs_id = *dag.node_index.get(&DagNode::BuildStep(bs_h)).unwrap();
         let image_id = *dag.node_index.get(&DagNode::Image(image_h)).unwrap();
@@ -2286,10 +2027,10 @@ mod tests {
             .expect("add vendor build");
 
         let resolved = make_resolved(th, vec![]);
-        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+        let dag = test_dag(&resolved, &model, &vctx).expect("dag built");
 
         let sysroot_id = *dag.node_index.get(&DagNode::Sysroot(th)).unwrap();
-        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
+        let v_id = *dag.node_index.get(&dag.vendor_node(vid)).unwrap();
         let sys_outs = dag.edges_out.get(&sysroot_id).expect("sysroot has outs");
         assert!(
             sys_outs.contains(&v_id),
@@ -2316,9 +2057,9 @@ mod tests {
             .expect("add vendor build");
 
         let resolved = make_resolved(th, vec![]);
-        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+        let dag = test_dag(&resolved, &model, &vctx).expect("dag built");
 
-        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
+        let v_id = *dag.node_index.get(&dag.vendor_node(vid)).unwrap();
         // No sysroot edge — host vendor builds compile against host
         // toolchain. In-degree should be 0 (leaf).
         assert_eq!(
@@ -2363,13 +2104,10 @@ mod tests {
             .expect("add consumer");
 
         let resolved = make_resolved(th, vec![]);
-        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+        let dag = test_dag(&resolved, &model, &vctx).expect("dag built");
 
-        let dep_id = *dag.node_index.get(&DagNode::VendorCrate(dep_vid)).unwrap();
-        let consumer_id = *dag
-            .node_index
-            .get(&DagNode::VendorCrate(consumer_vid))
-            .unwrap();
+        let dep_id = *dag.node_index.get(&dag.vendor_node(dep_vid)).unwrap();
+        let consumer_id = *dag.node_index.get(&dag.vendor_node(consumer_vid)).unwrap();
         let dep_outs = dag.edges_out.get(&dep_id).expect("dep has outs");
         assert!(
             dep_outs.contains(&consumer_id),
@@ -2405,7 +2143,7 @@ mod tests {
         .expect("add consumer");
 
         let resolved = make_resolved(th, vec![]);
-        let err = build_dag(&resolved, &model, &vctx).expect_err("must error");
+        let err = test_dag(&resolved, &model, &vctx).expect_err("must error");
         let msg = format!("{err}");
         assert!(
             msg.contains("unresolved dep") && msg.contains("ghost"),
@@ -2489,10 +2227,10 @@ mod tests {
                 host: false,
             }],
         );
-        let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
+        let dag = test_dag(&resolved, &model, &vctx).expect("dag built");
 
-        let v_id = *dag.node_index.get(&DagNode::VendorCrate(vid)).unwrap();
-        let user_id = *dag.node_index.get(&DagNode::Crate(user_h)).unwrap();
+        let v_id = *dag.node_index.get(&dag.vendor_node(vid)).unwrap();
+        let user_id = *dag.node_index.get(&dag.crate_node(user_h)).unwrap();
         let v_outs = dag.edges_out.get(&v_id).expect("vendor has outs");
         assert!(
             v_outs.contains(&user_id),
@@ -2565,11 +2303,11 @@ mod tests {
             }],
         );
         // Empty vendor context — V1 path has no vendor entries.
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
+        let dag = test_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         // No vendor node should have been created — the only nodes are
         // Sysroot, ConfigCrate, and the user crate.
-        let user_id = *dag.node_index.get(&DagNode::Crate(user_h)).unwrap();
+        let user_id = *dag.node_index.get(&dag.crate_node(user_h)).unwrap();
         // In-degree for the user crate: sysroot + config = 2 (no
         // vendor edge added).
         assert_eq!(*dag.in_degree.get(&user_id).unwrap(), 2);

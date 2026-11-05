@@ -78,6 +78,10 @@ Key layout decisions:
 - The **`tool/`** subdirectories ensure that `check` and `clippy` outputs
   do not collide with `build` artifacts. Running `gluon check` will not
   invalidate your last `gluon build`.
-- **Host-compiled crates** (such as procedural macros) live in a separate
-  `host/` directory because they are compiled for the host triple, not the
-  target triple.
+- **Host-compiled crates** live in a separate `host/` directory because
+  they are compiled for the host triple, not the target triple. Procedural
+  macros, vendored host crates and the crates they depend on use a fixed
+  host profile (no optimisation, no debug info) and `host/<crate>/`, so
+  switching profiles does not rebuild them. Other host crates (host tools,
+  build-step runners) use the active profile and `host/<crate>/<profile>/`,
+  so each profile keeps its own copy.

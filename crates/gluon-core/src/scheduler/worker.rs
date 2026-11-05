@@ -562,6 +562,7 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::scheduler::dag::DagNode;
+    use crate::unit::UnitId;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -672,21 +673,19 @@ mod tests {
 
     /// Build a DAG with `n` independent nodes (no edges).
     fn independent_dag(n: u32) -> Dag {
-        use gluon_model::CrateDef;
         let mut dag = Dag::new();
         for i in 0..n {
-            dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(i)));
+            dag.insert_node(DagNode::Compile(UnitId(i)));
         }
         dag
     }
 
     /// Build a chain A → B → C (topological order: A first, C last).
     fn chain_dag() -> (Dag, NodeId, NodeId, NodeId) {
-        use gluon_model::CrateDef;
         let mut dag = Dag::new();
-        let a = dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(0)));
-        let b = dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(1)));
-        let c = dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(2)));
+        let a = dag.insert_node(DagNode::Compile(UnitId(0)));
+        let b = dag.insert_node(DagNode::Compile(UnitId(1)));
+        let c = dag.insert_node(DagNode::Compile(UnitId(2)));
         dag.add_edge(a, b); // b depends on a
         dag.add_edge(b, c); // c depends on b
         (dag, a, b, c)
@@ -896,8 +895,6 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn execute_detects_deadlock() {
-        use gluon_model::CrateDef;
-
         // Both workers=1 and workers=2 should detect the deadlock.
         for workers in [1usize, 2] {
             let pool = WorkerPool::new(workers);
@@ -905,8 +902,8 @@ mod tests {
 
             // Build a cyclic DAG: 0 → 1 → 0.
             let mut dag = Dag::new();
-            let a = dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(0)));
-            let b = dag.insert_node(DagNode::Crate(gluon_model::Handle::<CrateDef>::new(1)));
+            let a = dag.insert_node(DagNode::Compile(UnitId(0)));
+            let b = dag.insert_node(DagNode::Compile(UnitId(1)));
             dag.add_edge(a, b);
             dag.add_edge(b, a);
 

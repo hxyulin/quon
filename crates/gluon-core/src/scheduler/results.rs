@@ -7,9 +7,9 @@
 //! with release/acquire ordering, and nothing ever writes a slot twice.
 //! See `docs/src/architecture/concurrency.md`.
 
-use super::dag::{Dag, DagNode};
+use super::dag::{Dag, DagNode, NodeId};
 use crate::compile::extern_map::ArtifactLookup;
-use crate::vendor::cross::context::VendorBuildId;
+use crate::unit::{UnitGraph, UnitId};
 use gluon_model::{BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -30,11 +30,32 @@ pub(crate) struct NodeResult {
 pub(crate) struct ResultView<'a> {
     dag: &'a Dag,
     results: &'a [OnceLock<NodeResult>],
+    units: &'a UnitGraph,
+    /// `NodeId` of each unit's `Compile` node, indexed by `UnitId`.
+    node_of_unit: &'a [NodeId],
+}
+
+/// `NodeId` of each unit's `Compile` node, indexed by `UnitId`.
+pub(crate) fn node_of_unit(dag: &Dag, units: &UnitGraph) -> Vec<NodeId> {
+    units
+        .iter()
+        .map(|(id, _)| dag.node_index[&DagNode::Compile(id)])
+        .collect()
 }
 
 impl<'a> ResultView<'a> {
-    pub(crate) fn new(dag: &'a Dag, results: &'a [OnceLock<NodeResult>]) -> Self {
-        Self { dag, results }
+    pub(crate) fn new(
+        dag: &'a Dag,
+        results: &'a [OnceLock<NodeResult>],
+        units: &'a UnitGraph,
+        node_of_unit: &'a [NodeId],
+    ) -> Self {
+        Self {
+            dag,
+            results,
+            units,
+            node_of_unit,
+        }
     }
 
     /// The result of `node`, or `None` when the node is not in the DAG
@@ -52,16 +73,15 @@ impl<'a> ResultView<'a> {
     pub(crate) fn sysroot(&self, target: Handle<TargetDef>) -> Option<&'a Path> {
         self.primary(DagNode::Sysroot(target))
     }
-
-    /// Artifact of a vendored crate build.
-    pub(crate) fn vendor(&self, id: VendorBuildId) -> Option<&'a Path> {
-        self.primary(DagNode::VendorCrate(id))
-    }
 }
 
 impl ArtifactLookup for ResultView<'_> {
     fn get(&self, h: Handle<CrateDef>) -> Option<&Path> {
-        self.primary(DagNode::Crate(h))
+        self.unit(self.units.unit_of(h)?)
+    }
+    fn unit(&self, u: UnitId) -> Option<&Path> {
+        let node = *self.node_of_unit.get(u.0 as usize)?;
+        self.results.get(node as usize)?.get()?.primary.as_deref()
     }
     fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path> {
         self.primary(DagNode::ConfigCrate(target))
@@ -81,14 +101,17 @@ impl ArtifactLookup for ResultView<'_> {
 mod tests {
     use super::*;
 
+    fn slots(n: usize) -> Vec<OnceLock<NodeResult>> {
+        (0..n).map(|_| OnceLock::new()).collect()
+    }
+
     #[test]
     fn view_reads_only_finished_slots() {
         let mut dag = Dag::new();
         let target = Handle::<TargetDef>::new(0);
-        let krate = Handle::<CrateDef>::new(0);
         let sysroot = dag.insert_node(DagNode::Sysroot(target));
-        dag.insert_node(DagNode::Crate(krate));
-        let results: Vec<OnceLock<NodeResult>> = (0..dag.len()).map(|_| OnceLock::new()).collect();
+        dag.insert_node(DagNode::Compile(UnitId(0)));
+        let results = slots(dag.len());
         results[sysroot as usize]
             .set(NodeResult {
                 primary: Some(PathBuf::from("/sys/0")),
@@ -96,9 +119,11 @@ mod tests {
             })
             .unwrap();
 
-        let view = ResultView::new(&dag, &results);
+        let units = UnitGraph::default();
+        let node_of_unit = [1];
+        let view = ResultView::new(&dag, &results, &units, &node_of_unit);
         assert_eq!(view.sysroot(target), Some(Path::new("/sys/0")));
-        assert_eq!(view.get(krate), None, "unfinished node has no output");
+        assert_eq!(view.unit(UnitId(0)), None, "unfinished node has no output");
         assert_eq!(
             view.esp(Handle::new(3)),
             None,
@@ -109,11 +134,12 @@ mod tests {
     #[test]
     fn view_is_readable_from_parallel_threads() {
         let mut dag = Dag::new();
-        let handles: Vec<Handle<CrateDef>> = (0..8).map(Handle::new).collect();
-        for &h in &handles {
-            dag.insert_node(DagNode::Crate(h));
-        }
-        let results: Vec<OnceLock<NodeResult>> = (0..dag.len()).map(|_| OnceLock::new()).collect();
+        let ids: Vec<UnitId> = (0..8).map(UnitId).collect();
+        let node_of_unit: Vec<NodeId> = ids
+            .iter()
+            .map(|&u| dag.insert_node(DagNode::Compile(u)))
+            .collect();
+        let results = slots(dag.len());
         std::thread::scope(|s| {
             for (i, slot) in results.iter().enumerate() {
                 s.spawn(move || {
@@ -125,12 +151,13 @@ mod tests {
                 });
             }
         });
-        let view = ResultView::new(&dag, &results);
+        let units = UnitGraph::default();
+        let view = ResultView::new(&dag, &results, &units, &node_of_unit);
         std::thread::scope(|s| {
-            for (i, &h) in handles.iter().enumerate() {
+            for (i, &u) in ids.iter().enumerate() {
                 let view = &view;
                 s.spawn(move || {
-                    assert_eq!(view.get(h), Some(Path::new(&format!("/out/{i}"))));
+                    assert_eq!(view.unit(u), Some(Path::new(&format!("/out/{i}"))));
                 });
             }
         });

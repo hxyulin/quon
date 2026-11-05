@@ -24,12 +24,13 @@ pub mod run;
 pub mod scheduler;
 pub mod script_runner;
 pub mod sysroot;
+pub mod unit;
 pub mod vendor;
 
 pub use cache::{BuildRecord, Cache, CacheLock, CacheManifest, FreshnessQuery};
 pub use compile::{
-    ArtifactMap, BuildLayout, CompileCrateInput, CompileCtx, DriverKind, Emit, RustcCommandBuilder,
-    RustcInfo, compile_crate,
+    ArtifactMap, BuildLayout, CompileCtx, CompileUnitInput, DriverKind, Emit, RustcCommandBuilder,
+    RustcInfo, compile_unit,
 };
 pub use error::{Diagnostic, Error, Level, Result};
 pub use project_root::find_project_root;

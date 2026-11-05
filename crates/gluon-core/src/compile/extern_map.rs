@@ -5,6 +5,7 @@
 //! Backed by `BTreeMap` for cache-key stability — see
 //! `docs/src/architecture/determinism.md`.
 
+use crate::unit::UnitId;
 use gluon_model::{BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ pub struct ArtifactMap {
     build_steps: BTreeMap<Handle<BuildStepDef>, PathBuf>,
     esps: BTreeMap<Handle<EspDef>, PathBuf>,
     images: BTreeMap<Handle<ImageDef>, PathBuf>,
+    units: BTreeMap<UnitId, PathBuf>,
 }
 
 /// Read access to the outputs of nodes that have already run.
@@ -42,8 +44,10 @@ pub struct ArtifactMap {
 /// its inputs without a lock or a copy. Tests pass an [`ArtifactMap`]
 /// filled by hand.
 pub trait ArtifactLookup: Sync {
-    /// Primary artifact of a crate.
+    /// Primary artifact of a declared crate.
     fn get(&self, h: Handle<CrateDef>) -> Option<&Path>;
+    /// Primary artifact of a build unit (declared or vendored crate).
+    fn unit(&self, u: UnitId) -> Option<&Path>;
     /// Config crate rlib for a cross target.
     fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path>;
     /// Output file of a build step.
@@ -57,6 +61,9 @@ pub trait ArtifactLookup: Sync {
 impl ArtifactLookup for ArtifactMap {
     fn get(&self, h: Handle<CrateDef>) -> Option<&Path> {
         ArtifactMap::get(self, h)
+    }
+    fn unit(&self, u: UnitId) -> Option<&Path> {
+        self.units.get(&u).map(PathBuf::as_path)
     }
     fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path> {
         ArtifactMap::config_crate(self, target)
@@ -149,6 +156,13 @@ impl ArtifactMap {
     /// order.
     pub fn build_steps_iter(&self) -> impl Iterator<Item = (Handle<BuildStepDef>, &Path)> + '_ {
         self.build_steps.iter().map(|(h, p)| (*h, p.as_path()))
+    }
+
+    /// Record a build unit's artifact. Crate artifacts recorded with
+    /// [`Self::insert`] are not visible through [`ArtifactLookup::unit`];
+    /// tests that compile a unit record its deps here.
+    pub fn insert_unit(&mut self, u: UnitId, path: PathBuf) {
+        self.units.insert(u, path);
     }
 
     /// Record an assembled ESP directory.

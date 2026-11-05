@@ -9,8 +9,8 @@
 //! # Identification
 //!
 //! Each registered build gets a [`VendorBuildId`] (a thin newtype around a
-//! `u32` index into the backing `Vec`). The id is what the
-//! `DagNode::VendorCrate` variant carries; everything else lives behind it.
+//! `u32` index into the backing `Vec`). The id is what
+//! `crate::unit::UnitOrigin::Vendor` carries; everything else lives behind it.
 //! Lookups from the consumer side go through `(target, cargo_target_name)`
 //! to a `VendorBuildId` — that's the same compound key shape as
 //! [`gluon_model::ExternalArtifactKey`], so a future "what artifact does

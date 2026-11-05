@@ -150,6 +150,19 @@ impl BuildLayout {
         self.user_crate_root().join("host").join(&krate.name)
     }
 
+    /// Artifact directory for a host crate that uses the active profile
+    /// (host tools, build-step runners): `<root>/host/<crate>/<profile>/`.
+    /// Each profile keeps its own copy, so switching back and forth does
+    /// not rebuild it. Proc macros and their deps use the fixed host
+    /// profile and [`Self::host_artifact_dir`].
+    pub fn host_profile_artifact_dir(
+        &self,
+        krate: &CrateDef,
+        profile: &ResolvedProfile,
+    ) -> PathBuf {
+        self.host_artifact_dir(krate).join(&profile.name)
+    }
+
     /// Per-cross-crate artifact directory.
     ///
     /// `gluon build`: `<root>/cross/<target>/<profile>/<crate>/`.

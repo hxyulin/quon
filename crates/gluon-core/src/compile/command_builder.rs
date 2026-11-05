@@ -1,167 +1,115 @@
-//! Rustc command assembly for per-crate compilation.
+//! Rustc command assembly for one build unit.
 //!
-//! This module contains `build_rustc_command`, which assembles a
-//! [`RustcCommandBuilder`] for a single user crate without spawning rustc.
-//! It was extracted from `compile_crate.rs` to keep that module focused on
-//! cache integration and process management.
+//! `build_unit_command` is the single place that turns a
+//! [`BuildUnit`] into a rustc invocation, for crates declared in
+//! `gluon.rs` and vendored crates alike. It reads only the unit, the
+//! model and the outputs of finished nodes; it spawns nothing.
+//! [`super::compile_crate::compile`] wraps it with the cache check and
+//! the spawn.
+//!
+//! ### Argument order
+//!
+//! The argv is hashed into the cache key, so its order must be stable.
+//! It is:
+//!
+//! 1. input, `--crate-name`, `--crate-type`, `--edition`
+//! 2. `--sysroot`, `--target`, `--out-dir`
+//! 3. implicit sysroot externs and the config crate extern
+//! 4. `--emit`
+//! 5. dep `--extern`s, in extern-name order
+//! 6. `-L dependency=` directories, sorted
+//! 7. `--extern proc_macro` for proc macros
+//! 8. opt-level, debuginfo, LTO
+//! 9. feature cfgs, then the unit's cfg flags
+//! 10. `--cap-lints`, panic strategy, the unit's raw rustc flags
+//! 11. incremental directory, linker script, `-o` for raw binaries
+//! 12. `-C extra-filename`
 
-use super::artifact_shape::CrateArtifactShape;
-use super::compile_crate::CompileCrateInput;
-use super::compile_utils::{normalize_crate_name, sanitise_crate_name};
-use super::{CompileCtx, Emit, RustcCommandBuilder};
+use super::compile_crate::CompileUnitInput;
+use super::compile_utils::sanitise_crate_name;
+use super::{CompileCtx, Emit, HOST_DEBUG_INFO, HOST_OPT_LEVEL, RustcCommandBuilder};
 use crate::error::{Error, Result};
-use gluon_model::{CrateDef, CrateType, DepResolution};
-use std::path::PathBuf;
+use crate::unit::{BuildUnit, DepTarget, Platform, UnitOrigin, UnitPaths, UnitProfile};
+use gluon_model::{CrateType, TargetDef};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-/// Assemble a [`RustcCommandBuilder`] for the given crate without spawning
-/// rustc. Also returns the expected output artifact path and the depfile
-/// path.
+/// A ready-to-spawn rustc invocation for one unit.
+pub(crate) struct UnitCommand {
+    pub(crate) builder: RustcCommandBuilder,
+    pub(crate) paths: UnitPaths,
+    /// The path recorded in the cache and handed to dependents. The
+    /// primary artifact, except under `gluon check` and `gluon clippy`,
+    /// where crates (other than proc macros) write no artifact and the
+    /// depfile stands in for it.
+    pub(crate) output_path: PathBuf,
+}
+
+/// Assemble the rustc invocation for `input.unit`.
 ///
-/// Exposed as `pub(crate)` so tests can inspect the assembled flags without
-/// needing a real rustc binary. Production code calls [`compile`], which
-/// wraps this with cache checking and process spawning.
-///
-/// Returns `(builder, output_path, depfile_path)`.
-pub(crate) fn build_rustc_command(
+/// Every dependency must have finished: its output is read from
+/// `input.artifacts`. A missing output is a scheduler bug and is
+/// reported as one.
+pub(crate) fn build_unit_command(
     ctx: &CompileCtx,
-    input: &CompileCrateInput<'_>,
-) -> Result<(RustcCommandBuilder, PathBuf, PathBuf)> {
+    input: &CompileUnitInput<'_>,
+) -> Result<UnitCommand> {
     let layout = &ctx.layout;
     let model = input.model;
     let resolved = input.resolved;
-    let crate_ref = input.crate_ref;
+    let units = input.units;
     let artifacts = input.artifacts;
+    let unit: &BuildUnit = units.get(input.unit);
+    let paths = units.paths(input.unit, layout, model, resolved)?;
 
-    let crate_def: &CrateDef = model.crates.get(crate_ref.handle).ok_or_else(|| {
-        Error::Compile(format!(
-            "crate handle {:?} not found in build model",
-            crate_ref.handle
-        ))
-    })?;
-
-    let crate_name = &crate_def.name;
-    // rustc rejects `-` in `--crate-name`. Cargo silently normalizes
-    // `my-crate` → `my_crate`; we mirror that so cargo-style names in
-    // `gluon.rs` Just Work. The original `crate_name` is kept for error
-    // messages and cache keys (it's what the user typed). The normalized
-    // form (`crate_name_rustc`) is what we hand to rustc and what we
-    // splice into on-disk filenames so they line up with what rustc
-    // actually writes (rustc derives the filename from `--crate-name` +
-    // `extra-filename`). The post-normalization collision check (rejecting
-    // e.g. both `foo-bar` and `foo_bar`) is done in `gluon_model::intern`.
-    let crate_name_rustc = normalize_crate_name(crate_name);
-
-    // Resolve the source input file. `CrateDef::path` is a directory path
-    // relative to the project root; `CrateDef::root` optionally overrides
-    // the entry-point file inside that directory.
-    let project_root = &resolved.project_root;
-    let crate_dir = project_root.join(&crate_def.path);
-    let src_file = if let Some(root_override) = &crate_def.root {
-        crate_dir.join(root_override)
-    } else if crate_def.crate_type.is_executable() {
-        crate_dir.join("src/main.rs")
+    // `gluon check` and `gluon clippy` swap the program and the emit
+    // kinds. Vendored units are exempt (see `UnitSettings::always_rustc`).
+    let driver = ctx.driver();
+    let program = if unit.settings.always_rustc {
+        ctx.rustc_info.rustc_path.clone()
     } else {
-        crate_dir.join("src/lib.rs")
+        driver.program(&ctx.rustc_info)
     };
-
-    // Determine the output directory and artifact paths via
-    // [`CrateArtifactShape`] — the single source of truth for crate
-    // path arithmetic, also consumed by [`crate::compile::artifact_path`]
-    // for analyzer-time lookups. Keep `extra_filename` available
-    // locally; it is still emitted as `-C extra-filename=...` further
-    // down for non-executable / host crates.
-    //
-    // Why bins skip extra-filename: rustc never hash-suffixes binary
-    // names, and adding extra-filename produces an ugly
-    // `hello-gluon-hello` final binary. The shape constructor encodes
-    // the same exception (cross Bin / RawBinary use `cross_final_dir`
-    // with bare crate names); the `-C extra-filename` emit below is
-    // gated on `!crate_type.is_executable() || crate_ref.host`.
-    let extra_filename = format!("-gluon-{crate_name_rustc}");
-
-    let shape = CrateArtifactShape::for_crate(layout, model, resolved, crate_def, crate_ref)?;
-    let out_dir = shape.out_dir;
-    let output_path = shape.output_path;
-    let depfile_path = shape.depfile_path;
-
-    // --- Builder assembly ---
-    //
-    // The program path is selected by `ctx.driver`. For
-    // `DriverKind::Rustc` (the historical default) this is just the
-    // probed rustc path. For `Check` it is also rustc, but we will
-    // override the `--emit` kinds below to suppress codegen. For
-    // `Clippy` it resolves `clippy-driver` (env, sibling-of-rustc, or
-    // PATH lookup), which is rustc-CLI-compatible so every flag below
-    // applies unchanged.
-    let program = ctx.driver().program(&ctx.rustc_info);
     let mut builder = RustcCommandBuilder::new(&program);
 
-    // Input source file — positional arg, must come first.
-    builder.input(&src_file);
-
-    // Crate identity flags.
+    builder.input(&unit.src);
     builder
-        .crate_name(&crate_name_rustc)
-        .crate_type(crate_def.crate_type)
-        .edition(&crate_def.edition);
+        .crate_name(&unit.crate_name)
+        .crate_type(unit.kind)
+        .edition(&unit.edition);
 
-    // Look up whether this crate's group has `no_sysroot=true`. Such
-    // crates skip the custom sysroot, the implicit core/alloc/compiler_builtins
-    // externs, and the auto-injected config crate. They still get
-    // `--target` (the target spec is needed to compile correctly), but
-    // are responsible for declaring `#![no_core]` (or equivalent) and
-    // providing their own runtime primitives.
-    let group_no_sysroot = model
-        .groups
-        .get(crate_def.group)
-        .map(|g| g.no_sysroot)
-        .unwrap_or(false);
-
-    if crate_ref.host {
-        // Host crates: no sysroot, no target. rustc uses its built-in sysroot.
-        builder.out_dir(&out_dir);
-    } else if group_no_sysroot {
-        // No-sysroot cross crates: emit `--target` only. No sysroot,
-        // no implicit externs, no config crate. The crate is on its
-        // own — `#![no_core]` is mandatory.
-        let target_handle = crate_ref.target;
-        let target = model.targets.get(target_handle).ok_or_else(|| {
+    let target: Option<&TargetDef> = match unit.platform {
+        Platform::Host => None,
+        Platform::Cross(t) => Some(model.targets.get(t).ok_or_else(|| {
             Error::Compile(format!(
-                "crate '{}': target handle {:?} not found in build model",
-                crate_name, target_handle
+                "unit '{}': target handle {t:?} not found in build model",
+                unit.name
             ))
-        })?;
-        builder
-            .target(&target.spec, target.builtin)
-            .out_dir(&out_dir);
-    } else {
-        // Cross crates: sysroot and target are required.
+        })?),
+    };
+
+    if unit.sysroot {
         let sysroot = input.sysroot_dir.ok_or_else(|| {
             Error::Compile(format!(
-                "crate '{}' is a cross crate but no sysroot_dir was provided",
-                crate_name
+                "unit '{}' links the sysroot but no sysroot_dir was provided \
+                 (scheduler bug)",
+                unit.name
             ))
         })?;
+        builder.sysroot(sysroot);
+    }
+    if let Some(t) = target {
+        // `no_sysroot` cross crates still get `--target`; they provide
+        // their own runtime with `#![no_core]`.
+        builder.target(&t.spec, t.builtin);
+    }
+    builder.out_dir(&paths.out_dir);
 
-        let target_handle = crate_ref.target;
-        let target = model.targets.get(target_handle).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle {:?} not found in build model",
-                crate_name, target_handle
-            ))
-        })?;
-
-        builder
-            .sysroot(sysroot)
-            .target(&target.spec, target.builtin)
-            .out_dir(&out_dir);
-
-        // Inject implicit sysroot crates. These are the crates that rustc
-        // normally injects from its own built-in sysroot; since we are
-        // using a custom sysroot we must wire them explicitly. The names
-        // must match what `build_sysroot_crate` writes (same extra-filename
-        // convention: `-gluon-<name>`).
-        let sysroot_lib = layout.sysroot_lib_dir(target);
+    if let (true, Some(t)) = (unit.sysroot, target) {
+        // A custom sysroot means rustc does not inject these itself.
+        // The file names match what `sysroot::build_sysroot_crate`
+        // writes.
+        let sysroot_lib = layout.sysroot_lib_dir(t);
         builder
             .extern_crate("core", &sysroot_lib.join("libcore-gluon-core.rlib"))
             .extern_crate(
@@ -169,348 +117,224 @@ pub(crate) fn build_rustc_command(
                 &sysroot_lib.join("libcompiler_builtins-gluon-compiler_builtins.rlib"),
             )
             .extern_crate("alloc", &sysroot_lib.join("liballoc-gluon-alloc.rlib"));
-
-        // Inject the generated config crate for this crate's target.
-        // Each cross target has its own config crate rlib so there is
-        // no target-mismatch risk.
-        if let Some(config_path) = artifacts.config_crate(crate_ref.target) {
-            // The config crate name is `<project>_config` by default, or the
-            // override in `ProjectDef::config_crate_name`. We sanitise the
-            // project name (lowercase, non-[a-z0-9_] replaced by `_`) and
-            // append `_config`.
-            let config_extern_name = resolved
-                .project
-                .config_crate_name
-                .as_deref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| sanitise_crate_name(&resolved.project.name) + "_config");
-            builder.extern_crate(&config_extern_name, config_path);
-        }
+    }
+    if let (true, Platform::Cross(t)) = (unit.config_crate, unit.platform)
+        && let Some(config_path) = artifacts.config_crate(t)
+    {
+        let config_extern_name = resolved
+            .project
+            .config_crate_name
+            .clone()
+            .unwrap_or_else(|| sanitise_crate_name(&resolved.project.name) + "_config");
+        builder.extern_crate(&config_extern_name, config_path);
     }
 
-    // Emit flags. The depfile path is threaded in explicitly so rustc writes
-    // it to a location we control, rather than deriving it from --out-dir +
-    // crate name + extra-filename. This keeps the "where does the .d land?"
-    // knowledge in one place (the `depfile_path` bound above).
-    //
-    // The driver may force a metadata-only emit (`Check` and `Clippy`
-    // both do this) — in that case it returns `Some(slice)` from
-    // `emit_override` and we use it instead of the per-crate-type
-    // selection. The depfile is still emitted so the cache freshness
-    // logic continues to track source dependencies; it is correct on a
-    // metadata-only build because rustc still produces accurate
-    // dep-info even when codegen is suppressed.
-    //
-    // **Proc-macros are exempt from the override.** A proc-macro crate
-    // must produce a real dylib because the dependent crate's compile
-    // pass dlopens it at compile time. Forcing `--emit=metadata` here
-    // would write only an `.rmeta` and the next crate's rustc would
-    // fail with "extern location for X does not exist". `cargo check`
-    // has exactly the same behavior — it always builds proc-macros
-    // fully, regardless of the check vs build distinction. We mirror
-    // that.
-    let default_emit: &[Emit] = if crate_def.crate_type.is_executable() {
-        // Executables (Bin, RawBinary) don't produce metadata that other
-        // crates would `--extern` against. Skipping `--emit=metadata`
-        // saves a few hundred ms per binary build.
+    // Executables produce no metadata anyone links against. Proc macros
+    // keep the full emit under check and clippy, because dependents
+    // dlopen the dylib at compile time (`cargo check` does the same).
+    // The depfile is always emitted: the cache needs it.
+    let default_emit: &[Emit] = if unit.kind.is_executable() {
         &[Emit::Link, Emit::DepInfo]
     } else {
         &[Emit::Link, Emit::Metadata, Emit::DepInfo]
     };
-    let emit_kinds: &[Emit] = if crate_def.crate_type == CrateType::ProcMacro {
-        default_emit
+    let emit_override = if unit.kind == CrateType::ProcMacro || unit.settings.always_rustc {
+        None
     } else {
-        ctx.driver().emit_override().unwrap_or(default_emit)
+        driver.emit_override()
     };
-    builder.emit_with_dep_info_path(emit_kinds, &depfile_path);
+    builder.emit_with_dep_info_path(emit_override.unwrap_or(default_emit), &paths.depfile_path);
 
-    // Explicit dependencies (BTreeMap order = deterministic argv order).
-    //
-    // Two flavours:
-    //
-    // - `DepResolution::Project(h)` — sibling project crates. Their
-    //   artifacts come from `ArtifactMap`, populated by the scheduler
-    //   as each gluon-managed compile completes.
-    //
-    // - `DepResolution::External(eh)` — vendored crates compiled by
-    //   cargo via the cargo-as-builder vendor pipeline (see
-    //   `vendor/cargo_cmd.rs::run_cargo_build_vendor` and
-    //   `vendor/mod.rs::auto_register_vendored_deps`). Their artifact
-    //   paths live in `model.external_artifacts`, populated at
-    //   model-load time from `gluon.lock`. We look up the vendored
-    //   artifact by the external dep's *crate name* (not the alias),
-    //   matching how `auto_register` keys the map.
-    //
-    //   v1 limitation: vendored deps assume host-target compatibility.
-    //   A cross-target consumer that pulls a host-built rlib would
-    //   fail to link with an opaque rustc error. We don't pre-flight
-    //   that case here yet — the lepton-os usage path is host-only
-    //   (proc-macros and their deps), so the live failure mode is
-    //   acceptable until v2 wires per-target vendored builds.
-    let mut external_dep_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
-    for (extern_name, dep_def) in &crate_def.deps {
-        let artifact_path: PathBuf = match dep_def.resolution {
-            DepResolution::Project(h) => artifacts
-                .get(h)
-                .ok_or_else(|| {
+    let mut search_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    for dep in &unit.deps {
+        match &dep.target {
+            DepTarget::Unit(d) => {
+                let path = artifacts.unit(*d).ok_or_else(|| {
                     Error::Compile(format!(
-                        "crate '{}' depends on '{}' but its artifact is not yet \
-                         available in ArtifactMap (scheduler bug — dep must be \
-                         built before depender)",
-                        crate_name, extern_name,
-                    ))
-                })?
-                .to_path_buf(),
-            DepResolution::External(eh) => {
-                let ext = model.external_deps.get(eh).ok_or_else(|| {
-                    Error::Compile(format!(
-                        "crate '{}': external dep handle for '{}' is dangling \
-                         (intern bug)",
-                        crate_name, extern_name,
+                        "{} depends on {} but its artifact is not available yet \
+                         (scheduler bug: a dep must be built before its dependent)",
+                        unit.name,
+                        units.get(*d).name,
                     ))
                 })?;
-                // Lookup key matches what `auto_register_vendored_deps`
-                // wrote: the dep's declared target (Host for v1's
-                // cargo-as-builder pipeline, Cross(_) for v2's
-                // gluon-driven pipeline) plus the cargo-normalised
-                // crate name (hyphens → underscores). The dep's
-                // *target*, not the consumer's, is what disambiguates
-                // — a kernel-target consumer that pulls a host-built
-                // proc-macro still looks it up under `Host`.
-                let key = gluon_model::ExternalArtifactKey {
-                    target: ext.target,
-                    cargo_target_name: ext.name.replace('-', "_"),
-                };
-                let path = model.external_artifacts.get(&key).ok_or_else(|| {
-                    Error::Compile(format!(
-                        "crate '{}' depends on external crate '{}' but no \
-                         vendor artifact is registered for it — run \
-                         `gluon vendor` to build the external dep set",
-                        crate_name, ext.name,
-                    ))
-                })?;
-                if let Some(parent) = path.parent() {
-                    external_dep_dirs.insert(parent.to_path_buf());
-                }
-                if ext.target == gluon_model::TargetSpec::Host {
-                    external_dep_dirs.extend(model.external_search_dirs.iter().cloned());
-                }
+                builder.extern_crate(&dep.extern_name, path);
+            }
+            DepTarget::Prebuilt {
+                path,
+                search_dirs: dirs,
+            } => {
                 // Nightly cargo (1.101+) writes rlibs with only a
                 // metadata stub and the real metadata in a sibling
-                // `.rmeta`. rustc needs both, and cargo passes both
-                // under the same extern name, so we do the same.
-                // Stable cargo writes the `.rmeta` too; passing it is
-                // harmless there.
+                // `.rmeta`. rustc needs both under the same extern name,
+                // as cargo passes them.
                 let rmeta = path.with_extension("rmeta");
                 if path.extension().is_some_and(|e| e == "rlib") && rmeta.is_file() {
-                    builder.extern_crate(extern_name, &rmeta);
+                    builder.extern_crate(&dep.extern_name, &rmeta);
                 }
-                path.clone()
+                builder.extern_crate(&dep.extern_name, path);
+                search_dirs.extend(dirs.iter().cloned());
             }
-        };
-        builder.extern_crate(extern_name, &artifact_path);
-    }
-
-    // Transitive vendored deps. Adding `-L dependency=<dir>` lets
-    // rustc resolve a vendored crate's own deps (e.g. `unicode-ident`
-    // behind `syn`) without forcing the user to declare them in
-    // `cfg.dependency()`. Stable cargo keeps every unit in
-    // `target/release/deps/`, so the direct dep's parent was enough.
-    // Nightly cargo (1.101+) gives each unit its own directory, so
-    // host external deps also bring in every directory `gluon vendor`
-    // recorded in `gluon.lock` (`model.external_search_dirs`).
-    //
-    // Sorted iteration: BTreeSet is already deterministic, but state
-    // it explicitly — argv order matters for cache-key stability.
-    for dir in &external_dep_dirs {
-        builder.library_search_dependency(dir);
-    }
-
-    // Transitive search paths. rustc validates the recorded dep
-    // graph of every `--extern`'d rlib at consumer-compile time:
-    // it walks each rlib's metadata, looks at the deps the rlib
-    // *itself* records, and tries to load each by name from a
-    // search path. `--extern` only covers the consumer's *direct*
-    // deps; transitives (siblings, proc-macros, libs-of-libs) need
-    // a search path.
-    //
-    // Cargo handles this by tracking the full transitive graph and
-    // emitting `-L dependency=<dir>` for every directory holding a
-    // transitive artifact. We mirror that: BFS the consumer's
-    // direct Project deps, follow each one's deps, and collect the
-    // parent dir of every reached artifact into a dedup set. Both
-    // proc-macros (host dylibs in `build/host/<crate>/`) and cross
-    // libs (rlibs in `build/cross/<target>/<profile>/<crate>/`)
-    // need to be reachable; one BTreeSet handles both.
-    //
-    // External deps don't need walking — the search dirs added for
-    // them above already cover their transitive deps (e.g.
-    // `unicode-ident` behind `syn`).
-    let mut transitive_dirs: std::collections::BTreeSet<PathBuf> = Default::default();
-    let mut visited: std::collections::BTreeSet<gluon_model::Handle<gluon_model::CrateDef>> =
-        Default::default();
-    let mut queue: std::collections::VecDeque<gluon_model::Handle<gluon_model::CrateDef>> =
-        Default::default();
-    for dep_def in crate_def.deps.values() {
-        if let DepResolution::Project(h) = dep_def.resolution
-            && visited.insert(h)
-        {
-            queue.push_back(h);
-        }
-    }
-    while let Some(h) = queue.pop_front() {
-        let Some(dep_crate) = model.crates.get(h) else {
-            continue;
-        };
-        if let Some(p) = artifacts.get(h)
-            && let Some(parent) = p.parent()
-        {
-            transitive_dirs.insert(parent.to_path_buf());
-        }
-        for d in dep_crate.deps.values() {
-            if let DepResolution::Project(child_h) = d.resolution
-                && visited.insert(child_h)
-            {
-                queue.push_back(child_h);
+            DepTarget::Missing { package } => {
+                return Err(Error::Compile(format!(
+                    "crate '{}' depends on external crate '{package}' but no vendor \
+                     artifact is registered for it — run `gluon vendor` to build the \
+                     external dep set",
+                    unit.name,
+                )));
             }
         }
     }
-    for dir in &transitive_dirs {
+    collect_transitive_dirs(input, unit, &mut search_dirs)?;
+    for dir in &search_dirs {
         builder.library_search_dependency(dir);
     }
 
-    // Modern proc-macro source (no `extern crate proc_macro;` line)
-    // imports `proc_macro` directly. Without `--extern proc_macro`,
-    // rustc fails with `E0432: unresolved import proc_macro`. The
-    // `proc_macro` crate is a sysroot built-in for the host target;
-    // bare `--extern proc_macro` (no `=path`) makes rustc resolve it
-    // via its sysroot's `target-libdir`, matching what cargo does for
-    // every `--crate-type=proc-macro` build. Cheap to emit
-    // unconditionally for proc-macro crates, and harmless when the
-    // source happens to use the older `extern crate` form.
-    if crate_def.crate_type == CrateType::ProcMacro {
+    // Proc-macro source that imports `proc_macro` without an
+    // `extern crate` line needs it passed explicitly. Bare `--extern`
+    // makes rustc take it from its own sysroot, as cargo does.
+    if unit.kind == CrateType::ProcMacro {
         builder.extern_crate_bare("proc_macro");
     }
 
-    // Artifact env vars: deterministic, BTreeMap-ordered, canonicalised.
-    // Resolution is centralised in `compile::env::resolve_crate_env` so
-    // analyzer-time consumers (`rust-project.json` generation) and
-    // build-time consumers (this site) produce *identical* env-var
-    // pairs for the same crate. Symmetry between the two is what makes
-    // `env!("FOO")` resolve the same way under rustc and under
-    // rust-analyzer.
-    //
-    // The closure here reads from the just-built ArtifactMap; missing
-    // entries indicate a scheduler bug (the `artifact_deps` ordering
-    // edge auto-added by the Rhai builder should have ensured the
-    // producer was built first).
-    let env_vars = crate::compile::env::resolve_crate_env(crate_def, model, |h| {
-        artifacts.get(h).map(std::path::Path::to_path_buf)
-    })?;
-    for (k, v) in &env_vars {
-        builder.env(k.as_str(), v.as_str());
-    }
-
-    // Profile-driven code-generation knobs.
-    builder
-        .opt_level(resolved.profile.opt_level)
-        .debug_info(resolved.profile.debug_info);
-    if let Some(mode) = &resolved.profile.lto {
-        builder.lto(mode);
-    }
-
-    // Per-crate cfg flags (Vec order is preserved for determinism; the
-    // Rhai evaluator always produces them in declaration order).
-    for flag in &crate_def.cfg_flags {
-        builder.cfg(flag);
-    }
-
-    // Panic strategy (cross crates only) — must be consistent across
-    // sysroot + user crates for the same target, otherwise rustc rejects
-    // the link with a "different panic strategy" error. Emitted at this
-    // position to match the canonical token order documented at the top
-    // of this module.
-    if !crate_ref.host {
-        let target = model.targets.get(crate_ref.target).ok_or_else(|| {
-            Error::Compile(format!(
-                "crate '{}': target handle {:?} not found in build model",
-                crate_name, crate_ref.target
-            ))
+    // `artifact_env`: the same resolution the analyzer uses, so `env!`
+    // resolves identically under rustc and rust-analyzer.
+    if let UnitOrigin::Crate(h) = unit.origin {
+        let def = model.crates.get(h).ok_or_else(|| {
+            Error::Compile(format!("crate handle {h:?} not found in build model"))
         })?;
-        if let Some(s) = target.panic_strategy {
-            builder
-                .raw_arg("-C")
-                .raw_arg(format!("panic={}", s.as_str()));
+        let env_vars = crate::compile::env::resolve_crate_env(def, model, |dep| {
+            artifacts.get(dep).map(Path::to_path_buf)
+        })?;
+        for (k, v) in &env_vars {
+            builder.env(k.as_str(), v.as_str());
         }
     }
 
-    // Extra rustc flags — appended last (before extra-filename) so they
-    // cannot accidentally interleave with the structured flags above.
-    for flag in &crate_def.rustc_flags {
+    match unit.profile {
+        UnitProfile::Host => {
+            builder
+                .opt_level(HOST_OPT_LEVEL)
+                .debug_info(HOST_DEBUG_INFO);
+        }
+        UnitProfile::Active => {
+            builder
+                .opt_level(resolved.profile.opt_level)
+                .debug_info(resolved.profile.debug_info);
+            if let Some(mode) = &resolved.profile.lto {
+                builder.lto(mode);
+            }
+        }
+    }
+
+    for feat in &unit.features {
+        builder.cfg(&format!("feature=\"{feat}\""));
+    }
+    for flag in &unit.settings.cfg_flags {
+        builder.cfg(flag);
+    }
+    if unit.settings.cap_lints {
+        builder.raw_arg("--cap-lints").raw_arg("allow");
+    }
+
+    // Every crate for a target must use the sysroot's panic strategy,
+    // or rustc rejects the link.
+    if let Some(s) = target.and_then(|t| t.panic_strategy) {
+        builder
+            .raw_arg("-C")
+            .raw_arg(format!("panic={}", s.as_str()));
+    }
+
+    for flag in &unit.settings.rustc_flags {
         builder.raw_arg(flag.as_str());
     }
 
-    // Incremental compilation directory.
-    builder.incremental(&layout.incremental_dir(crate_def));
-
-    // Linker script (executable crates only — Bin or RawBinary).
-    // Resolved relative to the project root.
-    if crate_def.crate_type.is_executable() {
-        if let Some(ls) = &crate_def.linker_script {
-            builder.linker_script(&project_root.join(ls));
-        }
-        // For Bin (cross): we use --out-dir = cross_final_dir and let
-        // rustc produce <name>{exe-suffix}. No -o needed.
-        //
-        // For RawBinary: rustc emits <name>.elf into cross_final_dir.
-        // We pass -o <name>.elf explicitly because rustc's default
-        // executable name has no extension and we want an unambiguous
-        // .elf suffix the post-link objcopy step (compile_crate.rs
-        // wires it via post_compile_step) can target. The flat
-        // <name>.bin is produced by objcopy after rustc returns
-        // success — see compile/objcopy.rs.
-        if crate_def.crate_type == CrateType::RawBinary {
-            let elf_path = output_path.with_extension("elf");
-            builder.raw_arg("-o").raw_arg(elf_path.as_os_str());
-        }
+    if unit.settings.incremental
+        && let UnitOrigin::Crate(h) = unit.origin
+        && let Some(def) = model.crates.get(h)
+    {
+        builder.incremental(&layout.incremental_dir(def));
     }
 
-    // Append -C extra-filename LAST (mirrors sysroot convention). This must
-    // come after all other flags so the canonical token order (and therefore
-    // the cache hash) stays stable.
-    //
-    // Exception: cross executables (Bin and RawBinary) skip extra-filename
-    // entirely. See the output-path derivation comment above for the full
-    // rationale. The `if` here ensures the cache key is still stable —
-    // the absence of the flag for executable crates is part of the
-    // canonical token order.
-    if !crate_def.crate_type.is_executable() || crate_ref.host {
+    if let Some(ls) = &unit.settings.linker_script {
+        builder.linker_script(ls);
+    }
+    // rustc's default executable name has no extension; a raw binary
+    // gets an explicit `<name>.elf` that the post-link objcopy step
+    // turns into `<name>.bin`.
+    if let Some(elf) = &paths.debug_elf_path {
+        builder.raw_arg("-o").raw_arg(elf.as_os_str());
+    }
+
+    if let Some(extra) = &paths.extra_filename {
         builder
             .raw_arg("-C")
-            .raw_arg(format!("extra-filename={extra_filename}"));
+            .raw_arg(format!("extra-filename={extra}"));
     }
 
-    // For Check/Clippy on non-proc-macro crates, the artifact path
-    // computed above (rlib / bin / dylib) is *never written* — only
-    // metadata + dep-info land on disk. The cache freshness check in
-    // `compile_and_cache` uses `output_path.exists()` as a final
-    // sanity guard, which would fail forever under those drivers and
-    // re-run rustc on every invocation.
-    //
-    // Use the depfile as the cache stamp instead: rustc reliably
-    // writes it under both Rustc and Check/Clippy, and its existence
-    // is a faithful proxy for "we ran a successful compile". The
-    // BuildRecord stores it the same way as a real artifact path; the
-    // `compile()` caller's return value is the path that downstream
-    // crates use to wire `--extern`, so for proc-macros (which still
-    // produce a real artifact under Check) we keep the original
-    // dylib path.
-    let cache_output_path =
-        if ctx.driver().emit_override().is_some() && crate_def.crate_type != CrateType::ProcMacro {
-            depfile_path.clone()
-        } else {
-            output_path.clone()
-        };
+    let output_path = if emit_override.is_some() {
+        paths.depfile_path.clone()
+    } else {
+        paths.output_path.clone()
+    };
+    Ok(UnitCommand {
+        builder,
+        paths,
+        output_path,
+    })
+}
 
-    Ok((builder, cache_output_path, depfile_path))
+/// Add the directory of every unit reachable through `unit`'s deps, for
+/// `-L dependency=<dir>`.
+///
+/// `--extern` covers only direct deps, but rustc also loads every crate
+/// recorded in a direct dep's metadata by name, so it needs a search
+/// path for the rest. Each unit has its own output directory, so this
+/// collects one entry per transitive dep.
+///
+/// The walk does not descend into a proc macro's deps: those are linked
+/// into the proc-macro dylib, and they are host units, whose directories
+/// must not appear on a cross unit's search path.
+fn collect_transitive_dirs(
+    input: &CompileUnitInput<'_>,
+    unit: &BuildUnit,
+    dirs: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let units = input.units;
+    let mut seen = BTreeSet::new();
+    let mut stack: Vec<_> = unit
+        .deps
+        .iter()
+        .filter_map(|d| match d.target {
+            DepTarget::Unit(u) => Some(u),
+            _ => None,
+        })
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let path = input.artifacts.unit(id).ok_or_else(|| {
+            Error::Compile(format!(
+                "{} ran before its transitive dep {} finished (scheduler bug)",
+                unit.name,
+                units.get(id).name,
+            ))
+        })?;
+        if let Some(parent) = path.parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+        let dep = units.get(id);
+        if dep.kind != CrateType::ProcMacro {
+            for d in &dep.deps {
+                match &d.target {
+                    DepTarget::Unit(u) => stack.push(*u),
+                    DepTarget::Prebuilt {
+                        search_dirs: more, ..
+                    } => dirs.extend(more.iter().cloned()),
+                    DepTarget::Missing { .. } => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
