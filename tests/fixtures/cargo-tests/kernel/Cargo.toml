@@ -1,0 +1,12 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "boot"
+harness = false
+
+[[test]]
+name = "fails"
+harness = false

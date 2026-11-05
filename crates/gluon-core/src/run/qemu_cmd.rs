@@ -9,8 +9,8 @@
 //!   real OVMF install.
 //! - The `gluon run --dry-run` path can print the exact argv that
 //!   would be used without needing QEMU at all.
-//! - Future `gluon test` can reuse this for per-test argv assembly
-//!   while managing the surrounding process lifecycle itself.
+//! - `gluon test` reuses it for each test's argv while managing the
+//!   surrounding process lifecycle itself.
 //!
 //! All "live" work (resolving OVMF paths, copying a writable vars file,
 //! spawning) lives in [`super::ovmf`] and [`super`] respectively.

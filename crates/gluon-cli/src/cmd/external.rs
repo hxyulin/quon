@@ -2,10 +2,9 @@
 //!
 //! When clap encounters an unknown subcommand (the `external_subcommand`
 //! arm in `cli.rs`), we resolve it to `gluon-<name>` on `$PATH` and
-//! forward any remaining arguments. This lets future binaries like
-//! `gluon-vendor` or `gluon-test` be dropped onto `$PATH` and invoked as
-//! `gluon vendor` / `gluon test` without any core changes — mirroring
-//! git's and cargo's extension conventions.
+//! forward any remaining arguments. This lets a binary like `gluon-foo`
+//! be dropped onto `$PATH` and invoked as `gluon foo` without any core
+//! changes — mirroring git's and cargo's extension conventions.
 
 use anyhow::{Result, anyhow};
 use std::ffi::OsString;

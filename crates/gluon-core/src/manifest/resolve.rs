@@ -49,7 +49,7 @@ pub enum UnitKind {
     Lib,
     ProcMacro,
     Bin(String),
-    /// Stage 6.
+    /// An integration test with `harness = false`, built like a bin.
     Test(String),
     /// Stage 6.
     LibTest,
@@ -121,10 +121,11 @@ impl UnitGraph {
 
     /// One unique name per unit, indexed by [`UnitId`].
     ///
-    /// A unit is named after its package (lib, proc-macro), its bin, or
-    /// `<package>@build-script`. When names collide, root units keep the
-    /// plain name and the others get suffixes in this order: `@lib` for a
-    /// lib sharing a name with a bin of its package, `@<domain>` for a
+    /// A unit is named after its package (lib, proc-macro), its bin or
+    /// test, or `<package>@build-script`. When names collide, root units
+    /// keep the plain name and the others get suffixes in this order:
+    /// `@test` for a test sharing a name with any other unit, `@lib` for
+    /// a lib sharing a name with a bin of its package, `@<domain>` for a
     /// copy outside the group's primary domain (the root's domain, else
     /// the first target, else host), `@<version>` for all but the newest
     /// version. A last `#<n>` suffix separates build-script units that
@@ -145,6 +146,15 @@ impl UnitGraph {
 
         type Step<'a> = Box<dyn Fn(&[UnitId], &UnitGraph) -> Vec<(UnitId, String)> + 'a>;
         let steps: Vec<Step> = vec![
+            // A test never takes the plain name from a bin or lib, so
+            // adding `tests/kernel.rs` does not rename the `kernel` bin.
+            Box::new(|group, g| {
+                group
+                    .iter()
+                    .filter(|&&i| matches!(g.units[i].kind, UnitKind::Test(_)))
+                    .map(|&i| (i, "@test".to_string()))
+                    .collect()
+            }),
             Box::new(|group, g| {
                 let has_bin = |p| {
                     group.iter().any(|&i| {
@@ -605,6 +615,20 @@ fn build_units(
                     });
                 }
             }
+            // Tests that need libtest are left to `cargo test`;
+            // expansion warns about them.
+            for t in pkg.tests.iter().filter(|t| !t.harness) {
+                if t.required_features.iter().all(|f| st.features.contains(f)) {
+                    drafts.push(Draft {
+                        package: key.0,
+                        kind: UnitKind::Test(t.name.clone()),
+                        domain: key.1.clone(),
+                        features: st.features.clone(),
+                        state: key.clone(),
+                        is_root,
+                    });
+                }
+            }
         }
         if pkg.build_script.is_some() {
             drafts.push(Draft {
@@ -686,7 +710,7 @@ fn build_units(
                 kind: dep.kind,
             });
         }
-        if let (UnitKind::Bin(_), Some(lib)) = (&d.kind, &pkg.lib)
+        if let (UnitKind::Bin(_) | UnitKind::Test(_), Some(lib)) = (&d.kind, &pkg.lib)
             && let Some(&unit) = lib_unit.get(&(d.package, d.domain.clone()))
         {
             deps.insert(UnitDep {

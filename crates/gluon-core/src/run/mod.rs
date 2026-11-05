@@ -16,17 +16,18 @@
 //! - `entry` wires those three together behind the public [`prepare`]
 //!   and [`launch`] entry points.
 //!
-//! The future `gluon test` command will reuse everything except
-//! [`prepare`] itself: the test harness will call `build_qemu_command`
-//! directly per test binary and interpret exit codes.
+//! [`prepare_tests`] reuses the same steps through `entry`'s helpers, booting
+//! each integration-test binary in place of the boot binary.
 
 pub mod boot_mode;
 mod entry;
 pub mod ovmf;
 pub mod qemu_cmd;
 pub mod resolve;
+mod test;
 
 pub use entry::{Prepared, RunOptions, launch, prepare};
 pub use ovmf::{ResolvedOvmf, resolve_ovmf};
 pub use qemu_cmd::{QemuInvocation, build_qemu_command};
 pub use resolve::{ResolvedQemu, resolve_qemu};
+pub use test::{PreparedTest, PreparedTests, TestOptions, TestStatus, prepare_tests, run_test};

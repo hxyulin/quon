@@ -30,6 +30,7 @@
 - [QEMU Orchestration](./running/qemu.md)
 - [UEFI Boot and ESP Assembly](./running/uefi-boot.md)
 - [Debugging with GDB](./running/debugging.md)
+- [Integration Tests](./running/integration-tests.md)
 
 # CLI Reference
 

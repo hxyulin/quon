@@ -119,6 +119,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell),
         cli::Command::Configure(args) => cmd::configure::run(ctx, args.output),
         cli::Command::Run(args) => cmd::run::run(ctx, cli.jobs, args, shell),
+        cli::Command::Test(args) => cmd::test::run(ctx, cli.jobs, args, shell),
         cli::Command::Check(_)
         | cli::Command::Clippy(_)
         | cli::Command::Clean(_)

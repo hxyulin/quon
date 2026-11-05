@@ -120,6 +120,19 @@ pub struct BinTarget {
     pub required_features: Vec<String>,
 }
 
+/// An integration test: a `[[test]]` table or a file Cargo would find
+/// under `tests/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestTarget {
+    pub name: String,
+    pub path: PathBuf,
+    pub edition: String,
+    pub required_features: Vec<String>,
+    /// `harness`, true when absent. Gluon builds only `harness = false`
+    /// tests, since a harness needs libtest; lowering rejects the rest.
+    pub harness: bool,
+}
+
 /// One value in a `[features]` list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeatureValue {
@@ -223,6 +236,9 @@ pub struct Package {
     pub metadata: PackageMetadata,
     pub lib: Option<LibTarget>,
     pub bins: Vec<BinTarget>,
+    /// Integration tests. Empty for non-members: nothing builds a
+    /// dependency's tests.
+    pub tests: Vec<TestTarget>,
     /// Absolute path of the build script, if the package has one.
     pub build_script: Option<PathBuf>,
     pub links: Option<String>,
@@ -841,6 +857,11 @@ impl ManifestCx<'_> {
         }
         let lib = self.lower_lib(m, &pkg.name, &dir, &edition, pkg.autolib);
         let bins = self.lower_bins(m, &pkg.name, &dir, &edition, pkg.autobins);
+        let tests = if is_member {
+            self.lower_tests(m, &dir, &edition, pkg.autotests)
+        } else {
+            Vec::new()
+        };
         let build_script = match &pkg.build {
             Some(TomlBuild::Path(p)) => Some(dir.join(p)),
             Some(TomlBuild::Flag(false)) => None,
@@ -930,6 +951,7 @@ impl ManifestCx<'_> {
             metadata,
             lib,
             bins,
+            tests,
             build_script,
             links: pkg.links.clone(),
             features,
@@ -1064,6 +1086,71 @@ impl ManifestCx<'_> {
         }
         bins.sort_by(|a, b| a.name.cmp(&b.name));
         bins
+    }
+
+    /// `[[test]]` tables, then, unless `autotests = false`, each
+    /// `tests/<name>.rs` and `tests/<name>/main.rs` no table already
+    /// names, sorted by name. The same rules as Cargo's target discovery.
+    fn lower_tests(
+        &mut self,
+        m: &TomlManifest,
+        dir: &Path,
+        edition: &str,
+        autotests: Option<bool>,
+    ) -> Vec<TestTarget> {
+        let mut tests = Vec::new();
+        for t in &m.test {
+            let path = match &t.path {
+                Some(p) => Some(dir.join(p)),
+                None => [
+                    dir.join(format!("tests/{}.rs", t.name)),
+                    dir.join(format!("tests/{}/main.rs", t.name)),
+                ]
+                .into_iter()
+                .find(|p| p.is_file()),
+            };
+            let Some(path) = path else {
+                self.error(format!("cannot find the source of test `{}`", t.name), None);
+                continue;
+            };
+            let edition = t.edition.clone().unwrap_or_else(|| edition.to_string());
+            self.check_edition(&edition);
+            tests.push(TestTarget {
+                name: t.name.clone(),
+                path,
+                edition,
+                required_features: t.required_features.clone(),
+                harness: t.harness.unwrap_or(true),
+            });
+        }
+        if autotests != Some(false)
+            && let Ok(rd) = std::fs::read_dir(dir.join("tests"))
+        {
+            let mut entries: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+            entries.sort();
+            for p in entries {
+                let (name, path) = if p.extension().is_some_and(|e| e == "rs") && p.is_file() {
+                    (p.file_stem().unwrap_or_default(), p.clone())
+                } else if p.join("main.rs").is_file() {
+                    (p.file_name().unwrap_or_default(), p.join("main.rs"))
+                } else {
+                    continue;
+                };
+                let name = name.to_string_lossy().into_owned();
+                if tests.iter().any(|t| t.name == name || t.path == path) {
+                    continue;
+                }
+                tests.push(TestTarget {
+                    name,
+                    path,
+                    edition: edition.to_string(),
+                    required_features: Vec::new(),
+                    harness: true,
+                });
+            }
+        }
+        tests.sort_by(|a, b| a.name.cmp(&b.name));
+        tests
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1465,6 +1552,79 @@ mod tests {
     const WS: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n\
                       [workspace.dependencies]\nb = { path = \"b\" }\n";
     const B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\n";
+
+    #[test]
+    fn tests_are_discovered_like_cargo() {
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+                 [[test]]\nname = \"boot\"\nharness = false\n\
+                 [[test]]\nname = \"custom\"\npath = \"checks/custom.rs\"\nharness = false\n";
+        let tmp = tree(&[
+            ("Cargo.toml", WS),
+            ("a/Cargo.toml", a),
+            ("a/src/lib.rs", ""),
+            ("a/tests/boot.rs", ""),
+            ("a/tests/smp/main.rs", ""),
+            ("a/tests/notes.txt", ""),
+            ("a/checks/custom.rs", ""),
+            ("b/Cargo.toml", B),
+            ("b/src/lib.rs", ""),
+            ("b/tests/own.rs", ""),
+        ]);
+        let set = load(&tmp).unwrap();
+        let a = &set.packages[set.member("a").unwrap()];
+        let root = tmp.path().canonicalize().unwrap();
+        let found: Vec<(&str, String, bool)> = a
+            .tests
+            .iter()
+            .map(|t| {
+                let path = t.path.strip_prefix(&root).unwrap();
+                (t.name.as_str(), path.display().to_string(), t.harness)
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("boot", "a/tests/boot.rs".to_string(), false),
+                ("custom", "a/checks/custom.rs".to_string(), false),
+                ("smp", "a/tests/smp/main.rs".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn autotests_false_keeps_only_declared_tests() {
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\nautotests = false\n\
+                 [[test]]\nname = \"boot\"\nharness = false\n";
+        let tmp = tree(&[
+            ("Cargo.toml", WS),
+            ("a/Cargo.toml", a),
+            ("a/tests/boot.rs", ""),
+            ("a/tests/other.rs", ""),
+            ("b/Cargo.toml", B),
+            ("b/src/lib.rs", ""),
+        ]);
+        let set = load(&tmp).unwrap();
+        let a = &set.packages[set.member("a").unwrap()];
+        let names: Vec<&str> = a.tests.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["boot"]);
+    }
+
+    #[test]
+    fn declared_test_without_source_is_an_error() {
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[[test]]\nname = \"gone\"\n";
+        let tmp = tree(&[
+            ("Cargo.toml", WS),
+            ("a/Cargo.toml", a),
+            ("a/src/lib.rs", ""),
+            ("b/Cargo.toml", B),
+            ("b/src/lib.rs", ""),
+        ]);
+        let err = load(&tmp).unwrap_err().to_string();
+        assert!(
+            err.contains("cannot find the source of test `gone`"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn member_disabling_workspace_defaults_is_an_error_in_2024() {

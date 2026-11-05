@@ -442,6 +442,17 @@ pub struct CargoUnitDef {
     /// The package's build script, which runs for this unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_script: Option<CargoBuildScriptDef>,
+    /// The unit is an integration test. `gluon build` and `gluon run`
+    /// skip it; `gluon test` builds and boots it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_test: bool,
+}
+
+impl CrateDef {
+    /// Whether the crate is an integration test lowered from `tests/`.
+    pub fn is_test(&self) -> bool {
+        self.cargo.as_ref().is_some_and(|c| c.is_test)
+    }
 }
 
 /// The build script that runs for a manifest unit.
@@ -933,7 +944,7 @@ impl Named for ImageDef {
     }
 }
 
-/// QEMU configuration for `gluon run` (and future `gluon test`).
+/// QEMU configuration for `gluon run` and `gluon test`.
 ///
 /// All fields are optional at the model level — defaults are filled in by
 /// [`resolve_qemu`](../../gluon_core/run/resolve/fn.resolve_qemu.html) at

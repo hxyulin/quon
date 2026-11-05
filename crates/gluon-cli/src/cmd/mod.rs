@@ -37,6 +37,7 @@ pub mod fmt;
 pub mod init;
 pub mod manifest;
 pub mod run;
+pub mod test;
 pub mod vendor;
 
 use anyhow::{Context, Result};

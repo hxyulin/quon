@@ -208,7 +208,7 @@ pub fn expand_with(
     host_triple: &str,
 ) -> Result<Vec<Diagnostic>> {
     let mut errors = Vec::new();
-    let warnings = set.warnings.clone();
+    let mut warnings = set.warnings.clone();
 
     let mut roots: Vec<RootInfo> = Vec::new();
     for (_, c) in raw.crates.iter() {
@@ -262,6 +262,23 @@ pub fn expand_with(
         .collect();
 
     check_unsupported(&graph, &roots, &mut errors);
+    for r in &roots {
+        let pkg = &graph.packages[r.package];
+        for t in pkg.tests.iter().filter(|t| t.harness) {
+            warnings.push(
+                Diagnostic::warning(format!(
+                    "test `{}` of package `{}` uses the libtest harness, so Gluon skips it",
+                    t.name,
+                    pkg.name()
+                ))
+                .with_note(format!(
+                    "add `[[test]] name = \"{}\"` with `harness = false` to {}",
+                    t.name,
+                    pkg.manifest_path.display()
+                )),
+            );
+        }
+    }
     check_declared_crates(raw, &set, &graph, &names, &roots, project_root, &mut errors);
     if !errors.is_empty() {
         return Err(Error::Diagnostics(errors));
@@ -575,9 +592,21 @@ fn lower_unit(
             };
             (ty, &b.path, &b.edition, name.replace('-', "_"), Some(name))
         }
+        UnitKind::Test(name) => {
+            let t = pkg
+                .tests
+                .iter()
+                .find(|t| &t.name == name)
+                .expect("test units come from a test target");
+            let ty = match root.map(|r| r.def.crate_type) {
+                Some(CrateType::RawBinary) => CrateType::RawBinary,
+                _ => CrateType::Bin,
+            };
+            (ty, &t.path, &t.edition, name.replace('-', "_"), None)
+        }
         other => {
-            // The resolver makes test units only in test mode (stage 6),
-            // and build-script units are skipped by the caller.
+            // The resolver makes no lib-test units, and build-script
+            // units are skipped by the caller.
             return Err(Diagnostic::error(format!(
                 "package `{}`: {other} units are not supported",
                 pkg.name()
@@ -678,6 +707,7 @@ fn lower_unit(
             lints,
             env,
             build_script,
+            is_test: matches!(u.kind, UnitKind::Test(_)),
         }),
         ..Default::default()
     };
@@ -691,6 +721,10 @@ fn lower_unit(
         def.artifact_deps = rd.artifact_deps.clone();
         def.artifact_env = rd.artifact_env.clone();
         def.span = rd.span.clone();
+    }
+    // Cargo passes `--cfg test` to `harness = false` tests too.
+    if matches!(u.kind, UnitKind::Test(_)) {
+        def.cfg_flags.push("test".into());
     }
     Ok(def)
 }

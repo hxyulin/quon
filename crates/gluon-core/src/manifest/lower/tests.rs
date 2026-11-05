@@ -603,6 +603,94 @@ fn root_crate_type_needs_a_bin_target() {
     assert!(err.contains("a/Cargo.toml"), "{err}");
 }
 
+/// A root package's `harness = false` tests become bin crates marked as
+/// tests, linked to the package's lib, with the root's settings and
+/// `--cfg test`. A test named like the package's bin yields the plain
+/// name. Tests that need libtest are skipped with a warning.
+#[test]
+fn root_tests_become_test_crates() {
+    let ws = workspace(&[
+        ("Cargo.toml", WS),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [[test]]\nname = \"boot\"\nharness = false\n\
+             [[test]]\nname = \"a\"\nharness = false\n",
+        ),
+        ("a/src/lib.rs", ""),
+        ("a/src/main.rs", ""),
+        ("a/tests/boot.rs", ""),
+        ("a/tests/a.rs", ""),
+        ("a/tests/hosted.rs", ""),
+    ]);
+    let mut raw = raw_model(|cfg, t| {
+        cfg.cargo_workspace(".");
+        cfg.group("k")
+            .target(t)
+            .package("a")
+            .linker_script("a/link.ld");
+    });
+    let warnings = expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        dump(&raw),
+        "\
+a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
+a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
+a@test [k] x86_64-unknown-none Bin a/tests/a.rs 2021 f=[] d=[a->a@lib] rustc=a
+boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib] rustc=boot
+"
+    );
+    let krate = |name: &str| {
+        let h = raw.crates.lookup(name).expect(name);
+        raw.crates.get(h).unwrap().clone()
+    };
+    let boot = krate("boot");
+    assert!(boot.cargo.as_ref().unwrap().is_test);
+    assert_eq!(boot.linker_script.as_deref(), Some("a/link.ld"));
+    assert_eq!(boot.cfg_flags, ["test"]);
+    assert!(!krate("a").cargo.as_ref().unwrap().is_test);
+    assert!(krate("a").cfg_flags.is_empty());
+
+    let messages: Vec<String> = warnings.iter().map(|w| w.to_string()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("test `hosted` of package `a` uses the libtest harness")),
+        "{messages:?}"
+    );
+}
+
+/// `gluon build` leaves test crates out; check and clippy keep them.
+#[test]
+fn build_skips_test_crates() {
+    let ws = workspace(&[
+        ("Cargo.toml", WS),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+             [[test]]\nname = \"boot\"\nharness = false\n",
+        ),
+        ("a/src/main.rs", ""),
+        ("a/tests/boot.rs", ""),
+    ]);
+    let mut raw = raw_model(|cfg, t| {
+        cfg.cargo_workspace(".");
+        cfg.group("k").target(t).package("a");
+    });
+    expand_at(&mut raw, ws.path()).expect("expand");
+    let (model, diags) = gluon_model::intern(raw);
+    assert!(diags.is_empty(), "{diags:?}");
+    let resolved = crate::config::resolve(&model, "dev", None, ws.path(), None).unwrap();
+    let names = |r: &ResolvedConfig| -> Vec<String> {
+        r.crates
+            .iter()
+            .map(|c| model.crates.get(c.handle).unwrap().name.clone())
+            .collect()
+    };
+    assert_eq!(names(&resolved), ["a", "boot"]);
+    assert_eq!(names(&crate::without_tests(&model, &resolved)), ["a"]);
+}
+
 /// A path lib used by the kernel and by a proc macro is built twice:
 /// once per platform, with its own hash and paths. The unit table
 /// needs nothing special for it.

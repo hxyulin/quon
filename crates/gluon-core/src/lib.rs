@@ -37,7 +37,7 @@ pub use error::{Diagnostic, Error, Level, Result};
 pub use project_root::find_project_root;
 pub use rule::builtin::ExecRule;
 pub use rule::{RuleCtx, RuleFn, RuleRegistry};
-pub use run::{Prepared, RunOptions};
+pub use run::{Prepared, RunOptions, TestOptions, TestStatus};
 pub use scheduler::{
     BuildSummary, Dag, DagNode, JobDispatcher, JobInfo, JobKind, JobOutcome, NodeId, PlainReporter,
     Reporter, WorkerPool, build_dag, execute_pipeline,
@@ -128,6 +128,8 @@ pub fn build(
 /// - a CI run needs deterministic interleaving (e.g. `-j 1` for stable
 ///   stdout in golden tests),
 /// - you're debugging a scheduler issue and want to bisect parallelism.
+///
+/// Integration tests are not built; see [`build_tests_with_reporter`].
 pub fn build_with_workers(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -151,7 +153,55 @@ pub fn build_with_workers(
 /// Like [`build_with_workers`], but sends job events and job output to
 /// `reporter` instead of writing them to the process's stdout and
 /// stderr. The CLI uses this to draw status lines.
+///
+/// A normal build leaves out the integration tests. Check and clippy
+/// keep them, as `cargo clippy --all-targets` does, so test code is
+/// linted.
 pub fn build_with_reporter(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    workers: usize,
+    reporter: &mut dyn Reporter,
+) -> Result<BuildSummary> {
+    if ctx.driver() == DriverKind::Rustc {
+        execute(
+            ctx,
+            model,
+            &without_tests(model, resolved),
+            workers,
+            reporter,
+        )
+    } else {
+        execute(ctx, model, resolved, workers, reporter)
+    }
+}
+
+/// Like [`build_with_reporter`], but also builds the integration
+/// tests, for `gluon test`.
+pub fn build_tests_with_reporter(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    workers: usize,
+    reporter: &mut dyn Reporter,
+) -> Result<BuildSummary> {
+    execute(ctx, model, resolved, workers, reporter)
+}
+
+/// `resolved` without the integration-test crates. Nothing depends on
+/// a test binary, so dropping them leaves every other crate's inputs
+/// intact.
+fn without_tests(model: &BuildModel, resolved: &ResolvedConfig) -> ResolvedConfig {
+    let mut resolved = resolved.clone();
+    resolved
+        .crates
+        .retain(|c| !model.crates.get(c.handle).is_some_and(|k| k.is_test()));
+    resolved
+}
+
+/// Run the pipeline over every crate in `resolved`.
+fn execute(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,

@@ -100,6 +100,7 @@ in larger projects.
 ```sh
 gluon build              # Compile everything
 gluon run                # Build + launch QEMU
+gluon test               # Build + boot each integration test
 gluon check              # Metadata-only check pass
 gluon configure          # Generate rust-project.json for rust-analyzer
 ```

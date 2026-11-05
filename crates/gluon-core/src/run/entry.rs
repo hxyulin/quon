@@ -17,10 +17,10 @@ use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use crate::scheduler::{BuildSummary, Reporter};
 use crate::{build_with_reporter, model::BootMode};
-use gluon_model::{BuildModel, EspSource, ResolvedConfig};
+use gluon_model::{BuildModel, CrateDef, EspSource, Handle, ResolvedConfig, TargetDef};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
@@ -58,12 +58,14 @@ pub struct RunOptions {
     /// the spawn so the user knows where to point their debugger.
     pub gdb: bool,
     /// Emit an `-device isa-debug-exit,iobase=<port>,iosize=0x04`
-    /// entry in the QEMU argv so the future `gluon test` harness can
-    /// read an exit code back from the guest via an I/O port write.
-    /// The port comes from [`super::ResolvedQemu::test_exit_port`].
+    /// entry in the QEMU argv so a guest can report an exit code
+    /// through an I/O port write. The port comes from
+    /// [`super::ResolvedQemu::test_exit_port`].
     ///
-    /// Not wired to a CLI flag today; the future `gluon test`
-    /// subcommand will flip this on before invoking the runner.
+    /// Not wired to a CLI flag today. `gluon test` leaves it off:
+    /// projects such as Hadron add the device in
+    /// `qemu().extra_args(...)`, and a second device on the same port
+    /// would clash.
     pub test_mode: bool,
 }
 
@@ -138,23 +140,72 @@ pub fn prepare(
     let boot_handle = profile.boot_binary.ok_or_else(|| Error::NoBootBinary {
         profile: profile.name.clone(),
     })?;
-    let krate = model.crates.get(boot_handle).ok_or_else(|| {
+    let kernel = final_binary(ctx, model, resolved, boot_handle)?;
+    let invocation = invocation(
+        ctx,
+        model,
+        resolved,
+        opts,
+        &kernel,
+        None,
+        build_summary.as_ref(),
+    )?;
+
+    Ok(Prepared {
+        invocation,
+        build: build_summary,
+    })
+}
+
+/// Where the build puts `krate`'s binary for the profile's target.
+pub(super) fn final_binary(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    krate: Handle<CrateDef>,
+) -> Result<PathBuf> {
+    let profile = &resolved.profile;
+    let krate = model.crates.get(krate).ok_or_else(|| {
         Error::Config(format!(
-            "internal: boot_binary handle for profile '{}' does not resolve in the model",
+            "internal: crate handle for profile '{}' does not resolve in the model",
             profile.name
         ))
     })?;
-    let target = model.targets.get(profile.target).ok_or_else(|| {
-        Error::Config(format!(
-            "internal: profile '{}' target handle does not resolve",
-            profile.name
-        ))
-    })?;
+    let target = profile_target(model, resolved)?;
     let suffix = crate::compile::compile_utils::exe_suffix_for_target(&target.spec);
-    let kernel: PathBuf = ctx.layout.cross_final_dir(target, profile).join(format!(
+    Ok(ctx.layout.cross_final_dir(target, profile).join(format!(
         "{}{suffix}",
         crate::compile::compile_utils::normalize_crate_name(&krate.name)
-    ));
+    )))
+}
+
+pub(super) fn profile_target<'m>(
+    model: &'m BuildModel,
+    resolved: &ResolvedConfig,
+) -> Result<&'m TargetDef> {
+    model.targets.get(resolved.profile.target).ok_or_else(|| {
+        Error::Config(format!(
+            "internal: profile '{}' target handle does not resolve",
+            resolved.profile.name
+        ))
+    })
+}
+
+/// Steps 3 to 5 of [`prepare`]: resolve QEMU, the disk, the ESP and
+/// OVMF, and assemble the command that boots `kernel`. `esp_override`,
+/// when set, is the ESP directory to mount in UEFI mode instead of the
+/// one the project declares; `gluon test` passes each test's copy.
+pub(super) fn invocation(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    opts: &RunOptions,
+    kernel: &Path,
+    esp_override: Option<PathBuf>,
+    build_summary: Option<&BuildSummary>,
+) -> Result<QemuInvocation> {
+    let profile = &resolved.profile;
+    let target = profile_target(model, resolved)?;
 
     // Step 3: resolve QEMU config.
     //
@@ -193,7 +244,7 @@ pub fn prepare(
     // dry-run / `--no-build` modes (where the build didn't run, so the
     // map is empty).
     if let Some(disk_source) = qemu_def.disk.clone() {
-        let image_paths = match build_summary.as_ref() {
+        let image_paths = match build_summary {
             Some(s) => s.image_paths.clone(),
             None => {
                 // Dry-run / no-build fallback: synthesise paths via
@@ -211,7 +262,7 @@ pub fn prepare(
         // post-build map, or synthesise from the layout in dry-run /
         // --no-build mode so `disk_ref` to a build step's name still
         // resolves to a deterministic path (the file just won't exist).
-        let build_step_paths = match build_summary.as_ref() {
+        let build_step_paths = match build_summary {
             Some(s) => s.build_step_paths.clone(),
             None => {
                 let mut map: BTreeMap<_, _> = BTreeMap::new();
@@ -236,7 +287,9 @@ pub fn prepare(
     // must pick explicitly because we can't guess. Zero declarations
     // falls through — QEMU will simply have no ESP drive, same as
     // before this feature existed.
-    if resolved_qemu.boot_mode == BootMode::Uefi && resolved_qemu.esp.is_none() {
+    if let Some(dir) = esp_override.filter(|_| resolved_qemu.boot_mode == BootMode::Uefi) {
+        resolved_qemu.esp = Some(EspSource::Dir(dir));
+    } else if resolved_qemu.boot_mode == BootMode::Uefi && resolved_qemu.esp.is_none() {
         match model.esps.len() {
             0 => { /* no automation requested */ }
             1 => {
@@ -254,7 +307,6 @@ pub fn prepare(
                     Error::Compile("internal: esp handle iterates but does not resolve".to_string())
                 })?;
                 let esp_path = build_summary
-                    .as_ref()
                     .and_then(|s| s.esp_dirs.get(&esp_handle).cloned())
                     .unwrap_or_else(|| ctx.layout.esp_dir(target, profile, &esp_def.name));
                 resolved_qemu.esp = Some(EspSource::Dir(esp_path));
@@ -297,9 +349,9 @@ pub fn prepare(
     } else {
         opts.extra_args.clone()
     };
-    let invocation = build_qemu_command(
+    build_qemu_command(
         &resolved_qemu,
-        &kernel,
+        kernel,
         resolved_qemu.boot_mode,
         ovmf.as_ref(),
         &extra_args_with_gdb,
@@ -310,12 +362,7 @@ pub fn prepare(
         // build tree is already current, and QEMU will report a better
         // error than we can if they're wrong.
         opts.dry_run || opts.no_build,
-    )?;
-
-    Ok(Prepared {
-        invocation,
-        build: build_summary,
-    })
+    )
 }
 
 impl QemuInvocation {

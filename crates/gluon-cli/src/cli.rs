@@ -133,6 +133,14 @@ pub enum Command {
     /// `qemu().boot_mode(...)` → direct. Extra arguments after `--`
     /// are passed through to QEMU verbatim.
     Run(RunArgs),
+    /// Build the integration tests and boot each one under QEMU.
+    ///
+    /// An integration test is a `harness = false` target in `tests/`
+    /// of a package named with `group.package(...)`. Each test boots
+    /// the way `gluon run` boots the boot binary, with the test binary
+    /// in its place, and passes when QEMU exits with the success
+    /// status. Tests run one at a time, in name order.
+    Test(TestArgs),
     /// Inspect the Cargo workspace as Gluon reads it. Debug output only.
     #[command(subcommand)]
     Manifest(ManifestCommand),
@@ -273,6 +281,32 @@ pub struct RunArgs {
     pub gdb: bool,
     /// Arguments after `--` are passed verbatim to QEMU as a suffix.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub extra: Vec<OsString>,
+}
+
+/// Arguments for `gluon test`.
+#[derive(clap::Args, Debug)]
+pub struct TestArgs {
+    /// Run only the tests whose name contains this string.
+    pub filter: Option<String>,
+    /// Force UEFI boot. Mutually exclusive with `--direct`.
+    #[arg(long, conflicts_with = "direct")]
+    pub uefi: bool,
+    /// Force direct-kernel boot (`-kernel <path>`).
+    #[arg(long)]
+    pub direct: bool,
+    /// Per-test timeout in seconds. Default: the profile's
+    /// `test_timeout`, then `qemu().test_timeout(...)`, then 60.
+    #[arg(short = 'T', long)]
+    pub timeout: Option<u64>,
+    /// Print each test's QEMU command instead of building and booting.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Skip the build and boot the test binaries already on disk.
+    #[arg(long)]
+    pub no_build: bool,
+    /// Arguments after `--` are passed verbatim to QEMU for every test.
+    #[arg(last = true, allow_hyphen_values = true)]
     pub extra: Vec<OsString>,
 }
 

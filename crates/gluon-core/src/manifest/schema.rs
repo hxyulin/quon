@@ -42,6 +42,8 @@ pub struct TomlManifest {
     pub lib: Option<TomlLib>,
     #[serde(default)]
     pub bin: Vec<TomlBin>,
+    #[serde(default)]
+    pub test: Vec<TomlTest>,
     #[serde(default, deserialize_with = "dep_table")]
     pub dependencies: DepTable,
     #[serde(default, alias = "dev_dependencies", deserialize_with = "dep_table")]
@@ -96,6 +98,7 @@ pub struct TomlPackage {
     pub build: Option<TomlBuild>,
     pub autobins: Option<bool>,
     pub autolib: Option<bool>,
+    pub autotests: Option<bool>,
 }
 
 /// `readme = "README.md"` or `readme = false`.
@@ -190,6 +193,18 @@ pub struct TomlBin {
     #[serde(default, alias = "required_features")]
     pub required_features: Vec<String>,
     pub edition: Option<String>,
+}
+
+/// One `[[test]]` table.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TomlTest {
+    pub name: String,
+    pub path: Option<String>,
+    #[serde(default, alias = "required_features")]
+    pub required_features: Vec<String>,
+    pub edition: Option<String>,
+    pub harness: Option<bool>,
 }
 
 /// `[lints]`: either `workspace = true` or per-tool tables.

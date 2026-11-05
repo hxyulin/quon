@@ -158,6 +158,28 @@ gluon run --gdb -- -d int
 gluon run --dry-run
 ```
 
+### `gluon test [flags] [FILTER] [-- QEMU_ARGS...]`
+
+Build the integration tests and boot each one under QEMU, one at a time,
+in name order. A test passes when QEMU exits with
+`qemu().success_exit_code(...)`, or 0 when that is unset. Only the tests
+whose name contains `FILTER` run. See
+[Integration Tests](../running/integration-tests.md).
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--uefi` | | Force UEFI boot (conflicts with `--direct`) |
+| `--direct` | | Force direct kernel boot |
+| `--timeout <SECS>` | `-T` | Per-test timeout (default: the profile's `test_timeout`, then `qemu().test_timeout(...)`, then 60) |
+| `--dry-run` | | Print each test's QEMU command without building or booting |
+| `--no-build` | | Skip the build step (use existing artifacts) |
+
+```sh
+gluon test
+gluon test heap
+gluon test --timeout 120 -- -smp 4
+```
+
 ## External Subcommands
 
 Unknown subcommands are dispatched to `gluon-<name>` binaries on `$PATH`. For
