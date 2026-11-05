@@ -1,0 +1,4 @@
+error: two workspace members are named `same`
+    note: in Cargo.toml
+    note: one/Cargo.toml
+    note: two/Cargo.toml

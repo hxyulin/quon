@@ -1,0 +1,11 @@
+[package]
+name = "nodef"
+version.workspace = true
+edition = "2018"
+
+[lib]
+name = "no_def"
+
+[features]
+default = ["x"]
+x = []

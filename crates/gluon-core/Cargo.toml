@@ -45,6 +45,8 @@ walkdir = "2"
 # against `rustc --print cfg` output. Published by the Cargo team; it is
 # the matcher Cargo itself uses, so Gluon selects the same edges.
 cargo-platform = "0.3.0"
+semver = "1"
+glob = "0.3"
 
 # Signal handling for `gluon run`: catches SIGINT/SIGTERM so the
 # spawned QEMU child can be killed cleanly instead of wedging. Used

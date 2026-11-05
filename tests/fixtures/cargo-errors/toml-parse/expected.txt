@@ -1,0 +1,1 @@
+a/Cargo.toml:4:11: error: invalid manifest: data did not match any variant of untagged enum Inheritable

@@ -1,0 +1,12 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "app_core"
+
+[dependencies]
+fake1 = { package = "fake", version = "1" }
+fake = { version = "2", features = ["extra"] }
+aux = { path = "../helper", package = "helper" }

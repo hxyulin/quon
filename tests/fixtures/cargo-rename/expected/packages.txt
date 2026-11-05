@@ -1,0 +1,18 @@
+app 0.1.0 (path app) member
+  edition 2021
+  lib app_core src/lib.rs (lib, edition 2021)
+  dep normal aux -> helper 0.2.0
+  dep normal fake -> fake 2.0.0 features=extra
+  dep normal fake1 -> fake 1.0.0
+fake 1.0.0 (registry)
+  edition 2021
+  lib fake src/lib.rs (lib, edition 2021)
+  feature extra = []
+fake 2.0.0 (registry)
+  edition 2021
+  lib fake src/lib.rs (lib, edition 2021)
+  feature extra = []
+helper 0.2.0 (path helper) member
+  edition 2021
+  lib helper src/lib.rs (lib, edition 2021)
+  dep normal fake -> fake 1.0.0

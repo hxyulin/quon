@@ -1,0 +1,2 @@
+error: workspace member `crates/empty` (from pattern `crates/*`) has no Cargo.toml
+    note: in Cargo.toml

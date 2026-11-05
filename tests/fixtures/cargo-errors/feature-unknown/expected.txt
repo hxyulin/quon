@@ -1,0 +1,2 @@
+a/Cargo.toml:7:12: error: feature `default` includes `missing`, which is neither a dependency nor another feature
+a/Cargo.toml:8:10: error: feature `other` includes `nodep/f`, but `nodep` is not a dependency

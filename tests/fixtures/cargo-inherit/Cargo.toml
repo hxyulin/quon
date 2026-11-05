@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+exclude = ["crates/skipped"]
+
+[workspace.package]
+version = "1.2.3"
+edition = "2021"
+authors = ["A <a@example.com>", "B <b@example.com>"]
+license = "MIT OR Apache-2.0"
+description = "inherited description"
+rust-version = "1.85"
+
+[workspace.dependencies]
+util = { path = "crates/util", features = ["a"] }
+nodef = { path = "crates/nodef", default-features = false }
+other = { path = "crates/other" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

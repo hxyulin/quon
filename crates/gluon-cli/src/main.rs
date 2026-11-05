@@ -28,6 +28,11 @@ fn run() -> Result<()> {
         return cmd::external::run(args);
     }
 
+    // `manifest` reads a Cargo workspace directly; it needs no gluon.rs.
+    if let cli::Command::Manifest(sub) = &cli.command {
+        return cmd::manifest::run(sub);
+    }
+
     // `clean` and `fmt` take the lighter layout-only context (no
     // rustc probe) so they still work when the toolchain is broken
     // or missing. `fmt` only needs `rustfmt`, which it resolves
@@ -110,6 +115,7 @@ fn run() -> Result<()> {
         | cli::Command::Clean(_)
         | cli::Command::Fmt(_)
         | cli::Command::Vendor(_)
+        | cli::Command::Manifest(_)
         | cli::Command::External(_) => {
             unreachable!("handled above")
         }

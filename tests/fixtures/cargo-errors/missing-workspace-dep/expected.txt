@@ -1,0 +1,1 @@
+a/Cargo.toml:7:8: error: dependency `nope` sets `workspace = true`, but `[workspace.dependencies]` has no `nope`

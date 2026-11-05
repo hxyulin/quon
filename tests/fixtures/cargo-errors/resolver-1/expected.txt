@@ -1,0 +1,2 @@
+error: workspace defaults to resolver 1, which Gluon does not support; set `resolver = "2"` in `[workspace]`
+    note: in Cargo.toml

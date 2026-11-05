@@ -1,0 +1,2 @@
+a/Cargo.toml:10:10: error: feature `use-b` includes `dep:b`, but `b` is not an optional dependency
+a/Cargo.toml:11:9: error: feature `weak` includes `b?/f` with a `?`, but `b` is not an optional dependency

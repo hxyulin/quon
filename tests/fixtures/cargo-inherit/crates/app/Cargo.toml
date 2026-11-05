@@ -1,0 +1,37 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "tool"
+path = "src/tool.rs"
+required-features = ["util"]
+
+[dependencies]
+# Feature union with the workspace entry; optional only on the member side.
+util = { workspace = true, features = ["b"], optional = true }
+# Member re-enables defaults that the workspace entry disabled.
+nodef = { workspace = true, default-features = true }
+# Member cannot disable defaults the workspace enables: a warning in 2021.
+other = { workspace = true, default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+nodef = { workspace = true }
+
+[build-dependencies]
+util = { workspace = true }
+
+[features]
+default = []
+extra = ["util?/b", "nodef/x"]
+
+[lints]
+workspace = true
+
+[profile.release]
+opt-level = 3

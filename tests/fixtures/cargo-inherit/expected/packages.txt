@@ -1,0 +1,35 @@
+app 1.2.3 (path crates/app) member
+  edition 2021
+  authors A <a@example.com>:B <b@example.com>
+  description inherited description
+  license MIT OR Apache-2.0
+  readme README.md
+  rust-version 1.85
+  lib app src/lib.rs (lib, edition 2021)
+  bin app src/main.rs
+  bin extra src/bin/extra.rs
+  bin tool src/tool.rs requires util
+  feature default = []
+  feature extra = [util?/b, nodef/x]
+  feature util = [dep:util]
+  dep normal nodef -> nodef 1.2.3
+  dep normal other -> other 0.1.0
+  dep normal util -> util 0.3.0 optional features=a,b
+  dep build util -> util 0.3.0 features=a
+  dep normal nodef [cfg(unix)] -> nodef 1.2.3 no-default-features
+  lint clippy::all warn priority -1
+  lint rust::unsafe_code deny priority 0
+nodef 1.2.3 (path crates/nodef) member
+  edition 2018
+  lib no_def src/lib.rs (lib, edition 2018)
+  feature default = [x]
+  feature x = []
+other 0.1.0 (path crates/other) member
+  edition 2015
+  lib other src/lib.rs (lib, edition 2015)
+util 0.3.0 (path crates/util) member
+  edition 2024
+  lib util src/lib.rs (lib, edition 2024)
+  feature a = []
+  feature b = []
+  feature default = [a]

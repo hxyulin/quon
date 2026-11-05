@@ -103,6 +103,10 @@ pub enum Command {
     /// `qemu().boot_mode(...)` → direct. Extra arguments after `--`
     /// are passed through to QEMU verbatim.
     Run(RunArgs),
+    /// Inspect the Cargo workspace as Gluon reads it. Debug output only;
+    /// builds do not use it yet.
+    #[command(subcommand)]
+    Manifest(ManifestCommand),
     /// Dispatch to an external `gluon-<name>` binary on `$PATH`.
     ///
     /// Clap's `external_subcommand` captures everything after the
@@ -221,6 +225,27 @@ pub struct VendorArgs {
     /// network access; expects the lockfile to already be up to date.
     #[arg(long)]
     pub offline: bool,
+}
+
+/// `gluon manifest` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ManifestCommand {
+    /// Print every package the workspace reaches, with inherited fields,
+    /// targets, features and dependency edges.
+    Packages(ManifestArgs),
+}
+
+/// Where `gluon manifest` finds the workspace.
+#[derive(clap::Args, Debug)]
+pub struct ManifestArgs {
+    /// Directory holding the workspace `Cargo.toml` (default: current
+    /// directory).
+    #[arg(long, value_name = "DIR")]
+    pub workspace: Option<PathBuf>,
+    /// Directory holding vendored registry sources (default:
+    /// `<workspace>/vendor`).
+    #[arg(long, value_name = "DIR")]
+    pub vendor_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]

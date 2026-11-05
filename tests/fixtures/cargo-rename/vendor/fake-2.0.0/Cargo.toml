@@ -1,0 +1,12 @@
+[package]
+edition = "2021"
+name = "fake"
+version = "2.0.0"
+autobins = false
+
+[lib]
+name = "fake"
+path = "src/lib.rs"
+
+[features]
+extra = []

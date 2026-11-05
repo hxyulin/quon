@@ -1,0 +1,2 @@
+error: `[patch]` and `[replace]` are not supported: Gluon would build different code than Cargo
+    note: in Cargo.toml

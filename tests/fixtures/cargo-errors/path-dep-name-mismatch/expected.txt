@@ -1,0 +1,1 @@
+a/Cargo.toml:7:7: error: path dependency `bee` points at package `b`; add `package = "b"` to rename it
