@@ -14,7 +14,9 @@
 //! - Declared input: the script binary, so a recompiled script reruns.
 //! - Discovered inputs: the `rerun-if-changed` paths. A script that
 //!   prints none is rerun when any file in its package changes, as in
-//!   Cargo.
+//!   Cargo. That walk skips `target/`, dot-directories and Gluon's own
+//!   build directory, which sits inside the package when the package is
+//!   the project root.
 //! - Env: the `rerun-if-env-changed` names, with the values the script
 //!   saw.
 //! - Output: the `output` file holding the script's stdout.
@@ -165,7 +167,7 @@ pub(crate) fn run_build_script(
     let out = Arc::new(parsed);
     // A `rerun-if-changed` path that does not exist is always stale, as
     // in Cargo: the run is not recorded, so the next build reruns it.
-    if let Some(discovered) = discovered_inputs(&out, input.manifest_dir) {
+    if let Some(discovered) = discovered_inputs(&out, input.manifest_dir, ctx.layout.root()) {
         ctx.store.record(RecordInput {
             key: &input.key,
             command,
@@ -185,8 +187,13 @@ pub(crate) fn run_build_script(
 /// The files whose change reruns the script: the `rerun-if-changed`
 /// paths, with directories expanded to the files under them, or every
 /// file in the package when the script names none. `None` when a named
-/// path does not exist.
-fn discovered_inputs(out: &BuildScriptOutput, manifest_dir: &Path) -> Option<Vec<PathBuf>> {
+/// path does not exist. `build_dir` is Gluon's build directory, skipped
+/// by the package walk.
+fn discovered_inputs(
+    out: &BuildScriptOutput,
+    manifest_dir: &Path,
+    build_dir: &Path,
+) -> Option<Vec<PathBuf>> {
     let roots: Vec<&Path> = if out.rerun_if_changed.is_empty() {
         vec![manifest_dir]
     } else {
@@ -201,12 +208,14 @@ fn discovered_inputs(out: &BuildScriptOutput, manifest_dir: &Path) -> Option<Vec
             .sort_by_file_name()
             .into_iter()
             // The package walk skips build output and VCS metadata;
-            // an explicitly named path is taken as given.
+            // an explicitly named path is taken as given. Other nodes
+            // rewrite files under the build directory on every build.
             .filter_entry(|e| {
                 e.depth() == 0
                     || !(e.file_type().is_dir()
                         && (e.file_name() == "target"
-                            || e.file_name().to_string_lossy().starts_with('.')))
+                            || e.file_name().to_string_lossy().starts_with('.')
+                            || e.path() == build_dir))
             });
         for entry in walk.filter_map(|e| e.ok()) {
             if entry.file_type().is_file() {
@@ -371,6 +380,33 @@ mod tests {
         // A new file is not in the recorded set, but an edited one is.
         std::fs::write(fx.pkg.join("input.txt"), b"v2").unwrap();
         assert!(!fx.run(&ctx, &mut Vec::new()).1);
+    }
+
+    /// A package at the project root holds Gluon's own build directory.
+    /// Other nodes rewrite files there on every build, so the package
+    /// walk must skip it or the script would rerun each time.
+    #[test]
+    fn package_walk_skips_gluons_build_dir() {
+        let fx = Fx::new("echo cargo::rustc-cfg=has_x\n");
+        let build = fx.pkg.join("build");
+        let rlib = build.join("host/deps/libother.rlib");
+        std::fs::create_dir_all(rlib.parent().unwrap()).unwrap();
+        std::fs::write(&rlib, b"v1").unwrap();
+        let ctx = CompileCtx::new(
+            BuildLayout::new(&build, "demo"),
+            Arc::clone(&fx.ctx().rustc_info),
+        );
+        fx.run(&ctx, &mut Vec::new());
+        std::fs::write(&rlib, b"v2, rebuilt by another node").unwrap();
+        assert!(
+            fx.run(&ctx, &mut Vec::new()).1,
+            "a file under the build dir must not rerun the script"
+        );
+        std::fs::write(fx.pkg.join("input.txt"), b"v2").unwrap();
+        assert!(
+            !fx.run(&ctx, &mut Vec::new()).1,
+            "a package file still does"
+        );
     }
 
     #[test]
