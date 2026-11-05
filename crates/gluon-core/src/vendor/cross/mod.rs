@@ -13,10 +13,10 @@
 //!   scratch workspace and parse the JSON into a target-agnostic
 //!   [`metadata::ResolvedGraph`].
 //! - [`graph`] — lower a `ResolvedGraph` into scheduler-node
-//!   descriptors ([`graph::VendorCrateBuild`]), applying proc-macro
-//!   re-targeting (proc-macros are dlopen'd by rustc and must always
-//!   be host) and rejecting `build.rs`-bearing crates (MVP scope:
-//!   build scripts are not yet supported).
+//!   descriptors ([`graph::VendorCrateBuild`]), placing each crate on
+//!   the host, the target, or both by reachability from proc macros,
+//!   and rejecting `build.rs`-bearing crates (build scripts are not yet
+//!   supported).
 //! - [`context`] — the side-table the scheduler reads to dispatch
 //!   vendor builds. Lives outside [`gluon_model::BuildModel`] because
 //!   vendor builds are synthesised at `vendor_sync` time, not declared
@@ -127,9 +127,10 @@ pub fn populate_cross_vendor_workspaces(
 ///    rather than a silent fetch.
 /// 2. Parse the JSON into a [`metadata::ResolvedGraph`].
 /// 3. Lower into [`graph::VendorCrateBuild`]s via
-///    [`graph::build_vendor_nodes`] (proc-macro re-targeting +
+///    [`graph::build_vendor_nodes`] (host placement by reachability +
 ///    build.rs rejection).
-/// 4. Register every build with the returned context.
+/// 4. Register every build with the returned context. A host unit
+///    that an earlier target registered identically is reused.
 ///
 /// Models with no cross-tagged deps short-circuit and return an empty
 /// context without spawning cargo, so host-only projects pay no
@@ -143,9 +144,9 @@ pub fn populate_cross_vendor_workspaces(
 /// - `cargo metadata` fails or produces non-parseable JSON.
 /// - The graph contains a build-script crate (MVP scope rejection
 ///   raised by [`graph::build_vendor_nodes`]).
-/// - Two cross workspaces register the same `(target, name)` —
-///   typically a proc-macro pulled in transitively at different
-///   versions across cross targets. Surfaced verbatim from
+/// - Two cross workspaces register different host units under the same
+///   name, typically a proc macro resolved at different versions or
+///   features per cross target. Surfaced verbatim from
 ///   [`context::VendorBuildContext::add`].
 pub fn build_cross_vendor_context(
     model: &BuildModel,
@@ -190,7 +191,7 @@ pub fn build_cross_vendor_context(
             ))])
         })?;
         for build in builds {
-            ctx.add(build).map_err(|e| {
+            add_unit(&mut ctx, build).map_err(|e| {
                 Error::Diagnostics(vec![Diagnostic::error(format!(
                     "duplicate vendor build registration for target '{}': {e}",
                     target.name,
@@ -199,6 +200,29 @@ pub fn build_cross_vendor_context(
         }
     }
     Ok(ctx)
+}
+
+/// Register one unit, reusing an identical host unit that an earlier
+/// cross target already registered.
+///
+/// Each cross target is resolved separately, so two targets that use
+/// the same proc macro both produce its host closure. When the two host
+/// units match exactly (version, features, deps), building it once is
+/// correct. When they differ, the `DuplicateKey` error stays: picking
+/// one would silently build a proc macro with the other target's
+/// features. A single host closure per project replaces this once gluon
+/// resolves manifests itself.
+fn add_unit(
+    ctx: &mut context::VendorBuildContext,
+    build: graph::VendorCrateBuild,
+) -> std::result::Result<(), context::ContextError> {
+    if build.target == TargetSpec::Host
+        && let Some(existing) = ctx.lookup(TargetSpec::Host, &build.cargo_target_name)
+        && ctx.get(existing) == Some(&build)
+    {
+        return Ok(());
+    }
+    ctx.add(build).map(|_| ())
 }
 
 // -------------------- tests --------------------
@@ -385,5 +409,38 @@ mod tests {
             ),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    fn host_unit(features: &[&str]) -> graph::VendorCrateBuild {
+        graph::VendorCrateBuild {
+            crate_id: metadata::CrateId {
+                name: "derive".into(),
+                version: "1.0.0".into(),
+            },
+            cargo_target_name: "derive".into(),
+            target: TargetSpec::Host,
+            kind: metadata::CrateKind::ProcMacro,
+            manifest_dir: "/vendor/derive-1.0.0".into(),
+            lib_path: "/vendor/derive-1.0.0/src/lib.rs".into(),
+            edition: "2021".into(),
+            features: features.iter().map(|f| f.to_string()).collect(),
+            deps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn add_unit_reuses_identical_host_unit_from_another_target() {
+        let mut ctx = context::VendorBuildContext::new();
+        add_unit(&mut ctx, host_unit(&["full"])).expect("first target");
+        add_unit(&mut ctx, host_unit(&["full"])).expect("second target reuses");
+        assert_eq!(ctx.len(), 1);
+    }
+
+    #[test]
+    fn add_unit_rejects_host_unit_that_differs_between_targets() {
+        let mut ctx = context::VendorBuildContext::new();
+        add_unit(&mut ctx, host_unit(&["full"])).expect("first target");
+        let err = add_unit(&mut ctx, host_unit(&[])).expect_err("features differ");
+        assert!(matches!(err, context::ContextError::DuplicateKey { .. }));
     }
 }

@@ -33,7 +33,7 @@ use gluon_model::{
     TargetDef, TargetSpec,
 };
 use snapshot::{ArtifactsSnapshot, NodeOutput};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -416,6 +416,58 @@ fn collect_vendor_extra_sources(
     sources
 }
 
+/// Directories of every artifact transitively reachable from `build`'s
+/// deps, for `-L dependency=<dir>`.
+///
+/// rustc loads each crate recorded in a direct dep's metadata by name,
+/// so a consumer of `syn` needs `unicode-ident`'s directory even though
+/// only `syn` is passed with `--extern`. Each vendor unit has its own
+/// output directory, so the walk collects one directory per reached
+/// unit. The walk does not descend into a proc macro's deps: those are
+/// linked into the proc-macro dylib, and they are host units, whose
+/// directories must not appear on a cross unit's search path.
+///
+/// A reached unit without an artifact is a scheduler bug: the DAG makes
+/// every unit wait for its deps, and so for all transitive deps.
+fn collect_vendor_search_dirs(
+    vendor_ctx: &VendorBuildContext,
+    vendor_artifacts: &BTreeMap<VendorBuildId, PathBuf>,
+    build: &crate::vendor::cross::graph::VendorCrateBuild,
+) -> Result<Vec<PathBuf>> {
+    use crate::vendor::cross::metadata::CrateKind;
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut seen: BTreeSet<VendorBuildId> = BTreeSet::new();
+    let mut queue: Vec<&crate::vendor::cross::graph::VendorDepEdge> = build.deps.iter().collect();
+    while let Some(edge) = queue.pop() {
+        let Some(id) = vendor_ctx.lookup(edge.target, &edge.extern_name) else {
+            return Err(Error::Compile(format!(
+                "scheduler: vendor build {} dep edge `{}` did not resolve in vendor_ctx \
+                 (lowering bug)",
+                build.crate_id, edge.extern_name,
+            )));
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        let path = vendor_artifacts.get(&id).ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: vendor build {} ran before its transitive dep {} completed; \
+                 DAG edge missing?",
+                build.crate_id, edge.crate_id,
+            ))
+        })?;
+        if let Some(parent) = path.parent() {
+            dirs.insert(parent.to_path_buf());
+        }
+        if let Some(dep) = vendor_ctx.get(id)
+            && dep.kind == CrateKind::Lib
+        {
+            queue.extend(dep.deps.iter());
+        }
+    }
+    Ok(dirs.into_iter().collect())
+}
+
 /// Compile one vendored crate via gluon-driven rustc.
 ///
 /// Mirrors [`dispatch_crate`]'s shape: looks up the build descriptor,
@@ -526,9 +578,11 @@ fn dispatch_vendor_crate(
         };
 
     // --- Assemble rustc command ---
+    let search_dirs = collect_vendor_search_dirs(vendor_ctx, &snapshot.vendor_artifacts, build)?;
     let input = VendorCompileInput {
         build,
         extern_artifacts: &extern_artifacts,
+        search_dirs: &search_dirs,
         sysroot_dir: sysroot_owned.as_deref(),
         out_dir: &out_dir,
         rustc: &ctx.rustc_info.rustc_path,
@@ -981,6 +1035,62 @@ mod tests {
             features: vec![],
             deps,
         }
+    }
+
+    #[test]
+    fn vendor_search_dirs_cover_transitive_deps_but_not_proc_macro_internals() {
+        use crate::vendor::cross::graph::VendorDepEdge;
+        use crate::vendor::cross::metadata::{CrateId, CrateKind};
+        let cross = TargetSpec::Cross(Handle::<gluon_model::TargetDef>::new(0));
+        let edge = |name: &str, target| VendorDepEdge {
+            extern_name: name.into(),
+            crate_id: CrateId {
+                name: name.into(),
+                version: "1.0.0".into(),
+            },
+            target,
+        };
+        // kernel → a → b (cross libs); kernel → derive (host proc
+        // macro) → quote (host lib).
+        let mut vctx = VendorBuildContext::new();
+        let mut artifacts = BTreeMap::new();
+        let mut add = |b: crate::vendor::cross::graph::VendorCrateBuild, dir: &str| {
+            let id = vctx.add(b).unwrap();
+            artifacts.insert(id, PathBuf::from(format!("/{dir}/artifact")));
+        };
+        add(vendor_lib("b", "1.0.0", cross, vec![]), "cross-b");
+        add(
+            vendor_lib("a", "1.0.0", cross, vec![edge("b", cross)]),
+            "cross-a",
+        );
+        add(
+            vendor_lib("quote", "1.0.0", TargetSpec::Host, vec![]),
+            "host-quote",
+        );
+        let mut derive = vendor_lib(
+            "derive",
+            "1.0.0",
+            TargetSpec::Host,
+            vec![edge("quote", TargetSpec::Host)],
+        );
+        derive.kind = CrateKind::ProcMacro;
+        add(derive, "host-derive");
+        let kernel = vendor_lib(
+            "kernel",
+            "1.0.0",
+            cross,
+            vec![edge("a", cross), edge("derive", TargetSpec::Host)],
+        );
+
+        let dirs = collect_vendor_search_dirs(&vctx, &artifacts, &kernel).unwrap();
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/cross-a"),
+                PathBuf::from("/cross-b"),
+                PathBuf::from("/host-derive"),
+            ],
+        );
     }
 
     #[test]

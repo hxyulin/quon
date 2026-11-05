@@ -21,25 +21,27 @@
 //! shapes hand off to, but the cost of inventing that abstraction now
 //! is high and the cost of two parallel command-builders is low.
 //!
-//! # MVP scope
+//! # Profiles
 //!
-//! - **One profile per vendor build.** Cargo's resolution is
-//!   profile-agnostic, but rustc invocations depend on opt level and
-//!   debug info. The MVP threads through whatever `(opt_level,
-//!   debug_info)` the caller supplies; the scheduler will inherit
-//!   these from the consumer's profile. A future slice may extend
-//!   [`super::super::vendor::cross::context::VendorBuildContext`]'s
-//!   key from `(target, name)` to `(target, profile, name)` if and
-//!   when consumers across profiles need divergent vendor builds.
-//! - **No `--cap-lints allow` yet.** Vendored crates legitimately
-//!   want lints suppressed (the user didn't write them); deferring to
-//!   keep the MVP slice minimal. Trivial to add later.
+//! Cross units take the caller's `(opt_level, debug_info)`, which the
+//! scheduler reads from the active profile; their output directory is
+//! profile-keyed. Host units ignore both and use
+//! [`super::HOST_OPT_LEVEL`] and [`super::HOST_DEBUG_INFO`], because
+//! their output directory is shared by every profile.
+//!
+//! # Lints
+//!
+//! Every vendored unit gets `--cap-lints allow`, as Cargo does for
+//! non-workspace crates. The user cannot fix lints in vendored code,
+//! and a `#![deny(..)]` in a dependency must not turn a newer
+//! nightly's new lint into a build failure.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gluon_model::{CrateType, TargetSpec};
 
+use super::compile_utils::proc_macro_file_name;
 use super::rustc::{Emit, RustcCommandBuilder};
 use crate::vendor::cross::graph::VendorCrateBuild;
 
@@ -91,6 +93,13 @@ pub struct VendorCompileInput<'a> {
     /// caller derives via [`super::BuildLayout::sysroot_dir`] for the
     /// target the scheduler resolved from `build.target`.
     pub sysroot_dir: Option<&'a Path>,
+    /// Directories holding the artifacts of transitive deps, each passed
+    /// as `-L dependency=<dir>`. `--extern` covers only direct deps, but
+    /// rustc also loads every crate recorded in a direct dep's metadata
+    /// by name, so it needs a search path for the rest. Each vendor
+    /// unit has its own output directory, so this holds one entry per
+    /// transitive dep. Sorted and deduplicated by the caller.
+    pub search_dirs: &'a [PathBuf],
     /// Output directory for this crate's artifacts. Caller derives via
     /// [`super::BuildLayout::host_vendor_dep_dir`] or
     /// [`super::BuildLayout::cross_vendor_dep_dir`].
@@ -105,11 +114,13 @@ pub struct VendorCompileInput<'a> {
     /// Whether `target_triple` is a built-in rustc triple (vs. a path
     /// to a JSON spec). Mirrors `TargetDef::builtin`.
     pub target_triple_builtin: bool,
-    /// Optimization level (`-C opt-level=N`). MVP: caller passes
-    /// `0`–`3` from the consumer's profile.
+    /// Optimization level (`-C opt-level=N`) from the active profile.
+    /// Applies to cross units only; host units use
+    /// [`super::HOST_OPT_LEVEL`].
     pub opt_level: u8,
-    /// Whether to emit debug info (`-C debuginfo=2`). MVP: same source
-    /// as `opt_level`.
+    /// Whether to emit debug info (`-C debuginfo=2`) from the active
+    /// profile. Applies to cross units only; host units use
+    /// [`super::HOST_DEBUG_INFO`].
     pub debug_info: bool,
 }
 
@@ -188,8 +199,17 @@ pub fn build_vendor_rustc_command(
     b.emit_with_dep_info_path(&[Emit::Link, Emit::DepInfo], &depfile_path);
 
     // --- Profile knobs ---
-    b.opt_level(input.opt_level);
-    b.debug_info(input.debug_info);
+    // Host units share one profile-independent output directory, so
+    // they must not take the active profile's flags. See the module
+    // docs.
+    if is_cross {
+        b.opt_level(input.opt_level);
+        b.debug_info(input.debug_info);
+    } else {
+        b.opt_level(super::HOST_OPT_LEVEL);
+        b.debug_info(super::HOST_DEBUG_INFO);
+    }
+    b.raw_arg("--cap-lints").raw_arg("allow");
 
     // --- Features → --cfg feature="<name>" ---
     // Cargo's contract: every feature in the resolved set becomes a
@@ -215,12 +235,14 @@ pub fn build_vendor_rustc_command(
             })?;
         b.extern_crate(&edge.extern_name, path);
     }
+    for dir in input.search_dirs {
+        b.library_search_dependency(dir);
+    }
 
     // --- Output path ---
-    // rustc writes `<out_dir>/lib<crate_name>.<ext>` for non-bin
-    // crate types. We don't pass `-C extra-filename` (vendor builds
-    // get one out_dir each, so collisions aren't possible). Linux
-    // proc-macros land at `lib<name>.so`; macOS at `lib<name>.dylib`.
+    // We don't pass `-C extra-filename`: every unit gets its own
+    // out_dir, keyed by platform (host vs cross/<target>/<profile>), so
+    // a host and a cross unit of one crate never share a file.
     let out_path = expected_artifact_path(input.out_dir, crate_name, build);
     Ok((b, out_path, depfile_path))
 }
@@ -236,21 +258,7 @@ fn expected_artifact_path(out_dir: &Path, crate_name: &str, build: &VendorCrateB
     use crate::vendor::cross::metadata::CrateKind;
     match build.kind {
         CrateKind::Lib => out_dir.join(format!("lib{crate_name}.rlib")),
-        CrateKind::ProcMacro => {
-            // Match host platform's dynamic library extension; rustc
-            // picks this automatically based on the host triple, and
-            // we mirror it here to predict the path. macOS would be
-            // .dylib; Linux .so; Windows .dll. cfg-gated for clarity
-            // — note this is the *host* platform regardless of the
-            // build's target, because proc-macros always run on host.
-            #[cfg(target_os = "macos")]
-            let ext = "dylib";
-            #[cfg(target_os = "windows")]
-            let ext = "dll";
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            let ext = "so";
-            out_dir.join(format!("lib{crate_name}.{ext}"))
-        }
+        CrateKind::ProcMacro => out_dir.join(proc_macro_file_name(crate_name)),
     }
 }
 
@@ -324,6 +332,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,
@@ -367,6 +376,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: None,
             out_dir: &out_dir,
             rustc: &rustc,
@@ -394,14 +404,103 @@ mod tests {
             args.iter().any(|a| a == "proc-macro"),
             "missing --crate-type proc-macro: {args:?}"
         );
-        // proc-macro output extension is host-specific. Just assert the
-        // basename family is right.
-        let fname = out_path.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(
-            fname.starts_with("libsyn.")
-                && (fname.ends_with(".so") || fname.ends_with(".dylib") || fname.ends_with(".dll")),
-            "proc-macro output filename unexpected: {fname}"
-        );
+        // Same naming rule as project proc macros: host DLL prefix and
+        // extension, so `syn.dll` on Windows, not `libsyn.dll`.
+        assert_eq!(out_path, out_dir.join(proc_macro_file_name("syn")));
+
+        // Host units ignore the profile passed in (opt 3, no debug) and
+        // use the fixed host profile.
+        assert!(args.iter().any(|a| a == "opt-level=0"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "opt-level=3"), "{args:?}");
+        assert!(args.iter().any(|a| a == "debuginfo=0"), "{args:?}");
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn vendored_units_cap_lints_on_both_platforms() {
+        let cross = build_lib("bitflags", cross_target(), vec![]);
+        let host = build_proc_macro("syn");
+        let externs = BTreeMap::new();
+        let sysroot = PathBuf::from("/sysroot");
+        let out_dir = PathBuf::from("/out");
+        let rustc = rustc_path();
+        for (b, sysroot_dir, triple) in [
+            (&cross, Some(sysroot.as_path()), Some("x86_64-unknown-none")),
+            (&host, None, None),
+        ] {
+            let input = VendorCompileInput {
+                build: b,
+                extern_artifacts: &externs,
+                search_dirs: &[],
+                sysroot_dir,
+                out_dir: &out_dir,
+                rustc: &rustc,
+                target_triple: triple,
+                target_triple_builtin: true,
+                opt_level: 2,
+                debug_info: true,
+            };
+            let (cmd, _, _) = build_vendor_rustc_command(&input).expect("ok");
+            let args = args_to_strings(&cmd);
+            assert!(has_pair(&args, "--cap-lints", "allow"), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn cross_unit_takes_active_profile() {
+        let b = build_lib("bitflags", cross_target(), vec![]);
+        let externs = BTreeMap::new();
+        let sysroot = PathBuf::from("/sysroot");
+        let out_dir = PathBuf::from("/out");
+        let rustc = rustc_path();
+        let input = VendorCompileInput {
+            build: &b,
+            extern_artifacts: &externs,
+            search_dirs: &[],
+            sysroot_dir: Some(&sysroot),
+            out_dir: &out_dir,
+            rustc: &rustc,
+            target_triple: Some("x86_64-unknown-none"),
+            target_triple_builtin: true,
+            opt_level: 3,
+            debug_info: false,
+        };
+        let (cmd, _, _) = build_vendor_rustc_command(&input).expect("ok");
+        let args = args_to_strings(&cmd);
+        assert!(args.iter().any(|a| a == "opt-level=3"), "{args:?}");
+    }
+
+    #[test]
+    fn search_dirs_become_dependency_search_paths() {
+        let b = build_proc_macro("derive");
+        let externs = BTreeMap::new();
+        let dirs = vec![
+            PathBuf::from("/build/host/vendor-deps/proc_macro2"),
+            PathBuf::from("/build/host/vendor-deps/unicode_ident"),
+        ];
+        let out_dir = PathBuf::from("/out");
+        let rustc = rustc_path();
+        let input = VendorCompileInput {
+            build: &b,
+            extern_artifacts: &externs,
+            search_dirs: &dirs,
+            sysroot_dir: None,
+            out_dir: &out_dir,
+            rustc: &rustc,
+            target_triple: None,
+            target_triple_builtin: false,
+            opt_level: 0,
+            debug_info: false,
+        };
+        let (cmd, _, _) = build_vendor_rustc_command(&input).expect("ok");
+        let args = args_to_strings(&cmd);
+        for dir in &dirs {
+            let value = format!("dependency={}", dir.display());
+            assert!(has_pair(&args, "-L", &value), "{args:?}");
+        }
     }
 
     #[test]
@@ -436,6 +535,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,
@@ -469,6 +569,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,
@@ -504,6 +605,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,
@@ -531,6 +633,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,
@@ -555,6 +658,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: None,
             out_dir: &out_dir,
             rustc: &rustc,
@@ -585,6 +689,7 @@ mod tests {
         let input = VendorCompileInput {
             build: &b,
             extern_artifacts: &externs,
+            search_dirs: &[],
             sysroot_dir: Some(&sysroot),
             out_dir: &out_dir,
             rustc: &rustc,

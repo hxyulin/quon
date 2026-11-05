@@ -45,6 +45,20 @@ pub use layout::BuildLayout;
 pub use rustc::{Emit, RustcCommandBuilder};
 pub use rustc_info::RustcInfo;
 
+/// Optimisation level for host units: proc macros, the crates linked
+/// into them, and (later) build scripts and their build-deps.
+///
+/// Host units use a fixed profile instead of the active gluon profile,
+/// matching Cargo's `build-override` defaults. Switching between
+/// `dev` and `release` then does not rebuild host tools, and their
+/// output directories (`host/vendor-deps/<crate>/`) can stay
+/// profile-independent without serving an artifact built with the
+/// other profile's flags.
+pub const HOST_OPT_LEVEL: u8 = 0;
+
+/// Debug-info setting for host units. See [`HOST_OPT_LEVEL`].
+pub const HOST_DEBUG_INFO: bool = false;
+
 use crate::cache::Cache;
 use std::sync::{Arc, Mutex};
 

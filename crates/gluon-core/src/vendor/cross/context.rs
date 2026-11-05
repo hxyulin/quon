@@ -28,9 +28,8 @@
 //! resolutions could legitimately disagree on features or version, and a
 //! quiet last-wins would mask that.
 //!
-//! Today the orchestration layer can treat `DuplicateKey` as fatal — MVP
-//! scope. A later iteration may layer "identical → reuse, different →
-//! diagnostic" on top of this primitive.
+//! The orchestration layer (`super::add_unit`) reuses an identical host
+//! unit and treats any other `DuplicateKey` as fatal.
 
 use std::collections::BTreeMap;
 

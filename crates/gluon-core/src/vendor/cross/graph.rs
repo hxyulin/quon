@@ -1,33 +1,49 @@
-//! Lower a [`ResolvedGraph`] into per-crate scheduler-node descriptors.
+//! Lower a [`ResolvedGraph`] into per-unit scheduler-node descriptors.
 //!
 //! This is the data-only stage between cargo-metadata parsing and the
-//! scheduler integration. It walks every non-stub crate in the graph
-//! and emits one [`VendorCrateBuild`] per crate, with two invariants
-//! enforced as part of the lowering:
+//! scheduler integration. It decides which platform each crate is built
+//! for and emits one [`VendorCrateBuild`] per `(crate, platform)` unit.
 //!
-//! 1. **Proc-macros pin to host.** Rustc dlopens proc-macros at compile
-//!    time, so a proc-macro built for a kernel target would not load.
-//!    Both the proc-macro itself and any non-proc-macro dep that the
-//!    proc-macro pulls in are placed at [`TargetSpec::Host`] regardless
-//!    of the consumer's target. Conversely, *consumers* of a proc-macro
-//!    keep their own target — only the edge to the proc-macro flips.
+//! # Placement by reachability
 //!
-//! 2. **Build scripts are rejected.** Compiling and running a `build.rs`
-//!    inside the cross pipeline would require sandboxed execution and
-//!    `OUT_DIR`/`cargo:` directive plumbing that the MVP doesn't have.
-//!    Any crate with `has_build_script == true` produces a hard error
-//!    naming the offender and the consumer chain that pulled it in
-//!    (root → … → offender), so the user can see which declared dep
-//!    is responsible.
+//! Rustc loads proc macros with `dlopen`, so a proc macro and every
+//! crate linked into it must be built for the host. Placement therefore
+//! follows the dependency edges instead of the crate kind:
 //!
-//! All offenders in the graph are collected in one pass and reported
-//! together. Reporting them one-at-a-time would force the user into
-//! re-run roulette: fix one, find another, repeat.
+//! - The **target closure** starts at the graph roots (the user's
+//!   declared deps) and follows normal edges, stopping at proc macros.
+//!   Each crate in it gets a [`TargetSpec::Cross`] unit.
+//! - The **host closure** holds every proc macro reached from either
+//!   closure and every dep of a host unit. Each crate in it gets a
+//!   [`TargetSpec::Host`] unit.
 //!
-//! No I/O happens here — [`build_vendor_nodes`] is a pure function over
+//! A crate in both closures (for example `memchr` used by a kernel crate
+//! and by a proc macro) gets two units. Crates reached by neither, such
+//! as those only behind dropped build or dev edges, get none.
+//!
+//! An edge from a unit to a proc macro points at the host unit. Every
+//! other edge stays on the parent's platform.
+//!
+//! # One feature set for both platforms
+//!
+//! `cargo metadata` reports one node per package, so both units of a
+//! dual-platform crate carry the same feature set. Cargo's resolver 2
+//! would unify host and target features separately. Until gluon has its
+//! own resolution, a crate whose host and target features must differ
+//! (`serde` with `std` on host only) gets the union on both platforms,
+//! which can break a `no_std` target build.
+//!
+//! # Build scripts are rejected
+//!
+//! Any placed crate with `has_build_script == true` produces a hard
+//! error naming the offender and the consumer chain that pulled it in
+//! (root → … → offender), so the user can see which declared dep is
+//! responsible. All offenders are collected in one pass and reported
+//! together, so the user does not have to fix them one at a time.
+//!
+//! No I/O happens here: [`build_vendor_nodes`] is a pure function over
 //! the parsed graph, which keeps it cheap to test against synthetic
-//! [`ResolvedGraph`] values and means scheduler integration can layer
-//! on top without entangling the two stages.
+//! [`ResolvedGraph`] values.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -114,15 +130,17 @@ fn format_build_script_error(offenders: &[BuildScriptOffender]) -> String {
 /// [`VendorCrateBuild`]s, or fail with the full set of build-script
 /// offenders.
 ///
-/// Iteration order is the natural [`BTreeMap`] order of the graph's
-/// `CrateId` keys (sorted by `(name, version)`), so two runs with the
-/// same input produce identical output. The downstream scheduler does
-/// its own topological pass; this function does not need to.
+/// Output order is the [`BTreeMap`] order of the graph's `CrateId` keys
+/// (sorted by `(name, version)`), with a crate's cross unit before its
+/// host unit, so two runs with the same input produce identical output.
+/// The scheduler does its own topological pass.
 pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Result<Vec<VendorCrateBuild>, GraphError> {
+    let placement = place_units(graph);
+
     let offenders: Vec<BuildScriptOffender> = graph
         .crates
         .iter()
-        .filter(|(_, c)| c.has_build_script)
+        .filter(|(id, c)| c.has_build_script && placement.contains_key(*id))
         .map(|(id, _)| BuildScriptOffender {
             crate_id: id.clone(),
             consumer_chain: shortest_chain_to(graph, id),
@@ -134,51 +152,87 @@ pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Result<Vec<VendorCrateBuild>
 
     let mut nodes = Vec::with_capacity(graph.crates.len());
     for (id, c) in &graph.crates {
-        let target = target_for(graph, c.kind);
-        let deps = c
-            .deps
-            .iter()
-            .map(|d| {
-                // Proc-macro deps always pin to host. Non-proc-macro
-                // deps inherit the parent's target — which means a
-                // proc-macro's lib dep also ends up host (correct: it
-                // gets linked into the proc-macro's host shared lib).
-                let dep_kind = graph
-                    .crates
-                    .get(&d.crate_id)
-                    .map(|rc| rc.kind)
-                    // Defensive: ResolvedGraph is internally
-                    // consistent, so missing edges shouldn't happen.
-                    // If one slips through, default to Lib so we don't
-                    // accidentally pin a missing crate to host.
-                    .unwrap_or(CrateKind::Lib);
-                VendorDepEdge {
+        let Some(platforms) = placement.get(id) else {
+            continue;
+        };
+        let cross = TargetSpec::Cross(graph.target);
+        let targets = [(platforms.cross, cross), (platforms.host, TargetSpec::Host)];
+        for target in targets.into_iter().filter(|(on, _)| *on).map(|(_, t)| t) {
+            let deps = c
+                .deps
+                .iter()
+                .map(|d| VendorDepEdge {
                     extern_name: d.extern_name.clone(),
                     crate_id: d.crate_id.clone(),
-                    target: edge_target(target, dep_kind),
-                }
-            })
-            .collect();
-        nodes.push(VendorCrateBuild {
-            crate_id: id.clone(),
-            cargo_target_name: c.cargo_target_name.clone(),
-            target,
-            kind: c.kind,
-            manifest_dir: c.manifest_dir.clone(),
-            lib_path: c.lib_path.clone(),
-            edition: c.edition.clone(),
-            features: c.features.clone(),
-            deps,
-        });
+                    target: edge_target(target, kind_of(graph, &d.crate_id)),
+                })
+                .collect();
+            nodes.push(VendorCrateBuild {
+                crate_id: id.clone(),
+                cargo_target_name: c.cargo_target_name.clone(),
+                target,
+                kind: c.kind,
+                manifest_dir: c.manifest_dir.clone(),
+                lib_path: c.lib_path.clone(),
+                edition: c.edition.clone(),
+                features: c.features.clone(),
+                deps,
+            });
+        }
     }
     Ok(nodes)
 }
 
-fn target_for(graph: &ResolvedGraph, kind: CrateKind) -> TargetSpec {
-    match kind {
-        CrateKind::ProcMacro => TargetSpec::Host,
-        CrateKind::Lib => TargetSpec::Cross(graph.target),
+/// Which platforms a crate needs a unit on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Platforms {
+    cross: bool,
+    host: bool,
+}
+
+/// Compute the target and host closures described in the module docs.
+///
+/// One worklist walk over `(crate, platform)` pairs: each pair is
+/// visited once, and its deps are queued on the platform
+/// [`edge_target`] picks. Crates missing from the map are reached by
+/// neither closure and get no unit.
+fn place_units(graph: &ResolvedGraph) -> BTreeMap<CrateId, Platforms> {
+    let mut placed: BTreeMap<CrateId, Platforms> = BTreeMap::new();
+    let mut queue: VecDeque<(CrateId, TargetSpec)> = VecDeque::new();
+    let cross = TargetSpec::Cross(graph.target);
+    for root in &graph.roots {
+        queue.push_back((root.clone(), edge_target(cross, kind_of(graph, root))));
     }
+    while let Some((id, target)) = queue.pop_front() {
+        let Some(c) = graph.crates.get(&id) else {
+            continue;
+        };
+        let entry = placed.entry(id).or_default();
+        let slot = match target {
+            TargetSpec::Host => &mut entry.host,
+            TargetSpec::Cross(_) => &mut entry.cross,
+        };
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        for d in &c.deps {
+            let dep_target = edge_target(target, kind_of(graph, &d.crate_id));
+            queue.push_back((d.crate_id.clone(), dep_target));
+        }
+    }
+    placed
+}
+
+/// Kind of a crate in the graph. A missing crate defaults to `Lib` so
+/// a dangling edge is never silently moved to the host; the DAG builder
+/// reports it as an unresolved dep instead.
+fn kind_of(graph: &ResolvedGraph, id: &CrateId) -> CrateKind {
+    graph
+        .crates
+        .get(id)
+        .map(|c| c.kind)
+        .unwrap_or(CrateKind::Lib)
 }
 
 fn edge_target(parent: TargetSpec, dep_kind: CrateKind) -> TargetSpec {
@@ -394,6 +448,190 @@ mod tests {
         // The edge from syn → quote inherits syn's target (host),
         // because quote is a Lib (not a proc-macro).
         assert_eq!(quote_edge.target, TargetSpec::Host);
+
+        // The edge must land on a real unit: quote is reachable only
+        // through the proc macro, so it has one host unit and no cross
+        // unit.
+        assert_eq!(
+            units(&nodes, "quote"),
+            vec![TargetSpec::Host],
+            "quote must be host only"
+        );
+    }
+
+    /// Platforms of every unit of `name`, in output order.
+    fn units(nodes: &[VendorCrateBuild], name: &str) -> Vec<TargetSpec> {
+        nodes
+            .iter()
+            .filter(|n| n.crate_id.name == name)
+            .map(|n| n.target)
+            .collect()
+    }
+
+    #[test]
+    fn transitive_deps_of_a_proc_macro_are_host_only() {
+        // kernel → derive (proc macro) → syn → proc-macro2 → unicode-ident.
+        // Only `kernel` belongs to the target; the whole syn stack is
+        // host, at every depth.
+        let mut crates = BTreeMap::new();
+        crates.insert(
+            cid("unicode-ident", "1.0.0"),
+            rc("unicode-ident", "1.0.0", CrateKind::Lib, vec![]),
+        );
+        crates.insert(
+            cid("proc-macro2", "1.0.0"),
+            rc(
+                "proc-macro2",
+                "1.0.0",
+                CrateKind::Lib,
+                vec![dep("unicode-ident", "1.0.0")],
+            ),
+        );
+        crates.insert(
+            cid("syn", "2.0.0"),
+            rc(
+                "syn",
+                "2.0.0",
+                CrateKind::Lib,
+                vec![dep("proc-macro2", "1.0.0")],
+            ),
+        );
+        crates.insert(
+            cid("derive", "1.0.0"),
+            rc(
+                "derive",
+                "1.0.0",
+                CrateKind::ProcMacro,
+                vec![dep("syn", "2.0.0")],
+            ),
+        );
+        crates.insert(
+            cid("kernel", "1.0.0"),
+            rc(
+                "kernel",
+                "1.0.0",
+                CrateKind::Lib,
+                vec![dep("derive", "1.0.0")],
+            ),
+        );
+        let graph = ResolvedGraph {
+            target: target_handle(),
+            crates,
+            roots: vec![cid("kernel", "1.0.0")],
+        };
+
+        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let cross = TargetSpec::Cross(target_handle());
+        assert_eq!(units(&nodes, "kernel"), vec![cross]);
+        for name in ["derive", "syn", "proc-macro2", "unicode-ident"] {
+            assert_eq!(units(&nodes, name), vec![TargetSpec::Host], "{name}");
+        }
+        // Every host unit's edges stay on the host.
+        for n in nodes.iter().filter(|n| n.target == TargetSpec::Host) {
+            assert!(n.deps.iter().all(|e| e.target == TargetSpec::Host));
+        }
+    }
+
+    #[test]
+    fn lib_reachable_from_target_and_proc_macro_gets_two_units() {
+        // kernel → memchr, kernel → derive (proc macro) → memchr.
+        // memchr is linked into the kernel and into the proc macro, so
+        // it needs a cross unit and a host unit with the same features
+        // (cargo metadata reports one feature set per package).
+        let mut memchr = rc("memchr", "2.7.0", CrateKind::Lib, vec![]);
+        memchr.features = vec!["alloc".into()];
+        let mut crates = BTreeMap::new();
+        crates.insert(cid("memchr", "2.7.0"), memchr);
+        crates.insert(
+            cid("derive", "1.0.0"),
+            rc(
+                "derive",
+                "1.0.0",
+                CrateKind::ProcMacro,
+                vec![dep("memchr", "2.7.0")],
+            ),
+        );
+        crates.insert(
+            cid("kernel", "1.0.0"),
+            rc(
+                "kernel",
+                "1.0.0",
+                CrateKind::Lib,
+                vec![dep("derive", "1.0.0"), dep("memchr", "2.7.0")],
+            ),
+        );
+        let graph = ResolvedGraph {
+            target: target_handle(),
+            crates,
+            roots: vec![cid("kernel", "1.0.0")],
+        };
+
+        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let cross = TargetSpec::Cross(target_handle());
+        assert_eq!(units(&nodes, "memchr"), vec![cross, TargetSpec::Host]);
+        for n in nodes.iter().filter(|n| n.crate_id.name == "memchr") {
+            assert_eq!(n.features, vec!["alloc".to_string()]);
+        }
+
+        // Each edge resolves to the unit on the expected platform, so
+        // both units register in the context without a duplicate key.
+        let kernel = nodes.iter().find(|n| n.crate_id.name == "kernel").unwrap();
+        let edge = |name: &str| {
+            kernel
+                .deps
+                .iter()
+                .find(|e| e.crate_id.name == name)
+                .unwrap()
+                .target
+        };
+        assert_eq!(edge("memchr"), cross);
+        assert_eq!(edge("derive"), TargetSpec::Host);
+        let derive = nodes.iter().find(|n| n.crate_id.name == "derive").unwrap();
+        assert_eq!(derive.deps[0].target, TargetSpec::Host);
+
+        let mut ctx = super::super::context::VendorBuildContext::new();
+        for n in nodes {
+            ctx.add(n).expect("no duplicate (target, name) key");
+        }
+    }
+
+    #[test]
+    fn proc_macro_root_is_host_only() {
+        let mut crates = BTreeMap::new();
+        crates.insert(
+            cid("derive", "1.0.0"),
+            rc("derive", "1.0.0", CrateKind::ProcMacro, vec![]),
+        );
+        let graph = ResolvedGraph {
+            target: target_handle(),
+            crates,
+            roots: vec![cid("derive", "1.0.0")],
+        };
+        let nodes = build_vendor_nodes(&graph).expect("ok");
+        assert_eq!(units(&nodes, "derive"), vec![TargetSpec::Host]);
+    }
+
+    #[test]
+    fn unreachable_crates_get_no_unit_and_are_not_rejected() {
+        // `cc` is in the metadata only as a build-dep, an edge the
+        // parser drops. It has no unit, so its own build script does
+        // not reject the graph.
+        let mut cc = rc("cc", "1.0.0", CrateKind::Lib, vec![]);
+        cc.has_build_script = true;
+        let mut crates = BTreeMap::new();
+        crates.insert(cid("cc", "1.0.0"), cc);
+        crates.insert(
+            cid("bitflags", "2.11.0"),
+            rc("bitflags", "2.11.0", CrateKind::Lib, vec![]),
+        );
+        let graph = ResolvedGraph {
+            target: target_handle(),
+            crates,
+            roots: vec![cid("bitflags", "2.11.0")],
+        };
+        let nodes = build_vendor_nodes(&graph).expect("ok");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].crate_id.name, "bitflags");
     }
 
     #[test]
@@ -501,7 +739,7 @@ mod tests {
         let graph = ResolvedGraph {
             target: target_handle(),
             crates,
-            roots: vec![],
+            roots: vec![cid("z", "1.0.0"), cid("a", "1.0.0"), cid("m", "1.0.0")],
         };
 
         let n1 = build_vendor_nodes(&graph).expect("ok");

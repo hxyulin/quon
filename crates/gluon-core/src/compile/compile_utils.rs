@@ -7,6 +7,22 @@
 
 use std::borrow::Cow;
 
+/// File name rustc gives a proc-macro dylib whose output stem (crate
+/// name plus any `-C extra-filename`) is `stem`.
+///
+/// Proc macros always run inside the host rustc, so the prefix and
+/// extension are the host's (`lib*.so`, `lib*.dylib`, `*.dll`). Gluon
+/// is itself a host binary, so `std::env::consts` gives exactly those.
+/// Both the project-crate and the vendored-crate paths predict their
+/// output with this, so the two agree on every host OS.
+pub fn proc_macro_file_name(stem: &str) -> String {
+    let prefix = std::env::consts::DLL_PREFIX;
+    match std::env::consts::DLL_EXTENSION {
+        "" => format!("{prefix}{stem}"),
+        ext => format!("{prefix}{stem}.{ext}"),
+    }
+}
+
 /// Normalize a user-supplied crate name into the form rustc accepts as
 /// `--crate-name`.
 ///

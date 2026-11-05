@@ -10,7 +10,9 @@
 //! because there is exactly one implementation, and both sides must
 //! agree on it.
 
-use crate::compile::compile_utils::{exe_suffix_for_target, normalize_crate_name};
+use crate::compile::compile_utils::{
+    exe_suffix_for_target, normalize_crate_name, proc_macro_file_name,
+};
 use crate::compile::layout::BuildLayout;
 use crate::error::{Error, Result};
 use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig, ResolvedCrateRef};
@@ -66,20 +68,9 @@ impl CrateArtifactShape {
             let out_dir = layout.host_artifact_dir(crate_def);
             let output_path = match crate_def.crate_type {
                 CrateType::Bin => out_dir.join(format!("{crate_name_rustc}{extra_filename}")),
-                CrateType::ProcMacro => {
-                    let ext = std::env::consts::DLL_EXTENSION;
-                    out_dir.join(format!(
-                        "{}{}{}{}",
-                        std::env::consts::DLL_PREFIX,
-                        crate_name_rustc,
-                        extra_filename,
-                        if ext.is_empty() {
-                            String::new()
-                        } else {
-                            format!(".{ext}")
-                        }
-                    ))
-                }
+                CrateType::ProcMacro => out_dir.join(proc_macro_file_name(&format!(
+                    "{crate_name_rustc}{extra_filename}"
+                ))),
                 _ => out_dir.join(format!("lib{crate_name_rustc}{extra_filename}.rlib")),
             };
             let depfile_path = out_dir.join(format!("{crate_name_rustc}{extra_filename}.d"));
