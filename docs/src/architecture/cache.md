@@ -17,7 +17,7 @@ The on-disk manifest carries two parallel maps:
 - **`rustc`** — per-crate compile cache. Keyed by a caller-chosen
   string (typically the crate id). Records the SHA-256 digest of the
   rustc invocation (`argv_hash`), the source set with per-file
-  fingerprints, parent-directory mtimes, and the declared output path.
+  fingerprints, and the declared output path.
 - **`composite`** — non-rustc artefacts (sysroot, ESP, image, vendor).
   No `argv_hash`; instead an opaque `aux_hash` rolls in non-file
   inputs (model definition bytes, tool version strings). File inputs
@@ -38,10 +38,13 @@ For a `FreshnessQuery` against a `rustc` entry, the entry is fresh iff:
 4. The recorded source set exactly matches the query's source set.
    Adding or removing a source file is always a change, even if every
    remaining file's hash is unchanged.
-5. Every parent-directory mtime in the entry matches the filesystem.
-   A directory mtime change indicates files were added or removed —
-   this catches new sources that wouldn't appear in the per-file check.
-6. Every source file passes the **two-tier freshness check**.
+5. Every source file passes the **two-tier freshness check**.
+
+Directory mtimes are not tracked. They change whenever an editor
+creates and deletes a swap file, which caused needless rebuilds. A
+new module file needs no directory check: the `mod foo;` line that
+pulls it in edits a file already in the source set, and the next
+depfile lists the new file. A deleted file fails its stat.
 
 `CompositeQuery` follows the same shape minus step 2, plus an
 `aux_hash` equality check.

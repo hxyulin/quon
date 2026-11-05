@@ -842,3 +842,89 @@ fn multi_profile_fixture_model() {
         "mylib dep should have features [logging]"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Freshness regression tests
+//
+// Each test builds the minimal fixture, changes one input, rebuilds, and
+// asserts on the `built N, cached M` summary or on the kernel binary.
+// Environment variables are set on the child `gluon` process only.
+// ---------------------------------------------------------------------------
+
+/// Run `gluon build` in `fixture` with `envs` set on the child process.
+/// Panics on failure and returns stderr.
+fn build_ok(fixture: &Path, envs: &[(&str, &str)]) -> String {
+    let out = gluon_command(fixture)
+        .arg("build")
+        .envs(envs.iter().copied())
+        .output()
+        .expect("spawn gluon build");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "gluon build failed:\n{stderr}");
+    stderr
+}
+
+/// Parse N from the `built N, cached M` summary line.
+fn built_count(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("built "))
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no `built N` summary in:\n{stderr}"))
+}
+
+/// An editor creating and deleting a swap file next to a source file
+/// changes the directory mtime but no input. The rebuild must be a no-op.
+#[test]
+#[ignore]
+fn swap_file_in_source_dir_does_not_rebuild() {
+    let Some(()) = require_rustc_or_skip("swap_file_in_source_dir_does_not_rebuild") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    build_ok(&fixture, &[]);
+
+    let swap = fixture.join("crates/kernel/src/.main.rs.swp");
+    fs::write(&swap, b"swap").expect("create swap file");
+    fs::remove_file(&swap).expect("remove swap file");
+
+    let stderr = build_ok(&fixture, &[]);
+    assert_eq!(
+        built_count(&stderr),
+        0,
+        "swap file caused a rebuild:\n{stderr}"
+    );
+}
+
+/// Adding `mod foo;` plus `foo.rs` rebuilds the crate, and a later edit to
+/// `foo.rs` alone rebuilds it again. The depfile tracks the new file.
+#[test]
+#[ignore]
+fn new_module_file_is_tracked() {
+    let Some(()) = require_rustc_or_skip("new_module_file_is_tracked") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    build_ok(&fixture, &[]);
+
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
+    src.push_str("\nmod foo;\n");
+    fs::write(&main_rs, src).expect("write main.rs");
+    let foo_rs = fixture.join("crates/kernel/src/foo.rs");
+    fs::write(&foo_rs, "pub const A: u32 = 1;\n").expect("write foo.rs");
+
+    let stderr = build_ok(&fixture, &[]);
+    assert!(
+        built_count(&stderr) > 0,
+        "new module did not rebuild:\n{stderr}"
+    );
+
+    fs::write(&foo_rs, "pub const A: u32 = 2;\n").expect("edit foo.rs");
+    let stderr = build_ok(&fixture, &[]);
+    assert!(
+        built_count(&stderr) > 0,
+        "foo.rs edit did not rebuild:\n{stderr}"
+    );
+}

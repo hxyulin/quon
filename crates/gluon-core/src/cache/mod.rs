@@ -56,14 +56,6 @@ pub struct BuildRecord {
     pub output_path: PathBuf,
 }
 
-/// Read a directory's mtime as nanoseconds since `UNIX_EPOCH`.
-/// Returns `None` on any I/O or time-conversion failure.
-fn dir_mtime_ns(path: &Path) -> Option<u128> {
-    let meta = std::fs::metadata(path).ok()?;
-    let mtime = meta.modified().ok()?;
-    Some(mtime.duration_since(UNIX_EPOCH).ok()?.as_nanos())
-}
-
 impl Cache {
     /// Load a cache from disk. A missing or corrupted manifest silently
     /// degrades to an empty cache — see [`CacheManifest::load`] for the
@@ -178,19 +170,6 @@ impl Cache {
             refreshes.push((src.to_path_buf(), cur_mtime, cur_size));
         }
 
-        // Verify parent-directory mtimes. A directory's mtime changes
-        // when files are added or removed — this catches new source
-        // files that wouldn't appear in the per-file check above.
-        for (dir, &recorded_mtime) in &entry.parent_dir_mtimes {
-            let current_mtime = match dir_mtime_ns(dir) {
-                Some(m) => m,
-                None => return false,
-            };
-            if current_mtime != recorded_mtime {
-                return false;
-            }
-        }
-
         if !refreshes.is_empty()
             && let Some(entry_mut) = self.manifest.rustc.get_mut(q.key)
         {
@@ -251,20 +230,6 @@ impl Cache {
             );
         }
 
-        // Collect mtimes for direct parent directories of all source
-        // files. Directory mtime changes when files are added or removed,
-        // so this catches new-file additions that per-file tracking misses.
-        let mut parent_dir_mtimes: BTreeMap<PathBuf, u128> = BTreeMap::new();
-        for src in &rec.sources {
-            if let Some(parent) = src.parent() {
-                if !parent_dir_mtimes.contains_key(parent) {
-                    if let Some(mtime) = dir_mtime_ns(parent) {
-                        parent_dir_mtimes.insert(parent.to_path_buf(), mtime);
-                    }
-                }
-            }
-        }
-
         let built_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -273,7 +238,6 @@ impl Cache {
         let entry = RustcEntry {
             argv_hash: rec.argv_hash,
             source_files,
-            parent_dir_mtimes,
             output_path: rec.output_path,
             built_at,
         };
@@ -291,13 +255,6 @@ impl Cache {
     /// manifest after every input has been successfully fingerprinted,
     /// so a mid-loop failure can never leave a half-populated entry
     /// behind.
-    ///
-    /// Note: composite entries do not track parent-directory mtimes (the
-    /// rustc-entry equivalent of `parent_dir_mtimes`). Composite callers
-    /// supply explicit input lists — there is no glob discovery to make
-    /// "a new file appeared in this directory" a meaningful invalidation
-    /// signal. If a caller's input set changes, the caller passes a
-    /// different `inputs` list and the set-comparison check catches it.
     pub fn mark_composite_built(&mut self, rec: CompositeRecord) -> Result<()> {
         let mut inputs: BTreeMap<PathBuf, FileFingerprint> = BTreeMap::new();
         for src in &rec.inputs {

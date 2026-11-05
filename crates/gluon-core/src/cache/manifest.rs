@@ -41,18 +41,6 @@ pub struct RustcEntry {
     /// Source files consumed by the build, with per-file fingerprints.
     /// `BTreeMap` for deterministic iteration / serialisation order.
     pub source_files: BTreeMap<PathBuf, FileFingerprint>,
-    /// Mtimes (nanoseconds since `UNIX_EPOCH`) of the direct parent
-    /// directories of all source files. A change in directory mtime
-    /// indicates that files were added or removed — catching new-file
-    /// additions that per-file tracking alone would miss.
-    ///
-    /// Backwards-compatible: older manifests deserialise with an empty
-    /// map via `#[serde(default)]`; newer manifests read by older gluon
-    /// versions silently ignore the populated field (the old code had
-    /// `let _ = &entry.parent_dir_mtimes`). Both directions degrade to
-    /// a more conservative freshness check, never to incorrect caching.
-    #[serde(default)]
-    pub parent_dir_mtimes: BTreeMap<PathBuf, u128>,
     /// Path to the artefact this entry declares as built. `is_fresh`
     /// requires this file to exist for the entry to be considered fresh.
     pub output_path: PathBuf,
@@ -302,7 +290,6 @@ mod tests {
         RustcEntry {
             argv_hash: [0xAB; 32],
             source_files: files,
-            parent_dir_mtimes: BTreeMap::new(),
             output_path: PathBuf::from("build/foo.rlib"),
             built_at: 999_999,
         }
