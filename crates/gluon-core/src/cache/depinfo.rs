@@ -343,20 +343,22 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_returns_config_error() {
-        let (_tmp, p) = write_tmp("");
-        match parse_depfile(&p) {
-            Err(Error::Config(msg)) => assert!(msg.contains("no target-line")),
-            other => panic!("expected Error::Config, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn only_blank_and_comment_lines_returns_config_error() {
-        let (_tmp, p) = write_tmp("\n\n# only comments\n#and more\n\n");
-        match parse_depfile(&p) {
-            Err(Error::Config(msg)) => assert!(msg.contains("no target-line")),
-            other => panic!("expected Error::Config, got {:?}", other),
+    fn no_target_line_returns_config_error() {
+        let cases = [
+            ("empty file", ""),
+            (
+                "only blank and comment lines",
+                "\n\n# only comments\n#and more\n\n",
+            ),
+        ];
+        for (case, contents) in cases {
+            let (_tmp, p) = write_tmp(contents);
+            match parse_depfile(&p) {
+                Err(Error::Config(msg)) => {
+                    assert!(msg.contains("no target-line"), "{case}: got {msg:?}")
+                }
+                other => panic!("{case}: expected Error::Config, got {:?}", other),
+            }
         }
     }
 

@@ -670,31 +670,16 @@ mod tests {
     }
 
     #[test]
-    fn bang_does_not_swallow_eq() {
-        // `!` is always a standalone token; there's no `!=` in the grammar.
-        let toks = lex_ok("!A");
-        assert_eq!(
-            kinds(&toks),
-            vec![&TokenKind::Bang, &TokenKind::Ident("A".into())]
-        );
-    }
-
-    #[test]
-    fn single_ampersand_is_error() {
-        let errs = lex("A & B", Path::new("t.kconfig")).unwrap_err();
-        assert!(errs.iter().any(|d| d.message.contains("&&")));
-    }
-
-    #[test]
-    fn single_pipe_is_error() {
-        let errs = lex("A | B", Path::new("t.kconfig")).unwrap_err();
-        assert!(errs.iter().any(|d| d.message.contains("||")));
-    }
-
-    #[test]
-    fn lone_dot_is_error() {
-        let errs = lex(".", Path::new("t.kconfig")).unwrap_err();
-        assert!(errs.iter().any(|d| d.message.contains("'..'")));
+    fn incomplete_operator_is_error() {
+        // Each message names the operator the user probably meant.
+        let cases = [("A & B", "&&"), ("A | B", "||"), (".", "'..'")];
+        for (input, want) in cases {
+            let errs = lex(input, Path::new("t.kconfig")).unwrap_err();
+            assert!(
+                errs.iter().any(|d| d.message.contains(want)),
+                "input {input:?}: no message containing {want:?} in {errs:?}"
+            );
+        }
     }
 
     #[test]

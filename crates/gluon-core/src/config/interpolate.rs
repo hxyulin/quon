@@ -98,36 +98,17 @@ mod tests {
     }
 
     #[test]
-    fn plain_passthrough() {
-        let mut v = HashSet::new();
-        assert_eq!(
-            interpolate("hello world", &opts(), &mut v).unwrap(),
-            "hello world"
-        );
-    }
-
-    #[test]
-    fn single_substitution() {
-        let mut v = HashSet::new();
-        assert_eq!(
-            interpolate("name=${NAME}", &opts(), &mut v).unwrap(),
-            "name=foo"
-        );
-    }
-
-    #[test]
-    fn nested_substitution() {
-        let mut v = HashSet::new();
-        assert_eq!(
-            interpolate("${GREETING}!", &opts(), &mut v).unwrap(),
-            "hello foo!"
-        );
-    }
-
-    #[test]
-    fn numeric_value_stringified() {
-        let mut v = HashSet::new();
-        assert_eq!(interpolate("${NUM}", &opts(), &mut v).unwrap(), "42");
+    fn interpolates_valid_input() {
+        let cases = [
+            ("plain passthrough", "hello world", "hello world"),
+            ("single substitution", "name=${NAME}", "name=foo"),
+            ("nested substitution", "${GREETING}!", "hello foo!"),
+            ("numeric value stringified", "${NUM}", "42"),
+        ];
+        for (case, input, want) in cases {
+            let mut v = HashSet::new();
+            assert_eq!(interpolate(input, &opts(), &mut v).unwrap(), want, "{case}");
+        }
     }
 
     #[test]

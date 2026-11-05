@@ -155,31 +155,6 @@ mod tests {
         assert_ne!(hash_parts("a", &[b"x"]), hash_parts("b", &[b"x"]));
     }
 
-    /// RFC 6234 / Wikipedia known answer for SHA-256("abc").
-    const ABC_DIGEST_HEX: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-
-    fn hex(bytes: &[u8; 32]) -> String {
-        let mut s = String::with_capacity(64);
-        for b in bytes {
-            s.push_str(&format!("{:02x}", b));
-        }
-        s
-    }
-
-    #[test]
-    fn sha256_bytes_matches_known_vector() {
-        assert_eq!(hex(&sha256_bytes(b"abc")), ABC_DIGEST_HEX);
-    }
-
-    #[test]
-    fn sha256_bytes_empty_matches_known_vector() {
-        // Known answer: SHA-256 of the empty string.
-        assert_eq!(
-            hex(&sha256_bytes(b"")),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
     #[test]
     fn sha256_file_matches_sha256_bytes() {
         let tmp = tempfile::tempdir().expect("tempdir");

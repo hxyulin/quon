@@ -383,27 +383,34 @@ mod tests {
     }
 
     #[test]
-    fn version_hash_changes_with_version() {
-        let a = sample();
-        let mut b = sample();
-        b.version = "rustc 1.83.0 (aaaaaaaaa 2025-01-01)".into();
-        assert_ne!(a.version_hash(), b.version_hash());
-    }
-
-    #[test]
-    fn version_hash_changes_with_commit_hash() {
-        let a = sample();
-        let mut b = sample();
-        b.commit_hash = Some("deadbeefcafe".into());
-        assert_ne!(a.version_hash(), b.version_hash());
-    }
-
-    #[test]
-    fn version_hash_changes_with_host_triple() {
-        let a = sample();
-        let mut b = sample();
-        b.host_triple = "aarch64-apple-darwin".into();
-        assert_ne!(a.version_hash(), b.version_hash());
+    fn version_hash_changes_with_each_hashed_field() {
+        let cases = [
+            (
+                "version",
+                RustcInfo {
+                    version: "rustc 1.83.0 (aaaaaaaaa 2025-01-01)".into(),
+                    ..sample()
+                },
+            ),
+            (
+                "commit_hash",
+                RustcInfo {
+                    commit_hash: Some("deadbeefcafe".into()),
+                    ..sample()
+                },
+            ),
+            (
+                "host_triple",
+                RustcInfo {
+                    host_triple: "aarch64-apple-darwin".into(),
+                    ..sample()
+                },
+            ),
+        ];
+        let base = sample().version_hash();
+        for (field, changed) in cases {
+            assert_ne!(base, changed.version_hash(), "changing {field}");
+        }
     }
 
     #[test]

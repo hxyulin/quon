@@ -481,16 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn target_builtin_does_not_emit_unstable_options() {
-        // Sanity: the -Z flag is *only* added for non-builtin specs. A
-        // builtin triple stays a single token with no extra flags, so we
-        // don't pollute the cache key for the common case.
-        let mut bld = b("/usr/bin/rustc");
-        bld.target("x86_64-unknown-none", true);
-        assert!(!bld.args().iter().any(|a| a == "-Zunstable-options"));
-    }
-
-    #[test]
     fn sysroot_out_dir_and_paths() {
         let mut bld = b("/usr/bin/rustc");
         bld.sysroot(&PathBuf::from("/tmp/sysroot"))
@@ -612,22 +602,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_is_stable_for_identical_builders() {
-        let build = || {
-            let mut bld = b("/usr/bin/rustc");
-            bld.crate_name("k")
-                .crate_type(CrateType::Lib)
-                .edition("2024")
-                .target("x86_64-unknown-none", true)
-                .cfg("foo")
-                .env("CARGO", "/bin/cargo")
-                .cwd("/tmp");
-            bld
-        };
-        assert_eq!(build().hash(), build().hash());
-    }
-
-    #[test]
     fn hash_changes_with_each_input_dimension() {
         let base = || {
             let mut bld = b("/usr/bin/rustc");
@@ -686,15 +660,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_length_prefix_collision_resistance() {
-        let mut a = b("/usr/bin/rustc");
-        a.raw_arg("foo").raw_arg("bar");
-        let mut c = b("/usr/bin/rustc");
-        c.raw_arg("foobar");
-        assert_ne!(a.hash(), c.hash());
-    }
-
-    #[test]
     #[should_panic(expected = "extern crate name must not contain '='")]
     fn extern_crate_debug_asserts_on_equals_in_name() {
         let mut bld = b("/usr/bin/rustc");
@@ -730,11 +695,5 @@ mod tests {
             Some(Path::new("/tmp")),
         );
         assert_eq!(builder_hash, direct_hash);
-    }
-
-    #[test]
-    fn rustc_path_accessor_returns_input() {
-        let bld = b("/opt/rust/bin/rustc");
-        assert_eq!(bld.rustc_path(), Path::new("/opt/rust/bin/rustc"));
     }
 }

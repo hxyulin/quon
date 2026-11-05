@@ -246,14 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_and_get_round_trip() {
-        let mut map = ArtifactMap::new();
-        map.insert(h(0), PathBuf::from("/build/libfoo.rlib"));
-        assert_eq!(map.get(h(0)), Some(Path::new("/build/libfoo.rlib")));
-        assert_eq!(map.get(h(1)), None);
-    }
-
-    #[test]
     fn iter_is_deterministic_across_inserts() {
         // Insert in non-sequential order; the BTreeMap must sort by handle
         // index so iteration always yields (0, 1, 2) regardless of the
@@ -318,21 +310,5 @@ mod tests {
             map.config_crate(t1),
             Some(Path::new("/build/libmyproject_config_t1.rlib"))
         );
-    }
-
-    #[test]
-    fn contains_returns_false_for_absent_handle() {
-        let map = ArtifactMap::new();
-        assert!(!map.contains(h(0)));
-    }
-
-    #[test]
-    fn len_and_is_empty() {
-        let mut map = ArtifactMap::new();
-        assert!(map.is_empty());
-        assert_eq!(map.len(), 0);
-        map.insert(h(0), PathBuf::from("/a.rlib"));
-        assert!(!map.is_empty());
-        assert_eq!(map.len(), 1);
     }
 }

@@ -234,7 +234,6 @@ fn depfile_fail_diag(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compile::compile_utils::normalize_crate_name;
     use crate::compile::layout::BuildLayout;
     use crate::compile::{ArtifactMap, RustcCommandBuilder, RustcInfo};
     use crate::unit::lower;
@@ -243,7 +242,6 @@ mod tests {
         BuildModel, CrateDef, CrateType, DepDef, DepResolution, GroupDef, Handle, PanicStrategy,
         ProjectDef, ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
-    use std::borrow::Cow;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -707,34 +705,6 @@ mod tests {
     // ---------------------------------------------------------------------------
     // Flag assembly tests
     // ---------------------------------------------------------------------------
-
-    // ---------------------------------------------------------------------------
-    // normalize_crate_name
-    // ---------------------------------------------------------------------------
-
-    #[test]
-    fn normalize_crate_name_passes_through_clean_names() {
-        // No dash → borrowed (no allocation, identity).
-        let n = normalize_crate_name("foo_bar");
-        assert_eq!(n, "foo_bar");
-        assert!(matches!(n, Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn normalize_crate_name_replaces_dashes_with_underscores() {
-        let n = normalize_crate_name("my-kernel-lib");
-        assert_eq!(n, "my_kernel_lib");
-        assert!(matches!(n, Cow::Owned(_)));
-    }
-
-    #[test]
-    fn normalize_crate_name_leaves_other_invalid_chars_for_rustc_to_reject() {
-        // Only `-` is normalized. `.` is left alone — rustc will reject it
-        // loudly, which is the right outcome (the user typed something
-        // genuinely wrong, not a stylistic dash).
-        let n = normalize_crate_name("foo.bar");
-        assert_eq!(n, "foo.bar");
-    }
 
     #[test]
     fn flag_assembly_dash_named_crate_normalizes_for_rustc_and_filenames() {

@@ -106,95 +106,51 @@ mod tests {
     // ── sanitise_crate_name ──────────────────────────────────────────
 
     #[test]
-    fn sanitise_alphanumeric_passthrough() {
-        assert_eq!(sanitise_crate_name("hello123"), "hello123");
-    }
-
-    #[test]
-    fn sanitise_uppercase_to_lowercase() {
-        assert_eq!(sanitise_crate_name("MyKernel"), "mykernel");
-    }
-
-    #[test]
-    fn sanitise_dashes_to_underscores() {
-        assert_eq!(sanitise_crate_name("my-kernel"), "my_kernel");
-    }
-
-    #[test]
-    fn sanitise_dots_and_spaces() {
-        assert_eq!(sanitise_crate_name("my.kernel lib"), "my_kernel_lib");
-    }
-
-    #[test]
-    fn sanitise_mixed_invalid_chars() {
-        assert_eq!(
-            sanitise_crate_name("Hello-World.2024!"),
-            "hello_world_2024_"
-        );
-    }
-
-    #[test]
-    fn sanitise_empty_string() {
-        assert_eq!(sanitise_crate_name(""), "");
+    fn sanitise_cases() {
+        let cases = [
+            ("hello123", "hello123"),
+            ("MyKernel", "mykernel"),
+            ("my-kernel", "my_kernel"),
+            ("my.kernel lib", "my_kernel_lib"),
+            ("Hello-World.2024!", "hello_world_2024_"),
+            ("", ""),
+        ];
+        for (input, want) in cases {
+            assert_eq!(sanitise_crate_name(input), want, "input {input:?}");
+        }
     }
 
     // ── exe_suffix_for_target ────────────────────────────────────────
 
     #[test]
-    fn suffix_bare_metal() {
-        assert_eq!(exe_suffix_for_target("x86_64-unknown-none"), "");
-    }
-
-    #[test]
-    fn suffix_uefi() {
-        assert_eq!(exe_suffix_for_target("x86_64-unknown-uefi"), ".efi");
-    }
-
-    #[test]
-    fn suffix_uefi_mid_triple() {
-        assert_eq!(
-            exe_suffix_for_target("aarch64-unknown-uefi-something"),
-            ".efi"
-        );
-    }
-
-    #[test]
-    fn suffix_windows() {
-        assert_eq!(exe_suffix_for_target("x86_64-pc-windows-msvc"), ".exe");
-    }
-
-    #[test]
-    fn suffix_wasm32() {
-        assert_eq!(exe_suffix_for_target("wasm32-unknown-unknown"), ".wasm");
-    }
-
-    #[test]
-    fn suffix_wasm64() {
-        assert_eq!(exe_suffix_for_target("wasm64-unknown-unknown"), ".wasm");
-    }
-
-    #[test]
-    fn suffix_linux() {
-        assert_eq!(exe_suffix_for_target("x86_64-unknown-linux-gnu"), "");
-    }
-
-    #[test]
-    fn suffix_macos() {
-        assert_eq!(exe_suffix_for_target("aarch64-apple-darwin"), "");
-    }
-
-    #[test]
-    fn suffix_custom_spec() {
-        assert_eq!(exe_suffix_for_target("my-custom-target"), "");
+    fn suffix_cases() {
+        let cases = [
+            ("x86_64-unknown-none", ""),
+            ("x86_64-unknown-uefi", ".efi"),
+            ("aarch64-unknown-uefi-something", ".efi"),
+            ("x86_64-pc-windows-msvc", ".exe"),
+            ("wasm32-unknown-unknown", ".wasm"),
+            ("wasm64-unknown-unknown", ".wasm"),
+            ("x86_64-unknown-linux-gnu", ""),
+            ("aarch64-apple-darwin", ""),
+            ("my-custom-target", ""),
+        ];
+        for (spec, want) in cases {
+            assert_eq!(exe_suffix_for_target(spec), want, "spec {spec:?}");
+        }
     }
 
     // ── normalize_crate_name ─────────────────────────────────────────
 
     #[test]
     fn normalize_no_dashes_borrows() {
-        let result = normalize_crate_name("hello");
-        assert_eq!(result, "hello");
-        assert!(matches!(result, Cow::Borrowed(_)));
+        // Only `-` is normalized. `.` passes through so rustc rejects it
+        // loudly: the user typed something wrong, not a stylistic dash.
+        for input in ["hello", "foo.bar"] {
+            let result = normalize_crate_name(input);
+            assert_eq!(result, input);
+            assert!(matches!(result, Cow::Borrowed(_)), "input {input:?}");
+        }
     }
 
     #[test]
@@ -202,12 +158,5 @@ mod tests {
         let result = normalize_crate_name("my-kernel");
         assert_eq!(result, "my_kernel");
         assert!(matches!(result, Cow::Owned(_)));
-    }
-
-    #[test]
-    fn normalize_underscores_untouched_borrows() {
-        let result = normalize_crate_name("my_kernel");
-        assert_eq!(result, "my_kernel");
-        assert!(matches!(result, Cow::Borrowed(_)));
     }
 }

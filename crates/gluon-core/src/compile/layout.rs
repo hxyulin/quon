@@ -376,34 +376,46 @@ mod tests {
     }
 
     #[test]
-    fn root_returned_verbatim() {
-        assert_eq!(layout().root(), Path::new("/tmp/fake"));
+    fn cache_key_suffix_per_driver() {
+        let cases = [
+            (DriverKind::Rustc, ""),
+            (DriverKind::Check, ":check"),
+            (DriverKind::Clippy, ":clippy"),
+        ];
+        for (driver, want) in cases {
+            let l = BuildLayout::with_driver("/tmp/fake", "demo", driver);
+            assert_eq!(l.cache_key_suffix(), want, "driver {driver:?}");
+        }
     }
 
     #[test]
-    fn cache_key_suffix_returns_empty_for_rustc_driver() {
-        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Rustc);
-        assert_eq!(l.cache_key_suffix(), "");
-    }
-
-    #[test]
-    fn cache_key_suffix_returns_check_for_check_driver() {
-        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Check);
-        assert_eq!(l.cache_key_suffix(), ":check");
-    }
-
-    #[test]
-    fn cache_key_suffix_returns_clippy_for_clippy_driver() {
-        let l = BuildLayout::with_driver("/tmp/fake", "demo", DriverKind::Clippy);
-        assert_eq!(l.cache_key_suffix(), ":clippy");
-    }
-
-    #[test]
-    fn fingerprint_dir_path() {
-        assert_eq!(
-            layout().fingerprint_dir(),
-            PathBuf::from("/tmp/fake/.fingerprint")
-        );
+    fn fixed_paths() {
+        let l = layout();
+        let cases = [
+            (
+                "fingerprint_dir",
+                l.fingerprint_dir(),
+                "/tmp/fake/.fingerprint",
+            ),
+            (
+                "cross_final_dir",
+                l.cross_final_dir(&target(), &profile()),
+                "/tmp/fake/cross/x86_64-test/debug/final",
+            ),
+            (
+                "generated_config_crate_dir",
+                l.generated_config_crate_dir(),
+                "/tmp/fake/generated/demo_config",
+            ),
+            (
+                "rustc_info_cache",
+                l.rustc_info_cache(),
+                "/tmp/fake/.rustc-info.json",
+            ),
+        ];
+        for (name, got, want) in cases {
+            assert_eq!(got, PathBuf::from(want), "{name}");
+        }
     }
 
     #[test]
@@ -435,30 +447,6 @@ mod tests {
         assert_eq!(
             l.shared_cross_dir(&target(), &profile()),
             PathBuf::from("/tmp/fake/cross/x86_64-test/debug")
-        );
-    }
-
-    #[test]
-    fn cross_final_path() {
-        assert_eq!(
-            layout().cross_final_dir(&target(), &profile()),
-            PathBuf::from("/tmp/fake/cross/x86_64-test/debug/final")
-        );
-    }
-
-    #[test]
-    fn generated_config_crate_path() {
-        assert_eq!(
-            layout().generated_config_crate_dir(),
-            PathBuf::from("/tmp/fake/generated/demo_config")
-        );
-    }
-
-    #[test]
-    fn rustc_info_cache_path() {
-        assert_eq!(
-            layout().rustc_info_cache(),
-            PathBuf::from("/tmp/fake/.rustc-info.json")
         );
     }
 

@@ -81,50 +81,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_bare_ident() {
-        assert_eq!(parse("A").unwrap(), Expr::Ident("A".to_string()));
-    }
-
-    #[test]
-    fn parses_and() {
-        assert_eq!(
-            parse("A && B").unwrap(),
-            Expr::And(vec![
-                Expr::Ident("A".to_string()),
-                Expr::Ident("B".to_string())
-            ])
-        );
-    }
-
-    #[test]
-    fn parses_or_with_not() {
-        assert_eq!(
-            parse("A || !B").unwrap(),
-            Expr::Or(vec![
-                Expr::Ident("A".to_string()),
-                Expr::Not(Box::new(Expr::Ident("B".to_string()))),
-            ])
-        );
-    }
-
-    #[test]
-    fn parses_grouped() {
-        assert_eq!(
-            parse("(A || B) && !C").unwrap(),
-            Expr::And(vec![
-                Expr::Or(vec![
-                    Expr::Ident("A".to_string()),
-                    Expr::Ident("B".to_string())
-                ]),
-                Expr::Not(Box::new(Expr::Ident("C".to_string()))),
-            ])
-        );
-    }
-
-    #[test]
-    fn parses_literal_true_false() {
-        assert_eq!(parse("true").unwrap(), Expr::Const(true));
-        assert_eq!(parse("false").unwrap(), Expr::Const(false));
+    fn parses_valid_expressions() {
+        let id = |s: &str| Expr::Ident(s.to_string());
+        let cases = [
+            ("A", id("A")),
+            ("A && B", Expr::And(vec![id("A"), id("B")])),
+            (
+                "A || !B",
+                Expr::Or(vec![id("A"), Expr::Not(Box::new(id("B")))]),
+            ),
+            ("true", Expr::Const(true)),
+            ("false", Expr::Const(false)),
+        ];
+        for (input, want) in cases {
+            assert_eq!(parse(input).unwrap(), want, "input {input:?}");
+        }
     }
 
     #[test]

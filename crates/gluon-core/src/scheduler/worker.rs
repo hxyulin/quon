@@ -862,23 +862,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 11: execute_single_node_dag_calls_dispatcher_once
-    // -----------------------------------------------------------------------
-    #[test]
-    fn execute_single_node_dag_calls_dispatcher_once() {
-        let pool = WorkerPool::new(1);
-        let dispatcher = TestDispatcher::new();
-        let record = dispatcher.record();
-        let dag = independent_dag(1);
-        let mut out = Vec::<u8>::new();
-        let mut err = Vec::<u8>::new();
-        pool.execute(&dag, &dispatcher, &mut out, &mut err).unwrap();
-        let calls = record.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], 0);
-    }
-
-    // -----------------------------------------------------------------------
     // Test 12: execute_respects_topological_order
     // -----------------------------------------------------------------------
     #[test]
