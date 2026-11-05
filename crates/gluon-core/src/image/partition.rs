@@ -28,7 +28,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 /// A view of a `File` restricted to `[base, base + len)`. All I/O
-/// positions are reported and seeked relative to `base`. Writes that
+/// positions are reported and seek relative to `base`. Writes that
 /// would extend past `len` short-write — hadris-fat treats this as a
 /// disk-full error, which is the correct semantics for a partition
 /// that's too small for its contents.
