@@ -403,7 +403,8 @@ fn cross_fixture_populates_per_target_workspace_and_builds_context() {
     );
 
     // ---- Phase 2: build the VendorBuildContext from the scratch.
-    let ctx = vendor::cross::build_cross_vendor_context(&model, &layout)
+    let rustc = gluon_core::RustcInfo::probe().expect("rustc probe");
+    let ctx = vendor::cross::build_cross_vendor_context(&model, &layout, &rustc, &project)
         .expect("build_cross_vendor_context");
 
     assert!(
