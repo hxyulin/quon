@@ -31,6 +31,7 @@
 
 use crate::compile::RustcInfo;
 use crate::error::{Error, Result};
+use crate::script_runner::file_hashes::FileHashes;
 use crate::script_runner::rlib::RlibPaths;
 use std::path::{Path, PathBuf};
 
@@ -45,16 +46,22 @@ use std::path::{Path, PathBuf};
 /// lists. The fingerprint catches edits to files reached via `mod` /
 /// `#[path]` from the entrypoint, which would otherwise leave the outer
 /// key unchanged, so both layers are needed.
-pub fn ensure_script_binary(
+pub(crate) fn ensure_script_binary(
     script_path: &Path,
     build_dir: &Path,
     rustc_info: &RustcInfo,
     rlib: &RlibPaths,
+    hashes: &mut FileHashes,
 ) -> Result<PathBuf> {
     let cache_root = build_dir.join("script-runner").join("scripts");
     let mut gluon_config_files = vec![rlib.gluon_config_rlib.as_path()];
     gluon_config_files.extend(rlib.gluon_config_rmeta.as_deref());
-    let key = compute_key(script_path, &rustc_info.version, &gluon_config_files)?;
+    let key = compute_key(
+        script_path,
+        &rustc_info.version,
+        &gluon_config_files,
+        hashes,
+    )?;
     let entry_dir = cache_root.join(&key);
     let bin_path = entry_dir.join(SCRIPT_BIN_NAME);
 
@@ -185,29 +192,15 @@ fn compute_key(
     script_path: &Path,
     rustc_version: &str,
     gluon_config_files: &[&Path],
+    hashes: &mut FileHashes,
 ) -> Result<String> {
-    use crate::cache::sha256_file;
     use sha2::{Digest, Sha256};
 
     let mut h = Sha256::new();
     h.update(rustc_version.as_bytes());
-    let s = sha256_file(script_path).map_err(|e| match e {
-        Error::Io { source, .. } => Error::Io {
-            path: script_path.to_path_buf(),
-            source,
-        },
-        other => other,
-    })?;
-    h.update(s);
+    h.update(hashes.hash(script_path)?);
     for file in gluon_config_files {
-        let r = sha256_file(file).map_err(|e| match e {
-            Error::Io { source, .. } => Error::Io {
-                path: file.to_path_buf(),
-                source,
-            },
-            other => other,
-        })?;
-        h.update(r);
+        h.update(hashes.hash(file)?);
     }
     Ok(format!("{:x}", h.finalize()))
 }
@@ -301,6 +294,12 @@ fn compile_script(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh, empty memo per call keeps these tests about the key
+    /// itself; the memo's fast path has its own tests.
+    fn memo() -> FileHashes {
+        FileHashes::load(PathBuf::from("/nonexistent/gluon-test-memo.json"))
+    }
     use std::fs;
 
     #[test]
@@ -313,8 +312,8 @@ mod tests {
         fs::write(&s2, b"fn main() { /* different */ }").unwrap();
         fs::write(&rlib, b"fake rlib bytes").unwrap();
 
-        let k1 = compute_key(&s1, "rustc 1", &[&rlib]).expect("k1");
-        let k2 = compute_key(&s2, "rustc 1", &[&rlib]).expect("k2");
+        let k1 = compute_key(&s1, "rustc 1", &[&rlib], &mut memo()).expect("k1");
+        let k2 = compute_key(&s2, "rustc 1", &[&rlib], &mut memo()).expect("k2");
         assert_ne!(k1, k2, "different scripts must produce different keys");
     }
 
@@ -328,8 +327,8 @@ mod tests {
         fs::write(&r1, b"first").unwrap();
         fs::write(&r2, b"second").unwrap();
 
-        let k1 = compute_key(&s, "rustc 1", &[&r1]).expect("k1");
-        let k2 = compute_key(&s, "rustc 1", &[&r2]).expect("k2");
+        let k1 = compute_key(&s, "rustc 1", &[&r1], &mut memo()).expect("k1");
+        let k2 = compute_key(&s, "rustc 1", &[&r2], &mut memo()).expect("k2");
         assert_ne!(k1, k2, "different rlibs must produce different keys");
     }
 
@@ -341,8 +340,8 @@ mod tests {
         fs::write(&s, b"fn main() {}").unwrap();
         fs::write(&r, b"rlib").unwrap();
 
-        let k1 = compute_key(&s, "rustc 1.85", &[&r]).expect("k1");
-        let k2 = compute_key(&s, "rustc 1.86", &[&r]).expect("k2");
+        let k1 = compute_key(&s, "rustc 1.85", &[&r], &mut memo()).expect("k1");
+        let k2 = compute_key(&s, "rustc 1.86", &[&r], &mut memo()).expect("k2");
         assert_ne!(
             k1, k2,
             "different rustc versions must produce different keys"

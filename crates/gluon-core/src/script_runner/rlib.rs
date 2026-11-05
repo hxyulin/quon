@@ -45,6 +45,7 @@
 
 use crate::compile::RustcInfo;
 use crate::error::{Error, Result};
+use crate::script_runner::file_hashes::FileHashes;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -69,11 +70,15 @@ pub struct RlibPaths {
 /// --message-format=json` from the gluon workspace root, parses the JSON
 /// stream to extract the rlib path, and persists a manifest under
 /// `<build_dir>/script-runner/rlib/<hash>/manifest.json`.
-pub fn ensure_gluon_config_rlib(build_dir: &Path, rustc_info: &RustcInfo) -> Result<RlibPaths> {
+pub(crate) fn ensure_gluon_config_rlib(
+    build_dir: &Path,
+    rustc_info: &RustcInfo,
+    hashes: &mut FileHashes,
+) -> Result<RlibPaths> {
     let workspace = workspace_dir()?;
     let cache_root = build_dir.join("script-runner").join("rlib");
 
-    let key = compute_cache_key(&workspace, &rustc_info.version)?;
+    let key = compute_cache_key(&workspace, &rustc_info.version, hashes)?;
     let entry_dir = cache_root.join(&key);
     let manifest_path = entry_dir.join("manifest.json");
 
@@ -149,9 +154,13 @@ pub fn workspace_dir() -> Result<PathBuf> {
 
 /// Hash all `.rs` files and `Cargo.toml`s under `crates/gluon-config` and
 /// `crates/gluon-model`, plus the rustc version. Determinism: the file
-/// list is sorted by path before hashing.
-fn compute_cache_key(workspace_dir: &Path, rustc_version: &str) -> Result<String> {
-    use crate::cache::sha256_file;
+/// list is sorted by path before hashing. File hashes come from
+/// `hashes`, which skips files whose mtime and size are unchanged.
+fn compute_cache_key(
+    workspace_dir: &Path,
+    rustc_version: &str,
+    hashes: &mut FileHashes,
+) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -176,14 +185,7 @@ fn compute_cache_key(workspace_dir: &Path, rustc_version: &str) -> Result<String
             // doesn't change the cache key.
             let rel = path.strip_prefix(workspace_dir).unwrap_or(&path);
             hasher.update(rel.to_string_lossy().as_bytes());
-            let h = sha256_file(&path).map_err(|e| match e {
-                Error::Io { source, .. } => Error::Io {
-                    path: path.clone(),
-                    source,
-                },
-                other => other,
-            })?;
-            hasher.update(h);
+            hasher.update(hashes.hash(&path)?);
         }
     }
     // Lock file captures transitive dep versions. If serde bumps from 1.0.196
@@ -193,8 +195,7 @@ fn compute_cache_key(workspace_dir: &Path, rustc_version: &str) -> Result<String
     // exist.
     let lock_path = workspace_dir.join("Cargo.lock");
     if lock_path.is_file() {
-        let h = sha256_file(&lock_path)?;
-        hasher.update(h);
+        hasher.update(hashes.hash(&lock_path)?);
     }
     // (If Cargo.lock is absent — e.g., an unusual library-only workspace —
     // skip the hash; cargo will regenerate the lock and the next call will
@@ -410,6 +411,12 @@ fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
 mod tests {
     use super::*;
 
+    /// A fresh, empty memo per call keeps these tests about the key
+    /// itself; the memo's fast path has its own tests.
+    fn memo() -> FileHashes {
+        FileHashes::load(PathBuf::from("/nonexistent/gluon-test-memo.json"))
+    }
+
     #[test]
     fn parse_cargo_output_stable_deps_layout() {
         // Stable cargo: every unit in `deps/`, the root package uplifted
@@ -528,16 +535,16 @@ also not json
         // iteration order, mtime peeking, etc.).
         let workspace = workspace_dir().expect("workspace_dir");
         let v = "rustc 1.85.0";
-        let k1 = compute_cache_key(&workspace, v).expect("k1");
-        let k2 = compute_cache_key(&workspace, v).expect("k2");
+        let k1 = compute_cache_key(&workspace, v, &mut memo()).expect("k1");
+        let k2 = compute_cache_key(&workspace, v, &mut memo()).expect("k2");
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn cache_key_changes_with_rustc_version() {
         let workspace = workspace_dir().expect("workspace_dir");
-        let k1 = compute_cache_key(&workspace, "rustc 1.85.0").expect("k1");
-        let k2 = compute_cache_key(&workspace, "rustc 1.86.0").expect("k2");
+        let k1 = compute_cache_key(&workspace, "rustc 1.85.0", &mut memo()).expect("k1");
+        let k2 = compute_cache_key(&workspace, "rustc 1.86.0", &mut memo()).expect("k2");
         assert_ne!(k1, k2);
     }
 
@@ -559,9 +566,9 @@ also not json
         )
         .unwrap();
         std::fs::write(tmp.path().join("Cargo.lock"), b"# version 1\n").unwrap();
-        let k1 = compute_cache_key(tmp.path(), "rustc 1.0").unwrap();
+        let k1 = compute_cache_key(tmp.path(), "rustc 1.0", &mut memo()).unwrap();
         std::fs::write(tmp.path().join("Cargo.lock"), b"# version 2\n").unwrap();
-        let k2 = compute_cache_key(tmp.path(), "rustc 1.0").unwrap();
+        let k2 = compute_cache_key(tmp.path(), "rustc 1.0", &mut memo()).unwrap();
         assert_ne!(k1, k2, "cache key must invalidate when Cargo.lock changes");
     }
 }

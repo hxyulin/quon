@@ -74,6 +74,7 @@ use gluon_model::{BuildModel, RawBuildModel};
 use std::path::Path;
 
 pub mod cache;
+mod file_hashes;
 pub mod rlib;
 
 /// Compile `<project_root>/gluon.rs`, run it, parse stdout, and return
@@ -95,8 +96,13 @@ pub fn compile_and_run(
         )));
     }
 
-    let rlib = rlib::ensure_gluon_config_rlib(build_dir, rustc_info)?;
-    let bin = cache::ensure_script_binary(&script_path, build_dir, rustc_info, &rlib)?;
+    let mut hashes =
+        file_hashes::FileHashes::load(build_dir.join("script-runner").join("file-hashes.json"));
+    let rlib = rlib::ensure_gluon_config_rlib(build_dir, rustc_info, &mut hashes)?;
+    let bin = cache::ensure_script_binary(&script_path, build_dir, rustc_info, &rlib, &mut hashes)?;
+    // A failed save only means the next run rehashes; it must not fail
+    // a build that has everything it needs.
+    let _ = hashes.save();
     let stdout = run_script_binary(&bin)?;
 
     let raw: RawBuildModel = serde_json::from_slice(&stdout).map_err(|e| {
