@@ -64,9 +64,7 @@ pub fn expected_crate_artifact_path(
 /// sections when the flat `<name>.bin` is produced — the `.elf` is the
 /// debugger-facing sidecar that preserves symbols for `gdb`,
 /// `addr2line`, `objdump`, and `readelf`. Mirrors the write-side
-/// derivation in `artifact_shape.rs`. See
-/// `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`
-/// for the full rationale.
+/// derivation in `artifact_shape.rs`.
 pub fn expected_debug_elf_path(
     layout: &BuildLayout,
     model: &BuildModel,

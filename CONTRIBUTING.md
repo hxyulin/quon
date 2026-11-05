@@ -22,6 +22,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | Crate | Purpose |
 |-------|---------|
+| `gluon-config` | Rust API that `gluon.rs` build scripts use to declare a project |
 | `gluon-model` | Data types shared across the build pipeline |
 | `gluon-core` | Engine, compiler, scheduler, cache, vendor, kconfig |
 | `gluon-cli` | `clap`-based CLI (`gluon build`, `run`, `vendor`, ...) |
@@ -61,8 +62,6 @@ Gluon is a **kernel-agnostic** build system. Contributions should:
 - Surface errors with context — build failures should point the user at
   the offending crate, file, or config option
 - Use `unsafe` only when strictly necessary, isolated behind safe APIs
-
-See [CLAUDE.md](CLAUDE.md) for the full engineering guidelines.
 
 ## Documentation
 

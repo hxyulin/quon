@@ -389,8 +389,7 @@ fn build_vendor_cache_key(
 /// the next build, just like a `.rs` source edit would.
 ///
 /// Output is sorted by path so the cache record is deterministic
-/// across invocations — see the project-wide ordering invariant in
-/// `CLAUDE.md`.
+/// across invocations — see the determinism rule in `AGENTS.md`.
 fn collect_vendor_extra_sources(
     extern_artifacts: &BTreeMap<String, PathBuf>,
     sysroot_lib_dir: Option<&Path>,

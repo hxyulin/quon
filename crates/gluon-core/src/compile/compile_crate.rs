@@ -266,12 +266,10 @@ pub fn compile(
         let bin_path = cc.output_path.clone();
         let rustc_path = ctx.rustc_info.rustc_path.clone();
         let post: PostCompileStep = Box::new(move || {
-            // TODO(spec): memoise the probe on RustcInfo so it runs once per
-            // gluon invocation rather than once per RawBinary compile. Per
-            // docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md
-            // § rust-objcopy discovery. Cost today is microseconds per crate;
-            // the fix is to add `rust_objcopy_path: PathBuf` to RustcInfo and
-            // consume it here.
+            // TODO: memoise the probe on RustcInfo so it runs once per
+            // gluon invocation rather than once per RawBinary compile.
+            // Cost today is microseconds per crate; the fix is to add
+            // `rust_objcopy_path: PathBuf` to RustcInfo and consume it here.
             let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path)?;
             crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
         });

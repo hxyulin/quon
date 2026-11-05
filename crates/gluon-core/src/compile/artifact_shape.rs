@@ -6,10 +6,9 @@
 //! side — assembles the rustc invocation that produces the output)
 //! and [`super::artifact_path::expected_crate_artifact_path`] (read
 //! side — looks up the path after the fact for analyzer / scheduler
-//! bookkeeping) consume this type. There is exactly one
-//! implementation by design — see `docs/superpowers/plans/2026-05-03-stage-6-compile-pipeline.md`
-//! "Decisions baked in" §1 for why this is a struct and not a
-//! trait.
+//! bookkeeping) consume this type. It is a struct rather than a trait
+//! because there is exactly one implementation, and both sides must
+//! agree on it.
 
 use crate::compile::compile_utils::{exe_suffix_for_target, normalize_crate_name};
 use crate::compile::layout::BuildLayout;

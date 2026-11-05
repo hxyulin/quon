@@ -43,9 +43,7 @@ use std::path::{Path, PathBuf};
 /// still matches the current hash of every file the script's depfile
 /// lists. The fingerprint catches edits to files reached via `mod` /
 /// `#[path]` from the entrypoint, which would otherwise leave the outer
-/// key unchanged. See
-/// `docs/superpowers/specs/2026-05-05-modular-workspace-config-design.md`
-/// for what each layer catches and why both are needed.
+/// key unchanged, so both layers are needed.
 pub fn ensure_script_binary(
     script_path: &Path,
     build_dir: &Path,
@@ -90,10 +88,9 @@ const TRANSITIVE_FP_NAME: &str = "transitive-fingerprint.txt";
 /// Used as the secondary cache key for the script-runner: the outer
 /// directory is keyed by the entrypoint hash (cheap to recompute on
 /// every invocation), and this fingerprint catches edits to any file
-/// reached via `mod` / `#[path]` from the entrypoint. See the
-/// "Script-runner cache invariant change" section of
-/// `docs/superpowers/specs/2026-05-05-modular-workspace-config-design.md`
-/// for why this lives outside the entrypoint key.
+/// reached via `mod` / `#[path]` from the entrypoint. It lives outside
+/// the entrypoint key because computing it means reading every file the
+/// depfile lists, which the cheap outer lookup avoids.
 ///
 /// File order matters for the hash — we feed paths in the order rustc
 /// listed them, plus the file contents, so a permutation of the depfile
