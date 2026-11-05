@@ -138,7 +138,13 @@ Gluon does not ship OVMF. Users provide `OVMF_CODE.fd` and
 1. Explicit `.ovmf_code(...)` / `.ovmf_vars(...)` calls in
    `gluon.rs` → `QemuDef::ovmf_code` / `ovmf_vars`.
 2. `OVMF_CODE` / `OVMF_VARS` environment variables.
-3. A small table of well-known system paths per OS.
+3. The firmware installed beside the QEMU binary that `gluon run` will
+   spawn: `<bin>/../share/qemu/edk2-x86_64-code.fd` and
+   `edk2-i386-vars.fd`. A bare binary name is searched on `PATH`, and
+   symlinks are resolved first, so a Nix profile link leads to the
+   store path that holds the firmware. Nix, Homebrew and QEMU source
+   builds all install this pair.
+4. A small table of well-known system paths per OS.
 
 If none of those resolve, gluon emits `Error::OvmfNotFound` with a
 multi-line diagnostic listing every fallback the resolver tried, so

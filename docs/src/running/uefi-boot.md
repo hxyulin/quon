@@ -46,8 +46,13 @@ input files change.
 
 Gluon probes for OVMF firmware in this order:
 
-1. **Environment variables:** `OVMF_CODE` and `OVMF_VARS`
-2. **Common system paths** (distribution-dependent)
+1. **Explicit paths** from `qemu().ovmf_code(...)` and `.ovmf_vars(...)`
+2. **Environment variables:** `OVMF_CODE` and `OVMF_VARS`
+3. **Firmware beside QEMU:** `share/qemu/edk2-x86_64-code.fd` and
+   `edk2-i386-vars.fd` next to the `bin/` directory of the QEMU binary
+   on `PATH`. This finds the firmware of a Nix or Homebrew QEMU, for
+   example inside `nix shell nixpkgs#qemu`.
+4. **Common system paths** (distribution-dependent)
 
 If auto-detection fails, set the environment variables explicitly:
 

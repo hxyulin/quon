@@ -1,8 +1,8 @@
 //! OVMF firmware path resolver.
 //!
 //! See `docs/src/architecture/external-deps.md` for the precedence
-//! chain (explicit → env → system probe), the system path table,
-//! and the writable-vars copy strategy.
+//! chain (explicit → env → firmware beside QEMU → system probe), the
+//! system path table, and the writable-vars copy strategy.
 
 use crate::error::{Error, Result};
 use gluon_model::QemuDef;
@@ -63,18 +63,55 @@ pub struct OvmfResolveCtx<'a> {
     pub profile_name: &'a str,
     pub env_lookup: fn(&str) -> Option<String>,
     pub system_paths: &'a [(&'a str, &'a str)],
+    /// The QEMU binary `gluon run` will spawn, as configured (a bare
+    /// name is searched on `PATH` from `env_lookup`). `None` skips the
+    /// probe for firmware installed beside QEMU.
+    pub qemu_binary: Option<&'a str>,
 }
 
 impl<'a> OvmfResolveCtx<'a> {
-    /// Production context: real env, hard-coded `SYSTEM_PATHS`.
-    pub fn from_env(build_root: &'a Path, profile_name: &'a str) -> Self {
+    /// Production context: real env, hard-coded `SYSTEM_PATHS`, and
+    /// the firmware probe beside `qemu_binary`.
+    pub fn from_env(build_root: &'a Path, profile_name: &'a str, qemu_binary: &'a str) -> Self {
         Self {
             build_root,
             profile_name,
             env_lookup: real_env,
             system_paths: SYSTEM_PATHS,
+            qemu_binary: Some(qemu_binary),
         }
     }
+}
+
+/// x86_64 firmware file names QEMU's own build installs into
+/// `<prefix>/share/qemu/`. Nix, Homebrew and source builds all ship
+/// this pair; the 32-bit vars file is the one edk2 pairs with the
+/// x86_64 code image.
+const QEMU_SHARE_PAIR: (&str, &str) = ("edk2-x86_64-code.fd", "edk2-i386-vars.fd");
+
+/// Firmware installed beside the QEMU binary, at
+/// `<bin>/../share/qemu/`. The binary is found on `PATH` when it is a
+/// bare name, and symlinks are resolved first: a Nix profile's `bin/`
+/// holds links into the store, and the firmware sits next to the real
+/// binary there. Checked before the system table because it is the
+/// firmware built for the QEMU that will run.
+fn probe_beside_qemu(
+    binary: &str,
+    env_lookup: fn(&str) -> Option<String>,
+) -> Option<(PathBuf, PathBuf)> {
+    let path = if binary.contains('/') {
+        PathBuf::from(binary)
+    } else {
+        let search = env_lookup("PATH")?;
+        std::env::split_paths(&search)
+            .map(|dir| dir.join(binary))
+            .find(|candidate| candidate.is_file())?
+    };
+    let real = std::fs::canonicalize(path).ok()?;
+    let share = real.parent()?.parent()?.join("share").join("qemu");
+    let code = share.join(QEMU_SHARE_PAIR.0);
+    let vars = share.join(QEMU_SHARE_PAIR.1);
+    (code.is_file() && vars.is_file()).then_some((code, vars))
 }
 
 fn real_env(name: &str) -> Option<String> {
@@ -105,8 +142,11 @@ pub fn resolve_ovmf(qemu: &QemuDef, ctx: &OvmfResolveCtx<'_>) -> Result<Resolved
     let (code, vars) = match (code, vars) {
         (Some(c), Some(v)) => (c, v),
         _ => {
-            // ---- stage 3: system probe
-            match probe_system(ctx.system_paths) {
+            // ---- stage 3: firmware beside QEMU, then the system table
+            let beside_qemu = ctx
+                .qemu_binary
+                .and_then(|b| probe_beside_qemu(b, ctx.env_lookup));
+            match beside_qemu.or_else(|| probe_system(ctx.system_paths)) {
                 Some(pair) => pair,
                 None => {
                     return Err(Error::OvmfNotFound {
@@ -115,6 +155,7 @@ pub fn resolve_ovmf(qemu: &QemuDef, ctx: &OvmfResolveCtx<'_>) -> Result<Resolved
                             &explicit_vars,
                             &env_code,
                             &env_vars,
+                            ctx.qemu_binary,
                             ctx.system_paths,
                         ),
                     });
@@ -177,6 +218,7 @@ fn render_attempts(
     explicit_vars: &Option<PathBuf>,
     env_code: &Option<PathBuf>,
     env_vars: &Option<PathBuf>,
+    qemu_binary: Option<&str>,
     system_paths: &[(&str, &str)],
 ) -> String {
     let mut out = String::from("Tried, in order:\n");
@@ -200,12 +242,19 @@ fn render_attempts(
         (None, Some(v)) => out.push_str(&format!("OVMF_VARS={} (OVMF_CODE unset)\n", v.display())),
         (None, None) => out.push_str("OVMF_CODE / OVMF_VARS unset\n"),
     }
-    out.push_str("  3. System paths (first existing pair wins):\n");
+    if let Some(binary) = qemu_binary {
+        out.push_str(&format!(
+            "  3. Beside QEMU: <dir of {binary} on PATH>/../share/qemu/{{{}, {}}}\n",
+            QEMU_SHARE_PAIR.0, QEMU_SHARE_PAIR.1
+        ));
+    }
+    out.push_str("  4. System paths (first existing pair wins):\n");
     for (c, v) in system_paths {
         out.push_str(&format!("       {c} + {v}\n"));
     }
     out.push_str(
-        "\nInstall OVMF (apt install ovmf / brew install qemu / pacman -S edk2-ovmf),\n\
+        "\nInstall OVMF (apt install ovmf / pacman -S edk2-ovmf, or a QEMU that ships\n\
+         share/qemu/edk2-x86_64-code.fd such as Nix's or Homebrew's),\n\
          or set OVMF_CODE and OVMF_VARS, or declare explicit paths in gluon.rs via\n\
          qemu().ovmf_code(\"...\").ovmf_vars(\"...\").",
     );
@@ -351,6 +400,7 @@ mod tests {
             profile_name: "dev",
             env_lookup: test_env_empty,
             system_paths: &[],
+            qemu_binary: None,
         };
         let resolved = resolve_ovmf(&qemu, &ctx).unwrap();
         assert_eq!(resolved.code, code);
@@ -377,6 +427,7 @@ mod tests {
             profile_name: "dev",
             env_lookup: test_env_empty,
             system_paths: system,
+            qemu_binary: None,
         };
         let resolved = resolve_ovmf(&QemuDef::default(), &ctx).unwrap();
         assert_eq!(resolved.code, code);
@@ -392,6 +443,7 @@ mod tests {
             profile_name: "dev",
             env_lookup: test_env_empty,
             system_paths: &[],
+            qemu_binary: None,
         };
         let err = resolve_ovmf(&QemuDef::default(), &ctx).unwrap_err();
         let msg = err.to_string();
@@ -427,6 +479,7 @@ mod tests {
             profile_name: "dev",
             env_lookup: test_env_empty,
             system_paths: &[],
+            qemu_binary: None,
         };
         let resolved = resolve_ovmf(&qemu, &ctx).unwrap();
         assert_ne!(resolved.vars, src_vars);
@@ -471,9 +524,102 @@ mod tests {
             profile_name: "dev",
             env_lookup: lookup,
             system_paths: &[],
+            qemu_binary: None,
         };
         let _lock = env_lock().lock().unwrap();
         let resolved = resolve_ovmf(&QemuDef::default(), &ctx).unwrap();
         assert_eq!(resolved.code, code);
+    }
+
+    /// A fake QEMU install: `<root>/store/bin/qemu-system-x86_64` with
+    /// the firmware pair in `<root>/store/share/qemu/`, and a profile
+    /// directory `<root>/profile/bin/` whose binary is a symlink into
+    /// the store, the way a Nix profile is laid out.
+    #[cfg(unix)]
+    fn fake_qemu_install(root: &Path) -> (PathBuf, PathBuf) {
+        let store = root.join("store");
+        fs::create_dir_all(store.join("bin")).unwrap();
+        fs::create_dir_all(store.join("share/qemu")).unwrap();
+        fs::write(store.join("bin/qemu-system-x86_64"), b"").unwrap();
+        let code = store.join("share/qemu/edk2-x86_64-code.fd");
+        let vars = store.join("share/qemu/edk2-i386-vars.fd");
+        fs::write(&code, b"code").unwrap();
+        fs::write(&vars, b"vars").unwrap();
+        fs::create_dir_all(root.join("profile/bin")).unwrap();
+        std::os::unix::fs::symlink(
+            store.join("bin/qemu-system-x86_64"),
+            root.join("profile/bin/qemu-system-x86_64"),
+        )
+        .unwrap();
+        (code, vars)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firmware_beside_qemu_on_path_wins_over_system_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (code, _) = fake_qemu_install(&root);
+        let decoy = root.join("decoy.fd");
+        fs::write(&decoy, b"decoy").unwrap();
+        let decoy_s = decoy.to_str().unwrap();
+
+        static PATH: OnceLock<String> = OnceLock::new();
+        let _ = PATH.set(format!(
+            "{}:{}",
+            root.join("empty").display(),
+            root.join("profile/bin").display()
+        ));
+        fn lookup(name: &str) -> Option<String> {
+            (name == "PATH").then(|| PATH.get().cloned()).flatten()
+        }
+
+        let build = root.join("build");
+        let ctx = OvmfResolveCtx {
+            build_root: &build,
+            profile_name: "dev",
+            env_lookup: lookup,
+            system_paths: &[(decoy_s, decoy_s)],
+            qemu_binary: Some("qemu-system-x86_64"),
+        };
+        let resolved = resolve_ovmf(&QemuDef::default(), &ctx).unwrap();
+        assert_eq!(resolved.code, code);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firmware_beside_qemu_given_as_a_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (code, _) = fake_qemu_install(&root);
+        let binary = root.join("profile/bin/qemu-system-x86_64");
+
+        let build = root.join("build");
+        let ctx = OvmfResolveCtx {
+            build_root: &build,
+            profile_name: "dev",
+            env_lookup: test_env_empty,
+            system_paths: &[],
+            qemu_binary: Some(binary.to_str().unwrap()),
+        };
+        let resolved = resolve_ovmf(&QemuDef::default(), &ctx).unwrap();
+        assert_eq!(resolved.code, code);
+    }
+
+    #[test]
+    fn missing_qemu_falls_through_to_error_naming_the_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        let ctx = OvmfResolveCtx {
+            build_root: &build,
+            profile_name: "dev",
+            env_lookup: test_env_empty,
+            system_paths: &[],
+            qemu_binary: Some("qemu-system-x86_64"),
+        };
+        let msg = resolve_ovmf(&QemuDef::default(), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("Beside QEMU"), "{msg}");
     }
 }

@@ -258,7 +258,8 @@ pub fn run(
 
     // Step 4: OVMF (only when the final boot mode is UEFI).
     let ovmf = if resolved_qemu.boot_mode == BootMode::Uefi {
-        let ovmf_ctx = OvmfResolveCtx::from_env(ctx.layout.root(), &profile.name);
+        let ovmf_ctx =
+            OvmfResolveCtx::from_env(ctx.layout.root(), &profile.name, &resolved_qemu.binary);
         Some(resolve_ovmf(qemu_def, &ovmf_ctx)?)
     } else {
         None
