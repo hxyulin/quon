@@ -258,6 +258,12 @@ impl BuildLayout {
         self.root.join(".rustc-info.json")
     }
 
+    /// Cache file for probed target cfg sets
+    /// (`<root>/target-cfg.json`); see `manifest::platform`.
+    pub fn target_cfg_cache(&self) -> PathBuf {
+        self.root.join("target-cfg.json")
+    }
+
     /// Per-crate output directory for a host-pinned vendored crate
     /// (`<root>/host/vendor-deps/<crate>/`).
     ///

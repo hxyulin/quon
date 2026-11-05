@@ -17,6 +17,7 @@ pub mod fmt;
 pub mod generated;
 pub mod image;
 pub mod kconfig;
+pub mod manifest;
 pub mod project_root;
 pub mod rule;
 pub mod run;
@@ -139,7 +140,12 @@ pub fn build_with_workers(
     // invocation, so projects without cross deps pay zero overhead.
     // Models declaring cross deps without populated workspaces
     // produce a "run `gluon vendor`" diagnostic.
-    let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(model, &ctx.layout)?;
+    let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(
+        model,
+        &ctx.layout,
+        &ctx.rustc_info,
+        &resolved.project_root,
+    )?;
     let summary = scheduler::execute_pipeline(
         ctx,
         model,

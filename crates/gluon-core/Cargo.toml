@@ -41,6 +41,10 @@ sha2 = "0.10"
 thiserror = "1"
 toml = "0.8"
 walkdir = "2"
+# Parses `[target.'cfg(...)'.dependencies]` keys and matches them
+# against `rustc --print cfg` output. Published by the Cargo team; it is
+# the matcher Cargo itself uses, so Gluon selects the same edges.
+cargo-platform = "0.3.0"
 
 # Signal handling for `gluon run`: catches SIGINT/SIGTERM so the
 # spawned QEMU child can be killed cleanly instead of wedging. Used

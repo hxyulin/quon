@@ -33,12 +33,15 @@ pub mod context;
 pub mod graph;
 pub mod metadata;
 
+use crate::compile::RustcInfo;
 use crate::compile::layout::BuildLayout;
 use crate::error::{Diagnostic, Error, Result};
+use crate::manifest::platform::{self, ProbeTarget};
 use crate::vendor::cargo_cmd::{self, VendorFlags};
 use crate::vendor::manifest_gen;
 use gluon_model::{BuildModel, ExternalDepDef, Handle, TargetDef, TargetSpec};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 /// Group cross-tagged external deps by their target handle. Host-tagged
 /// deps are filtered out — those go through the host pipeline in
@@ -151,6 +154,8 @@ pub fn populate_cross_vendor_workspaces(
 pub fn build_cross_vendor_context(
     model: &BuildModel,
     layout: &BuildLayout,
+    rustc_info: &RustcInfo,
+    project_root: &Path,
 ) -> Result<context::VendorBuildContext> {
     let mut ctx = context::VendorBuildContext::new();
     let by_target = group_cross_deps(model);
@@ -178,7 +183,12 @@ pub fn build_cross_vendor_context(
         }
         let vendor_dir = scratch.join("vendor");
         let json = cargo_cmd::run_cargo_metadata(&scratch, &vendor_dir, flags)?;
-        let graph = metadata::parse_metadata(&json, *target_handle).map_err(|e| {
+        let platform = platform::probe(
+            rustc_info,
+            &ProbeTarget::for_target(target, project_root),
+            Some(&layout.target_cfg_cache()),
+        )?;
+        let graph = metadata::parse_metadata(&json, *target_handle, &platform).map_err(|e| {
             Error::Diagnostics(vec![Diagnostic::error(format!(
                 "failed to parse cargo metadata for target '{}': {e}",
                 target.name,
@@ -233,6 +243,22 @@ mod tests {
     use crate::compile::layout::BuildLayout;
     use crate::error::Error;
     use gluon_model::{BuildModel, DepSource, ExternalDepDef, PanicStrategy, TargetDef};
+
+    /// Never spawned: every test here fails or returns before the cfg
+    /// probe runs.
+    fn fake_rustc() -> RustcInfo {
+        RustcInfo {
+            rustc_path: "/nonexistent/rustc".into(),
+            rustc_arg: "rustc".into(),
+            version: "rustc 0.0.0".into(),
+            host_triple: "x86_64-unknown-linux-gnu".into(),
+            commit_hash: None,
+            release: "0.0.0".into(),
+            sysroot: "/nonexistent".into(),
+            rust_src: None,
+            mtime_ns: 0,
+        }
+    }
 
     fn empty_model() -> BuildModel {
         BuildModel::default()
@@ -331,7 +357,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let model = empty_model();
         let layout = layout(tmp.path());
-        let ctx = build_cross_vendor_context(&model, &layout).expect("ok");
+        let ctx =
+            build_cross_vendor_context(&model, &layout, &fake_rustc(), tmp.path()).expect("ok");
         assert!(ctx.is_empty());
         // Crucially, no scratch workspace was created.
         assert!(
@@ -358,7 +385,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let (model, _) = model_with_cross_target_and_dep();
         let layout = layout(tmp.path());
-        let err = build_cross_vendor_context(&model, &layout).expect_err("must fail");
+        let err = build_cross_vendor_context(&model, &layout, &fake_rustc(), tmp.path())
+            .expect_err("must fail");
         let msg = err.to_string();
         assert!(
             msg.contains("missing"),
@@ -401,7 +429,8 @@ mod tests {
         );
         let tmp = tempfile::tempdir().expect("tempdir");
         let layout = layout(tmp.path());
-        let err = build_cross_vendor_context(&model, &layout).expect_err("must fail");
+        let err = build_cross_vendor_context(&model, &layout, &fake_rustc(), tmp.path())
+            .expect_err("must fail");
         match err {
             Error::Compile(msg) => assert!(
                 msg.contains("not present in model.targets"),

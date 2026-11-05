@@ -36,8 +36,8 @@
 //!   a `build.rs` (see [`ResolvedCrate::has_build_script`]); the
 //!   build-deps that would feed those scripts are therefore irrelevant.
 //! - Target-conditional deps that don't apply to our compile target —
-//!   filtered via the `dep_kinds[].target` cfg expression. (See
-//!   [`is_dep_active_for_target`].)
+//!   the `dep_kinds[].target` key is matched against the target's
+//!   probed cfg set. (See [`is_dep_active_for_target`].)
 //!
 //! # Version handling
 //!
@@ -48,6 +48,7 @@
 //! semver semantics, swap the field type in [`CrateId`] and the
 //! string-parse points; everything else round-trips unchanged.
 
+use crate::manifest::platform::{TargetPlatform, parse_platform};
 use gluon_model::{Handle, TargetDef};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -85,6 +86,9 @@ pub enum ParseError {
 
     #[error("cargo metadata output is missing a `resolve` section; was --frozen used incorrectly?")]
     MissingResolve,
+
+    #[error("dependency `{dep}` has an unparseable target key `{key}`")]
+    InvalidPlatform { dep: String, key: String },
 }
 
 pub type Result<T> = std::result::Result<T, ParseError>;
@@ -240,8 +244,8 @@ struct RawDepKind {
     #[serde(default)]
     kind: Option<String>,
     /// `null` for unconditional, otherwise a cfg expression like
-    /// `cfg(unix)` or a target triple. MVP: only unconditional deps
-    /// are honoured.
+    /// `cfg(unix)` or a target triple, matched against the target's
+    /// probed cfg set.
     #[serde(default)]
     target: Option<String>,
 }
@@ -254,7 +258,13 @@ struct RawDepKind {
 /// the JSON itself doesn't know about gluon's target model, so the
 /// caller must pass it in. The handle is stored on the graph and used
 /// downstream when emitting scheduler nodes and artifact keys.
-pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedGraph> {
+/// `platform` is the target's probed cfg set, used to keep the
+/// target-conditional edges that apply.
+pub fn parse_metadata(
+    json: &str,
+    target: Handle<TargetDef>,
+    platform: &TargetPlatform,
+) -> Result<ResolvedGraph> {
     let raw: RawMetadata = serde_json::from_str(json)?;
     let resolve = raw.resolve.ok_or(ParseError::MissingResolve)?;
 
@@ -281,7 +291,7 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
         if Some(node.id.as_str()) == stub_id {
             // Roots = direct deps of the synthetic workspace package.
             for dep in &node.deps {
-                if !is_dep_active_for_target(dep) {
+                if !is_dep_active_for_target(dep, platform)? {
                     continue;
                 }
                 let pkg = by_id.get(dep.pkg.as_str()).copied().ok_or_else(|| {
@@ -332,25 +342,26 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
             .unwrap_or_default();
 
         // Filter, sort, and lower the dep edges.
-        let mut deps: Vec<ResolvedDep> = node
-            .deps
-            .iter()
-            .filter(|d| is_dep_active_for_target(d))
-            .map(|d| {
-                let dep_pkg = by_id.get(d.pkg.as_str()).copied().ok_or_else(|| {
-                    ParseError::MissingPackage {
+        let mut deps: Vec<ResolvedDep> = Vec::new();
+        for d in &node.deps {
+            if !is_dep_active_for_target(d, platform)? {
+                continue;
+            }
+            let dep_pkg =
+                by_id
+                    .get(d.pkg.as_str())
+                    .copied()
+                    .ok_or_else(|| ParseError::MissingPackage {
                         pkg_id: d.pkg.clone(),
-                    }
-                })?;
-                Ok(ResolvedDep {
-                    extern_name: d.name.clone(),
-                    crate_id: CrateId {
-                        name: dep_pkg.name.clone(),
-                        version: dep_pkg.version.clone(),
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+                    })?;
+            deps.push(ResolvedDep {
+                extern_name: d.name.clone(),
+                crate_id: CrateId {
+                    name: dep_pkg.name.clone(),
+                    version: dep_pkg.version.clone(),
+                },
+            });
+        }
         deps.sort_by(|a, b| a.extern_name.cmp(&b.extern_name));
 
         let mut features = node.features.clone();
@@ -452,20 +463,32 @@ fn pick_lib_target(pkg: &RawPackage) -> Result<(CrateKind, &RawTarget)> {
 /// 1. Skip dev-deps and build-deps entirely. Vendored crates don't
 ///    run tests through gluon (no dev) and we reject `build.rs`-bearing
 ///    crates outright (no build).
-/// 2. Skip target-conditional deps (`#[cfg(...)]` deps). Evaluating
-///    cfg expressions against an arbitrary target triple is non-trivial
-///    and a YAGNI for the MVP — the spec calls it out as future work.
+/// 2. Keep a target-conditional normal dep only when its key (a
+///    `cfg(...)` expression or a target name) matches `platform`, the
+///    cfg set `rustc --print cfg` reports for the compile target.
 ///
-/// Returns `true` only for *unconditional normal* deps.
-fn is_dep_active_for_target(dep: &RawNodeDep) -> bool {
+/// One edge can carry several `dep_kinds` entries (the same dep listed
+/// under `[dependencies]` and a `[target.*.dependencies]` table); the
+/// edge is active if any normal entry applies.
+fn is_dep_active_for_target(dep: &RawNodeDep, platform: &TargetPlatform) -> Result<bool> {
     if dep.dep_kinds.is_empty() {
         // Older cargo versions (< 1.41) didn't emit dep_kinds at all;
         // those edges are unconditional normal deps by definition.
-        return true;
+        return Ok(true);
     }
-    dep.dep_kinds
-        .iter()
-        .any(|dk| dk.kind.is_none() && dk.target.is_none())
+    for dk in dep.dep_kinds.iter().filter(|dk| dk.kind.is_none()) {
+        let Some(key) = &dk.target else {
+            return Ok(true);
+        };
+        let parsed = parse_platform(key).map_err(|_| ParseError::InvalidPlatform {
+            dep: dep.name.clone(),
+            key: key.clone(),
+        })?;
+        if platform.matches(&parsed) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // -------------------- tests --------------------
@@ -476,6 +499,14 @@ mod tests {
 
     fn target_handle() -> Handle<TargetDef> {
         Handle::<TargetDef>::new(0)
+    }
+
+    fn none_platform() -> TargetPlatform {
+        TargetPlatform::from_cfg_lines(
+            "x86_64-unknown-none",
+            ["target_arch=\"x86_64\"", "target_os=\"none\""],
+        )
+        .unwrap()
     }
 
     /// Smallest possible graph: the workspace stub depends on a single
@@ -540,7 +571,7 @@ mod tests {
 
     #[test]
     fn minimal_graph_drops_workspace_stub_and_lifts_root() {
-        let g = parse_metadata(MINIMAL_JSON, target_handle()).expect("parse ok");
+        let g = parse_metadata(MINIMAL_JSON, target_handle(), &none_platform()).expect("parse ok");
         assert_eq!(g.target, target_handle());
         assert_eq!(g.crates.len(), 1, "stub must be filtered out");
         assert_eq!(
@@ -677,7 +708,8 @@ mod tests {
 
     #[test]
     fn transitive_graph_keeps_dep_edges_and_normalises_proc_macro_name() {
-        let g = parse_metadata(TRANSITIVE_JSON, target_handle()).expect("parse ok");
+        let g =
+            parse_metadata(TRANSITIVE_JSON, target_handle(), &none_platform()).expect("parse ok");
         assert_eq!(g.crates.len(), 3);
         assert_eq!(
             g.roots,
@@ -767,7 +799,7 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
         let hb = g
             .crates
             .get(&CrateId {
@@ -817,7 +849,7 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
         let a = g
             .crates
             .get(&CrateId {
@@ -833,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn target_conditional_dep_is_filtered() {
+    fn target_conditional_dep_follows_target_cfgs() {
         let json = r#"
         {
           "packages": [
@@ -870,7 +902,7 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
         let a = g
             .crates
             .get(&CrateId {
@@ -879,6 +911,22 @@ mod tests {
             })
             .unwrap();
         assert!(a.deps.is_empty(), "cfg(unix) edge must be filtered");
+
+        // Keys that apply to x86_64-unknown-none keep the edge.
+        for key in [r#"cfg(target_os = \"none\")"#, "x86_64-unknown-none"] {
+            let json = json.replace("cfg(unix)", key);
+            let g = parse_metadata(&json, target_handle(), &none_platform()).expect("parse ok");
+            let a = g.crates.values().find(|c| c.name == "a").unwrap();
+            assert_eq!(a.deps.len(), 1, "edge with key {key} must be kept");
+            assert_eq!(a.deps[0].extern_name, "unix_only");
+        }
+
+        let json = json.replace("cfg(unix)", "cfg(unix");
+        let err = parse_metadata(&json, target_handle(), &none_platform()).expect_err("bad key");
+        assert!(
+            matches!(err, ParseError::InvalidPlatform { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -889,7 +937,7 @@ mod tests {
           "workspace_members": []
         }
         "#;
-        let err = parse_metadata(json, target_handle()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
         assert!(matches!(err, ParseError::MissingResolve), "got: {err:?}");
     }
 
@@ -931,7 +979,7 @@ mod tests {
           }
         }
         "#;
-        let err = parse_metadata(json, target_handle()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
         assert!(
             matches!(err, ParseError::AmbiguousLibKind { .. }),
             "got: {err:?}"
@@ -973,7 +1021,7 @@ mod tests {
           }
         }
         "#;
-        let err = parse_metadata(json, target_handle()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
         assert!(
             matches!(err, ParseError::NoLibTarget { .. }),
             "got: {err:?}"
