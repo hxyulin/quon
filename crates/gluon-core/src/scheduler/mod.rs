@@ -20,7 +20,9 @@ pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
 pub use results::NodeData;
-pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
+pub use worker::{
+    BuildSummary, JobDispatcher, JobInfo, JobKind, JobOutcome, PlainReporter, Reporter, WorkerPool,
+};
 
 use crate::compile::{CompileCtx, CompileUnitInput, compile_unit};
 use crate::error::{Error, Result};
@@ -34,7 +36,6 @@ use gluon_model::{
 };
 use results::{NodeResult, ResultView};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -484,6 +485,61 @@ fn node_label(
     }
 }
 
+/// What `node` does, for progress output; see [`JobInfo`].
+fn node_info(node: DagNode, model: &BuildModel, units: &UnitGraph) -> JobInfo {
+    let target_name = |h: Handle<TargetDef>| {
+        model
+            .targets
+            .get(h)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| format!("{h:?}"))
+    };
+    let named = |kind: JobKind, name: Option<&str>, h: &dyn std::fmt::Debug| JobInfo {
+        kind,
+        name: name.map_or_else(|| format!("{h:?}"), str::to_string),
+        detail: String::new(),
+    };
+    match node {
+        DagNode::Sysroot(t) => named(JobKind::Sysroot, Some(&target_name(t)), &t),
+        DagNode::ConfigCrate(t) => named(JobKind::ConfigCrate, Some(&target_name(t)), &t),
+        DagNode::Compile(u) => {
+            let unit = units.get(u);
+            if unit.is_build_script {
+                return named(JobKind::BuildScript, Some(&unit.package.name), &u);
+            }
+            let platform = match unit.platform {
+                Platform::Host => "host".to_string(),
+                Platform::Cross(t) => target_name(t),
+            };
+            JobInfo {
+                kind: JobKind::Crate,
+                name: unit.name.clone(),
+                detail: format!("v{} ({platform})", unit.package.version),
+            }
+        }
+        DagNode::RunBuildScript(r) => {
+            let owner = units.get(units.run(r).owner);
+            named(JobKind::BuildScript, Some(&owner.package.name), &r)
+        }
+        DagNode::Rule(h) => named(
+            JobKind::Rule,
+            model.rules.get(h).map(|r| r.name.as_str()),
+            &h,
+        ),
+        DagNode::Esp(h) => named(JobKind::Esp, model.esps.get(h).map(|e| e.name.as_str()), &h),
+        DagNode::Image(h) => named(
+            JobKind::Image,
+            model.images.get(h).map(|i| i.name.as_str()),
+            &h,
+        ),
+        DagNode::BuildStep(h) => named(
+            JobKind::BuildStep,
+            model.build_steps.get(h).map(|s| s.name.as_str()),
+            &h,
+        ),
+    }
+}
+
 impl JobDispatcher for PipelineDispatcher<'_> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let view = self.view();
@@ -544,6 +600,16 @@ impl JobDispatcher for PipelineDispatcher<'_> {
             self.units,
         )
     }
+
+    fn info(&self, node: NodeId) -> JobInfo {
+        node_info(self.dag.nodes[node as usize], self.model, self.units)
+    }
+
+    fn was_cached(&self, node: NodeId) -> bool {
+        self.results[node as usize]
+            .get()
+            .is_some_and(|r| r.was_cached)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -564,9 +630,8 @@ impl JobDispatcher for PipelineDispatcher<'_> {
 /// ### stdout / stderr
 ///
 /// Per-job output is buffered in `Vec<u8>` inside the worker pool and
-/// flushed to `stdout`/`stderr` as each job completes. This prevents
+/// handed to `reporter` as each job completes. This prevents
 /// interleaved rustc output from parallel compilations.
-#[allow(clippy::too_many_arguments)]
 pub fn execute_pipeline(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -574,8 +639,7 @@ pub fn execute_pipeline(
     vendor_ctx: &VendorBuildContext,
     rules: &RuleRegistry,
     workers: usize,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
+    reporter: &mut dyn Reporter,
 ) -> Result<BuildSummary> {
     let units = crate::unit::lower(model, resolved, vendor_ctx)?;
     let dag = build_dag(resolved, model, &units)?;
@@ -596,7 +660,7 @@ pub fn execute_pipeline(
     };
 
     let pool = WorkerPool::new(workers);
-    pool.execute(&dag, &dispatcher, stdout, stderr)?;
+    pool.execute_with(&dag, &dispatcher, reporter)?;
 
     Ok(summarize(&dag, &results))
 }
@@ -902,8 +966,10 @@ mod tests {
             &VendorBuildContext::new(),
             &rules,
             1,
-            &mut stdout,
-            &mut stderr,
+            &mut PlainReporter {
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+            },
         );
 
         // The pipeline must propagate an error — not panic.
@@ -972,8 +1038,10 @@ mod tests {
                 &VendorBuildContext::new(),
                 &rules,
                 1,
-                &mut out,
-                &mut err,
+                &mut PlainReporter {
+                    stdout: &mut out,
+                    stderr: &mut err,
+                },
             )
             .expect("first run should succeed");
         }
@@ -989,8 +1057,10 @@ mod tests {
                 &VendorBuildContext::new(),
                 &rules,
                 1,
-                &mut out,
-                &mut err,
+                &mut PlainReporter {
+                    stdout: &mut out,
+                    stderr: &mut err,
+                },
             )
             .expect("second run should succeed");
         }
@@ -1035,8 +1105,10 @@ mod tests {
             &VendorBuildContext::new(),
             &rules,
             1,
-            &mut out1,
-            &mut err1,
+            &mut PlainReporter {
+                stdout: &mut out1,
+                stderr: &mut err1,
+            },
         )
         .expect("first run");
 
@@ -1057,8 +1129,10 @@ mod tests {
             &VendorBuildContext::new(),
             &rules,
             1,
-            &mut out2,
-            &mut err2,
+            &mut PlainReporter {
+                stdout: &mut out2,
+                stderr: &mut err2,
+            },
         )
         .expect("second run");
         let bin2 = std::fs::read(&bin).expect("read second-run binary");
@@ -1106,8 +1180,10 @@ mod tests {
             &VendorBuildContext::new(),
             &rules,
             workers,
-            &mut stdout,
-            &mut stderr,
+            &mut PlainReporter {
+                stdout: &mut stdout,
+                stderr: &mut stderr,
+            },
         )
         .expect("pipeline should succeed");
 

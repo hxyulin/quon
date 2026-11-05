@@ -39,7 +39,8 @@ pub use rule::builtin::ExecRule;
 pub use rule::{RuleCtx, RuleFn, RuleRegistry};
 pub use run::{RunOptions, run};
 pub use scheduler::{
-    BuildSummary, Dag, DagNode, JobDispatcher, NodeId, WorkerPool, build_dag, execute_pipeline,
+    BuildSummary, Dag, DagNode, JobDispatcher, JobInfo, JobKind, JobOutcome, NodeId, PlainReporter,
+    Reporter, WorkerPool, build_dag, execute_pipeline,
 };
 pub use sysroot::ensure_sysroot;
 
@@ -133,6 +134,30 @@ pub fn build_with_workers(
     resolved: &ResolvedConfig,
     workers: usize,
 ) -> Result<BuildSummary> {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    build_with_reporter(
+        ctx,
+        model,
+        resolved,
+        workers,
+        &mut PlainReporter {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        },
+    )
+}
+
+/// Like [`build_with_workers`], but sends job events and job output to
+/// `reporter` instead of writing them to the process's stdout and
+/// stderr. The CLI uses this to draw status lines.
+pub fn build_with_reporter(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    workers: usize,
+    reporter: &mut dyn Reporter,
+) -> Result<BuildSummary> {
     assert!(workers >= 1, "build_with_workers requires workers >= 1");
 
     // Cross-process lock around the build directory. Held for the
@@ -143,16 +168,12 @@ pub fn build_with_workers(
     let _cache_guard = CacheLock::acquire(&ctx.layout)?;
 
     let rules = rule::RuleRegistry::with_builtins();
-    let mut stdout = std::io::stdout().lock();
-    let mut stderr = std::io::stderr().lock();
     if cache::remove_legacy_cache(&ctx.layout)? {
-        use std::io::Write as _;
-        let _ = writeln!(
-            stderr,
-            "note: removed the build cache of an older Gluon ({}) and its outputs; \
+        reporter.note(&format!(
+            "removed the build cache of an older Gluon ({}) and its outputs; \
              this build starts clean",
             ctx.layout.legacy_cache_manifest().display()
-        );
+        ));
     }
     // Build the cross-target vendor context by reading per-target
     // scratch workspaces populated by `gluon vendor`. For host-only
@@ -168,16 +189,7 @@ pub fn build_with_workers(
     )?;
     // Each node writes its own record when it finishes, so a failed
     // build keeps the records of every node that did finish.
-    scheduler::execute_pipeline(
-        ctx,
-        model,
-        resolved,
-        &vendor_ctx,
-        &rules,
-        workers,
-        &mut stdout,
-        &mut stderr,
-    )
+    scheduler::execute_pipeline(ctx, model, resolved, &vendor_ctx, &rules, workers, reporter)
 }
 
 /// Run the compile pipeline as a `gluon check` (metadata-only) pass.

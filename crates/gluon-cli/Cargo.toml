@@ -19,6 +19,10 @@ path = "src/main.rs"
 [dependencies]
 gluon-core.workspace = true
 clap = { version = "4", features = ["derive"] }
+# Colored stderr. Both are already in the tree through clap. `anstream`
+# strips escape codes when stderr is not a terminal or NO_COLOR is set.
+anstream = "1"
+anstyle = "1"
 anyhow = "1"
 # Used only by `gluon internal dump-dsl` to emit a stable JSON wrapper
 # around the DSL signature list. Already in the workspace dep tree via

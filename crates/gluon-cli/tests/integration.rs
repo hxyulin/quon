@@ -938,11 +938,11 @@ fn build_ok(fixture: &Path, envs: &[(&str, &str)]) -> String {
     stderr
 }
 
-/// Parse N from the `built N, cached M` summary line.
+/// Parse N from the `(built N, cached M)` counts on the `Finished` line.
 fn built_count(stderr: &str) -> usize {
     stderr
         .lines()
-        .find_map(|l| l.trim().strip_prefix("built "))
+        .find_map(|l| l.split_once("(built ").map(|(_, rest)| rest))
         .and_then(|rest| rest.split(',').next())
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or_else(|| panic!("no `built N` summary in:\n{stderr}"))

@@ -204,18 +204,11 @@ pub fn compile(
 }
 
 fn rustc_fail_diag(headline_what: String) -> Box<crate::compile::compile_and_cache::RustcFailDiag> {
-    Box::new(move |output, rendered| {
-        Error::Diagnostics(vec![
-            Diagnostic::error(format!(
-                "rustc failed while building {headline_what}: exit={:?}",
-                output.status.code(),
-            ))
-            .with_note(format!(
-                "stderr:\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            ))
-            .with_note(format!("command: {rendered}")),
-        ])
+    Box::new(move |output| {
+        Error::Diagnostics(vec![Diagnostic::error(format!(
+            "rustc failed while building {headline_what}: exit={:?}",
+            output.status.code(),
+        ))])
     })
 }
 

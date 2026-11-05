@@ -9,28 +9,20 @@
 //!    artifacts cannot collide with build or check artifacts), and the
 //!    rustc command builder swaps in `clippy-driver` as the program
 //!    path while leaving every other flag identical.
-//! 2. The summary verb is "linted" instead of "checked".
+//! 2. The `Finished` line counts "linted" crates.
 //!
 //! Sysroot, generated config crate, and cache manifest are shared with
 //! `gluon build` and `gluon check`.
 
 use super::CmdContext;
+use crate::output::Shell;
 use anyhow::Result;
 
 /// Execute the clippy lint pipeline against the prepared context.
 /// The context's layout must have been built with
-/// `DriverKind::Clippy`; the lib-level `debug_assert_eq!` in
-/// `gluon_core::clippy_with_workers` enforces this.
-pub fn run(ctx: CmdContext, jobs: Option<usize>) -> Result<()> {
-    let workers = jobs
-        .map(Ok)
-        .unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .or::<std::io::Error>(Ok(1))
-        })
-        .unwrap_or(1);
-    let summary = gluon_core::clippy_with_workers(&ctx.ctx, &ctx.model, &ctx.resolved, workers)?;
-    eprintln!("linted {}, cached {}", summary.built, summary.cached);
+/// `DriverKind::Clippy`.
+pub fn run(ctx: CmdContext, jobs: Option<usize>, shell: &mut Shell) -> Result<()> {
+    debug_assert_eq!(ctx.ctx.driver(), gluon_core::DriverKind::Clippy);
+    super::build::run_pipeline(&ctx, jobs, shell, "linted")?;
     Ok(())
 }

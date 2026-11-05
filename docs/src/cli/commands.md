@@ -12,8 +12,9 @@ These flags apply to all commands.
 | `--target <NAME>` | `-t` | Target triple (overrides profile's target) |
 | `--config-file <PATH>` | `-C` | Override file path (default: `.gluon-config`) |
 | `--jobs <N>` | `-j` | Parallel compile jobs (default: host parallelism) |
-| `--verbose` | `-v` | Emit more verbose output |
-| `--quiet` | `-q` | Suppress non-error output |
+| `--verbose` | `-v` | Print `Fresh` lines for cache hits, why each job reruns, and the rustc command of a failed job |
+| `--quiet` | `-q` | Print only warnings and errors |
+| `--color <WHEN>` | | `auto` (default), `always` or `never`. `auto` colors when stderr is a terminal and `NO_COLOR` is unset |
 
 ## Commands
 

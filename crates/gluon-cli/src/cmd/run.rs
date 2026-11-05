@@ -6,6 +6,7 @@
 
 use super::CmdContext;
 use crate::cli::RunArgs;
+use crate::output::{BuildReporter, Shell};
 use anyhow::{Result, bail};
 use gluon_core::Error as CoreError;
 use gluon_core::model::BootMode;
@@ -13,7 +14,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 /// Execute the `gluon run` pipeline against the prepared context.
-pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
+pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shell) -> Result<()> {
     // Reject an absent qemu block at the CLI boundary so the user gets
     // a targeted diagnostic ("you forgot a `cfg.qemu(...)` block")
     // instead of a panic from inside `gluon_core::run`. `model.qemu`
@@ -48,7 +49,8 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs) -> Result<()> {
         test_mode: false,
     };
 
-    let status = gluon_core::run(&ctx.ctx, &ctx.model, &ctx.resolved, opts)?;
+    let mut reporter = BuildReporter::new(shell, ctx.ctx.driver());
+    let status = gluon_core::run(&ctx.ctx, &ctx.model, &ctx.resolved, opts, &mut reporter)?;
 
     if args.dry_run {
         return Ok(());

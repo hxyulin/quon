@@ -24,6 +24,24 @@ fn parse_jobs(s: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Values of `--color`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorWhen {
+    Auto,
+    Always,
+    Never,
+}
+
+impl From<ColorWhen> for anstream::ColorChoice {
+    fn from(w: ColorWhen) -> Self {
+        match w {
+            ColorWhen::Auto => Self::Auto,
+            ColorWhen::Always => Self::Always,
+            ColorWhen::Never => Self::Never,
+        }
+    }
+}
+
 /// Top-level `gluon` command-line interface.
 #[derive(Parser, Debug)]
 #[command(name = "gluon", version, about = "Bare-metal Rust kernel build system")]
@@ -60,6 +78,11 @@ pub struct Cli {
     /// Suppress non-error output.
     #[arg(short = 'q', long, global = true)]
     pub quiet: bool,
+
+    /// When to color output: `auto` colors only when stderr is a
+    /// terminal and `NO_COLOR` is unset.
+    #[arg(long, global = true, value_name = "WHEN", default_value = "auto")]
+    pub color: ColorWhen,
 
     /// Which subcommand to run.
     #[command(subcommand)]
@@ -557,5 +580,14 @@ mod tests {
         let cli = Cli::try_parse_from(["gluon", "--verbose", "--quiet", "build"]).expect("parse");
         assert!(cli.verbose);
         assert!(cli.quiet);
+    }
+
+    #[test]
+    fn color_defaults_to_auto_and_parses_never() {
+        let cli = Cli::try_parse_from(["gluon", "build"]).expect("parse");
+        assert_eq!(cli.color, ColorWhen::Auto);
+        let cli = Cli::try_parse_from(["gluon", "--color", "never", "build"]).expect("parse");
+        assert_eq!(cli.color, ColorWhen::Never);
+        assert!(Cli::try_parse_from(["gluon", "--color", "sometimes", "build"]).is_err());
     }
 }

@@ -367,20 +367,13 @@ fn build_sysroot_crate(
             declared: Vec::new(),
             aux_outputs: Vec::new(),
             post_compile_step: None,
-            rustc_fail: Box::new(move |output, rendered| {
-                Error::Diagnostics(vec![
-                    Diagnostic::error(format!(
-                        "rustc failed while building sysroot crate '{}' for target '{}': exit={:?}",
-                        crate_name_fail,
-                        target_name_fail,
-                        output.status.code(),
-                    ))
-                    .with_note(format!(
-                        "stderr:\n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    ))
-                    .with_note(format!("command: {rendered}")),
-                ])
+            rustc_fail: Box::new(move |output| {
+                Error::Diagnostics(vec![Diagnostic::error(format!(
+                    "rustc failed while building sysroot crate '{}' for target '{}': exit={:?}",
+                    crate_name_fail,
+                    target_name_fail,
+                    output.status.code(),
+                ))])
             }),
             depfile_fail: Box::new(move |e| {
                 Error::Diagnostics(vec![

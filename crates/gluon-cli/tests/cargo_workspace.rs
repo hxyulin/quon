@@ -73,16 +73,17 @@ fn build_ok(project: &Path) -> String {
     stderr
 }
 
-/// `(built, cached)` from the `built N, cached M` summary line.
+/// `(built, cached)` from the `(built N, cached M)` counts that end
+/// the `Finished` line.
 fn summary(stderr: &str) -> (usize, usize) {
     let line = stderr
         .lines()
-        .find_map(|l| l.trim().strip_prefix("built "))
-        .unwrap_or_else(|| panic!("no `built N, cached M` summary in:\n{stderr}"));
+        .find_map(|l| l.split_once("(built ").map(|(_, rest)| rest))
+        .unwrap_or_else(|| panic!("no `(built N, cached M)` summary in:\n{stderr}"));
     let (built, cached) = line.split_once(", cached ").expect("summary format");
     (
         built.trim().parse().unwrap(),
-        cached.trim().parse().unwrap(),
+        cached.trim_end_matches(')').trim().parse().unwrap(),
     )
 }
 

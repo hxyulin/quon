@@ -138,6 +138,122 @@ pub trait JobDispatcher: Sync {
     fn label(&self, node: NodeId) -> String {
         format!("node {node}")
     }
+
+    /// What `node` does, for progress output. The default names the
+    /// bare id.
+    fn info(&self, node: NodeId) -> JobInfo {
+        JobInfo {
+            kind: JobKind::Other,
+            name: format!("node {node}"),
+            detail: String::new(),
+        }
+    }
+
+    /// Whether `node`, which has just succeeded, was a cache hit. Asked
+    /// on the scheduling thread after the job's result arrives, so the
+    /// dispatcher can answer from state the job wrote.
+    fn was_cached(&self, _node: NodeId) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reporter
+// ---------------------------------------------------------------------------
+
+/// What a job does. The CLI picks the words for each kind, so the core
+/// carries no presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    /// The sysroot crates of one target.
+    Sysroot,
+    /// The generated config crate of one target.
+    ConfigCrate,
+    /// A declared or vendored crate.
+    Crate,
+    /// Compiling or running a package's build script.
+    BuildScript,
+    Rule,
+    Esp,
+    Image,
+    BuildStep,
+    Other,
+}
+
+/// A job as the [`Reporter`] sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobInfo {
+    pub kind: JobKind,
+    /// Short name, such as `kernel` or `x86_64-unknown-none`.
+    pub name: String,
+    /// Version and platform, such as `v0.1.0 (x86_64-unknown-none)`.
+    /// Empty when there is nothing to add.
+    pub detail: String,
+}
+
+/// How a job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobOutcome {
+    /// The job ran its action (rustc, a rule, an image write).
+    Built,
+    /// The job's cache record was fresh, so the action was skipped.
+    Cached,
+    Failed,
+}
+
+/// Receives job events from the [`WorkerPool`].
+///
+/// Every call happens on the scheduling thread, in the order the
+/// scheduler observes events, so an implementation needs no locking.
+/// The pool hands each job's buffered output to [`Reporter::finished`]
+/// instead of writing it itself: a reporter that draws a status line
+/// must clear that line before the output and redraw it after.
+pub trait Reporter {
+    /// Called once, before the first job starts, with the job count.
+    fn plan(&mut self, _jobs: usize) {}
+
+    /// `job` was handed to a worker.
+    fn started(&mut self, _node: NodeId, _job: &JobInfo) {}
+
+    /// `job` ended. `stdout` and `stderr` are everything it wrote; the
+    /// reporter must write them out. An I/O error fails the build.
+    fn finished(
+        &mut self,
+        node: NodeId,
+        job: &JobInfo,
+        outcome: JobOutcome,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> std::io::Result<()>;
+
+    /// A message from the build that belongs to no job, such as the
+    /// removal of an old cache.
+    fn note(&mut self, _message: &str) {}
+}
+
+/// Writes job output to two streams and nothing else. Used by
+/// [`WorkerPool::execute`] and by library callers without a terminal.
+pub struct PlainReporter<'a> {
+    pub stdout: &'a mut dyn Write,
+    pub stderr: &'a mut dyn Write,
+}
+
+impl Reporter for PlainReporter<'_> {
+    fn finished(
+        &mut self,
+        _node: NodeId,
+        _job: &JobInfo,
+        _outcome: JobOutcome,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> std::io::Result<()> {
+        self.stdout.write_all(stdout)?;
+        self.stderr.write_all(stderr)
+    }
+
+    fn note(&mut self, message: &str) {
+        let _ = writeln!(self.stderr, "note: {message}");
+    }
 }
 
 /// Collects job failures and renders them in `NodeId` order.
@@ -154,7 +270,19 @@ impl Failures {
     }
 
     fn push_node(&mut self, dispatcher: &dyn JobDispatcher, node: NodeId, e: &Error) {
-        let diag = Diagnostic::error(format!("{}: {}", dispatcher.label(node), error_message(e)));
+        let label = dispatcher.label(node);
+        // A job's own diagnostics keep their level and notes; only the
+        // message gains the job label. Rendering them to one string
+        // would print `error: <job>: error: ...`.
+        if let Error::Diagnostics(diags) = e {
+            for d in diags {
+                let mut d = d.clone();
+                d.message = format!("{label}: {}", d.message);
+                self.by_node.push((node, d));
+            }
+            return;
+        }
+        let diag = Diagnostic::error(format!("{label}: {}", error_message(e)));
         self.by_node.push((node, diag));
     }
 
@@ -213,14 +341,26 @@ impl WorkerPool {
         stdout: &mut dyn Write,
         stderr: &mut dyn Write,
     ) -> Result<()> {
+        self.execute_with(dag, dispatcher, &mut PlainReporter { stdout, stderr })
+    }
+
+    /// Like [`WorkerPool::execute`], but sends job events and output to
+    /// `reporter`.
+    pub fn execute_with(
+        &self,
+        dag: &Dag,
+        dispatcher: &dyn JobDispatcher,
+        reporter: &mut dyn Reporter,
+    ) -> Result<()> {
         if dag.is_empty() {
             return Ok(());
         }
+        reporter.plan(dag.len());
 
         if self.workers == 1 {
-            execute_single(dag, dispatcher, stdout, stderr)
+            execute_single(dag, dispatcher, reporter)
         } else {
-            execute_parallel(dag, self.workers, dispatcher, stdout, stderr)
+            execute_parallel(dag, self.workers, dispatcher, reporter)
         }
     }
 }
@@ -238,8 +378,7 @@ impl WorkerPool {
 fn execute_single(
     dag: &Dag,
     dispatcher: &dyn JobDispatcher,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
+    reporter: &mut dyn Reporter,
 ) -> Result<()> {
     // Working copy of in-degrees so we do not mutate dag.in_degree.
     let mut in_degree: std::collections::BTreeMap<NodeId, u32> = dag.in_degree.clone();
@@ -267,6 +406,8 @@ fn execute_single(
         let node_id = *ready.iter().next().unwrap();
         ready.remove(&node_id);
 
+        let info = dispatcher.info(node_id);
+        reporter.started(node_id, &info);
         let mut job_stdout: Vec<u8> = Vec::new();
         let mut job_stderr: Vec<u8> = Vec::new();
         let result = dispatcher.dispatch(node_id, &mut job_stdout, &mut job_stderr);
@@ -274,14 +415,13 @@ fn execute_single(
         // Always drain the output buffers to the sinks, even on failure.
         // Propagate sink I/O errors; on failure we have nowhere useful to
         // write anyway, so bailing immediately is correct.
-        stdout.write_all(&job_stdout).map_err(|e| Error::Io {
-            path: std::path::PathBuf::from("<stdout>"),
-            source: e,
-        })?;
-        stderr.write_all(&job_stderr).map_err(|e| Error::Io {
-            path: std::path::PathBuf::from("<stderr>"),
-            source: e,
-        })?;
+        let outcome = job_outcome(dispatcher, node_id, &result);
+        reporter
+            .finished(node_id, &info, outcome, &job_stdout, &job_stderr)
+            .map_err(|e| Error::Io {
+                path: std::path::PathBuf::from("<stderr>"),
+                source: e,
+            })?;
 
         finished += 1;
 
@@ -340,8 +480,7 @@ fn execute_parallel(
     dag: &Dag,
     workers: usize,
     dispatcher: &dyn JobDispatcher,
-    stdout: &mut dyn Write,
-    stderr: &mut dyn Write,
+    reporter: &mut dyn Reporter,
 ) -> Result<()> {
     // Working copy of in-degrees — do not mutate dag.in_degree.
     let mut in_degree: std::collections::BTreeMap<NodeId, u32> = dag.in_degree.clone();
@@ -357,6 +496,10 @@ fn execute_parallel(
     let mut errors = Failures::default();
     let mut errored = false;
     let mut in_flight: usize = 0;
+    // Infos of the jobs in flight, taken at dispatch so `finished`
+    // reports the same names `started` did.
+    let mut running: std::collections::BTreeMap<NodeId, JobInfo> =
+        std::collections::BTreeMap::new();
 
     // Result channel: workers send (worker_index, NodeId, Result, stdout_buf, stderr_buf).
     // Including worker_index allows the main thread to return the worker to the
@@ -405,6 +548,9 @@ fn execute_parallel(
                     if let Some(&worker_idx) = idle.iter().next() {
                         ready.remove(&node_id);
                         idle.remove(&worker_idx);
+                        let info = dispatcher.info(node_id);
+                        reporter.started(node_id, &info);
+                        running.insert(node_id, info);
                         job_txs[worker_idx]
                             .send(Some(node_id))
                             .expect("worker job channel must be open during dispatch");
@@ -442,16 +588,14 @@ fn execute_parallel(
             // Collect sink I/O errors into `errors` rather than bailing
             // immediately, so in-flight jobs can still complete and the scope
             // exits cleanly.
-            if let Err(e) = stdout.write_all(&job_stdout) {
+            let info = running
+                .remove(&node_id)
+                .unwrap_or_else(|| dispatcher.info(node_id));
+            let outcome = job_outcome(dispatcher, node_id, &result);
+            if let Err(e) = reporter.finished(node_id, &info, outcome, &job_stdout, &job_stderr) {
                 errors
                     .other
-                    .push(Diagnostic::error(format!("sink I/O error (stdout): {e}")));
-                errored = true;
-            }
-            if let Err(e) = stderr.write_all(&job_stderr) {
-                errors
-                    .other
-                    .push(Diagnostic::error(format!("sink I/O error (stderr): {e}")));
+                    .push(Diagnostic::error(format!("sink I/O error: {e}")));
                 errored = true;
             }
 
@@ -495,6 +639,15 @@ fn execute_parallel(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// How the job behind `result` ended, as the reporter sees it.
+fn job_outcome(dispatcher: &dyn JobDispatcher, node: NodeId, result: &Result<()>) -> JobOutcome {
+    match result {
+        Err(_) => JobOutcome::Failed,
+        Ok(()) if dispatcher.was_cached(node) => JobOutcome::Cached,
+        Ok(()) => JobOutcome::Built,
+    }
+}
 
 /// Extract a displayable message from an `Error`.
 fn error_message(e: &Error) -> String {
@@ -961,6 +1114,101 @@ mod tests {
             Err(Error::Diagnostics(diags)) => {
                 let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
                 assert_eq!(messages, vec!["test unit 0: slow", "test unit 1: fast"]);
+            }
+            other => panic!("expected Err(Diagnostics), got {other:?}"),
+        }
+    }
+
+    /// Records reporter calls as `(event, node, outcome)`.
+    #[derive(Default)]
+    struct RecordingReporter {
+        events: Vec<(&'static str, NodeId, Option<JobOutcome>)>,
+        stderr: Vec<u8>,
+    }
+
+    impl Reporter for RecordingReporter {
+        fn plan(&mut self, jobs: usize) {
+            self.events.push(("plan", jobs as NodeId, None));
+        }
+
+        fn started(&mut self, node: NodeId, _job: &JobInfo) {
+            self.events.push(("started", node, None));
+        }
+
+        fn finished(
+            &mut self,
+            node: NodeId,
+            _job: &JobInfo,
+            outcome: JobOutcome,
+            _stdout: &[u8],
+            stderr: &[u8],
+        ) -> std::io::Result<()> {
+            self.events.push(("finished", node, Some(outcome)));
+            self.stderr.extend_from_slice(stderr);
+            Ok(())
+        }
+    }
+
+    /// Caches node 1; every other node builds.
+    struct CachingDispatcher;
+
+    impl JobDispatcher for CachingDispatcher {
+        fn dispatch(&self, node: NodeId, _out: &mut Vec<u8>, err: &mut Vec<u8>) -> Result<()> {
+            write!(err, "job {node};").unwrap();
+            if node == 2 {
+                return Err(Error::Compile("boom".into()));
+            }
+            Ok(())
+        }
+
+        fn was_cached(&self, node: NodeId) -> bool {
+            node == 1
+        }
+    }
+
+    /// The reporter sees the plan, then each job start and end in
+    /// order, with its outcome and the output it buffered, including
+    /// a failed job's.
+    #[test]
+    fn reporter_sees_each_job_with_its_outcome() {
+        let pool = WorkerPool::new(1);
+        let mut reporter = RecordingReporter::default();
+        let result = pool.execute_with(&independent_dag(3), &CachingDispatcher, &mut reporter);
+        assert!(result.is_err());
+        assert_eq!(
+            reporter.events,
+            vec![
+                ("plan", 3, None),
+                ("started", 0, None),
+                ("finished", 0, Some(JobOutcome::Built)),
+                ("started", 1, None),
+                ("finished", 1, Some(JobOutcome::Cached)),
+                ("started", 2, None),
+                ("finished", 2, Some(JobOutcome::Failed)),
+            ]
+        );
+        assert_eq!(reporter.stderr, b"job 0;job 1;job 2;");
+    }
+
+    /// A job's diagnostics keep their own level and notes; the pool
+    /// only prefixes the message with the job label.
+    #[test]
+    fn job_diagnostics_keep_their_notes() {
+        struct DiagDispatcher;
+        impl JobDispatcher for DiagDispatcher {
+            fn dispatch(&self, _: NodeId, _: &mut Vec<u8>, _: &mut Vec<u8>) -> Result<()> {
+                Err(Error::Diagnostics(vec![
+                    Diagnostic::error("rustc failed").with_note("hint"),
+                ]))
+            }
+        }
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        match WorkerPool::new(1).execute(&independent_dag(1), &DiagDispatcher, &mut out, &mut err) {
+            Err(Error::Diagnostics(diags)) => {
+                assert_eq!(diags.len(), 1);
+                assert_eq!(diags[0].message, "node 0: rustc failed");
+                assert_eq!(diags[0].notes, vec!["hint".to_string()]);
             }
             other => panic!("expected Err(Diagnostics), got {other:?}"),
         }

@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 /// Builds the error for a rustc run that exited non-zero. Called with
-/// the process output and the rendered command line.
-pub(crate) type RustcFailDiag = dyn FnOnce(&Output, &str) -> Error;
+/// the process output; [`compile_and_cache`] adds the command line.
+pub(crate) type RustcFailDiag = dyn FnOnce(&Output) -> Error;
 
 /// Builds the error for a depfile that could not be read after a
 /// successful run.
@@ -129,18 +129,43 @@ pub(crate) fn compile_and_cache(
     };
 
     let mut cmd = builder.into_command();
+    // Added after `builder.hash()` on purpose: color changes only how
+    // diagnostics look, so switching between a terminal and a pipe
+    // must not invalidate the record. The recorded stderr may then
+    // hold escape codes; the CLI strips them when its stderr does not
+    // take color.
+    if ctx.color {
+        cmd.arg("--color=always");
+    }
     let started_at = std::time::SystemTime::now();
     let output = cmd.output().map_err(|e| Error::Io {
         path: rustc_path.clone(),
         source: e,
     })?;
-    if !output.status.success() {
-        return Err(rustc_fail(&output, &render_cmd()));
-    }
     // The worker pool prints the job's buffer atomically when it
-    // finishes, so parallel compiles never interleave. On failure the
-    // diagnostic carries stderr instead.
+    // finishes, so parallel compiles never interleave. A failed job's
+    // buffer is printed too, so rustc's errors appear where its
+    // warnings would, and the failure diagnostic only names the job
+    // and the command.
     stderr_sink.extend_from_slice(&output.stderr);
+    if !output.status.success() {
+        // The command runs to several kilobytes of paths, so it is
+        // shown under `-v` only, as Cargo does.
+        let note = if ctx.verbose {
+            format!("command: {}", render_cmd())
+        } else {
+            "rerun with -v to see the rustc command".to_string()
+        };
+        return Err(match rustc_fail(&output) {
+            Error::Diagnostics(mut diags) => {
+                if let Some(last) = diags.last_mut() {
+                    last.notes.push(note);
+                }
+                Error::Diagnostics(diags)
+            }
+            other => other,
+        });
+    }
 
     if let Some(post) = post_compile_step {
         post()?;

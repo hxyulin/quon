@@ -37,10 +37,8 @@ pub fn run(ctx: LayoutContext, check_mode: bool) -> Result<()> {
         }
         // Match the exit-code semantics of `cargo fmt --check`: a
         // non-empty unformatted list is a non-zero exit so CI gates
-        // can rely on it. Returning an anyhow Error here will cause
-        // main.rs to print a (now somewhat redundant) "Error:" prefix
-        // — that's still better than silently exiting 0 from a check
-        // that found drift.
+        // can rely on it. Returning an anyhow Error here makes main.rs
+        // print it as `error: ...`.
         return Err(anyhow::anyhow!(
             "{} crate(s) need formatting; run `gluon fmt` (without --check) to fix",
             summary.unformatted.len()

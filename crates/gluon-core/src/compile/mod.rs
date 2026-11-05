@@ -69,6 +69,11 @@ pub struct CompileCtx {
     pub store: FingerprintStore,
     /// Print why each node reruns (`gluon -v`).
     pub verbose: bool,
+    /// Ask rustc for colored diagnostics. rustc writes into a buffer,
+    /// so it never sees a terminal and would not color on its own; the
+    /// caller sets this when the stream the buffer ends up on takes
+    /// color.
+    pub color: bool,
 }
 
 impl CompileCtx {
@@ -86,6 +91,7 @@ impl CompileCtx {
             rustc_info,
             store,
             verbose: false,
+            color: false,
         }
     }
 

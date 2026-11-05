@@ -7,20 +7,23 @@
 
 mod cli;
 mod cmd;
+mod output;
 
 use anyhow::Result;
 use clap::Parser;
+use output::Shell;
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("Error: {e:?}");
+    let started = std::time::Instant::now();
+    let cli = cli::Cli::parse();
+    let mut shell = Shell::new(cli.color.into(), cli.quiet, cli.verbose, started);
+    if let Err(e) = run(cli, &mut shell) {
+        shell.error(&e);
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
-    let cli = cli::Cli::parse();
-
+fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     // External subcommands dispatch before building any context — they
     // may be invoked outside any gluon project, so they don't need a
     // project root or an evaluated build model.
@@ -89,7 +92,8 @@ fn run() -> Result<()> {
             gluon_core::DriverKind::Check,
         )?;
         ctx.ctx.verbose = cli.verbose;
-        return cmd::check::run(ctx, cli.jobs);
+        ctx.ctx.color = shell.color();
+        return cmd::check::run(ctx, cli.jobs, shell);
     }
     if matches!(&cli.command, cli::Command::Clippy(_)) {
         let mut ctx = cmd::build_context_for_driver(
@@ -99,7 +103,8 @@ fn run() -> Result<()> {
             gluon_core::DriverKind::Clippy,
         )?;
         ctx.ctx.verbose = cli.verbose;
-        return cmd::clippy::run(ctx, cli.jobs);
+        ctx.ctx.color = shell.color();
+        return cmd::clippy::run(ctx, cli.jobs, shell);
     }
 
     let mut ctx = cmd::build_context(
@@ -108,11 +113,12 @@ fn run() -> Result<()> {
         cli.config_file.as_deref(),
     )?;
     ctx.ctx.verbose = cli.verbose;
+    ctx.ctx.color = shell.color();
 
     match cli.command {
-        cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs),
+        cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell),
         cli::Command::Configure(args) => cmd::configure::run(ctx, args.output),
-        cli::Command::Run(args) => cmd::run::run(ctx, cli.jobs, args),
+        cli::Command::Run(args) => cmd::run::run(ctx, cli.jobs, args, shell),
         cli::Command::Check(_)
         | cli::Command::Clippy(_)
         | cli::Command::Clean(_)

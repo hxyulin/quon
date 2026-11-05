@@ -15,7 +15,8 @@ use super::qemu_cmd::{QemuInvocation, build_qemu_command};
 use super::resolve::{resolve_disk_source, resolve_qemu};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
-use crate::{build_with_workers, model::BootMode};
+use crate::scheduler::Reporter;
+use crate::{build_with_reporter, model::BootMode};
 use gluon_model::{BuildModel, EspSource, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -91,6 +92,7 @@ pub fn run(
     model: &BuildModel,
     resolved: &ResolvedConfig,
     opts: RunOptions,
+    reporter: &mut dyn Reporter,
 ) -> Result<ExitStatus> {
     // Step 1: build (skipped in dry-run or when --no-build is set).
     //
@@ -114,7 +116,9 @@ pub fn run(
                 .map(|n| n.get())
                 .unwrap_or(1)
         });
-        Some(build_with_workers(ctx, model, resolved, workers)?)
+        Some(build_with_reporter(
+            ctx, model, resolved, workers, reporter,
+        )?)
     } else {
         None
     };
