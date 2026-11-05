@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 const SYSROOT_CRATES: [&str; 3] = ["core", "compiler_builtins", "alloc"];
 
 /// Command hash of the sysroot node: everything that changes how the
-/// sysroot crates compile and is not a file input. The `v1` tag stands
+/// sysroot crates compile and is not a file input. The `v2` tag stands
 /// for the flags `build_sysroot_crate` passes; change it when they
 /// change, or the fast path keeps serving sysroots built the old way.
 fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] {
@@ -54,7 +54,7 @@ fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] {
         .unwrap_or_default();
     let panic = target.panic_strategy.map(|p| p.as_str()).unwrap_or("");
     hash_parts(
-        "gluon.sysroot.v1",
+        "gluon.sysroot.v2",
         &[
             target.spec.as_bytes(),
             &[u8::from(target.builtin)],
@@ -308,10 +308,19 @@ fn build_sysroot_crate(
     //     compiler_builtins` into this crate (otherwise we hit E0463
     //     "can't find crate for compiler_builtins" building itself).
     //   * `feature="mem"` makes the crate emit memcpy/memset/memmove/
-    //     memcmp so bare-metal targets without a libc link cleanly.
+    //     memcmp/strlen so bare-metal targets without a libc link
+    //     cleanly.
+    // We pass cfgs, not Cargo features, so the features that
+    // `compiler-builtins` implies in the crate's Cargo.toml must be
+    // listed too:
+    //   * `feature="unmangled-names"` gives those functions their C
+    //     names (`#[no_mangle]`). Without it they exist only under
+    //     mangled names, and the first `strlen` or `memcpy` call that
+    //     LLVM does not inline fails to link.
     if crate_name == "compiler_builtins" {
         builder
             .cfg("feature=\"compiler-builtins\"")
+            .cfg("feature=\"unmangled-names\"")
             .cfg("feature=\"mem\"");
     }
 
