@@ -899,7 +899,19 @@ impl ManifestCx<'_> {
             }
         }
 
-        let features = self.lower_features(m, &deps);
+        // A feature may name a dev-dependency (`syn` has `test =
+        // ["syn-test-suite/all-features"]`). A non-member's dev-deps are
+        // dropped above, so their names are kept for validation.
+        let dropped_dev: BTreeSet<&str> = if is_member {
+            BTreeSet::new()
+        } else {
+            std::iter::once(&m.dev_dependencies)
+                .chain(m.target.values().map(|t| &t.dev_dependencies))
+                .flat_map(|table| table.keys())
+                .map(String::as_str)
+                .collect()
+        };
+        let features = self.lower_features(m, &deps, &dropped_dev);
         let lints = if is_member {
             self.lower_lints(m)
         } else {
@@ -1276,10 +1288,13 @@ impl ManifestCx<'_> {
         Some(dep)
     }
 
+    /// `dropped_dev` names dev-dependencies left out of `deps`, which
+    /// `dep/feature` entries may still name.
     fn lower_features(
         &mut self,
         m: &TomlManifest,
         deps: &[Dependency],
+        dropped_dev: &BTreeSet<&str>,
     ) -> BTreeMap<String, Vec<FeatureEntry>> {
         let mut features: BTreeMap<String, Vec<FeatureEntry>> = BTreeMap::new();
         for (name, values) in &m.features {
@@ -1345,7 +1360,10 @@ impl ManifestCx<'_> {
                         "feature `{fname}` includes `dep:{d}`, but `{d}` is not an optional \
                          dependency"
                     )),
-                    FeatureValue::DepFeature { dep, .. } if !dep_names.contains(dep.as_str()) => {
+                    FeatureValue::DepFeature { dep, .. }
+                        if !dep_names.contains(dep.as_str())
+                            && !dropped_dev.contains(dep.as_str()) =>
+                    {
                         Some(format!(
                             "feature `{fname}` includes `{}`, but `{dep}` is not a dependency",
                             e.value

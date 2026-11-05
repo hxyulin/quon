@@ -373,6 +373,25 @@ fn vendored_registry_dependency_is_lowered() {
     assert_ne!(flags.metadata, unit_named(&other_units, "flags").metadata);
 }
 
+/// `syn` 2 has `test = ["syn-test-suite/all-features"]`, where
+/// `syn-test-suite` is a dev-dependency. Cargo accepts that, and so must
+/// Gluon, though it drops a registry package's dev-dependencies.
+#[test]
+fn registry_feature_may_name_a_dev_dependency() {
+    let ws = vendored_workspace("abc");
+    std::fs::write(
+        ws.path().join("vendor/flags-1.2.0/Cargo.toml"),
+        "[package]\nname = \"flags\"\nversion = \"1.2.0\"\nedition = \"2021\"\n\
+         [features]\ntest = [\"suite/all-features\"]\n\
+         [dev-dependencies.suite]\nversion = \"1\"\n",
+    )
+    .unwrap();
+    crate::manifest::sources::write_vendor_stamp(ws.path(), &ws.path().join("vendor")).unwrap();
+    let mut raw = root_a_vendored();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert!(raw.crates.lookup("flags").is_some());
+}
+
 #[test]
 fn vendored_mode_needs_a_current_stamp() {
     let ws = vendored_workspace("abc");
