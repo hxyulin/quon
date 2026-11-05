@@ -29,12 +29,11 @@ impl<'cfg> PartitionBuilder<'cfg> {
     /// Apply `f` to the targeted [`PartitionDef`] if this builder is `Valid`
     /// and the image/partition are reachable.
     fn modify<F: FnOnce(&mut PartitionDef)>(&mut self, f: F) {
-        if !self.state.is_duplicate() {
-            if let Some(img) = self.cfg.raw.images.get_mut(self.image_handle) {
-                if let Some(p) = img.partitions.get_mut(self.partition_index) {
-                    f(p);
-                }
-            }
+        if !self.state.is_duplicate()
+            && let Some(img) = self.cfg.raw.images.get_mut(self.image_handle)
+            && let Some(p) = img.partitions.get_mut(self.partition_index)
+        {
+            f(p);
         }
     }
 

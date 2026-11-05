@@ -480,10 +480,10 @@ fn workspace_stub_id<'a>(
     by_id: &BTreeMap<&str, &'a RawPackage>,
 ) -> Option<&'a str> {
     for id in workspace_members {
-        if let Some(pkg) = by_id.get(id.as_str()) {
-            if pkg.name == WORKSPACE_STUB_NAME {
-                return Some(id.as_str());
-            }
+        if let Some(pkg) = by_id.get(id.as_str())
+            && pkg.name == WORKSPACE_STUB_NAME
+        {
+            return Some(id.as_str());
         }
     }
     None

@@ -16,10 +16,10 @@ impl<'cfg> ProfileBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RawProfileDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(p) = self.cfg.raw.profiles.get_mut(*handle) {
-                f(p);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(p) = self.cfg.raw.profiles.get_mut(*handle)
+        {
+            f(p);
         }
     }
 

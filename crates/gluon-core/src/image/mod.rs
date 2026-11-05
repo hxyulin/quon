@@ -669,14 +669,14 @@ fn validate_layout(
     for r in raw_writes {
         let bytes = r.bytes.len() as u64;
         let sectors = bytes.div_ceil(SECTOR_SIZE);
-        if let Some(cap) = r.write.max_sectors {
-            if sectors > cap {
-                return Err(Error::Compile(format!(
-                    "image('{}') write_*_at(lba={}): payload occupies {} sectors but \
+        if let Some(cap) = r.write.max_sectors
+            && sectors > cap
+        {
+            return Err(Error::Compile(format!(
+                "image('{}') write_*_at(lba={}): payload occupies {} sectors but \
                      max_sectors={} was set ({} bytes / {} sector)",
-                    image.name, r.write.lba, sectors, cap, bytes, SECTOR_SIZE
-                )));
-            }
+                image.name, r.write.lba, sectors, cap, bytes, SECTOR_SIZE
+            )));
         }
         let end = r.write.lba + sectors;
         if end > total_sectors {

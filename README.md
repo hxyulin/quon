@@ -36,7 +36,7 @@ Rust build script.
 
 **Requirements:**
 
-- Rust nightly toolchain (1.85+) with the `rust-src` component
+- Rust nightly toolchain (1.99+) with the `rust-src` component
 - QEMU (for `gluon run`; not needed for just building)
 
 **Install:**

@@ -16,10 +16,10 @@ impl<'cfg> EspBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RawEspDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(e) = self.cfg.raw.esps.get_mut(*handle) {
-                f(e);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(e) = self.cfg.raw.esps.get_mut(*handle)
+        {
+            f(e);
         }
     }
 

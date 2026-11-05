@@ -15,10 +15,10 @@ impl<'cfg> RuleBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RuleDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(r) = self.cfg.raw.rules.get_mut(*handle) {
-                f(r);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(r) = self.cfg.raw.rules.get_mut(*handle)
+        {
+            f(r);
         }
     }
 

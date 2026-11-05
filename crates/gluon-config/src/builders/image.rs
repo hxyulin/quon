@@ -18,10 +18,10 @@ pub struct ImageBuilder<'cfg> {
 impl<'cfg> ImageBuilder<'cfg> {
     /// Apply `f` to the [`ImageDef`] if this builder is `Valid`.
     fn modify<F: FnOnce(&mut ImageDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(img) = self.cfg.raw.images.get_mut(*handle) {
-                f(img);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(img) = self.cfg.raw.images.get_mut(*handle)
+        {
+            f(img);
         }
     }
 

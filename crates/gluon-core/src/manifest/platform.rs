@@ -142,11 +142,10 @@ pub fn probe(
 ) -> Result<TargetPlatform> {
     let key = cache_key(rustc, target)?;
     let mut cache = cache_path.map(load_cache).unwrap_or_default();
-    if let Some(entry) = cache.entries.get(&key) {
-        if let Ok(p) = TargetPlatform::from_cfg_lines(&entry.name, entry.lines.iter().map(|s| &**s))
-        {
-            return Ok(p);
-        }
+    if let Some(entry) = cache.entries.get(&key)
+        && let Ok(p) = TargetPlatform::from_cfg_lines(&entry.name, entry.lines.iter().map(|s| &**s))
+    {
+        return Ok(p);
     }
 
     let lines = run_print_cfg(rustc, target)?;

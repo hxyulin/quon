@@ -342,10 +342,10 @@ pub fn build_layout_context(
 ///
 /// Returns `None` only if the model declares no profiles at all.
 fn default_profile(model: &BuildModel) -> Option<&str> {
-    if let Some(project) = model.project.as_ref() {
-        if let Some(name) = project.default_profile.as_deref() {
-            return Some(name);
-        }
+    if let Some(project) = model.project.as_ref()
+        && let Some(name) = project.default_profile.as_deref()
+    {
+        return Some(name);
     }
     model.profiles.names().next().map(|(name, _)| name)
 }

@@ -21,10 +21,10 @@ impl<'cfg> BuildStepBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RawBuildStepDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(b) = self.cfg.raw.build_steps.get_mut(*handle) {
-                f(b);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(b) = self.cfg.raw.build_steps.get_mut(*handle)
+        {
+            f(b);
         }
     }
 

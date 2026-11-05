@@ -28,10 +28,10 @@ impl<'cfg> ConfigOptionBuilder<'cfg> {
 
     /// Apply `f` to the `ConfigOptionDef` if this builder is not a duplicate.
     fn modify<F: FnOnce(&mut ConfigOptionDef)>(&mut self, f: F) {
-        if let Some(h) = self.handle() {
-            if let Some(opt) = self.cfg.raw.config_options.get_mut(h) {
-                f(opt);
-            }
+        if let Some(h) = self.handle()
+            && let Some(opt) = self.cfg.raw.config_options.get_mut(h)
+        {
+            f(opt);
         }
     }
 

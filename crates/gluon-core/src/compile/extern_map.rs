@@ -223,15 +223,15 @@ pub fn resolve_artifact_by_name<'a>(
     artifacts: &'a dyn ArtifactLookup,
     name: &str,
 ) -> Option<&'a Path> {
-    if let Some(h) = model.crates.lookup(name) {
-        if let Some(p) = artifacts.get(h) {
-            return Some(p);
-        }
+    if let Some(h) = model.crates.lookup(name)
+        && let Some(p) = artifacts.get(h)
+    {
+        return Some(p);
     }
-    if let Some(h) = model.build_steps.lookup(name) {
-        if let Some(p) = artifacts.get_build_step(h) {
-            return Some(p);
-        }
+    if let Some(h) = model.build_steps.lookup(name)
+        && let Some(p) = artifacts.get_build_step(h)
+    {
+        return Some(p);
     }
     None
 }

@@ -22,10 +22,10 @@ impl<'cfg> ProjectBuilder<'cfg> {
     /// the model is interned; until then the value is recorded as a
     /// raw string and the validator catches dangling references.
     pub fn default_profile(self, name: &str) -> Self {
-        if !self.state.is_duplicate() {
-            if let Some(p) = self.cfg.raw.project.as_mut() {
-                p.default_profile = Some(name.into());
-            }
+        if !self.state.is_duplicate()
+            && let Some(p) = self.cfg.raw.project.as_mut()
+        {
+            p.default_profile = Some(name.into());
         }
         self
     }

@@ -426,15 +426,15 @@ fn spawn_and_wait(invocation: QemuInvocation) -> Result<ExitStatus> {
                     let _ = child.wait();
                     return Err(Error::KilledBySignal { signal: sig });
                 }
-                if let Some(dl) = deadline {
-                    if Instant::now() >= dl {
-                        // Kill + reap. Ignore errors: the child may
-                        // have exited on its own between the try_wait
-                        // and the kill, which is harmless.
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(Error::QemuTimeout);
-                    }
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl
+                {
+                    // Kill + reap. Ignore errors: the child may
+                    // have exited on its own between the try_wait
+                    // and the kill, which is harmless.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(Error::QemuTimeout);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }

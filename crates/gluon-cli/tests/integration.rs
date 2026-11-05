@@ -703,16 +703,16 @@ fn clippy_driver_available() -> bool {
     }
     // Sibling of rustc — the rustup install layout puts both in the
     // same toolchain bin dir.
-    if let Ok(info) = gluon_core::RustcInfo::probe() {
-        if let Some(parent) = info.rustc_path.parent() {
-            let cand = parent.join(if cfg!(windows) {
-                "clippy-driver.exe"
-            } else {
-                "clippy-driver"
-            });
-            if cand.is_file() {
-                return true;
-            }
+    if let Ok(info) = gluon_core::RustcInfo::probe()
+        && let Some(parent) = info.rustc_path.parent()
+    {
+        let cand = parent.join(if cfg!(windows) {
+            "clippy-driver.exe"
+        } else {
+            "clippy-driver"
+        });
+        if cand.is_file() {
+            return true;
         }
     }
     // Final fallback: bare-name lookup via spawning `clippy-driver -V`.

@@ -106,28 +106,24 @@ pub fn resolve(
         let mut value =
             coerce(&opt.default, opt, name, &mut diags).unwrap_or_else(|| off_value_for(opt));
 
-        if let Some(preset_map) = preset_overrides {
-            if let Some(pv) = preset_map.get(name) {
-                if let Some(coerced) = coerce_with_label(
-                    pv,
-                    opt,
-                    name,
-                    &mut diags,
-                    &format!("preset '{}'", flattened.preset.as_deref().unwrap_or("?")),
-                ) {
-                    value = coerced;
-                }
-            }
+        if let Some(preset_map) = preset_overrides
+            && let Some(pv) = preset_map.get(name)
+            && let Some(coerced) = coerce_with_label(
+                pv,
+                opt,
+                name,
+                &mut diags,
+                &format!("preset '{}'", flattened.preset.as_deref().unwrap_or("?")),
+            )
+        {
+            value = coerced;
         }
 
-        if let Some(overrides) = option_overrides {
-            if let Some(ov) = overrides.get(name) {
-                if let Some(coerced) =
-                    coerce_with_label(ov, opt, name, &mut diags, "config override")
-                {
-                    value = coerced;
-                }
-            }
+        if let Some(overrides) = option_overrides
+            && let Some(ov) = overrides.get(name)
+            && let Some(coerced) = coerce_with_label(ov, opt, name, &mut diags, "config override")
+        {
+            value = coerced;
         }
 
         resolved_options.insert(name.clone(), value);
@@ -332,10 +328,10 @@ pub fn resolve(
     let mut resolved_crates: Vec<ResolvedCrateRef> = Vec::new();
     for (crate_handle, krate) in model.crates.iter() {
         // Filter to reachable crates when boot_binary is set.
-        if let Some(ref set) = reachable {
-            if !set.contains(&crate_handle) {
-                continue;
-            }
+        if let Some(ref set) = reachable
+            && !set.contains(&crate_handle)
+        {
+            continue;
         }
         let Some(group) = model.groups.get(krate.group) else {
             continue;
@@ -519,10 +515,10 @@ fn reachable_crates(
             queue.push_back(step.runner);
         }
         for input in step.inputs.values() {
-            if let BuildStepInput::Crate { handle: ih } = input {
-                if visited.insert(*ih) {
-                    queue.push_back(*ih);
-                }
+            if let BuildStepInput::Crate { handle: ih } = input
+                && visited.insert(*ih)
+            {
+                queue.push_back(*ih);
             }
         }
     }
@@ -539,12 +535,11 @@ fn reachable_crates(
     for (_h, image) in model.images.iter() {
         let mut seed_entries = |entries: &[gluon_model::ImageEntry]| {
             for entry in entries {
-                if let ImageSource::Crate(name) = &entry.source {
-                    if let Some(ch) = model.crates.lookup(name) {
-                        if visited.insert(ch) {
-                            queue.push_back(ch);
-                        }
-                    }
+                if let ImageSource::Crate(name) = &entry.source
+                    && let Some(ch) = model.crates.lookup(name)
+                    && visited.insert(ch)
+                {
+                    queue.push_back(ch);
                 }
             }
         };
@@ -553,12 +548,11 @@ fn reachable_crates(
             seed_entries(&partition.entries);
         }
         for rw in &image.raw_writes {
-            if let RawSource::Crate { name } = &rw.source {
-                if let Some(ch) = model.crates.lookup(name) {
-                    if visited.insert(ch) {
-                        queue.push_back(ch);
-                    }
-                }
+            if let RawSource::Crate { name } = &rw.source
+                && let Some(ch) = model.crates.lookup(name)
+                && visited.insert(ch)
+            {
+                queue.push_back(ch);
             }
         }
     }
@@ -574,10 +568,10 @@ fn reachable_crates(
         // a `Handle<CrateDef>` for selection — they are pulled in via the
         // vendor pipeline, not via the crate-graph BFS.
         for dep in krate.deps.values() {
-            if let DepResolution::Project(dh) = dep.resolution {
-                if visited.insert(dh) {
-                    queue.push_back(dh);
-                }
+            if let DepResolution::Project(dh) = dep.resolution
+                && visited.insert(dh)
+            {
+                queue.push_back(dh);
             }
         }
         // Follow a manifest unit's build-dependencies, which its build
@@ -588,18 +582,18 @@ fn reachable_crates(
             .filter_map(|c| c.build_script.as_ref())
             .flat_map(|s| s.deps.values());
         for dep_name in build_deps {
-            if let Some(dh) = model.crates.lookup(dep_name) {
-                if visited.insert(dh) {
-                    queue.push_back(dh);
-                }
+            if let Some(dh) = model.crates.lookup(dep_name)
+                && visited.insert(dh)
+            {
+                queue.push_back(dh);
             }
         }
         // Follow artifact_deps (ordering-only edges, e.g. bootloader → kernel).
         for dep_name in &krate.artifact_deps {
-            if let Some(dh) = model.crates.lookup(dep_name) {
-                if visited.insert(dh) {
-                    queue.push_back(dh);
-                }
+            if let Some(dh) = model.crates.lookup(dep_name)
+                && visited.insert(dh)
+            {
+                queue.push_back(dh);
             }
         }
     }

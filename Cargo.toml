@@ -13,7 +13,7 @@ version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hxyulin/gluon"
-rust-version = "1.85"
+rust-version = "1.99"
 keywords = ["build-system", "bare-metal", "kernel", "rustc", "no-std"]
 categories = ["development-tools::build-utils", "embedded", "no-std"]
 

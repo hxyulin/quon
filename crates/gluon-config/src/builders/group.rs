@@ -17,10 +17,10 @@ impl<'cfg> GroupBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RawGroupDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(g) = self.cfg.raw.groups.get_mut(*handle) {
-                f(g);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(g) = self.cfg.raw.groups.get_mut(*handle)
+        {
+            f(g);
         }
     }
 
@@ -188,10 +188,9 @@ impl<'cfg> GroupBuilder<'cfg> {
             state: group_handle,
             ..
         } = &self.state
+            && let Some(g) = self.cfg.raw.groups.get_mut(*group_handle)
         {
-            if let Some(g) = self.cfg.raw.groups.get_mut(*group_handle) {
-                g.crates.push(crate_name.to_string());
-            }
+            g.crates.push(crate_name.to_string());
         }
 
         let state = BuilderState::Valid {

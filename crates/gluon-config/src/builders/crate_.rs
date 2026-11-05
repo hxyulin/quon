@@ -16,10 +16,10 @@ impl<'cfg> CrateBuilder<'cfg> {
     /// Uses the captured handle directly — no per-call name lookup or string
     /// allocation.
     fn modify<F: FnOnce(&mut RawCrateDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(c) = self.cfg.raw.crates.get_mut(*handle) {
-                f(c);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(c) = self.cfg.raw.crates.get_mut(*handle)
+        {
+            f(c);
         }
     }
 

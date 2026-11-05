@@ -14,10 +14,10 @@ pub struct DependencyBuilder<'cfg> {
 
 impl<'cfg> DependencyBuilder<'cfg> {
     fn modify<F: FnOnce(&mut ExternalDepDef)>(&mut self, f: F) {
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(d) = self.cfg.raw.external_deps.get_mut(*handle) {
-                f(d);
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(d) = self.cfg.raw.external_deps.get_mut(*handle)
+        {
+            f(d);
         }
     }
 
@@ -66,13 +66,12 @@ impl<'cfg> DependencyBuilder<'cfg> {
             return self;
         }
         let name = self.state.name().to_string();
-        if let BuilderState::Valid { state: handle, .. } = &self.state {
-            if let Some(d) = self.cfg.raw.external_deps.get_mut(*handle) {
-                if let DepSource::Git { reference, .. } = &mut d.source {
-                    *reference = new_ref;
-                    return self;
-                }
-            }
+        if let BuilderState::Valid { state: handle, .. } = &self.state
+            && let Some(d) = self.cfg.raw.external_deps.get_mut(*handle)
+            && let DepSource::Git { reference, .. } = &mut d.source
+        {
+            *reference = new_ref;
+            return self;
         }
         // Fall through: not a Git source. Mirror the engine's wording.
         self.cfg.diagnostics.push(ConfigError::new(format!(
