@@ -8,6 +8,7 @@
 //! considered semi-internal and may be reshaped between MVP releases.
 
 pub mod analyzer;
+pub mod build_script;
 pub mod cache;
 pub mod compile;
 pub mod config;
