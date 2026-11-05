@@ -413,26 +413,246 @@ fn inactive_registry_dependency_is_ignored() {
     assert!(raw.crates.lookup("a").is_some());
 }
 
+/// Member `a` (lib and bin) has a build script with build-dep `helper`
+/// and `links = "foo"`.
+fn scripted_workspace() -> tempfile::TempDir {
+    workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"helper\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             links = \"foo\"\n[build-dependencies]\nhelper = { path = \"../helper\" }\n",
+        ),
+        ("a/src/lib.rs", ""),
+        ("a/src/main.rs", "fn main() {}"),
+        ("a/build.rs", "fn main() {}"),
+        (
+            "helper/Cargo.toml",
+            "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("helper/src/lib.rs", ""),
+    ])
+}
+
+/// The script's build-dep is reachable from the boot binary through
+/// the script alone, so it is in the build.
+fn scripted_raw() -> RawBuildModel {
+    let mut cfg = Config::new();
+    cfg.project("demo", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("dev").target(t).boot_binary("a");
+    cfg.cargo_workspace(".");
+    cfg.group("k").target(t).package("a");
+    assert!(cfg.diagnostics().is_empty(), "{:?}", cfg.diagnostics());
+    cfg.into_raw()
+}
+
 #[test]
-fn build_script_and_links_are_rejected() {
+fn build_script_is_carried_by_each_owner() {
+    let ws = scripted_workspace();
+    let mut raw = scripted_raw();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    for owner in ["a", "a@lib"] {
+        let def = raw
+            .crates
+            .lookup(owner)
+            .and_then(|h| raw.crates.get(h))
+            .expect(owner);
+        let script = def.cargo.as_ref().unwrap().build_script.as_ref();
+        assert_eq!(
+            script,
+            Some(&CargoBuildScriptDef {
+                unit: "a@build-script".into(),
+                path: "build.rs".into(),
+                edition: "2021".into(),
+                deps: BTreeMap::from([("helper".into(), "helper".into())]),
+                links: Some("foo".into()),
+            }),
+            "{owner}"
+        );
+    }
+    // The script is not a crate; its build-dep is a host crate.
+    assert!(raw.crates.lookup("a@build-script").is_none());
+    let helper = raw
+        .crates
+        .lookup("helper")
+        .and_then(|h| raw.crates.get(h))
+        .unwrap();
+    assert_eq!(helper.group, "cargo:host");
+}
+
+#[test]
+fn build_script_is_one_host_unit_with_a_run_per_owner() {
+    use crate::unit::{DepTarget, Platform, UnitProfile};
+    let ws = scripted_workspace();
+    let units = units_at(scripted_raw(), ws.path());
+    let script = unit_named(&units, "a@build-script");
+    assert!(script.is_build_script);
+    assert_eq!(script.crate_name, "build_script_build");
+    assert_eq!(script.platform, Platform::Host);
+    assert_eq!(script.profile, UnitProfile::Host);
+    assert!(!script.settings.cap_lints);
+    assert!(script.src.ends_with("a/build.rs"), "{:?}", script.src);
+    let env = &script.settings.cargo.as_ref().unwrap().env;
+    assert_eq!(env["CARGO_CRATE_NAME"], "build_script_build");
+    assert_eq!(env["CARGO_PKG_NAME"], "a");
+
+    let (helper_id, helper) = units
+        .iter()
+        .find(|(_, u)| u.name == "helper")
+        .expect("helper is in the build");
+    assert_eq!(helper.platform, Platform::Host);
+    assert_eq!(helper.profile, UnitProfile::Host);
+    assert_eq!(script.deps.len(), 1);
+    assert_eq!(script.deps[0].extern_name, "helper");
+    assert_eq!(script.deps[0].target, DepTarget::Unit(helper_id));
+
+    let runs: Vec<_> = units.runs().map(|(_, r)| r.clone()).collect();
+    let owners: BTreeSet<String> = runs
+        .iter()
+        .map(|r| units.get(r.owner).name.clone())
+        .collect();
+    assert_eq!(owners, BTreeSet::from(["a".into(), "a@lib".into()]));
+    let script_ids: BTreeSet<_> = runs.iter().map(|r| r.script).collect();
+    assert_eq!(script_ids.len(), 1, "owners share one compile");
+    for r in &runs {
+        assert_eq!(r.package.name, "a");
+        assert_eq!(r.package.version, "0.1.0");
+        assert_eq!(r.package.links.as_deref(), Some("foo"));
+        assert!(r.package.manifest_dir.ends_with("a"));
+        assert!(r.package.manifest_path.ends_with("a/Cargo.toml"));
+    }
+}
+
+#[test]
+fn shared_links_value_is_rejected() {
+    let ws = workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             links = \"foo\"\n[dependencies]\nb = { path = \"../b\" }\n",
+        ),
+        ("a/src/lib.rs", ""),
+        ("a/build.rs", "fn main() {}"),
+        (
+            "b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             links = \"foo\"\n",
+        ),
+        ("b/src/lib.rs", ""),
+        ("b/build.rs", "fn main() {}"),
+    ]);
+    let err = expand_err(&mut root_a(), ws.path());
+    assert!(
+        err.contains("packages `a`, `b` all set `links = \"foo\"` for x86_64-unknown-none"),
+        "{err}"
+    );
+}
+
+#[test]
+fn root_crate_type_needs_a_bin_target() {
     let ws = workspace(&[
         ("Cargo.toml", WS),
         (
             "a/Cargo.toml",
-            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
-             links = \"foo\"\n",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         ),
         ("a/src/lib.rs", ""),
-        ("a/build.rs", "fn main() {}"),
     ]);
-    let err = expand_err(&mut root_a(), ws.path());
+    let mut raw = raw_model(|cfg, t| {
+        cfg.cargo_workspace(".");
+        cfg.group("k")
+            .target(t)
+            .package("a")
+            .crate_type(CrateType::RawBinary);
+    });
+    let err = expand_err(&mut raw, ws.path());
     assert!(
-        err.contains("package `a` has a build script, which Gluon does not run yet"),
+        err.contains(
+            "package root 'a' has crate type RawBinary in gluon.rs, but package `a` has no bin \
+             target"
+        ),
         "{err}"
     );
-    assert!(
-        err.contains("package `a` sets `links = \"foo\"`, which Gluon does not support"),
-        "{err}"
+    assert!(err.contains("a/Cargo.toml"), "{err}");
+}
+
+/// A path lib used by the kernel and by a proc macro is built twice:
+/// once per platform, with its own hash and paths. The unit table
+/// needs nothing special for it.
+#[test]
+fn path_crate_on_host_and_target_is_two_units() {
+    use crate::unit::Platform;
+    let ws = workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"pm\", \"shared\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [dependencies]\npm = { path = \"../pm\" }\nshared = { path = \"../shared\" }\n",
+        ),
+        ("a/src/lib.rs", ""),
+        (
+            "pm/Cargo.toml",
+            "[package]\nname = \"pm\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\
+             [lib]\nproc-macro = true\n[dependencies]\nshared = { path = \"../shared\" }\n",
+        ),
+        ("pm/src/lib.rs", ""),
+        (
+            "shared/Cargo.toml",
+            "[package]\nname = \"shared\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("shared/src/lib.rs", ""),
+    ]);
+    let units = units_at(root_a(), ws.path());
+    let target = unit_named(&units, "shared");
+    let host = unit_named(&units, "shared@host");
+    assert!(matches!(target.platform, Platform::Cross(_)));
+    assert_eq!(host.platform, Platform::Host);
+    assert_ne!(target.metadata, host.metadata);
+
+    let (model, resolved) = {
+        let mut raw = root_a();
+        expand_at(&mut raw, ws.path()).unwrap();
+        let (model, _) = gluon_model::intern(raw);
+        let resolved = crate::config::resolve(&model, "dev", None, ws.path(), None).unwrap();
+        (model, resolved)
+    };
+    let layout = BuildLayout::new(ws.path().join("build"), "demo");
+    let id = |name: &str| {
+        units
+            .iter()
+            .find(|(_, u)| u.name == name)
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    let path = |name: &str| {
+        units
+            .paths(id(name), &layout, &model, &resolved)
+            .unwrap()
+            .output_path
+    };
+    assert_ne!(path("shared"), path("shared@host"));
+    let key = |name: &str| {
+        units
+            .cache_key(id(name), &layout, &model, &resolved)
+            .unwrap()
+    };
+    assert_ne!(key("shared"), key("shared@host"));
+    // The proc macro links the host copy.
+    let pm = unit_named(&units, "pm");
+    assert_eq!(
+        pm.deps[0].target,
+        crate::unit::DepTarget::Unit(id("shared@host"))
     );
 }
 

@@ -115,6 +115,7 @@ pub(crate) fn needs_lint_pass(ctx: &CompileCtx, unit: &BuildUnit) -> bool {
     ctx.driver() == DriverKind::Clippy
         && unit.settings.always_rustc
         && matches!(unit.origin, UnitOrigin::Crate(_))
+        && !unit.is_build_script
 }
 
 fn build_command(
@@ -275,7 +276,10 @@ fn build_command(
 
     // `artifact_env`: the same resolution the analyzer uses, so `env!`
     // resolves identically under rustc and rust-analyzer.
-    if let UnitOrigin::Crate(h) = unit.origin {
+    // A manifest build script has its owner's origin, not its env.
+    if let UnitOrigin::Crate(h) = unit.origin
+        && !unit.is_build_script
+    {
         let def = model.crates.get(h).ok_or_else(|| {
             Error::Compile(format!("crate handle {h:?} not found in build model"))
         })?;

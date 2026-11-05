@@ -22,8 +22,22 @@
 //! Edges come from the manifest. The crate's [`CargoUnitDef`] carries
 //! what rustc needs beyond a declared crate: the lib or bin crate name,
 //! the package identity (with the `Cargo.lock` checksum for registry
-//! packages), declared features for `--check-cfg`, lints, and the
-//! `CARGO_*` environment.
+//! packages), declared features for `--check-cfg`, lints, the `CARGO_*`
+//! environment, and the build script that runs for the unit.
+//!
+//! ### Build scripts
+//!
+//! The resolver's [`UnitKind::BuildScript`] units do not become crates.
+//! Each lib, proc-macro or bin unit of a package with a build script
+//! carries a [`CargoBuildScriptDef`] instead: the script's unit name
+//! (owners that compile it identically share it), source, edition,
+//! `links`, and its build-dependencies as names of host crates. Unit
+//! lowering (`crate::unit::lower`) turns it into a script unit and one
+//! run per owner, as it does for `cfg.dependency()` crates. The run's
+//! environment is assembled when the run is dispatched, from the
+//! owner's features and platform, so the resolver's
+//! [`BuildScriptRun::env`](super::resolve::BuildScriptRun) is not used
+//! here; it holds the same values.
 //!
 //! ### Registry sources
 //!
@@ -35,9 +49,11 @@
 //!
 //! ### What is rejected
 //!
-//! Build scripts and `links` (until build-script support lands), lib
-//! crate types other than one of `lib`, `rlib` or `staticlib`, a root in
-//! a `no_sysroot` group that has dependencies, a crate declared with
+//! Two packages with the same `links` value in one domain, a root whose
+//! `gluon.rs` crate type (`Bin` or `RawBinary`) the manifest does not
+//! back with a bin target, lib crate types other than one of `lib`,
+//! `rlib` or `staticlib`, a root in a `no_sysroot` group that has
+//! dependencies, a crate declared with
 //! `group.add` that depends on a manifest unit or lives in a workspace
 //! member's directory (it would be described twice), and unit names that
 //! collide with declared crates.
@@ -55,8 +71,8 @@ use super::workspace::{Package, PackageIdx, PackageSet, PackageSource, load_work
 use crate::compile::RustcInfo;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    Arena, CargoLint, CargoPackageDef, CargoPackageSource, CargoUnitDef, CrateType, RawBuildModel,
-    RawCrateDef, RawDepDef, RawGroupDef,
+    Arena, CargoBuildScriptDef, CargoLint, CargoPackageDef, CargoPackageSource, CargoUnitDef,
+    CrateType, RawBuildModel, RawCrateDef, RawDepDef, RawGroupDef,
 };
 use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
@@ -259,6 +275,11 @@ pub fn expand_with(
 
     let mut lowered: Vec<RawCrateDef> = Vec::with_capacity(graph.units.len());
     for u in &graph.units {
+        // A script is compiled by unit lowering from its owners'
+        // `CargoBuildScriptDef`; see the module docs.
+        if u.kind == UnitKind::BuildScript {
+            continue;
+        }
         let pkg = &graph.packages[u.package];
         let root = if u.is_root {
             root_of(u.package, &u.domain)
@@ -275,7 +296,11 @@ pub fn expand_with(
                     .map(str::to_string),
             },
         };
-        match lower_unit(u, pkg, source, &names, root, project_root) {
+        let script = u
+            .build_script
+            .as_ref()
+            .map(|run| build_script_def(&graph, run.script, &names));
+        match lower_unit(u, pkg, source, &names, root, project_root, script) {
             Ok(def) => lowered.push(def),
             Err(d) => errors.push(d),
         }
@@ -288,26 +313,58 @@ pub fn expand_with(
     Ok(warnings)
 }
 
-/// Report what stage 3 cannot build: build scripts, `links`, lib crate
-/// types, and dependencies of `no_sysroot` roots.
+/// Report what Gluon cannot build: two packages sharing a `links` value
+/// in one domain, a root crate type the manifest does not back, and
+/// dependencies of `no_sysroot` roots. Lib crate types are checked when
+/// a unit is lowered.
 fn check_unsupported(graph: &UnitGraph, roots: &[RootInfo], errors: &mut Vec<Diagnostic>) {
-    let active: BTreeSet<PackageIdx> = graph.units.iter().map(|u| u.package).collect();
-    for &p in &active {
-        let pkg = &graph.packages[p];
-        if let Some(script) = &pkg.build_script {
+    // Cargo rejects this too: `DEP_<LINKS>_*` and the native library
+    // would be ambiguous.
+    let mut links: BTreeMap<(&Domain, &str), BTreeSet<PackageIdx>> = BTreeMap::new();
+    for u in graph
+        .units
+        .iter()
+        .filter(|u| u.kind != UnitKind::BuildScript)
+    {
+        if let Some(l) = &graph.packages[u.package].links {
+            links
+                .entry((&u.domain, l.as_str()))
+                .or_default()
+                .insert(u.package);
+        }
+    }
+    for ((domain, value), packages) in &links {
+        if packages.len() > 1 {
+            let names: Vec<String> = packages
+                .iter()
+                .map(|&p| format!("`{}`", graph.packages[p].name()))
+                .collect();
+            errors.push(Diagnostic::error(format!(
+                "packages {} all set `links = \"{value}\"` for {domain}; only one package \
+                 may link a native library",
+                names.join(", ")
+            )));
+        }
+    }
+    for r in roots {
+        let pkg = &graph.packages[r.package];
+        let wants_bin = matches!(r.def.crate_type, CrateType::Bin | CrateType::RawBinary);
+        if wants_bin && pkg.bins.is_empty() {
             errors.push(
                 Diagnostic::error(format!(
-                    "package `{}` has a build script, which Gluon does not run yet",
+                    "package root '{}' has crate type {:?} in gluon.rs, but package `{}` has \
+                     no bin target",
+                    r.def.name,
+                    r.def.crate_type,
                     pkg.name()
                 ))
-                .with_note(format!("build script: {}", script.display())),
+                .with_optional_span(r.def.span.clone())
+                .with_note(format!(
+                    "add a `[[bin]]` or `src/main.rs` to {}, or remove `crate_type` from \
+                     gluon.rs",
+                    pkg.manifest_path.display()
+                )),
             );
-        }
-        if let Some(links) = &pkg.links {
-            errors.push(Diagnostic::error(format!(
-                "package `{}` sets `links = \"{links}\"`, which Gluon does not support",
-                pkg.name()
-            )));
         }
     }
     for r in roots.iter().filter(|r| r.no_sysroot) {
@@ -453,6 +510,32 @@ fn lib_crate_type(
     }
 }
 
+/// The build script `script` (a [`UnitKind::BuildScript`] unit) as its
+/// owners carry it.
+fn build_script_def(graph: &UnitGraph, script: usize, names: &[String]) -> CargoBuildScriptDef {
+    let s = &graph.units[script];
+    let pkg = &graph.packages[s.package];
+    let path = pkg
+        .build_script
+        .as_ref()
+        .expect("build-script units come from a package with a build script");
+    CargoBuildScriptDef {
+        unit: names[script].clone(),
+        path: path
+            .strip_prefix(pkg.manifest_dir())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned(),
+        edition: pkg.edition.clone(),
+        deps: s
+            .deps
+            .iter()
+            .map(|d| (d.extern_name.clone(), names[d.unit].clone()))
+            .collect(),
+        links: pkg.links.clone(),
+    }
+}
+
 /// Lower one unit to a crate definition.
 fn lower_unit(
     u: &super::resolve::Unit,
@@ -461,6 +544,7 @@ fn lower_unit(
     names: &[String],
     root: Option<&RootInfo>,
     project_root: &Path,
+    build_script: Option<CargoBuildScriptDef>,
 ) -> std::result::Result<RawCrateDef, Diagnostic> {
     let dir = pkg.manifest_dir();
     let (crate_type, src, edition, rustc_name, bin) = match &u.kind {
@@ -493,7 +577,7 @@ fn lower_unit(
         }
         other => {
             // The resolver makes test units only in test mode (stage 6),
-            // and build scripts are rejected before lowering.
+            // and build-script units are skipped by the caller.
             return Err(Diagnostic::error(format!(
                 "package `{}`: {other} units are not supported",
                 pkg.name()
@@ -593,6 +677,7 @@ fn lower_unit(
             check_cfg,
             lints,
             env,
+            build_script,
         }),
         ..Default::default()
     };

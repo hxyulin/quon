@@ -407,6 +407,7 @@ pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNo
                         out.extend(prev.map(DagNode::Rule));
                         for (id, unit) in units.iter() {
                             if let UnitOrigin::Crate(h) = unit.origin
+                                && !unit.is_build_script
                                 && model
                                     .crates
                                     .get(h)

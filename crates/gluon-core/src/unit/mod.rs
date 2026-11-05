@@ -8,11 +8,11 @@
 //! - every crate in `ResolvedConfig::crates` (declared in `gluon.rs`),
 //! - every build in the [`VendorBuildContext`] (`cfg.dependency()`
 //!   crates compiled for a cross target, plus their host proc macros).
-//! - the build script of every vendored crate that has one: a host
-//!   executable unit, plus one [`ScriptRun`] per owning unit. Owners
-//!   whose script would compile identically (same package, features
-//!   and build-deps, such as a crate built for host and target) share
-//!   one script unit.
+//! - the build script of every vendored crate and every manifest unit
+//!   that has one: a host executable unit, plus one [`ScriptRun`] per
+//!   owning unit. Owners whose script would compile identically (same
+//!   package, features and build-deps, such as a crate built for host
+//!   and target) share one script unit.
 //!
 //! The scheduler has one compile node per unit, and the command builder
 //! reads a unit instead of a `CrateDef` or a `VendorCrateBuild`, so both
@@ -26,8 +26,8 @@
 //!
 //! Cross units use the active profile. Host units are split:
 //!
-//! - Proc macros, every vendored host unit, and every host unit they
-//!   depend on use the fixed host profile ([`HOST_OPT_LEVEL`],
+//! - Proc macros, build scripts, every vendored host unit, and every
+//!   host unit they depend on use the fixed host profile ([`HOST_OPT_LEVEL`],
 //!   [`HOST_DEBUG_INFO`]). Switching between `dev` and `release` does
 //!   not rebuild them, and their output directory is
 //!   profile-independent. They are compiled with plain rustc and full
@@ -112,7 +112,11 @@ pub struct ScriptRun {
 /// Where a unit came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnitOrigin {
-    /// A crate declared in `gluon.rs`.
+    /// A crate declared in `gluon.rs` or lowered from a manifest. The
+    /// build-script unit of a manifest package carries the handle of its
+    /// first owner, and is not that crate: check
+    /// [`BuildUnit::is_build_script`] before reading the crate's
+    /// settings.
     Crate(Handle<CrateDef>),
     /// A `cfg.dependency()` crate from the cross vendor pipeline.
     Vendor(VendorBuildId),
@@ -896,7 +900,13 @@ pub fn lower(
         });
     }
 
-    let runs = lower_vendor_scripts(&mut units, vendor_ctx, &unit_of_vendor)?;
+    let mut runs = lower_vendor_scripts(&mut units, vendor_ctx, &unit_of_vendor)?;
+    runs.extend(lower_manifest_scripts(
+        &mut units,
+        model,
+        resolved,
+        &unit_of_crate,
+    )?);
 
     uniquify_vendor_names(&mut units, model);
     assign_host_profile(&mut units);
@@ -1017,6 +1027,124 @@ fn lower_vendor_scripts(
         });
     }
     Ok(runs)
+}
+
+/// Add a script unit for every manifest unit whose package has a build
+/// script, and return one run per owner. Owners name their script unit
+/// (`CargoBuildScriptDef::unit`); the resolver gives owners that compile
+/// it identically the same name, so they share one unit.
+fn lower_manifest_scripts(
+    units: &mut Vec<BuildUnit>,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    unit_of_crate: &BTreeMap<Handle<CrateDef>, UnitId>,
+) -> Result<Vec<ScriptRun>> {
+    let mut script_of: BTreeMap<String, UnitId> = BTreeMap::new();
+    let mut runs = Vec::new();
+    for cref in &resolved.crates {
+        let def = crate_def(model, cref.handle)?;
+        let Some(cargo) = &def.cargo else { continue };
+        let Some(script) = &cargo.build_script else {
+            continue;
+        };
+        let owner = unit_of_crate[&cref.handle];
+        let script_unit = match script_of.get(&script.unit) {
+            Some(&u) => u,
+            None => {
+                let mut deps = Vec::with_capacity(script.deps.len());
+                for (extern_name, crate_name) in &script.deps {
+                    let dep = model
+                        .crates
+                        .lookup(crate_name)
+                        .and_then(|h| unit_of_crate.get(&h).copied())
+                        .ok_or_else(|| {
+                            Error::Compile(format!(
+                                "unit lowering: build script of '{}' depends on '{crate_name}', \
+                                 which is not in this build (manifest lowering bug)",
+                                def.name
+                            ))
+                        })?;
+                    deps.push(UnitDep {
+                        extern_name: extern_name.clone(),
+                        target: DepTarget::Unit(dep),
+                    });
+                }
+                let owner_unit = &units[owner.index()];
+                let mut env = cargo.env.clone();
+                env.remove("CARGO_BIN_NAME");
+                env.remove("CARGO_PRIMARY_PACKAGE");
+                env.insert("CARGO_CRATE_NAME".into(), "build_script_build".into());
+                let mut settings = cargo_settings(cargo, &[]);
+                settings.env = env;
+                let u = UnitId(units.len() as u32);
+                units.push(BuildUnit {
+                    name: script.unit.clone(),
+                    crate_name: "build_script_build".into(),
+                    origin: UnitOrigin::Crate(cref.handle),
+                    package: owner_unit.package.clone(),
+                    kind: CrateType::Bin,
+                    platform: Platform::Host,
+                    // Set to the fixed host profile by
+                    // `assign_host_profile`.
+                    profile: UnitProfile::Active,
+                    sysroot: false,
+                    config_crate: false,
+                    src: resolved.project_root.join(&def.path).join(&script.path),
+                    edition: script.edition.clone(),
+                    // Scripts test features with `cfg!(feature = ..)`.
+                    features: owner_unit.features.clone(),
+                    deps,
+                    order_deps: Vec::new(),
+                    settings: UnitSettings {
+                        cap_lints: owner_unit.settings.cap_lints,
+                        cargo: Some(settings),
+                        ..UnitSettings::default()
+                    },
+                    metadata: Metadata::default(),
+                    is_build_script: true,
+                });
+                script_of.insert(script.unit.clone(), u);
+                u
+            }
+        };
+        runs.push(ScriptRun {
+            script: script_unit,
+            owner,
+            package: package_info(&cargo.env, script.links.clone()),
+        });
+    }
+    Ok(runs)
+}
+
+/// The package fields a script's environment needs, read back from the
+/// `CARGO_PKG_*` and `CARGO_MANIFEST_*` values manifest lowering set
+/// (`manifest::resolve::package_env`, which sets every variable, empty
+/// when the manifest has no value).
+fn package_info(
+    env: &BTreeMap<String, String>,
+    links: Option<String>,
+) -> crate::build_script::PackageInfo {
+    let get = |k: &str| env.get(k).cloned().unwrap_or_default();
+    let opt = |k: &str| env.get(k).filter(|v| !v.is_empty()).cloned();
+    crate::build_script::PackageInfo {
+        name: get("CARGO_PKG_NAME"),
+        version: get("CARGO_PKG_VERSION"),
+        authors: get("CARGO_PKG_AUTHORS")
+            .split(':')
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .collect(),
+        description: opt("CARGO_PKG_DESCRIPTION"),
+        homepage: opt("CARGO_PKG_HOMEPAGE"),
+        repository: opt("CARGO_PKG_REPOSITORY"),
+        license: opt("CARGO_PKG_LICENSE"),
+        license_file: opt("CARGO_PKG_LICENSE_FILE"),
+        rust_version: opt("CARGO_PKG_RUST_VERSION"),
+        readme: opt("CARGO_PKG_README"),
+        links,
+        manifest_dir: PathBuf::from(get("CARGO_MANIFEST_DIR")),
+        manifest_path: PathBuf::from(get("CARGO_MANIFEST_PATH")),
+    }
 }
 
 /// Config crate hash for every target that has a unit linking it, and
@@ -1215,15 +1343,17 @@ fn uniquify_vendor_names(units: &mut [BuildUnit], model: &BuildModel) {
     }
 }
 
-/// Put proc macros, vendored host units, and every host unit they
-/// depend on, on the fixed host profile. See the module docs.
+/// Put proc macros, build scripts, vendored host units, and every host
+/// unit they depend on, on the fixed host profile. See the module docs.
 fn assign_host_profile(units: &mut [BuildUnit]) {
     let mut stack: Vec<UnitId> = units
         .iter()
         .enumerate()
         .filter(|(_, u)| {
             u.platform == Platform::Host
-                && (u.kind == CrateType::ProcMacro || matches!(u.origin, UnitOrigin::Vendor(_)))
+                && (u.kind == CrateType::ProcMacro
+                    || u.is_build_script
+                    || matches!(u.origin, UnitOrigin::Vendor(_)))
         })
         .map(|(i, _)| UnitId(i as u32))
         .collect();

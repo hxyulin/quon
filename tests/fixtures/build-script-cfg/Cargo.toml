@@ -1,0 +1,6 @@
+# Build scripts of path packages, built by `gluon build` (see gluon.rs).
+# No registry packages, so the fixture builds offline.
+
+[workspace]
+resolver = "2"
+members = ["probe", "consumer", "kernel", "tool"]

@@ -88,6 +88,7 @@ pub fn compile(
 
     let mut declared = cmd.dep_outputs.clone();
     declared.extend(match unit.origin {
+        UnitOrigin::Crate(_) if unit.is_build_script => Vec::new(),
         UnitOrigin::Crate(h) => {
             let def = model.crates.get(h).ok_or_else(|| {
                 Error::Compile(format!("crate handle {h:?} not found in build model"))

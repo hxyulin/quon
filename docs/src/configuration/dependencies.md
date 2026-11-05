@@ -170,3 +170,28 @@ Gluon compiles registry packages with `--cap-lints allow`, as Cargo does.
 Their sources in Cargo's registry cache are never checked for edits.
 Sources in a vendor directory are checked like project sources, so a
 patched vendored crate rebuilds.
+
+### Build scripts and proc macros of workspace packages
+
+Gluon runs the build scripts of workspace packages and of their registry
+dependencies, as described in [Build scripts](#build-scripts) above.
+Proc macros, build scripts and their dependencies build for the host with
+the fixed host profile. A package needed both by a proc macro and by a
+target crate builds once for each.
+
+Differences from vendored `cfg.dependency()` crates:
+
+- Gluon shows warnings from the scripts of path packages on every build.
+  Warnings from registry packages' scripts appear only with `gluon -v`.
+- `rustc-link-arg` applies to the package's bins, so a kernel can set its
+  linker script from `build.rs`:
+
+  ```rust
+  let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+  println!("cargo::rustc-link-arg=-T{dir}/kernel.ld");
+  ```
+
+- Two packages with the same `links` value in one target, or on the
+  host, are an error.
+- `crate_type(CrateType::RawBinary)` on a `group.package(...)` root needs
+  a bin target in the package's `Cargo.toml`.

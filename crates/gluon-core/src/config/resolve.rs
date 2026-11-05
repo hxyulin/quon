@@ -562,6 +562,20 @@ fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Hand
                 }
             }
         }
+        // Follow a manifest unit's build-dependencies, which its build
+        // script links.
+        let build_deps = krate
+            .cargo
+            .iter()
+            .filter_map(|c| c.build_script.as_ref())
+            .flat_map(|s| s.deps.values());
+        for dep_name in build_deps {
+            if let Some(dh) = model.crates.lookup(dep_name) {
+                if visited.insert(dh) {
+                    queue.push_back(dh);
+                }
+            }
+        }
         // Follow artifact_deps (ordering-only edges, e.g. bootloader → kernel).
         for dep_name in &krate.artifact_deps {
             if let Some(dh) = model.crates.lookup(dep_name) {

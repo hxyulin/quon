@@ -11,10 +11,10 @@
 //!   fingerprint record that stores the parsed output.
 //!
 //! `crate::unit::lower` creates a script unit and its runs for every
-//! vendored crate with a build script. The scheduler runs each one as a
-//! `RunBuildScript` node and passes its output to the owner's rustc
-//! command (`compile::command_builder`). Crates declared in `gluon.rs`
-//! and manifest packages do not run build scripts yet.
+//! vendored crate and every manifest package with a build script. The
+//! scheduler runs each one as a `RunBuildScript` node and passes its
+//! output to the owner's rustc command (`compile::command_builder`).
+//! Crates declared with `group.add` have no build scripts.
 
 pub mod directive;
 pub mod env;

@@ -339,3 +339,78 @@ fn registry_dependency_from_crates_io_and_gluon_vendor() {
     let (_, third) = gluon_ok(&project, &["build"], &without_cargo);
     assert_eq!(summary(&third).0, 2, "{third}");
 }
+
+// ---------------------------------------------------------------------
+// Build scripts of path packages (`tests/fixtures/build-script-cfg`)
+// ---------------------------------------------------------------------
+
+/// Labels of the build-script runs a `-v` build reran.
+fn reran_scripts(stderr: &str) -> Vec<&str> {
+    let mut runs: Vec<&str> = stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("rebuilding build script of "))
+        .map(|l| l.split_once(": ").map_or(l, |(what, _)| what))
+        // Script compiles are labelled `(compile)`; keep the runs.
+        .filter(|what| !what.ends_with("(compile)"))
+        .collect();
+    runs.sort_unstable();
+    runs
+}
+
+/// `e_entry` of a 64-bit little-endian ELF file.
+fn elf_entry(path: &Path) -> u64 {
+    let bytes = fs::read(path).unwrap();
+    assert_eq!(&bytes[..4], b"\x7fELF", "{} is not ELF", path.display());
+    u64::from_le_bytes(bytes[24..32].try_into().unwrap())
+}
+
+/// Offline. Every script runs once per platform on the first build and
+/// its directives reach rustc (the fixture's sources fail to compile
+/// otherwise); a second build runs nothing; editing a
+/// `rerun-if-changed` input reruns only that package's runs; editing a
+/// source no script reads reruns no script.
+#[test]
+#[ignore]
+fn build_scripts_of_path_packages_run_and_rerun_on_their_inputs() {
+    let Some(()) = require_rustc_or_skip("build_scripts_of_path_packages") else {
+        return;
+    };
+    let (_tmp, project) = setup("tests/fixtures/build-script-cfg");
+
+    let (_, first) = gluon_ok(&project, &["-v", "build"], &[]);
+    let (built, cached) = summary(&first);
+    assert_eq!(cached, 0, "{first}");
+    // Path packages show their scripts' warnings.
+    assert!(
+        first.contains("probe ran for x86_64-unknown-none"),
+        "{first}"
+    );
+    let host = gluon_core::RustcInfo::probe().unwrap().host_triple;
+    assert!(first.contains(&format!("probe ran for {host}")), "{first}");
+    assert_eq!(reran_scripts(&first).len(), 5, "{first}");
+    // `rustc-link-arg=-T<kernel.ld>` placed the kernel at 1 MiB.
+    let kernel = project.join("build/cross/x86_64-unknown-none/dev/final/kernel");
+    let entry = elf_entry(&kernel);
+    assert!((0x100000..0x200000).contains(&entry), "entry {entry:#x}");
+
+    let (_, second) = gluon_ok(&project, &["-v", "build"], &[]);
+    assert_eq!(summary(&second), (0, built), "{second}");
+    assert!(reran_scripts(&second).is_empty(), "{second}");
+
+    fs::write(project.join("probe/probe.txt"), "changed\n").unwrap();
+    let (_, third) = gluon_ok(&project, &["-v", "build"], &[]);
+    let reran = reran_scripts(&third);
+    assert_eq!(reran.len(), 2, "{third}");
+    assert!(
+        reran.iter().all(|r| r.starts_with("crate probe")),
+        "{third}"
+    );
+
+    append(
+        &project.join("consumer/src/lib.rs"),
+        "\npub const MORE: u32 = 1;\n",
+    );
+    let (_, fourth) = gluon_ok(&project, &["-v", "build"], &[]);
+    assert!(summary(&fourth).0 > 0, "{fourth}");
+    assert!(reran_scripts(&fourth).is_empty(), "{fourth}");
+}

@@ -403,6 +403,26 @@ pub struct CargoUnitDef {
     /// they apply, `CARGO_PRIMARY_PACKAGE` and `CARGO_BIN_NAME`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// The package's build script, which runs for this unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_script: Option<CargoBuildScriptDef>,
+}
+
+/// The build script that runs for a manifest unit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoBuildScriptDef {
+    /// Name of the compiled script (`probe@build-script`). Units with
+    /// the same name share one compile.
+    pub unit: String,
+    /// Script source, relative to the crate's `path`.
+    pub path: String,
+    pub edition: String,
+    /// Build-dependencies: extern name → name of the host crate.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub deps: BTreeMap<String, String>,
+    /// The package's `links` key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links: Option<String>,
 }
 
 /// The package a manifest unit is built from.
