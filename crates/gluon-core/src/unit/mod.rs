@@ -76,8 +76,8 @@ use crate::error::{Error, Result};
 use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
 use crate::vendor::cross::metadata::CrateKind;
 use gluon_model::{
-    BuildModel, CargoLint, CargoUnitDef, CrateDef, CrateType, DepResolution, ExternalArtifactKey,
-    Handle, ResolvedConfig, TargetDef, TargetSpec,
+    BuildModel, CargoLint, CargoPackageSource, CargoUnitDef, CrateDef, CrateType, DepResolution,
+    ExternalArtifactKey, Handle, ResolvedConfig, TargetDef, TargetSpec,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -131,8 +131,15 @@ pub struct PackageKey {
 pub enum PackageSource {
     /// Crate directory relative to the project root.
     Path(PathBuf),
-    /// A vendored crates.io package.
-    Registry,
+    /// A crates.io package: a manifest unit from Cargo's registry cache
+    /// or a vendor directory, or a `cfg.dependency()` crate.
+    Registry {
+        /// The `.crate` checksum from `Cargo.lock`. Registry sources are
+        /// never stat'ed (see `cache::store`), so the checksum is what
+        /// tells two registries' `name@version` apart. `None` for
+        /// `cfg.dependency()` crates and lock entries without one.
+        checksum: Option<String>,
+    },
 }
 
 /// The platform a unit is compiled for.
@@ -774,7 +781,14 @@ pub fn lower(
                 PackageKey {
                     name: c.package.name.clone(),
                     version: c.package.version.clone(),
-                    source: PackageSource::Path(PathBuf::from(&c.package.manifest_dir)),
+                    source: match &c.package.source {
+                        CargoPackageSource::Path => {
+                            PackageSource::Path(PathBuf::from(&c.package.manifest_dir))
+                        }
+                        CargoPackageSource::Registry { checksum } => PackageSource::Registry {
+                            checksum: checksum.clone(),
+                        },
+                    },
                 },
             ),
             None => (
@@ -787,6 +801,9 @@ pub fn lower(
             ),
         };
 
+        // As Cargo does for registry packages: their lints are not the
+        // user's to fix.
+        let cap_lints = matches!(package.source, PackageSource::Registry { .. });
         units.push(BuildUnit {
             name: def.name.clone(),
             crate_name,
@@ -807,7 +824,7 @@ pub fn lower(
             settings: UnitSettings {
                 cfg_flags: def.cfg_flags.clone(),
                 rustc_flags: def.rustc_flags.clone(),
-                cap_lints: false,
+                cap_lints,
                 linker_script: def
                     .linker_script
                     .as_ref()
@@ -851,7 +868,7 @@ pub fn lower(
             package: PackageKey {
                 name: build.crate_id.name.clone(),
                 version: build.crate_id.version.clone(),
-                source: PackageSource::Registry,
+                source: PackageSource::Registry { checksum: None },
             },
             kind: match build.kind {
                 CrateKind::Lib => CrateType::Lib,
@@ -965,7 +982,7 @@ fn lower_vendor_scripts(
                     package: PackageKey {
                         name: build.crate_id.name.clone(),
                         version: build.crate_id.version.clone(),
-                        source: PackageSource::Registry,
+                        source: PackageSource::Registry { checksum: None },
                     },
                     kind: CrateType::Bin,
                     platform: Platform::Host,

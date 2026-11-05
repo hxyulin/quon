@@ -21,17 +21,26 @@
 //!
 //! Edges come from the manifest. The crate's [`CargoUnitDef`] carries
 //! what rustc needs beyond a declared crate: the lib or bin crate name,
-//! the package identity, declared features for `--check-cfg`, lints, and
-//! the `CARGO_*` environment.
+//! the package identity (with the `Cargo.lock` checksum for registry
+//! packages), declared features for `--check-cfg`, lints, and the
+//! `CARGO_*` environment.
+//!
+//! ### Registry sources
+//!
+//! Registry packages are read from Cargo's registry cache, or from the
+//! vendor directory named by `cfg.cargo_workspace(..).vendored(dir)`;
+//! see [`super::sources`]. A registry edge whose source cannot be found
+//! is an error only when the resolver activates it, so an optional
+//! dependency no feature enables never is.
 //!
 //! ### What is rejected
 //!
-//! Registry dependencies (not yet supported), build scripts and `links`
-//! (until build-script support lands), lib crate types other than one of
-//! `lib`, `rlib` or `staticlib`, a root in a `no_sysroot` group that has
-//! dependencies, a crate declared with `group.add` that depends on a
-//! manifest unit or lives in a workspace member's directory (it would be
-//! described twice), and unit names that collide with declared crates.
+//! Build scripts and `links` (until build-script support lands), lib
+//! crate types other than one of `lib`, `rlib` or `staticlib`, a root in
+//! a `no_sysroot` group that has dependencies, a crate declared with
+//! `group.add` that depends on a manifest unit or lives in a workspace
+//! member's directory (it would be described twice), and unit names that
+//! collide with declared crates.
 //!
 //! ### Freshness
 //!
@@ -41,14 +50,15 @@
 
 use super::platform::{self, ProbeTarget, TargetPlatform};
 use super::resolve::{Domain, Root, UnitGraph, UnitKind, package_env, resolve};
-use super::sources::RegistrySources;
-use super::workspace::{DepSource, DepTarget, Package, PackageIdx, PackageSet, load_workspace};
+use super::sources::{RegistrySources, check_vendor_stamp};
+use super::workspace::{Package, PackageIdx, PackageSet, PackageSource, load_workspace};
 use crate::compile::RustcInfo;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    Arena, CargoLint, CargoPackageDef, CargoUnitDef, CrateType, RawBuildModel, RawCrateDef,
-    RawDepDef, RawGroupDef,
+    Arena, CargoLint, CargoPackageDef, CargoPackageSource, CargoUnitDef, CrateType, RawBuildModel,
+    RawCrateDef, RawDepDef, RawGroupDef,
 };
+use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -57,23 +67,33 @@ pub const SYNTHETIC_GROUP_PREFIX: &str = "cargo:";
 
 /// Expand the manifest roots in `raw`. A model without
 /// `cfg.cargo_workspace(...)` and without roots is left untouched and
-/// reads nothing. Returns warnings for the caller to print.
+/// reads nothing. `cache_dir` (the build directory) holds the target cfg
+/// cache and the registry source map; `None` caches nothing. Returns
+/// warnings for the caller to print.
 pub fn expand(
     raw: &mut RawBuildModel,
     project_root: &Path,
     rustc: &RustcInfo,
-    cfg_cache: Option<&Path>,
+    cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>> {
-    let Some(set) = load(raw, project_root)? else {
+    let sources_cache = cache_dir.map(|d| d.join("cargo-sources.json"));
+    let Some(set) = load(raw, project_root, sources_cache.as_deref())? else {
         return Ok(Vec::new());
     };
-    let platforms = probe_platforms(raw, project_root, rustc, cfg_cache)?;
+    let cfg_cache = cache_dir.map(|d| d.join("target-cfg.json"));
+    let platforms = probe_platforms(raw, project_root, rustc, cfg_cache.as_deref())?;
     expand_with(raw, project_root, set, &platforms, &rustc.host_triple)
 }
 
 /// Load the workspace `raw` names, or `None` when it names none and has
-/// no roots.
-pub fn load(raw: &RawBuildModel, project_root: &Path) -> Result<Option<PackageSet>> {
+/// no roots. Registry sources come from the vendor directory `raw`
+/// names, else from Cargo's registry cache, with the source map cached
+/// in `sources_cache`.
+pub fn load(
+    raw: &RawBuildModel,
+    project_root: &Path,
+    sources_cache: Option<&Path>,
+) -> Result<Option<PackageSet>> {
     let roots: Vec<&RawCrateDef> = raw
         .crates
         .iter()
@@ -98,30 +118,16 @@ pub fn load(raw: &RawBuildModel, project_root: &Path) -> Result<Option<PackageSe
                 .collect(),
         ));
     };
-    // Registry dependencies are mapped through an empty source map, so
-    // each one is recorded as unresolved; `reject_registry_deps` then
-    // gives it a clear reason, reported only if the resolver activates
-    // the edge.
-    let sources = RegistrySources::new(BTreeMap::new(), "");
-    let mut set = load_workspace(&project_root.join(&ws.dir), &sources)?;
-    reject_registry_deps(&mut set);
-    Ok(Some(set))
-}
-
-/// Mark every registry edge unresolved with the reason the build
-/// cannot use it yet.
-fn reject_registry_deps(set: &mut PackageSet) {
-    for pkg in &mut set.packages {
-        for dep in &mut pkg.deps {
-            if let DepSource::Registry(req) = &dep.source {
-                dep.target = DepTarget::Unresolved(format!(
-                    "registry dependency `{} {req}` is not supported yet; Gluon builds \
-                     path dependencies only",
-                    dep.package
-                ));
-            }
+    let ws_root = project_root.join(&ws.dir);
+    let sources = match &ws.vendored {
+        Some(dir) => {
+            let vendor_dir = project_root.join(dir);
+            check_vendor_stamp(&ws_root, &vendor_dir)?;
+            RegistrySources::vendor_dir(&ws_root, &vendor_dir)?
         }
-    }
+        None => RegistrySources::registry_cache(&ws_root, sources_cache)?,
+    };
+    Ok(Some(load_workspace(&ws_root, &sources)?))
 }
 
 /// The domain a group's crates build in.
@@ -231,6 +237,13 @@ pub fn expand_with(
         .collect();
     let graph = resolve(&set, &resolver_roots, platforms, host_triple)?;
     let names = graph.unit_names();
+    let checksums: BTreeMap<(&str, &Version), Option<&str>> = set
+        .lock
+        .iter()
+        .flat_map(|l| &l.packages)
+        .filter(|p| p.is_registry())
+        .map(|p| ((p.name.as_str(), &p.version), p.checksum.as_deref()))
+        .collect();
 
     check_unsupported(&graph, &roots, &mut errors);
     check_declared_crates(raw, &set, &graph, &names, &roots, project_root, &mut errors);
@@ -252,7 +265,17 @@ pub fn expand_with(
         } else {
             None
         };
-        match lower_unit(u, pkg, &names, root, project_root) {
+        let source = match pkg.id.source {
+            PackageSource::Path(_) => CargoPackageSource::Path,
+            PackageSource::Registry => CargoPackageSource::Registry {
+                checksum: checksums
+                    .get(&(pkg.name(), &pkg.id.version))
+                    .copied()
+                    .flatten()
+                    .map(str::to_string),
+            },
+        };
+        match lower_unit(u, pkg, source, &names, root, project_root) {
             Ok(def) => lowered.push(def),
             Err(d) => errors.push(d),
         }
@@ -434,6 +457,7 @@ fn lib_crate_type(
 fn lower_unit(
     u: &super::resolve::Unit,
     pkg: &Package,
+    source: CargoPackageSource,
     names: &[String],
     root: Option<&RootInfo>,
     project_root: &Path,
@@ -563,6 +587,7 @@ fn lower_unit(
                 name: pkg.name().to_string(),
                 version: pkg.id.version.to_string(),
                 manifest_dir,
+                source,
             },
             declared_features: pkg.features.keys().cloned().collect(),
             check_cfg,

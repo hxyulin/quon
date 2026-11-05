@@ -22,6 +22,7 @@ struct RawLockPackage {
     name: String,
     version: String,
     source: Option<String>,
+    checksum: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
 }
@@ -34,6 +35,8 @@ pub struct LockPackage {
     /// `None` for path packages, else the source URL
     /// (`registry+https://...`, `sparse+https://...`, `git+...`).
     pub source: Option<String>,
+    /// SHA-256 of the `.crate` file, for registry packages.
+    pub checksum: Option<String>,
     pub dependencies: Vec<LockDepRef>,
 }
 
@@ -95,6 +98,7 @@ impl Lockfile {
                 name: p.name,
                 version,
                 source: p.source,
+                checksum: p.checksum,
                 dependencies,
             });
         }

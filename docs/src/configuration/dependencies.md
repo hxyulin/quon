@@ -134,3 +134,39 @@ regardless of what is currently published on crates.io.
 The `vendor/` directory itself can optionally be committed for fully offline
 builds, or left out of version control and regenerated with `gluon vendor` as
 needed.
+
+## Registry dependencies of a Cargo workspace
+
+Packages built with `cfg.cargo_workspace(dir)` and `group.package(name)`
+take their dependencies from their `Cargo.toml`. Registry dependencies
+use the versions in the workspace's `Cargo.lock`, which Cargo writes.
+
+By default, Gluon reads their sources from Cargo's registry cache. When
+`Cargo.lock` changes, Gluon runs `cargo fetch --locked` and then `cargo
+metadata --locked --offline` to learn where each package lives. It caches
+the result in `build/cargo-sources.json`. A build with an unchanged
+`Cargo.lock` and `CARGO_HOME` runs no Cargo command. Gluon never edits
+`Cargo.lock`.
+
+To build offline or from an archived tree, vendor the sources:
+
+```sh
+gluon vendor
+```
+
+This runs `cargo vendor --versioned-dirs --locked vendor` on the
+workspace and writes `vendor/.gluon-vendor-stamp`, which holds the
+SHA-256 of `Cargo.lock`. Then name the directory in `gluon.rs`:
+
+```rust
+cfg.cargo_workspace(".").vendored("vendor");
+```
+
+A build then reads `vendor/<name>-<version>/`, runs no Cargo command, and
+fails if `Cargo.lock` changed since the last `gluon vendor`. A `vendor/`
+directory that `gluon.rs` does not name is ignored.
+
+Gluon compiles registry packages with `--cap-lints allow`, as Cargo does.
+Their sources in Cargo's registry cache are never checked for edits.
+Sources in a vendor directory are checked like project sources, so a
+patched vendored crate rebuilds.

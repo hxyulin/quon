@@ -10,13 +10,29 @@
 //! untagged buffer drops the span), so spans wrap untagged values from
 //! the outside. Spans on implicit tables (`[target.'cfg(x)'.dependencies]`)
 //! fail to deserialize in toml 0.8, so target tables carry no span of
-//! their own; diagnostics about them point at their first entry.
+//! their own; diagnostics about them point at their first entry. For the
+//! same reason a dependency's span is its key's: a dotted entry
+//! (`x.workspace = true`) is an implicit table, and only its key can
+//! carry a span.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use toml::Spanned;
 
 pub type DepTable = BTreeMap<String, Spanned<TomlDependency>>;
+
+/// Read a dependency table with each entry spanned by its key, so dotted
+/// entries (`x.workspace = true`) parse like inline ones.
+fn dep_table<'de, D: Deserializer<'de>>(d: D) -> Result<DepTable, D::Error> {
+    let raw = BTreeMap::<Spanned<String>, TomlDependency>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(key, dep)| {
+            let span = key.span();
+            (key.into_inner(), Spanned::new(span, dep))
+        })
+        .collect())
+}
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -26,11 +42,11 @@ pub struct TomlManifest {
     pub lib: Option<TomlLib>,
     #[serde(default)]
     pub bin: Vec<TomlBin>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "dep_table")]
     pub dependencies: DepTable,
-    #[serde(default, alias = "dev_dependencies")]
+    #[serde(default, alias = "dev_dependencies", deserialize_with = "dep_table")]
     pub dev_dependencies: DepTable,
-    #[serde(default, alias = "build_dependencies")]
+    #[serde(default, alias = "build_dependencies", deserialize_with = "dep_table")]
     pub build_dependencies: DepTable,
     #[serde(default)]
     pub target: BTreeMap<String, TomlPlatform>,
@@ -45,11 +61,11 @@ pub struct TomlManifest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TomlPlatform {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "dep_table")]
     pub dependencies: DepTable,
-    #[serde(default, alias = "dev_dependencies")]
+    #[serde(default, alias = "dev_dependencies", deserialize_with = "dep_table")]
     pub dev_dependencies: DepTable,
-    #[serde(default, alias = "build_dependencies")]
+    #[serde(default, alias = "build_dependencies", deserialize_with = "dep_table")]
     pub build_dependencies: DepTable,
 }
 
@@ -107,7 +123,7 @@ pub struct TomlWorkspace {
     pub exclude: Vec<String>,
     pub resolver: Option<String>,
     pub package: Option<TomlWorkspacePackage>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "dep_table")]
     pub dependencies: DepTable,
     pub lints: Option<BTreeMap<String, BTreeMap<String, TomlLint>>>,
 }

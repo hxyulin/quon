@@ -179,6 +179,10 @@ pub struct RawCargoWorkspace {
     /// Directory holding the workspace `Cargo.toml`, relative to the
     /// project root.
     pub dir: String,
+    /// `.vendored(dir)`: read registry sources from this directory,
+    /// relative to the project root, instead of Cargo's registry cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendored: Option<String>,
 }
 
 impl Named for RawCrateDef {

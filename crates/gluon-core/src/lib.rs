@@ -67,6 +67,16 @@ pub fn load_build_model(project_root: &Path) -> Result<BuildModel> {
     )))
 }
 
+/// The model `<project_root>/gluon.rs` prints, before `.kconfig`
+/// includes are merged and Cargo workspace packages are expanded. For
+/// commands that must work while the full load would fail, such as
+/// `gluon vendor` refilling a stale vendor directory.
+pub fn load_raw_build_model(project_root: &Path) -> Result<gluon_model::RawBuildModel> {
+    let layout = compile::BuildLayout::new(project_root.join("build"), "script-runner");
+    let info = compile::RustcInfo::load_or_probe(&layout)?;
+    script_runner::compile_and_run_raw(project_root, layout.root(), &info)
+}
+
 /// Resolve a [`BuildModel`] into a [`ResolvedConfig`] for a specific
 /// profile, optionally overriding the target and per-option config
 /// values.

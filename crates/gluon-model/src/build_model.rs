@@ -413,6 +413,30 @@ pub struct CargoPackageDef {
     /// Manifest directory, relative to the project root when it lies
     /// under it.
     pub manifest_dir: String,
+    #[serde(default, skip_serializing_if = "CargoPackageSource::is_path")]
+    pub source: CargoPackageSource,
+}
+
+/// Where a manifest unit's package comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CargoPackageSource {
+    /// A workspace member or another path dependency.
+    #[default]
+    Path,
+    /// A registry package, read from Cargo's registry cache or a vendor
+    /// directory.
+    Registry {
+        /// The `.crate` checksum from `Cargo.lock`, when it has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checksum: Option<String>,
+    },
+}
+
+impl CargoPackageSource {
+    pub fn is_path(&self) -> bool {
+        matches!(self, Self::Path)
+    }
 }
 
 /// One `[lints]` entry.

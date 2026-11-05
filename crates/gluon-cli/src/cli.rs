@@ -88,12 +88,16 @@ pub enum Command {
     Clean(CleanArgs),
     /// Generate `rust-project.json` for rust-analyzer.
     Configure(ConfigureArgs),
-    /// Vendor external dependencies declared in `gluon.rs`.
+    /// Vendor external dependencies.
     ///
-    /// Synthesises a scratch `Cargo.toml`, invokes `cargo vendor` to
+    /// For the Cargo workspace named by `cfg.cargo_workspace`, runs
+    /// `cargo vendor --versioned-dirs --locked` into the configured
+    /// vendor directory (default `vendor/`) and stamps it with the
+    /// `Cargo.lock` hash. For `cfg.dependency()` declarations,
+    /// synthesises a scratch `Cargo.toml`, invokes `cargo vendor` to
     /// populate `./vendor/`, and writes `gluon.lock` pinning the
-    /// result. `--check` verifies the existing lock without touching
-    /// disk; `--force` bypasses the fingerprint-match fast path.
+    /// result. `--check` verifies without touching disk; `--force`
+    /// bypasses the fingerprint-match fast path.
     Vendor(VendorArgs),
     /// Build the project and launch the boot binary under QEMU.
     ///

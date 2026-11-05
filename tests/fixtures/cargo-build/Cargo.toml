@@ -1,5 +1,5 @@
 # Cargo workspace built end to end by `gluon build` (see gluon.rs).
-# Path dependencies only: registry dependencies need manifest stage 4.
+# Path dependencies only; `cargo-registry` covers registry dependencies.
 
 [workspace]
 resolver = "2"

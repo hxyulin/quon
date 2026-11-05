@@ -88,6 +88,19 @@ pub fn compile_and_run(
     build_dir: &Path,
     rustc_info: &RustcInfo,
 ) -> Result<BuildModel> {
+    let raw = compile_and_run_raw(project_root, build_dir, rustc_info)?;
+    finalize(raw, project_root, build_dir, rustc_info)
+}
+
+/// [`compile_and_run`] without the final transform: the model exactly
+/// as `gluon.rs` printed it, with no `.kconfig` merged and no Cargo
+/// workspace read. `gluon vendor` uses it, because a stale vendor
+/// directory would fail the full load.
+pub fn compile_and_run_raw(
+    project_root: &Path,
+    build_dir: &Path,
+    rustc_info: &RustcInfo,
+) -> Result<RawBuildModel> {
     let script_path = project_root.join("gluon.rs");
     if !script_path.is_file() {
         return Err(Error::Config(format!(
@@ -105,13 +118,11 @@ pub fn compile_and_run(
     let _ = hashes.save();
     let stdout = run_script_binary(&bin)?;
 
-    let raw: RawBuildModel = serde_json::from_slice(&stdout).map_err(|e| {
+    serde_json::from_slice(&stdout).map_err(|e| {
         Error::Config(format!(
             "gluon.rs stdout was not valid RawBuildModel JSON: {e}"
         ))
-    })?;
-
-    finalize(raw, project_root, build_dir, rustc_info)
+    })
 }
 
 /// Spawn the compiled script binary and capture its stdout. Stderr is
@@ -185,14 +196,11 @@ fn finalize(
 
     // Manifests are read here, on every run, not by the script binary:
     // editing a Cargo.toml must not recompile gluon.rs, and the
-    // expansion can never be stale. The cfg probe cache is the same
-    // file the build layout names (`BuildLayout::target_cfg_cache`).
-    let warnings = crate::manifest::lower::expand(
-        &mut raw,
-        project_root,
-        rustc_info,
-        Some(&build_dir.join("target-cfg.json")),
-    )?;
+    // expansion can never be stale. The cfg probe cache in the build
+    // directory is the file the build layout names
+    // (`BuildLayout::target_cfg_cache`).
+    let warnings =
+        crate::manifest::lower::expand(&mut raw, project_root, rustc_info, Some(build_dir))?;
     for w in &warnings {
         eprintln!("{w}");
     }

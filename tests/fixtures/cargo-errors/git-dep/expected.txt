@@ -1,1 +1,1 @@
-a/Cargo.toml:7:10: error: git dependency `remote` is not supported yet
+a/Cargo.toml:7:1: error: git dependency `remote` is not supported yet

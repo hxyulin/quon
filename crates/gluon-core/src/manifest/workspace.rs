@@ -42,7 +42,8 @@ pub type PackageIdx = usize;
 pub enum PackageSource {
     /// A path package; the absolute manifest directory.
     Path(PathBuf),
-    /// A crates.io package, read from the vendor directory.
+    /// A crates.io package, read from Cargo's registry cache or a
+    /// vendor directory.
     Registry,
 }
 
@@ -403,8 +404,9 @@ impl<'s> Loader<'s> {
             (
                 None,
                 Some(format!(
-                    "{} is missing; run `gluon vendor`",
-                    lock_path.display()
+                    "{} is missing; {}",
+                    lock_path.display(),
+                    sources.lock_hint()
                 )),
             )
         };
@@ -626,13 +628,15 @@ impl<'s> Loader<'s> {
         }
         .ok_or_else(|| {
             format!(
-                "Cargo.lock has no entry for `{} {}`; run `gluon vendor`",
-                pid.name, pid.version
+                "Cargo.lock has no entry for `{} {}`; {}",
+                pid.name,
+                pid.version,
+                self.sources.lock_hint()
             )
         })?;
         let locked = lock
             .locked_registry_dep(parent_entry, &dep.package, req)
-            .map_err(|m| format!("{m}; run `gluon vendor`"))?;
+            .map_err(|m| format!("{m}; {}", self.sources.lock_hint()))?;
         let id = PackageId {
             name: locked.name.clone(),
             version: locked.version.clone(),
@@ -1460,6 +1464,31 @@ mod tests {
             err.contains("`default-features = false` is ignored"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn dotted_dependency_keys_parse() {
+        let ws = "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n\
+                  [workspace.dependencies]\nb.path = \"b\"\n";
+        let a = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [dependencies]\nb.workspace = true\n\
+                 [target.'cfg(unix)'.dependencies]\nb.workspace = true\n";
+        let tmp = tree(&[
+            ("Cargo.toml", ws),
+            ("a/Cargo.toml", a),
+            ("a/src/lib.rs", ""),
+            ("b/Cargo.toml", B),
+            ("b/src/lib.rs", ""),
+        ]);
+        let set = load(&tmp).unwrap();
+        let a = &set.packages[set.member("a").unwrap()];
+        let b = set.member("b").unwrap();
+        assert_eq!(a.deps.len(), 2);
+        for d in &a.deps {
+            assert_eq!(d.target, DepTarget::Resolved(b));
+            let span = d.span.as_ref().expect("dotted entries carry a span");
+            assert!(span.line > 0, "{span:?}");
+        }
     }
 
     #[test]

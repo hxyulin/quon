@@ -427,11 +427,11 @@ pub(crate) fn file_stem(key: &str) -> String {
 /// `$CARGO_HOME/registry/src`, with `$CARGO_HOME` defaulting to
 /// `~/.cargo` as in Cargo.
 fn cargo_registry_src() -> Option<PathBuf> {
-    let home = match std::env::var_os("CARGO_HOME") {
-        Some(h) => PathBuf::from(h),
-        None => PathBuf::from(std::env::var_os("HOME")?).join(".cargo"),
-    };
-    Some(home.join("registry").join("src"))
+    Some(
+        crate::manifest::sources::cargo_home()?
+            .join("registry")
+            .join("src"),
+    )
 }
 
 fn create_dir(dir: &Path) -> Result<()> {

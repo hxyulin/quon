@@ -1,10 +1,14 @@
-//! `gluon vendor` subcommand — thin CLI wrapper over
-//! [`gluon_core::vendor::vendor_sync`] and
-//! [`gluon_core::vendor::vendor_check`].
+//! `gluon vendor` subcommand: a thin CLI wrapper over
+//! [`gluon_core::manifest::sources::vendor`] for the Cargo workspace,
+//! and over [`gluon_core::vendor::vendor_sync`] and
+//! [`gluon_core::vendor::vendor_check`] for `cfg.dependency()`
+//! declarations.
 //!
-//! The heavy lifting lives in `gluon_core::vendor`; this file is
-//! responsible for:
+//! This file is responsible for:
 //!
+//! - loading `gluon.rs` without expanding the Cargo workspace, because
+//!   a stale vendor directory, the thing this command fixes, fails the
+//!   full load;
 //! - routing `--check` / `--force` / `--offline` into the right core
 //!   entry point,
 //! - printing human-friendly progress and summary lines,
@@ -12,22 +16,84 @@
 //!   into a non-zero process exit code via
 //!   [`std::process::exit`].
 //!
-//! Uses the lighter-weight [`LayoutContext`] (no rustc probe) because
-//! vendoring does not need the toolchain. The caller in `main.rs`
-//! constructs the context with
-//! [`super::LayoutContextOpts::skip_vendor_autoreg`] set to `true` —
-//! see that call site for why.
+//! The `cfg.dependency()` pipeline uses the lighter-weight
+//! [`super::LayoutContext`] (no rustc probe) with
+//! [`super::LayoutContextOpts::skip_vendor_autoreg`] set, because
+//! registering against a stale `gluon.lock` would abort before this
+//! command could repair it.
 
-use super::LayoutContext;
-use anyhow::Result;
+use super::{LayoutContext, LayoutContextOpts, build_layout_context_at_with_opts};
+use crate::cli::VendorArgs;
+use anyhow::{Context, Result};
+use gluon_core::manifest::sources;
+use gluon_core::model::RawCargoWorkspace;
 use gluon_core::vendor::{self, VendorOptions};
+use gluon_core::{find_project_root, load_raw_build_model};
+use std::path::Path;
 
 /// Entry point called from `main.rs`.
+pub fn run(
+    cwd: &Path,
+    profile: Option<&str>,
+    target: Option<&str>,
+    config_file: Option<&Path>,
+    args: &VendorArgs,
+) -> Result<()> {
+    let project_root = find_project_root(cwd)
+        .context("could not find a gluon.rs in the current directory or any parent")?;
+    let raw = load_raw_build_model(&project_root).context("failed to load build model")?;
+    if let Some(ws) = &raw.cargo_workspace {
+        vendor_workspace(&project_root, ws, args)?;
+        if raw.external_deps.is_empty() {
+            return Ok(());
+        }
+    }
+    let ctx = build_layout_context_at_with_opts(
+        cwd,
+        profile,
+        target,
+        config_file,
+        LayoutContextOpts {
+            skip_vendor_autoreg: true,
+        },
+    )?;
+    run_dependencies(ctx, args.check, args.force, args.offline)
+}
+
+/// Vendor the registry packages of the Cargo workspace `ws`, or with
+/// `--check` verify the vendor stamp.
+fn vendor_workspace(project_root: &Path, ws: &RawCargoWorkspace, args: &VendorArgs) -> Result<()> {
+    let ws_root = project_root.join(&ws.dir);
+    let dir = ws.vendored.as_deref().unwrap_or("vendor");
+    let vendor_dir = project_root.join(dir);
+    if args.check {
+        sources::check_vendor_stamp(&ws_root, &vendor_dir)?;
+        println!("{dir}/ matches Cargo.lock");
+        return Ok(());
+    }
+    let n = sources::vendor(&ws_root, &vendor_dir, args.offline)?;
+    println!("Vendored {n} packages into {dir}/.");
+    if ws.vendored.is_none() {
+        println!(
+            "To build from {dir}/, add this to gluon.rs:\n\n    \
+             cfg.cargo_workspace({:?}).vendored({dir:?});",
+            ws.dir
+        );
+    }
+    Ok(())
+}
+
+/// `gluon vendor` for `cfg.dependency()` declarations.
 ///
 /// `check_mode` mirrors `gluon vendor --check`: verify-only, no
 /// disk mutation. `force` bypasses the fingerprint fast path.
 /// `offline` passes `--offline`/`--frozen` through to cargo.
-pub fn run(ctx: LayoutContext, check_mode: bool, force: bool, offline: bool) -> Result<()> {
+fn run_dependencies(
+    ctx: LayoutContext,
+    check_mode: bool,
+    force: bool,
+    offline: bool,
+) -> Result<()> {
     let LayoutContext {
         model,
         resolved: _, // vendor doesn't need the resolved profile

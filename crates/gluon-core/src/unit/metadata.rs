@@ -12,7 +12,8 @@
 //! What goes in, in this order, each field length-prefixed:
 //!
 //! - package name, version, and source (path relative to the project
-//!   root, or `registry`), so two versions or two sources coexist;
+//!   root, or `registry` plus the `Cargo.lock` checksum), so two
+//!   versions or two sources coexist;
 //! - unit kind and crate name, so a lib and a bin of one package do;
 //! - platform: `host`, or the target name plus `builtin:<triple>` or
 //!   `spec:<path relative to the project root>`;
@@ -156,7 +157,15 @@ pub(crate) fn unit_metadata(
     h.field(&unit.package.name).field(&unit.package.version);
     match &unit.package.source {
         PackageSource::Path(p) => h.field(format!("path:{}", project_relative(p, project_root))),
-        PackageSource::Registry => h.field("registry"),
+        PackageSource::Registry { checksum } => {
+            h.field("registry");
+            // Only when known, so `cfg.dependency()` units, which have
+            // none, keep their hashes.
+            if let Some(c) = checksum {
+                h.field(format!("checksum:{c}"));
+            }
+            &mut h
+        }
     };
     h.field(kind_label(unit.kind)).field(&unit.crate_name);
     h.field(platform);

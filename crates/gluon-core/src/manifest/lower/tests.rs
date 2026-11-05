@@ -55,7 +55,7 @@ fn fixture_raw() -> RawBuildModel {
 }
 
 fn expand_at(raw: &mut RawBuildModel, root: &Path) -> Result<Vec<Diagnostic>> {
-    let Some(set) = load(raw, root)? else {
+    let Some(set) = load(raw, root, None)? else {
         return Ok(Vec::new());
     };
     expand_with(raw, root, set, &platforms(), "x86_64-unknown-linux-gnu")
@@ -251,7 +251,7 @@ fn root_a() -> RawBuildModel {
 }
 
 #[test]
-fn registry_dependency_is_rejected() {
+fn registry_dependency_needs_a_lock() {
     let ws = workspace(&[
         ("Cargo.toml", WS),
         (
@@ -263,10 +263,134 @@ fn registry_dependency_is_rejected() {
     ]);
     let err = expand_err(&mut root_a(), ws.path());
     assert!(
-        err.contains(
-            "dependency `bitflags` of `a`: registry dependency `bitflags ^2` is not supported \
-             yet; Gluon builds path dependencies only"
+        err.contains("Cargo.lock is missing; run `cargo update`"),
+        "{err}"
+    );
+}
+
+const A_WITH_REGISTRY_DEP: &str = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                                   edition = \"2021\"\n[dependencies]\nflags = \"1\"\n";
+
+fn registry_lock(checksum: &str) -> String {
+    format!(
+        "version = 4\n[[package]]\nname = \"a\"\nversion = \"0.1.0\"\n\
+         dependencies = [\"flags\"]\n[[package]]\nname = \"flags\"\nversion = \"1.2.0\"\n\
+         source = \"registry+https://github.com/rust-lang/crates.io-index\"\n\
+         checksum = \"{checksum}\"\n"
+    )
+}
+
+/// A workspace whose member `a` depends on registry package
+/// `flags 1.2.0`, vendored into `vendor/` and stamped.
+fn vendored_workspace(checksum: &str) -> tempfile::TempDir {
+    let ws = workspace(&[
+        ("Cargo.toml", WS),
+        ("Cargo.lock", &registry_lock(checksum)),
+        ("a/Cargo.toml", A_WITH_REGISTRY_DEP),
+        ("a/src/lib.rs", ""),
+        (
+            "vendor/flags-1.2.0/Cargo.toml",
+            "[package]\nname = \"flags\"\nversion = \"1.2.0\"\nedition = \"2021\"\n",
         ),
+        ("vendor/flags-1.2.0/src/lib.rs", ""),
+    ]);
+    crate::manifest::sources::write_vendor_stamp(ws.path(), &ws.path().join("vendor")).unwrap();
+    ws
+}
+
+fn root_a_vendored() -> RawBuildModel {
+    raw_model(|cfg, t| {
+        cfg.cargo_workspace(".").vendored("vendor");
+        cfg.group("k").target(t).package("a");
+    })
+}
+
+/// The units of `raw` expanded at `root`.
+fn units_at(mut raw: RawBuildModel, root: &Path) -> crate::unit::UnitGraph {
+    expand_at(&mut raw, root).expect("expand");
+    let (model, diags) = gluon_model::intern(raw);
+    assert!(diags.is_empty(), "{diags:?}");
+    let resolved = crate::config::resolve(&model, "dev", None, root, None).expect("resolve");
+    crate::unit::lower(
+        &model,
+        &resolved,
+        &crate::vendor::cross::context::VendorBuildContext::new(),
+    )
+    .expect("lower")
+}
+
+fn unit_named(units: &crate::unit::UnitGraph, name: &str) -> crate::unit::BuildUnit {
+    units
+        .iter()
+        .find(|(_, u)| u.name == name)
+        .map(|(_, u)| u.clone())
+        .expect(name)
+}
+
+#[test]
+fn vendored_registry_dependency_is_lowered() {
+    let ws = vendored_workspace("abc");
+    let mut raw = root_a_vendored();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    let flags = raw
+        .crates
+        .lookup("flags")
+        .and_then(|h| raw.crates.get(h))
+        .expect("flags unit");
+    assert_eq!(flags.group, "cargo:x86_64-unknown-none");
+    assert!(!flags.is_project_crate);
+    let cargo = flags.cargo.as_ref().unwrap();
+    assert_eq!(
+        cargo.package.source,
+        CargoPackageSource::Registry {
+            checksum: Some("abc".into())
+        }
+    );
+    let a = raw
+        .crates
+        .lookup("a")
+        .and_then(|h| raw.crates.get(h))
+        .unwrap();
+    assert_eq!(
+        a.cargo.as_ref().unwrap().package.source,
+        CargoPackageSource::Path
+    );
+
+    let units = units_at(root_a_vendored(), ws.path());
+    let flags = unit_named(&units, "flags");
+    assert!(flags.settings.cap_lints);
+    assert_eq!(
+        flags.package.source,
+        crate::unit::PackageSource::Registry {
+            checksum: Some("abc".into())
+        }
+    );
+    assert!(!unit_named(&units, "a").settings.cap_lints);
+
+    // Another checksum is another package: a new metadata hash.
+    let other = vendored_workspace("def");
+    let other_units = units_at(root_a_vendored(), other.path());
+    assert_ne!(flags.metadata, unit_named(&other_units, "flags").metadata);
+}
+
+#[test]
+fn vendored_mode_needs_a_current_stamp() {
+    let ws = vendored_workspace("abc");
+    std::fs::write(ws.path().join("Cargo.lock"), registry_lock("abd")).unwrap();
+    let err = expand_err(&mut root_a_vendored(), ws.path());
+    assert!(
+        err.contains("Cargo.lock changed since the last `gluon vendor`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn vendored_mode_reports_a_missing_package_directory() {
+    let ws = vendored_workspace("abc");
+    std::fs::remove_dir_all(ws.path().join("vendor/flags-1.2.0")).unwrap();
+    let err = expand_err(&mut root_a_vendored(), ws.path());
+    assert!(
+        err.contains("source of `flags 1.2.0` is missing") && err.contains("run `gluon vendor`"),
         "{err}"
     );
 }

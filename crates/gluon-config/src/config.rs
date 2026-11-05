@@ -696,16 +696,26 @@ impl Config {
     /// Like [`Self::include_kconfig`], nothing is read here: Gluon reads
     /// the manifests on every run, after `gluon.rs` has run, so editing
     /// a `Cargo.toml` does not recompile `gluon.rs`.
-    pub fn cargo_workspace(&mut self, dir: &str) {
-        if let Some(prev) = &self.raw.cargo_workspace {
+    ///
+    /// Registry dependencies come from Cargo's registry cache unless the
+    /// returned builder names a vendor directory with
+    /// [`crate::builders::CargoWorkspaceBuilder::vendored`].
+    pub fn cargo_workspace(&mut self, dir: &str) -> crate::builders::CargoWorkspaceBuilder<'_> {
+        let active = if let Some(prev) = &self.raw.cargo_workspace {
             self.diagnostics
                 .push(crate::error::ConfigError::new(format!(
                     "cargo_workspace is declared more than once (\"{}\" and \"{dir}\")",
                     prev.dir
                 )));
-            return;
-        }
-        self.raw.cargo_workspace = Some(gluon_model::RawCargoWorkspace { dir: dir.into() });
+            false
+        } else {
+            self.raw.cargo_workspace = Some(gluon_model::RawCargoWorkspace {
+                dir: dir.into(),
+                vendored: None,
+            });
+            true
+        };
+        crate::builders::CargoWorkspaceBuilder { cfg: self, active }
     }
 
     /// Record a `.kconfig` file path for host-side parsing.
@@ -749,11 +759,25 @@ mod tests {
     }
 
     #[test]
+    fn cargo_workspace_vendored_records_the_directory() {
+        let mut cfg = Config::new();
+        cfg.cargo_workspace(".").vendored("vendor");
+        // A repeated declaration does not overwrite the first one's
+        // vendor directory.
+        cfg.cargo_workspace("other").vendored("elsewhere");
+        let ws = cfg.raw.cargo_workspace.as_ref().unwrap();
+        assert_eq!(ws.dir, ".");
+        assert_eq!(ws.vendored.as_deref(), Some("vendor"));
+        assert_eq!(cfg.diagnostics.len(), 1);
+    }
+
+    #[test]
     fn cargo_workspace_is_recorded_once() {
         let mut cfg = Config::new();
         cfg.cargo_workspace(".");
         cfg.cargo_workspace("other");
         assert_eq!(cfg.raw.cargo_workspace.as_ref().unwrap().dir, ".");
+        assert_eq!(cfg.raw.cargo_workspace.as_ref().unwrap().vendored, None);
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(
             cfg.diagnostics[0]

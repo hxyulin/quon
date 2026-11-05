@@ -2,6 +2,7 @@
 
 pub mod bootloader;
 pub mod build_step;
+pub mod cargo_workspace;
 pub mod config_option;
 pub mod crate_;
 pub mod dep;
@@ -17,6 +18,7 @@ pub mod qemu;
 pub mod rule;
 pub use bootloader::BootloaderBuilder;
 pub use build_step::BuildStepBuilder;
+pub use cargo_workspace::CargoWorkspaceBuilder;
 pub use config_option::ConfigOptionBuilder;
 pub use crate_::CrateBuilder;
 pub use dep::DepBuilder;

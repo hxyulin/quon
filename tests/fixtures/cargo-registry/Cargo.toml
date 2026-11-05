@@ -1,0 +1,10 @@
+# Cargo workspace with one registry dependency, built by `gluon build`
+# (see gluon.rs). `registry/` is not a member: it is the directory source
+# the tests point Cargo at.
+
+[workspace]
+resolver = "2"
+members = ["crates/kernel"]
+
+[workspace.dependencies]
+fakeflags = "1"
