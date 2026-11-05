@@ -30,7 +30,9 @@
 //!
 //! Cache key is `sha256(rustc_version || sources_of(gluon-config) ||
 //! sources_of(gluon-model))`. Touching either crate's sources or the
-//! compiler invalidates the entry.
+//! compiler invalidates the entry. cargo is run with `RUSTC` set to the
+//! project's rustc, so the compiler in the key is the one that built
+//! the rlib.
 //!
 //! ## Workspace discovery
 //!
@@ -92,7 +94,7 @@ pub fn ensure_gluon_config_rlib(build_dir: &Path, rustc_info: &RustcInfo) -> Res
     }
 
     // Cache miss: build via cargo and persist the resolved paths.
-    let paths = run_cargo_build(&workspace)?;
+    let paths = run_cargo_build(&workspace, &rustc_info.rustc_path)?;
     if !paths.gluon_config_rlib.is_file() {
         return Err(Error::Config(format!(
             "cargo build -p gluon-config reported {} but the file does not exist",
@@ -248,17 +250,29 @@ fn write_cached_manifest(path: &Path, paths: &RlibPaths) -> Result<()> {
     })
 }
 
-fn run_cargo_build(workspace_dir: &Path) -> Result<RlibPaths> {
-    use std::process::Command;
-    let output = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "gluon-config",
-            "--message-format=json",
-        ])
-        .current_dir(workspace_dir)
+/// `cargo build` for gluon-config, compiled by `rustc`.
+///
+/// cargo runs from the gluon workspace, where rustup would pick the
+/// workspace's own toolchain. The script binary is compiled by the
+/// project's rustc, and rustc refuses (E0514) to link a crate built by a
+/// different compiler. Setting `RUSTC` makes cargo use the project's
+/// compiler, which is also the one the cache key names.
+fn cargo_build_command(workspace_dir: &Path, rustc: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.args([
+        "build",
+        "--release",
+        "-p",
+        "gluon-config",
+        "--message-format=json",
+    ])
+    .env("RUSTC", rustc)
+    .current_dir(workspace_dir);
+    cmd
+}
+
+fn run_cargo_build(workspace_dir: &Path, rustc: &Path) -> Result<RlibPaths> {
+    let output = cargo_build_command(workspace_dir, rustc)
         .output()
         .map_err(|e| Error::Io {
             path: workspace_dir.to_path_buf(),
@@ -491,6 +505,19 @@ also not json
             paths.gluon_config_rlib,
             PathBuf::from("/x/libgluon_config-1.rlib")
         );
+    }
+
+    #[test]
+    fn cargo_build_uses_the_project_rustc() {
+        // The rlib cache is keyed on the project's rustc, and the script
+        // is compiled by it, so cargo must build gluon-config with it too.
+        let rustc = Path::new("/toolchains/project/bin/rustc");
+        let cmd = cargo_build_command(Path::new("/gluon"), rustc);
+        let rustc_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "RUSTC")
+            .and_then(|(_, v)| v);
+        assert_eq!(rustc_env, Some(rustc.as_os_str()));
     }
 
     #[test]
