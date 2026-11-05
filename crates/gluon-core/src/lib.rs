@@ -468,6 +468,7 @@ mod tests {
                     outputs: std::slice::from_ref(&out),
                     started_at: std::time::SystemTime::now(),
                     stderr,
+                    data: None,
                 })
                 .unwrap()
         };

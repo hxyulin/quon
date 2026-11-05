@@ -35,7 +35,8 @@ fs2 = "0.4"
 # `no_std`-compatible upstream but we use the `std` paths.
 # Pinned to 1.x; the API has stabilised since 1.0.
 hadris-fat = "1.1"
-serde = { version = "1", features = ["derive"] }
+# `rc` serialises the `Arc`s in `NodeData`, which fingerprint records store.
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "1"

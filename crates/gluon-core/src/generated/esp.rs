@@ -177,6 +177,7 @@ pub fn ensure_esp(
             outputs: &outputs,
             started_at,
             stderr: &[],
+            data: None,
         })?;
     }
 

@@ -249,6 +249,7 @@ pub fn build_image(
         outputs: &outputs,
         started_at,
         stderr: &[],
+        data: None,
     })?;
 
     Ok((image_path, false))

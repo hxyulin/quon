@@ -161,6 +161,7 @@ pub(crate) fn compile_and_cache(
         outputs: &outputs,
         started_at,
         stderr: &output.stderr,
+        data: None,
     })?;
     Ok((output_path, false))
 }

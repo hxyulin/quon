@@ -115,7 +115,7 @@ pub fn run_cargo_vendor(
 /// (rustup sets this on the outer cargo invocation, so nested calls
 /// naturally stick to the same toolchain), otherwise falls back to
 /// bare `cargo` on `$PATH`.
-fn resolve_cargo() -> PathBuf {
+pub(crate) fn resolve_cargo() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO") {
         return PathBuf::from(p);
     }

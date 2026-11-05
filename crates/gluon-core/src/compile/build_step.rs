@@ -251,6 +251,7 @@ pub fn execute_build_step(
         outputs: &outputs,
         started_at,
         stderr: &[],
+        data: None,
     })?;
 
     Ok((output_path, false))

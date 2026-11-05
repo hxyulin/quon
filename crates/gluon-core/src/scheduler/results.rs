@@ -8,21 +8,41 @@
 //! See `docs/src/architecture/concurrency.md`.
 
 use super::dag::{Dag, DagNode, NodeId};
+use crate::build_script::BuildScriptOutput;
 use crate::compile::extern_map::ArtifactLookup;
-use crate::unit::{UnitGraph, UnitId};
+use crate::unit::{RunId, UnitGraph, UnitId};
 use gluon_model::{BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
+
+/// Data a node hands to its dependents besides files.
+///
+/// A `RunBuildScript` node stores its parsed output here and in its
+/// fingerprint record, so a cache hit restores it without running the
+/// script. A `Compile` node stores the native link-search paths of the
+/// build scripts in its closure, so a dependent reads one slot per
+/// direct dep instead of walking the graph.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NodeData {
+    #[default]
+    None,
+    BuildScript(Arc<BuildScriptOutput>),
+    /// `rustc-link-search` values, in dep order then the unit's own,
+    /// without duplicates.
+    LinkSearch(Arc<[String]>),
+}
 
 /// What a finished node hands to its dependents and to the summary.
 #[derive(Debug)]
 pub(crate) struct NodeResult {
     /// The node's main output: rlib, dylib or binary for crates, the
     /// sysroot directory, the ESP directory, the image file, or the
-    /// build-step output. `None` for rule nodes.
+    /// build-step output. `None` for rule and build-script run nodes.
     pub(crate) primary: Option<PathBuf>,
     /// True when the freshness check skipped the node's action.
     pub(crate) was_cached: bool,
+    pub(crate) data: NodeData,
 }
 
 /// Read-only lookups over the result slots, keyed the way helpers ask
@@ -73,6 +93,11 @@ impl<'a> ResultView<'a> {
     pub(crate) fn sysroot(&self, target: Handle<TargetDef>) -> Option<&'a Path> {
         self.primary(DagNode::Sysroot(target))
     }
+
+    fn unit_result(&self, u: UnitId) -> Option<&'a NodeResult> {
+        let node = *self.node_of_unit.get(u.0 as usize)?;
+        self.results.get(node as usize)?.get()
+    }
 }
 
 impl ArtifactLookup for ResultView<'_> {
@@ -80,8 +105,19 @@ impl ArtifactLookup for ResultView<'_> {
         self.unit(self.units.unit_of(h)?)
     }
     fn unit(&self, u: UnitId) -> Option<&Path> {
-        let node = *self.node_of_unit.get(u.0 as usize)?;
-        self.results.get(node as usize)?.get()?.primary.as_deref()
+        self.unit_result(u)?.primary.as_deref()
+    }
+    fn build_script(&self, r: RunId) -> Option<&BuildScriptOutput> {
+        match &self.node(DagNode::RunBuildScript(r))?.data {
+            NodeData::BuildScript(out) => Some(out),
+            _ => None,
+        }
+    }
+    fn link_search(&self, u: UnitId) -> &[String] {
+        match self.unit_result(u).map(|r| &r.data) {
+            Some(NodeData::LinkSearch(paths)) => paths,
+            _ => &[],
+        }
     }
     fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path> {
         self.primary(DagNode::ConfigCrate(target))
@@ -116,6 +152,7 @@ mod tests {
             .set(NodeResult {
                 primary: Some(PathBuf::from("/sys/0")),
                 was_cached: true,
+                data: NodeData::None,
             })
             .unwrap();
 
@@ -146,6 +183,7 @@ mod tests {
                     slot.set(NodeResult {
                         primary: Some(PathBuf::from(format!("/out/{i}"))),
                         was_cached: false,
+                        data: NodeData::None,
                     })
                     .unwrap();
                 });

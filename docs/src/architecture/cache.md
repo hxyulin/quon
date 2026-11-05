@@ -1,7 +1,7 @@
 # Build Cache
 
 Every node that can skip its work (sysroot, sysroot crate, config
-crate, build unit, ESP entry, image, build step) proves it is fresh
+crate, build unit, build-script run, ESP entry, image, build step) proves it is fresh
 with one function, `FingerprintStore::check`, and records a finished
 run with one function, `FingerprintStore::record`. Both live in
 `cache::store`. Rules are not cached: they run arbitrary commands with
@@ -143,7 +143,8 @@ replaced by `_`, cut to 80 bytes, plus the first 8 hex digits of the
 key's SHA-256 when anything was replaced or cut, so two keys never
 share a file. A record holds the format, key, command, toolchain, the
 declared and discovered stamps (mtime, size, SHA-256, dirty), the env
-values, the outputs and `started_at`. Hashes are hex strings so the
+values, the outputs, `started_at`, and for build-script runs the parsed
+output (`data`). Hashes are hex strings so the
 files can be read when a cache misbehaves.
 
 Why one file per record instead of one manifest:
@@ -165,6 +166,19 @@ rustc, after any post step (objcopy for raw binaries) and after its
 depfile parsed. A failure anywhere before leaves the old record, which
 no longer matches, so the next build reruns the node. An unreadable or
 unparsable record is stale (`FormatChanged`), never a build error.
+
+### Build-script runs
+
+A `RunBuildScript` node's command is the script binary's path, the
+environment Gluon sets and the package directory. Its declared input is
+the script binary, its discovered inputs are the `rerun-if-changed`
+paths (every file in the package when the script prints none), and its
+env values are the `rerun-if-env-changed` names. The record's `data`
+holds the parsed output, so a hit hands it to the owner without running
+the script. The output reaches the owner's argv and env, so a changed
+output reruns the owner and a rerun with the same directives does not.
+A `rerun-if-changed` path that does not exist leaves the run unrecorded,
+so it reruns every build, as in Cargo.
 
 ### Replayed warnings
 

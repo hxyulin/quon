@@ -22,8 +22,18 @@
 //! 8. opt-level, debuginfo, LTO
 //! 9. feature cfgs, then the unit's cfg flags
 //! 10. `--cap-lints`, panic strategy, the unit's raw rustc flags
-//! 11. incremental directory, linker script, `-o` for raw binaries
-//! 12. `-C metadata`, then `-C extra-filename`
+//! 11. build-script output: `--cfg`, `--check-cfg`, `-l`, link args,
+//!     then `-L` for the link-search paths of the unit's closure
+//! 12. incremental directory, linker script, `-o` for raw binaries
+//! 13. `-C metadata`, then `-C extra-filename`
+//!
+//! ### Build-script output
+//!
+//! A unit with a build-script run reads the run's parsed output from
+//! the run node's result. Every part of it lands in the argv or the
+//! child's env (`OUT_DIR`, `rustc-env`), so it is in the command hash:
+//! a changed output reruns the unit, and a rerun that prints the same
+//! directives does not.
 //!
 //! ### Search paths
 //!
@@ -37,8 +47,12 @@ use super::compile_crate::CompileUnitInput;
 use super::{
     BuildLayout, CompileCtx, DriverKind, Emit, HOST_DEBUG_INFO, HOST_OPT_LEVEL, RustcCommandBuilder,
 };
+use crate::build_script::{LinkArg, LinkArgTarget};
+use crate::compile::extern_map::ArtifactLookup;
 use crate::error::{Error, Result};
-use crate::unit::{BuildUnit, DepTarget, Platform, UnitOrigin, UnitPaths, UnitProfile};
+use crate::unit::{
+    BuildUnit, DepTarget, Platform, UnitGraph, UnitId, UnitOrigin, UnitPaths, UnitProfile,
+};
 use gluon_model::{CrateType, TargetDef};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -309,6 +323,37 @@ fn build_command(
         builder.raw_arg(flag.as_str());
     }
 
+    if let Some(run) = units.build_script_of(input.unit) {
+        let out = artifacts.build_script(run).ok_or_else(|| {
+            Error::Compile(format!(
+                "{} ran before its build script finished (scheduler bug)",
+                unit.name
+            ))
+        })?;
+        let out_dir = units.run_dir(run, layout, model, resolved)?.join("out");
+        builder.env("OUT_DIR", out_dir.as_os_str());
+        for (k, v) in &out.env {
+            builder.env(k.as_str(), v.as_str());
+        }
+        for cfg in &out.cfgs {
+            builder.cfg(cfg);
+        }
+        for check in &out.check_cfgs {
+            builder.raw_arg("--check-cfg").raw_arg(check.as_str());
+        }
+        for lib in &out.link_libs {
+            builder.raw_arg("-l").raw_arg(lib.as_str());
+        }
+        for arg in out.link_args.iter().filter(|a| link_arg_applies(a, unit)) {
+            builder
+                .raw_arg("-C")
+                .raw_arg(format!("link-arg={}", arg.arg));
+        }
+    }
+    for path in closure_link_search(units, input.unit, artifacts) {
+        builder.raw_arg("-L").raw_arg(path);
+    }
+
     if let Some(dir) = &paths.incremental_dir {
         builder.incremental(dir);
     }
@@ -343,6 +388,56 @@ fn build_command(
         output_path,
         dep_outputs,
     })
+}
+
+/// Whether a build script's link argument applies to `unit`, as in
+/// Cargo: libraries take none, `rustc-link-arg` applies to executables
+/// and static libraries, `-bins` to executables, `-bin=NAME` to the
+/// executable named `NAME`. Gluon builds no cdylibs.
+fn link_arg_applies(arg: &LinkArg, unit: &BuildUnit) -> bool {
+    match &arg.applies_to {
+        LinkArgTarget::All => unit.kind.is_executable() || unit.kind == CrateType::StaticLib,
+        LinkArgTarget::Bins => unit.kind.is_executable(),
+        LinkArgTarget::Bin(name) => unit.kind.is_executable() && *name == unit.crate_name,
+        LinkArgTarget::Cdylib => false,
+    }
+}
+
+/// The `rustc-link-search` paths of the build scripts in `id`'s
+/// closure: each direct dep's set (its result's
+/// [`crate::scheduler::NodeData::LinkSearch`]), in dep order, then the
+/// unit's own run's, without duplicates. Proc-macro deps are skipped:
+/// their native libraries are linked into the dylib, on the host.
+///
+/// Each dep's set already covers its own closure, so this reads one
+/// slot per direct dep and walks nothing.
+pub(crate) fn closure_link_search(
+    units: &UnitGraph,
+    id: UnitId,
+    artifacts: &dyn ArtifactLookup,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |paths: &[String]| {
+        for p in paths {
+            if !out.contains(p) {
+                out.push(p.clone());
+            }
+        }
+    };
+    for dep in &units.get(id).deps {
+        if let DepTarget::Unit(d) = dep.target
+            && units.get(d).kind != CrateType::ProcMacro
+        {
+            add(artifacts.link_search(d));
+        }
+    }
+    if let Some(out) = units
+        .build_script_of(id)
+        .and_then(|r| artifacts.build_script(r))
+    {
+        add(&out.link_search);
+    }
+    out
 }
 
 /// Paths of the lint pass: metadata and depfile under

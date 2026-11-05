@@ -181,6 +181,7 @@ pub fn ensure_sysroot(
         outputs: &rlibs,
         started_at,
         stderr: &[],
+        data: None,
     })?;
 
     Ok((sysroot_dir, false))
@@ -554,6 +555,7 @@ mod tests {
                 outputs: &rlibs,
                 started_at: std::time::SystemTime::now(),
                 stderr: &[],
+                data: None,
             })
             .expect("record");
         ctx

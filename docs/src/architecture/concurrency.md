@@ -96,8 +96,24 @@ The dispatcher holds one `OnceLock<NodeResult>` per node, indexed by
 struct NodeResult {
     primary: Option<PathBuf>, // rlib, binary, sysroot dir, ESP dir, image, ...
     was_cached: bool,
+    data: NodeData,
+}
+
+enum NodeData {
+    None,
+    BuildScript(Arc<BuildScriptOutput>), // a RunBuildScript node's parsed output
+    LinkSearch(Arc<[String]>),           // link-search paths of a unit's closure
 }
 ```
+
+`data` carries what a node hands its dependents besides files. A
+`RunBuildScript` node stores its parsed output, which the owner's rustc
+command reads at dispatch time. Each `Compile` node stores the
+`rustc-link-search` paths of the build scripts in its closure (its
+direct deps' sets, then its own run's), so a dependent reads one slot
+per direct dep instead of walking the graph. A run's output is also
+kept in its fingerprint record, so a cache hit restores it without
+running the script.
 
 ### Dispatch protocol
 

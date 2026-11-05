@@ -31,6 +31,7 @@
 use crate::cache::hash::{sha256_bytes, sha256_file};
 use crate::compile::BuildLayout;
 use crate::error::{Error, Result};
+use crate::scheduler::NodeData;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -86,6 +87,10 @@ pub struct Fingerprint {
     /// A `.stderr` sidecar holds the run's diagnostics.
     #[serde(default)]
     pub stderr: bool,
+    /// Data the node hands its dependents, restored on a cache hit
+    /// (a build script's parsed output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<NodeData>,
 }
 
 /// Input for [`FingerprintStore::check`].
@@ -120,6 +125,7 @@ pub struct RecordInput<'a> {
     pub started_at: SystemTime,
     /// Diagnostics to replay on later cache hits. Empty for none.
     pub stderr: &'a [u8],
+    pub data: Option<NodeData>,
 }
 
 /// Result of [`FingerprintStore::check`].
@@ -309,6 +315,7 @@ impl FingerprintStore {
             outputs: r.outputs.to_vec(),
             started_at_ns: nanos(r.started_at),
             stderr: !r.stderr.is_empty(),
+            data: r.data,
         };
         create_dir(&self.dir)?;
         // The sidecar goes first, so a record that says it has stderr
@@ -553,6 +560,7 @@ mod tests {
                     // After every file the test wrote.
                     started_at: SystemTime::now(),
                     stderr,
+                    data: None,
                 })
                 .unwrap();
         }
@@ -716,6 +724,7 @@ mod tests {
                 outputs: &fx.outputs(),
                 started_at: SystemTime::now() - Duration::from_secs(10),
                 stderr: b"",
+                data: None,
             })
             .unwrap();
         set_mtime(&a, SystemTime::now());
@@ -730,6 +739,7 @@ mod tests {
                 outputs: &fx.outputs(),
                 started_at: SystemTime::now() - Duration::from_secs(1),
                 stderr: b"",
+                data: None,
             })
             .unwrap();
         assert_eq!(

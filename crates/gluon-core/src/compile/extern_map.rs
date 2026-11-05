@@ -5,7 +5,8 @@
 //! Backed by `BTreeMap` for cache-key stability — see
 //! `docs/src/architecture/determinism.md`.
 
-use crate::unit::UnitId;
+use crate::build_script::BuildScriptOutput;
+use crate::unit::{RunId, UnitId};
 use gluon_model::{BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,8 @@ pub struct ArtifactMap {
     esps: BTreeMap<Handle<EspDef>, PathBuf>,
     images: BTreeMap<Handle<ImageDef>, PathBuf>,
     units: BTreeMap<UnitId, PathBuf>,
+    build_scripts: BTreeMap<RunId, BuildScriptOutput>,
+    link_search: BTreeMap<UnitId, Vec<String>>,
 }
 
 /// Read access to the outputs of nodes that have already run.
@@ -56,6 +59,11 @@ pub trait ArtifactLookup: Sync {
     fn esp(&self, h: Handle<EspDef>) -> Option<&Path>;
     /// Built disk image.
     fn image(&self, h: Handle<ImageDef>) -> Option<&Path>;
+    /// Parsed output of a finished build-script run.
+    fn build_script(&self, r: RunId) -> Option<&BuildScriptOutput>;
+    /// Native link-search paths from the build scripts in a finished
+    /// unit's closure. Empty when it has none.
+    fn link_search(&self, u: UnitId) -> &[String];
 }
 
 impl ArtifactLookup for ArtifactMap {
@@ -73,6 +81,12 @@ impl ArtifactLookup for ArtifactMap {
     }
     fn esp(&self, h: Handle<EspDef>) -> Option<&Path> {
         self.esps.get(&h).map(PathBuf::as_path)
+    }
+    fn build_script(&self, r: RunId) -> Option<&BuildScriptOutput> {
+        self.build_scripts.get(&r)
+    }
+    fn link_search(&self, u: UnitId) -> &[String] {
+        self.link_search.get(&u).map(Vec::as_slice).unwrap_or(&[])
     }
     fn image(&self, h: Handle<ImageDef>) -> Option<&Path> {
         self.images.get(&h).map(PathBuf::as_path)
@@ -161,6 +175,16 @@ impl ArtifactMap {
     /// Record a build unit's artifact. Crate artifacts recorded with
     /// [`Self::insert`] are not visible through [`ArtifactLookup::unit`];
     /// tests that compile a unit record its deps here.
+    /// Record the output of a build-script run.
+    pub fn set_build_script(&mut self, r: RunId, out: BuildScriptOutput) {
+        self.build_scripts.insert(r, out);
+    }
+
+    /// Record the link-search paths of a unit's closure.
+    pub fn set_link_search(&mut self, u: UnitId, paths: Vec<String>) {
+        self.link_search.insert(u, paths);
+    }
+
     pub fn insert_unit(&mut self, u: UnitId, path: PathBuf) {
         self.units.insert(u, path);
     }

@@ -85,6 +85,23 @@ impl UnitId {
     }
 }
 
+/// Index into the build-script run table ([`UnitGraph::run`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RunId(pub u32);
+
+/// One run of a build script for one owning unit. The same compiled
+/// script can run for several owners (a package built for host and
+/// target), each with its own features, platform and `OUT_DIR`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptRun {
+    /// The compiled script: a host unit whose output is the binary.
+    pub script: UnitId,
+    /// The unit whose rustc command takes the run's output.
+    pub owner: UnitId,
+    /// What the script's environment says about its package.
+    pub package: crate::build_script::PackageInfo,
+}
+
 /// Where a unit came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnitOrigin {
@@ -237,6 +254,10 @@ pub struct UnitGraph {
     unit_of_vendor: BTreeMap<VendorBuildId, UnitId>,
     /// Config crate hash per target that has a unit linking it.
     config_metadata: BTreeMap<Handle<TargetDef>, Metadata>,
+    /// Build-script runs, one `RunBuildScript` node each.
+    runs: Vec<ScriptRun>,
+    /// The run whose output each owning unit takes.
+    run_of_owner: BTreeMap<UnitId, RunId>,
 }
 
 impl UnitGraph {
@@ -278,6 +299,68 @@ impl UnitGraph {
     /// build links it.
     pub fn config_metadata(&self, target: Handle<TargetDef>) -> Option<Metadata> {
         self.config_metadata.get(&target).copied()
+    }
+
+    /// Add a build-script run. Each owner has at most one; adding a
+    /// second for the same owner is a lowering bug and errors.
+    pub fn add_script_run(&mut self, run: ScriptRun) -> Result<RunId> {
+        let id = RunId(self.runs.len() as u32);
+        if self.run_of_owner.insert(run.owner, id).is_some() {
+            return Err(Error::Compile(format!(
+                "unit lowering: {} has two build-script runs (lowering bug)",
+                self.get(run.owner).name
+            )));
+        }
+        self.runs.push(run);
+        Ok(id)
+    }
+
+    pub fn run(&self, id: RunId) -> &ScriptRun {
+        &self.runs[id.0 as usize]
+    }
+
+    pub fn runs(&self) -> impl Iterator<Item = (RunId, &ScriptRun)> {
+        self.runs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (RunId(i as u32), r))
+    }
+
+    /// The build-script run whose output `unit` takes, if any.
+    pub fn build_script_of(&self, unit: UnitId) -> Option<RunId> {
+        self.run_of_owner.get(&unit).copied()
+    }
+
+    /// Directory of a run: `<owner platform dir>/build/<package>-<owner
+    /// h16>/`, holding `out/` (`OUT_DIR`) and `output` (the script's
+    /// stdout). Keyed by the owner, because each owner runs the script
+    /// with its own features and platform.
+    pub fn run_dir(
+        &self,
+        id: RunId,
+        layout: &BuildLayout,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+    ) -> Result<PathBuf> {
+        let run = self.run(id);
+        let owner = self.get(run.owner);
+        Ok(self
+            .platform_dir(run.owner, layout, model, resolved)?
+            .join("build")
+            .join(format!("{}-{}", owner.package.name, owner.metadata.short())))
+    }
+
+    /// Fingerprint key of a run: the owner's key behind `run:`, so it
+    /// carries the owner's identity and driver.
+    pub fn run_key(
+        &self,
+        id: RunId,
+        layout: &BuildLayout,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+    ) -> Result<String> {
+        let owner_key = self.cache_key(self.run(id).owner, layout, model, resolved)?;
+        Ok(format!("run:{owner_key}"))
     }
 
     /// The directory that holds `id`'s `deps/`, `final/` and
@@ -676,6 +759,7 @@ pub fn lower(
         unit_of_crate,
         unit_of_vendor,
         config_metadata,
+        ..UnitGraph::default()
     })
 }
 
@@ -1540,5 +1624,357 @@ mod tests {
                 meta(&units, kernel).short()
             )))
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Build-script runs (synthetic: no lowering creates them yet)
+    // ---------------------------------------------------------------
+
+    mod script_runs {
+        use super::*;
+        use crate::build_script::{BuildScriptOutput, LinkArg, LinkArgTarget, PackageInfo};
+        use crate::compile::command_builder::{build_unit_command, closure_link_search};
+        use crate::compile::{ArtifactMap, CompileCtx, CompileUnitInput, RustcInfo};
+        use std::sync::Arc;
+
+        /// `pkg_build` (host bin, the script) runs for `pkg` (cross
+        /// lib); `mid` (cross lib) uses `pkg`; `kernel` (cross bin)
+        /// uses `mid`.
+        struct Runs {
+            fx: Fixture,
+            units: UnitGraph,
+            run: RunId,
+            script: UnitId,
+            pkg: UnitId,
+            mid: UnitId,
+            kernel: UnitId,
+        }
+
+        fn runs() -> Runs {
+            let mut fx = Fixture::new();
+            let script = fx.add_crate("pkg_build", CrateType::Bin, true, &[]);
+            let pkg = fx.add_crate("pkg", CrateType::Lib, false, &[]);
+            let mid = fx.add_crate(
+                "mid",
+                CrateType::Lib,
+                false,
+                &[("pkg", DepResolution::Project(pkg))],
+            );
+            let kernel = fx.add_crate(
+                "kernel",
+                CrateType::Bin,
+                false,
+                &[("mid", DepResolution::Project(mid))],
+            );
+            let mut units = fx.lower(&VendorBuildContext::new());
+            let [script, pkg, mid, kernel] =
+                [script, pkg, mid, kernel].map(|h| units.unit_of(h).unwrap());
+            let run = units
+                .add_script_run(ScriptRun {
+                    script,
+                    owner: pkg,
+                    package: PackageInfo {
+                        name: "pkg".into(),
+                        version: "0.0.0".into(),
+                        manifest_dir: PathBuf::from("/proj/crates/pkg"),
+                        manifest_path: PathBuf::from("/proj/crates/pkg/Cargo.toml"),
+                        ..PackageInfo::default()
+                    },
+                })
+                .unwrap();
+            Runs {
+                fx,
+                units,
+                run,
+                script,
+                pkg,
+                mid,
+                kernel,
+            }
+        }
+
+        fn output(cfg: &str) -> BuildScriptOutput {
+            BuildScriptOutput {
+                cfgs: vec![cfg.into()],
+                check_cfgs: vec!["cfg(has_feature_x)".into()],
+                env: vec![("PKG_GENERATED".into(), "yes".into())],
+                link_libs: vec!["static=pkgnative".into()],
+                link_search: vec!["native=/opt/pkg/lib".into()],
+                link_args: vec![LinkArg {
+                    applies_to: LinkArgTarget::All,
+                    arg: "-Tpkg.ld".into(),
+                }],
+                ..BuildScriptOutput::default()
+            }
+        }
+
+        fn ctx(root: &std::path::Path) -> CompileCtx {
+            CompileCtx::new(
+                BuildLayout::new(root.join("build"), "demo"),
+                Arc::new(RustcInfo {
+                    rustc_path: PathBuf::from("/usr/bin/rustc"),
+                    rustc_arg: "rustc".into(),
+                    version: "rustc 0.0.0".into(),
+                    host_triple: "x86_64-unknown-linux-gnu".into(),
+                    commit_hash: None,
+                    release: "0.0.0".into(),
+                    sysroot: PathBuf::from("/fake-sysroot"),
+                    rust_src: None,
+                    mtime_ns: 0,
+                }),
+            )
+        }
+
+        /// Every unit finished, at fake paths, plus the config crate.
+        fn finished(r: &Runs) -> ArtifactMap {
+            let mut map = ArtifactMap::new();
+            for (id, u) in r.units.iter() {
+                map.insert_unit(id, PathBuf::from(format!("/out/lib{}.rlib", u.crate_name)));
+            }
+            map.set_config_crate(r.fx.target, PathBuf::from("/out/libdemo_config.rlib"));
+            map
+        }
+
+        fn argv(r: &Runs, unit: UnitId, map: &ArtifactMap) -> (Vec<String>, [u8; 32]) {
+            let ctx = ctx(std::path::Path::new("/proj"));
+            let cmd = build_unit_command(
+                &ctx,
+                &CompileUnitInput {
+                    model: &r.fx.model,
+                    resolved: &r.fx.resolved,
+                    units: &r.units,
+                    unit,
+                    artifacts: map,
+                    sysroot_dir: Some(std::path::Path::new("/sysroot")),
+                },
+            )
+            .unwrap();
+            let args = cmd
+                .builder
+                .args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            (args, cmd.builder.hash())
+        }
+
+        fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+            args.windows(2).any(|w| w[0] == flag && w[1] == value)
+        }
+
+        #[test]
+        fn run_node_sits_between_script_and_owner() {
+            let r = runs();
+            let dag = build_dag(&r.fx.resolved, &r.fx.model, &r.units).unwrap();
+            let id = |n: DagNode| dag.node_index[&n];
+            let run = id(DagNode::RunBuildScript(r.run));
+            assert!(dag.edges_out[&id(DagNode::Compile(r.script))].contains(&run));
+            assert!(dag.edges_out[&id(DagNode::Sysroot(r.fx.target))].contains(&run));
+            assert!(dag.edges_out[&run].contains(&id(DagNode::Compile(r.pkg))));
+            assert_eq!(dag.edges_out[&run].len(), 1, "only the owner reads the run");
+        }
+
+        #[test]
+        fn an_owner_has_one_run() {
+            let mut r = runs();
+            let again = r.units.run(r.run).clone();
+            assert!(r.units.add_script_run(again).is_err());
+        }
+
+        #[test]
+        fn run_output_reaches_the_owner_command() {
+            let r = runs();
+            let mut map = finished(&r);
+            map.set_build_script(r.run, output("has_x"));
+            let ctx = ctx(std::path::Path::new("/proj"));
+            let cmd = build_unit_command(
+                &ctx,
+                &CompileUnitInput {
+                    model: &r.fx.model,
+                    resolved: &r.fx.resolved,
+                    units: &r.units,
+                    unit: r.pkg,
+                    artifacts: &map,
+                    sysroot_dir: Some(std::path::Path::new("/sysroot")),
+                },
+            )
+            .unwrap();
+            let args: Vec<String> = cmd
+                .builder
+                .args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert!(has_pair(&args, "--cfg", "has_x"), "{args:?}");
+            assert!(
+                has_pair(&args, "--check-cfg", "cfg(has_feature_x)"),
+                "{args:?}"
+            );
+            assert!(has_pair(&args, "-l", "static=pkgnative"), "{args:?}");
+            assert!(has_pair(&args, "-L", "native=/opt/pkg/lib"), "{args:?}");
+            assert!(
+                !args.iter().any(|a| a.starts_with("link-arg=")),
+                "libraries take no link args: {args:?}"
+            );
+            let envs = cmd.builder.envs();
+            let out_dir = r
+                .units
+                .run_dir(r.run, &ctx.layout, &r.fx.model, &r.fx.resolved)
+                .unwrap()
+                .join("out");
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new("OUT_DIR")),
+                Some(&out_dir.into_os_string())
+            );
+            assert_eq!(
+                envs.get(std::ffi::OsStr::new("PKG_GENERATED")),
+                Some(&std::ffi::OsString::from("yes"))
+            );
+        }
+
+        #[test]
+        fn changed_output_changes_the_owner_command_and_same_output_does_not() {
+            let r = runs();
+            let mut map = finished(&r);
+            map.set_build_script(r.run, output("has_x"));
+            let (_, first) = argv(&r, r.pkg, &map);
+            map.set_build_script(r.run, output("has_x"));
+            let (_, rerun) = argv(&r, r.pkg, &map);
+            assert_eq!(
+                first, rerun,
+                "a rerun with the same output must not rebuild"
+            );
+            map.set_build_script(r.run, output("has_y"));
+            let (_, changed) = argv(&r, r.pkg, &map);
+            assert_ne!(first, changed, "a changed output must rebuild the owner");
+        }
+
+        #[test]
+        fn owner_without_its_run_finished_is_a_scheduler_bug() {
+            let r = runs();
+            let map = finished(&r);
+            let ctx = ctx(std::path::Path::new("/proj"));
+            let err = build_unit_command(
+                &ctx,
+                &CompileUnitInput {
+                    model: &r.fx.model,
+                    resolved: &r.fx.resolved,
+                    units: &r.units,
+                    unit: r.pkg,
+                    artifacts: &map,
+                    sysroot_dir: Some(std::path::Path::new("/sysroot")),
+                },
+            )
+            .err()
+            .expect("must fail");
+            assert!(err.to_string().contains("scheduler bug"), "{err}");
+        }
+
+        #[test]
+        fn link_search_from_a_transitive_dep_reaches_the_bin() {
+            let r = runs();
+            let mut map = finished(&r);
+            map.set_build_script(r.run, output("has_x"));
+            // What each Compile node stores in its result, bottom-up.
+            let pkg_ls = closure_link_search(&r.units, r.pkg, &map);
+            assert_eq!(pkg_ls, ["native=/opt/pkg/lib"]);
+            map.set_link_search(r.pkg, pkg_ls);
+            let mid_ls = closure_link_search(&r.units, r.mid, &map);
+            assert_eq!(
+                mid_ls,
+                ["native=/opt/pkg/lib"],
+                "mid has no script of its own"
+            );
+            map.set_link_search(r.mid, mid_ls);
+
+            let (args, _) = argv(&r, r.kernel, &map);
+            assert!(has_pair(&args, "-L", "native=/opt/pkg/lib"), "{args:?}");
+            // The script's own flags stay with its owner.
+            assert!(!args.iter().any(|a| a == "has_x" || a == "static=pkgnative"));
+        }
+
+        #[test]
+        fn link_args_apply_to_executables() {
+            let mut r = runs();
+            // Move the run onto the kernel to see an executable take it.
+            let mut units = r.fx.lower(&VendorBuildContext::new());
+            let mut package = r.units.run(r.run).package.clone();
+            package.name = "kernel".into();
+            r.run = units
+                .add_script_run(ScriptRun {
+                    script: r.script,
+                    owner: r.kernel,
+                    package,
+                })
+                .unwrap();
+            r.units = units;
+            let mut map = finished(&r);
+            map.set_build_script(r.run, output("has_x"));
+            let (args, _) = argv(&r, r.kernel, &map);
+            assert!(has_pair(&args, "-C", "link-arg=-Tpkg.ld"), "{args:?}");
+        }
+
+        /// The owner compiled with real rustc: fresh when the run's
+        /// output is unchanged, rebuilt when it changes.
+        #[test]
+        #[ignore]
+        fn owner_rebuilds_only_when_run_output_changes() {
+            let Ok(info) = RustcInfo::probe() else {
+                eprintln!("skipped: rustc probe failed");
+                return;
+            };
+            let tmp = tempfile::tempdir().unwrap();
+            let mut fx = Fixture::new();
+            fx.resolved.project_root = tmp.path().to_path_buf();
+            let script = fx.add_crate("pkg_build", CrateType::Bin, true, &[]);
+            let pkg = fx.add_crate("pkg", CrateType::Lib, true, &[]);
+            let src = tmp.path().join("crates/pkg/src/lib.rs");
+            std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+            std::fs::write(
+                &src,
+                "#[cfg(has_x)] pub const X: u32 = 1;\n#[cfg(has_y)] pub const Y: u32 = 2;\n",
+            )
+            .unwrap();
+            let mut units = fx.lower(&VendorBuildContext::new());
+            let (script, pkg) = (units.unit_of(script).unwrap(), units.unit_of(pkg).unwrap());
+            let run = units
+                .add_script_run(ScriptRun {
+                    script,
+                    owner: pkg,
+                    package: PackageInfo::default(),
+                })
+                .unwrap();
+            let ctx = CompileCtx::new(
+                BuildLayout::new(tmp.path().join("build"), "demo"),
+                Arc::new(info),
+            );
+            let compile = |cfg: &str| {
+                let mut map = ArtifactMap::new();
+                map.set_build_script(
+                    run,
+                    BuildScriptOutput {
+                        cfgs: vec![cfg.into()],
+                        ..BuildScriptOutput::default()
+                    },
+                );
+                crate::compile::compile_unit(
+                    &ctx,
+                    CompileUnitInput {
+                        model: &fx.model,
+                        resolved: &fx.resolved,
+                        units: &units,
+                        unit: pkg,
+                        artifacts: &map,
+                        sysroot_dir: None,
+                    },
+                    &mut Vec::new(),
+                )
+                .expect("compile")
+                .1
+            };
+            assert!(!compile("has_x"), "cold build");
+            assert!(compile("has_x"), "same run output must stay fresh");
+            assert!(!compile("has_y"), "changed run output must rebuild");
+        }
     }
 }

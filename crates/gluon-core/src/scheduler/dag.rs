@@ -23,7 +23,7 @@
 //! **Do not change `edges_out` to `Vec` under any circumstances.**
 
 use crate::error::{Error, Result};
-use crate::unit::{DepTarget, Platform, UnitGraph, UnitId, UnitOrigin};
+use crate::unit::{DepTarget, Platform, RunId, UnitGraph, UnitId, UnitOrigin};
 use gluon_model::{
     BuildModel, BuildStepDef, BuildStepInput, CrateDef, EspDef, Handle, ImageDef, ImageSource,
     ResolvedConfig, RuleDef, TargetDef,
@@ -52,6 +52,10 @@ pub enum DagNode {
     /// vendored crate, for host or for a cross target. See
     /// [`crate::unit::BuildUnit`].
     Compile(UnitId),
+    /// Run one build script for one owning unit (see
+    /// [`crate::unit::ScriptRun`]). Its parsed output reaches the
+    /// owner's rustc command through the node's result data.
+    RunBuildScript(RunId),
     /// Run a user-declared rule via the rule registry.
     Rule(Handle<RuleDef>),
     /// Assemble an EFI System Partition directory from the primary build
@@ -239,6 +243,9 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel, units: &UnitGrap
     for (id, _) in units.iter() {
         dag.insert_node(DagNode::Compile(id));
     }
+    for (id, _) in units.runs() {
+        dag.insert_node(DagNode::RunBuildScript(id));
+    }
     for (h, _) in model.esps.iter() {
         dag.insert_node(DagNode::Esp(h));
     }
@@ -276,7 +283,8 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel, units: &UnitGrap
 ///
 /// | Node | Inputs |
 /// |---|---|
-/// | `Compile(u)` | `Sysroot(t)` if the unit links the sysroot; `ConfigCrate(t)` if it links the config crate; `Compile` of each dep unit and each order dep (`artifact_deps`) |
+/// | `Compile(u)` | `Sysroot(t)` if the unit links the sysroot; `ConfigCrate(t)` if it links the config crate; `Compile` of each dep unit and each order dep (`artifact_deps`); `RunBuildScript(r)` if the unit has a build-script run |
+/// | `RunBuildScript(r)` | `Compile` of the script; `Sysroot(t)` when the owner is a cross unit that links the sysroot, because probe-style scripts compile against it |
 /// | `ConfigCrate(t)` | `Sysroot(t)` |
 /// | `Esp(e)` | `Compile` of each entry's source crate |
 /// | `Image(i)` | per entry and raw write: crate name → `Compile`, else build-step name → `BuildStep`; ESP name → `Esp`. Host files have no node |
@@ -320,6 +328,16 @@ pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNo
                 }
             }
             out.extend(unit.order_deps.iter().map(|&d| DagNode::Compile(d)));
+            out.extend(units.build_script_of(id).map(DagNode::RunBuildScript));
+            out
+        }
+        DagNode::RunBuildScript(r) => {
+            let run = units.run(r);
+            let mut out = vec![DagNode::Compile(run.script)];
+            let owner = units.get(run.owner);
+            if let (true, Platform::Cross(t)) = (owner.sysroot, owner.platform) {
+                out.push(DagNode::Sysroot(t));
+            }
             out
         }
         DagNode::Esp(h) => model

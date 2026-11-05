@@ -19,13 +19,14 @@ mod results;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
+pub use results::NodeData;
 pub use worker::{BuildSummary, JobDispatcher, WorkerPool};
 
 use crate::compile::{CompileCtx, CompileUnitInput, compile_unit};
 use crate::error::{Error, Result};
 use crate::image::{ImageCtx, build_image};
 use crate::rule::{RuleCtx, RuleRegistry};
-use crate::unit::{Platform, UnitGraph, UnitId};
+use crate::unit::{Platform, RunId, UnitGraph, UnitId};
 use crate::vendor::cross::context::VendorBuildContext;
 use dag::Dag as DagType;
 use gluon_model::{
@@ -133,7 +134,7 @@ fn dispatch_compile(
     view: &ResultView<'_>,
     unit: UnitId,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutcome> {
+) -> Result<NodeResult> {
     // The DAG gives a unit that links the sysroot an edge from its
     // target's Sysroot node, so the sysroot has finished by now.
     let u = units.get(unit);
@@ -159,7 +160,116 @@ fn dispatch_compile(
         },
         stderr,
     )?;
-    Ok((Some(out_path), was_cached))
+    // Computed from the inputs' slots, so a cache hit carries it too.
+    let link_search = crate::compile::command_builder::closure_link_search(units, unit, view);
+    Ok(NodeResult {
+        primary: Some(out_path),
+        was_cached,
+        data: if link_search.is_empty() {
+            NodeData::None
+        } else {
+            NodeData::LinkSearch(link_search.into())
+        },
+    })
+}
+
+/// Run one build script for its owner; see [`crate::build_script::run`].
+///
+/// Not yet given: `rustc --print cfg` values (`CARGO_CFG_*`), the
+/// platform's rustflags, and `links` metadata from deps (`DEP_*`). No
+/// lowered unit has a run yet; the stage that lowers vendored build
+/// scripts fills these in.
+fn dispatch_run_build_script(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    units: &UnitGraph,
+    view: &ResultView<'_>,
+    r: RunId,
+    stderr: &mut Vec<u8>,
+) -> Result<NodeResult> {
+    use crate::build_script::{ScriptEnvInput, ScriptPlatform, ScriptTarget, script_env};
+    use crate::compile::extern_map::ArtifactLookup;
+    use crate::unit::UnitProfile;
+
+    let run = units.run(r);
+    let owner = units.get(run.owner);
+    let what = format!(
+        "build script of {}",
+        units.label(run.owner, model, resolved)
+    );
+    let binary = view.unit(run.script).ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: {what} ran before its script compiled; DAG edge missing?"
+        ))
+    })?;
+    let run_dir = units.run_dir(r, &ctx.layout, model, resolved)?;
+    let out_dir = run_dir.join("out");
+    let (opt_level, debug_info) = match owner.profile {
+        UnitProfile::Host => (
+            crate::compile::HOST_OPT_LEVEL,
+            crate::compile::HOST_DEBUG_INFO,
+        ),
+        UnitProfile::Active => (resolved.profile.opt_level, resolved.profile.debug_info),
+    };
+    let spec_file;
+    let gluon_sysroot;
+    let platform = match owner.platform {
+        Platform::Host => ScriptPlatform::Host,
+        Platform::Cross(t) => {
+            let target = model.targets.get(t).ok_or_else(|| {
+                Error::Compile(format!("{what}: target handle {t:?} not in the model"))
+            })?;
+            spec_file = crate::compile::rustc::target_spec_file(&target.spec, target.builtin);
+            gluon_sysroot = view
+                .sysroot(t)
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| ctx.layout.sysroot_dir(target));
+            ScriptPlatform::Cross {
+                target: match &spec_file {
+                    Some(path) => ScriptTarget::Custom(path),
+                    None => ScriptTarget::Builtin(&target.spec),
+                },
+                gluon_sysroot: &gluon_sysroot,
+                opt_level,
+                debug_info,
+            }
+        }
+    };
+    let cargo = crate::vendor::cargo_cmd::resolve_cargo();
+    let env = script_env(&ScriptEnvInput {
+        package: &run.package,
+        features: &owner.features,
+        platform,
+        out_dir: &out_dir,
+        host_triple: &ctx.rustc_info.host_triple,
+        toolchain_sysroot: &ctx.rustc_info.sysroot,
+        cargo: &cargo,
+        num_jobs: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1),
+        target_cfgs: &[],
+        target_rustflags: &[],
+        dep_metadata: &[],
+    });
+    let (out, was_cached) = crate::build_script::run::run_build_script(
+        ctx,
+        crate::build_script::run::RunInput {
+            what,
+            key: units.run_key(r, &ctx.layout, model, resolved)?,
+            binary,
+            env,
+            manifest_dir: &run.package.manifest_dir,
+            run_dir: &run_dir,
+            has_links: run.package.links.is_some(),
+        },
+        stderr,
+    )?;
+    Ok(NodeResult {
+        primary: None,
+        was_cached,
+        data: NodeData::BuildScript(out),
+    })
 }
 
 fn dispatch_esp(
@@ -257,6 +367,10 @@ fn node_label(
         DagNode::Sysroot(t) => format!("sysroot {}", target_name(t)),
         DagNode::ConfigCrate(t) => format!("config crate ({})", target_name(t)),
         DagNode::Compile(u) => units.label(u, model, resolved),
+        DagNode::RunBuildScript(r) => format!(
+            "build script of {}",
+            units.label(units.run(r).owner, model, resolved)
+        ),
         DagNode::Rule(h) => match model.rules.get(h) {
             Some(r) => format!("rule {}", r.name),
             None => format!("rule {h:?}"),
@@ -280,40 +394,45 @@ impl JobDispatcher for PipelineDispatcher<'_> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
         let view = self.view();
         let (ctx, model, resolved) = (self.ctx, self.model, self.resolved);
-        let (primary, was_cached) = match self.dag.nodes[node as usize] {
-            DagNode::Sysroot(target) => dispatch_sysroot(ctx, model, target, stdout, stderr)?,
-            DagNode::ConfigCrate(target) => {
-                dispatch_config_crate(ctx, model, resolved, self.units, &view, target, stderr)?
+        let plain = |(primary, was_cached): NodeOutcome| NodeResult {
+            primary,
+            was_cached,
+            data: NodeData::None,
+        };
+        let result = match self.dag.nodes[node as usize] {
+            DagNode::Sysroot(target) => {
+                plain(dispatch_sysroot(ctx, model, target, stdout, stderr)?)
             }
+            DagNode::ConfigCrate(target) => plain(dispatch_config_crate(
+                ctx, model, resolved, self.units, &view, target, stderr,
+            )?),
             // rustc writes everything to stderr; the worker pool
             // flushes it per job.
             DagNode::Compile(unit) => {
                 dispatch_compile(ctx, model, resolved, self.units, &view, unit, stderr)?
             }
-            DagNode::Esp(handle) => {
-                dispatch_esp(ctx, model, resolved, &view, handle, stdout, stderr)?
+            DagNode::RunBuildScript(r) => {
+                dispatch_run_build_script(ctx, model, resolved, self.units, &view, r, stderr)?
             }
-            DagNode::Image(handle) => {
-                dispatch_image(ctx, model, resolved, &view, handle, stdout, stderr)?
-            }
-            DagNode::Rule(handle) => dispatch_rule(
+            DagNode::Esp(handle) => plain(dispatch_esp(
+                ctx, model, resolved, &view, handle, stdout, stderr,
+            )?),
+            DagNode::Image(handle) => plain(dispatch_image(
+                ctx, model, resolved, &view, handle, stdout, stderr,
+            )?),
+            DagNode::Rule(handle) => plain(dispatch_rule(
                 ctx, model, resolved, self.rules, &view, handle, stdout, stderr,
-            )?,
-            DagNode::BuildStep(handle) => {
-                dispatch_build_step(ctx, model, resolved, &view, handle, stdout, stderr)?
-            }
+            )?),
+            DagNode::BuildStep(handle) => plain(dispatch_build_step(
+                ctx, model, resolved, &view, handle, stdout, stderr,
+            )?),
         };
-        self.results[node as usize]
-            .set(NodeResult {
-                primary,
-                was_cached,
-            })
-            .map_err(|_| {
-                Error::Compile(format!(
-                    "scheduler: {} was dispatched twice (scheduler bug)",
-                    self.label(node)
-                ))
-            })
+        self.results[node as usize].set(result).map_err(|_| {
+            Error::Compile(format!(
+                "scheduler: {} was dispatched twice (scheduler bug)",
+                self.label(node)
+            ))
+        })
     }
 
     fn label(&self, node: NodeId) -> String {

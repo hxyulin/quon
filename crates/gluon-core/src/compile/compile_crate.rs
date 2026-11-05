@@ -1444,6 +1444,7 @@ mod tests {
                 outputs: std::slice::from_ref(&output_path),
                 started_at: std::time::SystemTime::now(),
                 stderr: &[],
+                data: None,
             })
             .expect("record");
         drop(ctx_for_hash);
