@@ -78,6 +78,15 @@ cfg.profile("release")
 | `.preset(name)` | Apply a named config preset |
 | `.config(key, value)` | Set a config option value for this profile |
 
+### What a profile builds
+
+Without `.boot_binary(...)`, a profile builds every crate. With it, the
+profile builds every crate of its own target, the boot binary, and what
+they depend on. Crates of other targets build only when something the
+profile builds needs them, for example through `artifact_env`. A project
+with an x86_64 profile and an aarch64 profile therefore does not compile
+the aarch64 crates for the x86_64 profile.
+
 ### Profile inheritance
 
 The `.inherits(profile_name)` method creates a parent-child relationship

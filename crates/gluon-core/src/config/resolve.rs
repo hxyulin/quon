@@ -315,11 +315,12 @@ pub fn resolve(
         resolved_options.insert(k, v);
     }
 
-    // 10. Resolve crate list. When boot_binary is set, include only crates
-    //     reachable from the boot binary via deps + artifact_deps closure.
-    //     This prevents wasteful compilation: a project with profile("x86")
-    //     and profile("arm") will only compile crates relevant to the
-    //     active profile's boot binary.
+    // 10. Resolve crate list. When boot_binary is set, include the crates
+    //     of the profile's target and everything reachable from them and
+    //     from the boot binary via deps + artifact_deps closure. This
+    //     prevents wasteful compilation: a project with profile("x86")
+    //     and profile("arm") will not compile the arm crates for the x86
+    //     profile, but every crate declared for x86 still builds.
     //
     //     When boot_binary is None, fall back to including every crate
     //     (backward compat for simple single-target projects).
@@ -327,7 +328,7 @@ pub fn resolve(
     //     Host crates (target == "host") set `host: true` so the
     //     scheduler compiles them for the build machine. All other crates
     //     are cross and receive their group's resolved target handle.
-    let reachable = boot_binary.map(|root| reachable_crates(model, root));
+    let reachable = boot_binary.map(|root| reachable_crates(model, root, effective_target));
     let mut resolved_crates: Vec<ResolvedCrateRef> = Vec::new();
     for (crate_handle, krate) in model.crates.iter() {
         // Filter to reachable crates when boot_binary is set.
@@ -470,20 +471,37 @@ fn flatten_profile(
     Ok(acc)
 }
 
-/// Compute the transitive closure of crates reachable from `root` via
-/// `deps` and `artifact_deps` edges. Used when a profile declares a
-/// `boot_binary` to restrict the build to only the crates that are actually
-/// needed — preventing wasteful cross-target compilation in multi-profile
-/// projects.
+/// Compute the transitive closure of crates reachable from `root` and
+/// from every crate built for `target` via `deps` and `artifact_deps`
+/// edges. Used when a profile declares a `boot_binary` to restrict the
+/// build to the crates that are actually needed — preventing wasteful
+/// cross-target compilation in multi-profile projects. Crates of the
+/// profile's own target are always kept, so a library the boot binary
+/// does not use is still built and linted.
 ///
 /// Also expands ESP entries: if any source crate in an `EspDef` is reachable,
 /// all source crates in that ESP are included (an ESP is an atomic unit that
 /// must be assembled whole).
-fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Handle<CrateDef>> {
+fn reachable_crates(
+    model: &BuildModel,
+    root: Handle<CrateDef>,
+    target: Handle<TargetDef>,
+) -> BTreeSet<Handle<CrateDef>> {
     let mut visited = BTreeSet::new();
     let mut queue = VecDeque::new();
     visited.insert(root);
     queue.push_back(root);
+
+    // Target seed: every crate built for the profile's target.
+    for (h, krate) in model.crates.iter() {
+        let cross = model
+            .groups
+            .get(krate.group)
+            .is_some_and(|g| !matches!(g.target, TargetSpec::Host));
+        if cross && krate.target == TargetSpec::Cross(target) && visited.insert(h) {
+            queue.push_back(h);
+        }
+    }
 
     // Build-step seed: every declared build step contributes its runner
     // crate and every `crate_in` input as additional reachability roots.
@@ -1250,6 +1268,47 @@ mod tests {
         assert!(
             !names.contains(&"crate_b".into()),
             "crate_b is unreachable from crate_a, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn filter_boot_binary_keeps_crates_of_the_profile_target() {
+        // A library on the profile's own target that the boot binary
+        // does not use still builds: only other targets' crates are
+        // filtered. Its host proc macro comes with it.
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            let x = cfg.target_spec("x", "t.json");
+            let y = cfg.target_spec("y", "y.json");
+            cfg.profile("default").target(x).boot_binary("kernel");
+            {
+                let mut h = cfg.group("host_tools").target_host();
+                h.add("lib_derive", "crates/derive")
+                    .crate_type(CrateType::ProcMacro);
+            }
+            {
+                let mut g = cfg.group("kernel").target(x);
+                g.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
+                g.add("lib", "crates/lib").dep("lib_derive", "lib_derive");
+            }
+            {
+                let mut g = cfg.group("other").target(y);
+                g.add("other", "crates/other");
+            }
+        });
+        let names = crate_names_for_profile(&model, "default");
+        assert!(names.contains(&"kernel".into()), "got {names:?}");
+        assert!(
+            names.contains(&"lib".into()),
+            "same-target crate unused by the boot binary, got {names:?}"
+        );
+        assert!(
+            names.contains(&"lib_derive".into()),
+            "host dep of a same-target crate, got {names:?}"
+        );
+        assert!(
+            !names.contains(&"other".into()),
+            "crate on another target, got {names:?}"
         );
     }
 
