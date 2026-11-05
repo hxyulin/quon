@@ -38,6 +38,16 @@ cfg.esp("default")
     .add("shell", "EFI/tools/Shell.efi");
 ```
 
+`.add_file(path, esp_path)` copies a file Gluon does not build, such as
+a bootloader configuration file. `path` is relative to the project
+root, and an edited file is copied again on the next build:
+
+```rust
+cfg.esp("default")
+    .add("kernel", "boot/kernel")
+    .add_file("limine.conf", "limine.conf");
+```
+
 The staging directory is located at
 `build/cross/<target>/<profile>/esp/` and is rebuilt whenever any of its
 input files change.

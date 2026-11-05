@@ -3,7 +3,7 @@
 use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{Handle, RawEspDef, RawEspEntry};
+use gluon_model::{Handle, RawEspDef, RawEspEntry, RawEspSource};
 
 /// Chainable builder returned by [`Config::esp`].
 pub struct EspBuilder<'cfg> {
@@ -30,7 +30,19 @@ impl<'cfg> EspBuilder<'cfg> {
     /// An absolute `dest_path` is rejected with an engine-parity diagnostic
     /// and the entry is **not** inserted — mirroring the engine check at
     /// `register_esp` (pipeline.rs line 961).
-    pub fn add(mut self, source_crate: &str, dest_path: &str) -> Self {
+    pub fn add(self, source_crate: &str, dest_path: &str) -> Self {
+        self.push("add", RawEspSource::Crate(source_crate.into()), dest_path)
+    }
+
+    /// Append an ESP entry: copy the host file `path`, relative to the
+    /// project root, to `dest_path` within the ESP directory. Use it
+    /// for files Gluon does not build, such as a bootloader's
+    /// configuration file. `dest_path` follows the rules of [`Self::add`].
+    pub fn add_file(self, path: &str, dest_path: &str) -> Self {
+        self.push("add_file", RawEspSource::File(path.into()), dest_path)
+    }
+
+    fn push(mut self, method: &str, source: RawEspSource, dest_path: &str) -> Self {
         if self.state.is_duplicate() {
             return self;
         }
@@ -38,13 +50,13 @@ impl<'cfg> EspBuilder<'cfg> {
         if dest_path.starts_with('/') || dest_path.starts_with('\\') {
             let esp_name = self.state.name().to_string();
             self.cfg.diagnostics.push(ConfigError::new(format!(
-                "esp(\"{esp_name}\").add: destination path '{dest_path}' must be relative \
+                "esp(\"{esp_name}\").{method}: destination path '{dest_path}' must be relative \
                  to the ESP root (no leading '/')"
             )));
             return self;
         }
         let entry = RawEspEntry {
-            source_crate: source_crate.into(),
+            source,
             dest_path: dest_path.into(),
         };
         self.modify(|e| e.entries.push(entry));
@@ -55,6 +67,7 @@ impl<'cfg> EspBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
+    use gluon_model::RawEspSource;
 
     #[test]
     fn esp_add_appends_entries() {
@@ -65,9 +78,29 @@ mod tests {
         let h = cfg.raw.esps.lookup("default").unwrap();
         let e = cfg.raw.esps.get(h).unwrap();
         assert_eq!(e.entries.len(), 2);
-        assert_eq!(e.entries[0].source_crate, "bootloader");
+        assert_eq!(
+            e.entries[0].source,
+            RawEspSource::Crate("bootloader".into())
+        );
         assert_eq!(e.entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");
         assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn esp_add_file_appends_host_file_entry() {
+        let mut cfg = Config::new();
+        cfg.esp("default")
+            .add_file("boot/limine.conf", "limine.conf")
+            .add_file("x", "/abs");
+        let h = cfg.raw.esps.lookup("default").unwrap();
+        let e = cfg.raw.esps.get(h).unwrap();
+        assert_eq!(e.entries.len(), 1);
+        assert_eq!(
+            e.entries[0].source,
+            RawEspSource::File("boot/limine.conf".into())
+        );
+        assert_eq!(e.entries[0].dest_path, "limine.conf");
+        assert!(cfg.diagnostics[0].message.contains("add_file"));
     }
 
     #[test]
@@ -98,6 +131,6 @@ mod tests {
             1,
             "first esp's entry preserved; second's add no-op"
         );
-        assert_eq!(e.entries[0].source_crate, "bl");
+        assert_eq!(e.entries[0].source, RawEspSource::Crate("bl".into()));
     }
 }

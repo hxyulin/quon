@@ -467,7 +467,7 @@ impl Config {
     }
 
     /// Declare an EFI System Partition layout. Returns a chainable
-    /// [`EspBuilder`] that accumulates `(source_crate, dest_path)` entries.
+    /// [`EspBuilder`] that accumulates `(source, dest_path)` entries.
     ///
     /// If an ESP with this name was already declared, the builder enters the
     /// `Duplicate` state: all chained methods become no-ops and the first

@@ -229,8 +229,19 @@ impl Named for RawEspDef {
 /// Raw form of [`crate::build_model::EspEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawEspEntry {
-    pub source_crate: String,
+    pub source: RawEspSource,
     pub dest_path: String,
+}
+
+/// Raw form of [`crate::build_model::EspEntrySource`]: names are
+/// resolved by intern.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawEspSource {
+    /// A crate's primary output, by crate name.
+    Crate(String),
+    /// A host file, relative to the project root.
+    File(String),
 }
 
 /// Raw form of [`crate::build_model::BuildStepDef`].
@@ -379,7 +390,7 @@ mod tests {
         let e = RawEspDef {
             name: "default".into(),
             entries: vec![RawEspEntry {
-                source_crate: "boot".into(),
+                source: RawEspSource::Crate("boot".into()),
                 dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
             }],
             span: None,
@@ -387,7 +398,7 @@ mod tests {
         let json = serde_json::to_string(&e).unwrap();
         let de: RawEspDef = serde_json::from_str(&json).unwrap();
         assert_eq!(de.entries.len(), 1);
-        assert_eq!(de.entries[0].source_crate, "boot");
+        assert_eq!(de.entries[0].source, RawEspSource::Crate("boot".into()));
     }
 
     #[test]

@@ -1078,22 +1078,43 @@ pub enum DiskSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EspDef {
     pub name: String,
-    /// Ordered list of `(source_crate, dest_path_within_esp)` entries.
+    /// Ordered list of `(source, dest_path_within_esp)` entries.
     #[serde(default)]
     pub entries: Vec<EspEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
 }
 
-/// A single entry in an [`EspDef`]: a handle to a sibling crate whose
-/// primary build output should be copied to `dest_path` within the ESP
-/// directory. The handle is resolved by the intern pass after the model
-/// is fully built; entries whose source crate does not exist are
-/// dropped (with a diagnostic) rather than carried forward.
+/// A single entry in an [`EspDef`]: a file copied to `dest_path`
+/// within the ESP directory. Crate names are resolved to handles by
+/// the intern pass after the model is fully built; entries whose
+/// source crate does not exist are dropped (with a diagnostic) rather
+/// than carried forward.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EspEntry {
-    pub source_crate: Handle<CrateDef>,
+    pub source: EspEntrySource,
     pub dest_path: String,
+}
+
+/// Where an [`EspEntry`]'s bytes come from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EspEntrySource {
+    /// A sibling crate's primary build output.
+    Crate(Handle<CrateDef>),
+    /// A host file, relative to the project root. Projects ship
+    /// bootloader configuration files (such as `limine.conf`) this way.
+    File(String),
+}
+
+impl EspEntrySource {
+    /// The source crate, for entries that copy a crate's output.
+    pub fn crate_handle(&self) -> Option<Handle<CrateDef>> {
+        match self {
+            Self::Crate(h) => Some(*h),
+            Self::File(_) => None,
+        }
+    }
 }
 
 /// A custom build step: invoke a host binary (a "runner crate") with a
@@ -1253,8 +1274,8 @@ mod tests {
 
     #[test]
     fn esp_def_round_trips_through_json() {
-        // Mint a real CrateDef handle so EspEntry.source_crate (now a
-        // non-optional Handle<CrateDef>) round-trips through serde.
+        // Mint a real CrateDef handle so the entry's crate source
+        // round-trips through serde.
         let mut m = BuildModel::default();
         let (group_h, _) = m.groups.insert("uefi".into(), GroupDef::default());
         let (crate_h, _) = m.crates.insert(
@@ -1285,10 +1306,16 @@ mod tests {
             "default".into(),
             EspDef {
                 name: "default".into(),
-                entries: vec![EspEntry {
-                    source_crate: crate_h,
-                    dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
-                }],
+                entries: vec![
+                    EspEntry {
+                        source: EspEntrySource::Crate(crate_h),
+                        dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
+                    },
+                    EspEntry {
+                        source: EspEntrySource::File("limine.conf".into()),
+                        dest_path: "limine.conf".into(),
+                    },
+                ],
                 span: None,
             },
         );
@@ -1298,9 +1325,13 @@ mod tests {
         let de: BuildModel = serde_json::from_str(&json).unwrap();
         let h = de.esps.lookup("default").expect("esp name index rebuilt");
         let esp = de.esps.get(h).unwrap();
-        assert_eq!(esp.entries.len(), 1);
-        assert_eq!(esp.entries[0].source_crate, crate_h);
+        assert_eq!(esp.entries.len(), 2);
+        assert_eq!(esp.entries[0].source, EspEntrySource::Crate(crate_h));
         assert_eq!(esp.entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");
+        assert_eq!(
+            esp.entries[1].source,
+            EspEntrySource::File("limine.conf".into())
+        );
     }
 
     #[test]

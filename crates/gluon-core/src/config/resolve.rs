@@ -590,16 +590,12 @@ fn reachable_crates(model: &BuildModel, root: Handle<CrateDef>) -> BTreeSet<Hand
     // entries of that ESP. An ESP is assembled as a unit — partial inclusion
     // would produce a broken boot partition.
     for (_h, esp) in model.esps.iter() {
-        let any_reachable = esp
-            .entries
-            .iter()
-            .any(|e| visited.contains(&e.source_crate));
-        if any_reachable {
-            for entry in &esp.entries {
-                // No need to BFS from these — ESP source crates are leaves
-                // in the dependency sense (they produce artifacts, not deps).
-                visited.insert(entry.source_crate);
-            }
+        let mut source_crates = esp.entries.iter().filter_map(|e| e.source.crate_handle());
+        if source_crates.clone().any(|h| visited.contains(&h)) {
+            // No need to BFS from these — ESP source crates are leaves
+            // in the dependency sense (they produce artifacts, not deps).
+            // Host-file entries pull in nothing.
+            visited.extend(&mut source_crates);
         }
     }
 

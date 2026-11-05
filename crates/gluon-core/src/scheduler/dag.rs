@@ -352,7 +352,9 @@ pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNo
             .map(|esp| {
                 esp.entries
                     .iter()
-                    .filter_map(|e| compile_of(e.source_crate))
+                    // Host-file entries exist before gluon runs; the ESP
+                    // node checks their freshness itself.
+                    .filter_map(|e| e.source.crate_handle().and_then(compile_of))
                     .collect()
             })
             .unwrap_or_default(),
@@ -1328,7 +1330,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: bl_h,
+                    source: gluon_model::EspEntrySource::Crate(bl_h),
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,
@@ -1465,7 +1467,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: bl_h,
+                    source: gluon_model::EspEntrySource::Crate(bl_h),
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,

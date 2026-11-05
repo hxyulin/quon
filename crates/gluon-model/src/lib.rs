@@ -20,7 +20,7 @@ pub use kconfig::*;
 pub use raw::RawBuildModel;
 pub use raw_defs::{
     RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCargoWorkspace, RawCrateDef,
-    RawDepDef, RawEspDef, RawEspEntry, RawGroupDef, RawManifestRoot, RawPipelineDef,
+    RawDepDef, RawEspDef, RawEspEntry, RawEspSource, RawGroupDef, RawManifestRoot, RawPipelineDef,
     RawPipelineStep, RawProfileDef,
 };
 pub use resolved::*;

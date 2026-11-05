@@ -1,9 +1,10 @@
 //! ESP assembly helper.
 //!
-//! An [`EspDef`] declares a list of `(source_crate, dest_path)` pairs. At
-//! build time, after every referenced source crate has compiled, the
-//! `EspBuild` scheduler node calls [`ensure_esp`] to copy each source
-//! artifact into the configured destination inside the ESP directory.
+//! An [`EspDef`] declares a list of `(source, dest_path)` pairs. A
+//! source is a crate's primary output or a host file. At build time,
+//! after every referenced source crate has compiled, the `EspBuild`
+//! scheduler node calls [`ensure_esp`] to copy each source into the
+//! configured destination inside the ESP directory.
 //!
 //! ### Output layout
 //!
@@ -18,15 +19,17 @@
 //!
 //! Each `(esp_name, dest_path)` pair has its own fingerprint record,
 //! keyed `esp:<esp_name>:<dest_path>`. The declared input is the
-//! source artifact; the command hashes the ESP name, dest path and
-//! source kind tag, so a crate→file rename in `gluon.rs` invalidates.
+//! source file; the command hashes the ESP name, dest path and source
+//! kind tag, so a crate→file switch in `gluon.rs` invalidates. A host
+//! file's content is part of its declared-input fingerprint, so an
+//! edited `limine.conf` is copied again.
 //! The helper checks every entry, copies the stale ones, and records
 //! each one after its copy.
 
 use crate::cache::{Freshness, FreshnessQuery, RecordInput, hash_parts};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, EspDef, Handle, ResolvedConfig};
+use gluon_model::{BuildModel, EspDef, EspEntrySource, Handle, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -83,26 +86,47 @@ pub fn ensure_esp(
         dest_path: &'a str,
         source_path: PathBuf,
         source_name: &'a str,
+        /// Folded into the fingerprint command; see the module docs.
+        kind_tag: &'static [u8],
     }
     let mut entries: Vec<ResolvedEntry<'_>> = Vec::with_capacity(esp.entries.len());
     for entry in &esp.entries {
-        let h = entry.source_crate;
-        let source_name = model
-            .crates
-            .get(h)
-            .map(|c| c.name.as_str())
-            .unwrap_or("<unknown>");
-        let art = artifacts.get(h).ok_or_else(|| {
-            Error::Compile(format!(
-                "scheduler: EspBuild('{}') source crate '{}' has no entry in \
-                 ArtifactMap (DAG edge missing or ran out of order?)",
-                esp.name, source_name
-            ))
-        })?;
+        let (source_path, source_name, kind_tag) = match &entry.source {
+            EspEntrySource::Crate(h) => {
+                let source_name = model
+                    .crates
+                    .get(*h)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("<unknown>");
+                let art = artifacts.get(*h).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: EspBuild('{}') source crate '{}' has no entry in \
+                         ArtifactMap (DAG edge missing or ran out of order?)",
+                        esp.name, source_name
+                    ))
+                })?;
+                (art.to_path_buf(), source_name, &b"crate"[..])
+            }
+            EspEntrySource::File(path) => {
+                let abs = resolved.project_root.join(path);
+                if !abs.is_file() {
+                    return Err(Error::Compile(format!(
+                        "esp(\"{}\").add_file(\"{}\", \"{}\"): host file does not exist \
+                         at {} (paths are relative to the project root)",
+                        esp.name,
+                        path,
+                        entry.dest_path,
+                        abs.display()
+                    )));
+                }
+                (abs, path.as_str(), &b"file"[..])
+            }
+        };
         entries.push(ResolvedEntry {
             dest_path: &entry.dest_path,
-            source_path: art.to_path_buf(),
+            source_path,
             source_name,
+            kind_tag,
         });
     }
 
@@ -122,12 +146,11 @@ pub fn ensure_esp(
         let dest_abs = esp_dir.join(e.dest_path);
         let key = format!("esp:{}:{}", esp.name, e.dest_path);
         // The command folds in the ESP name, dest path and source kind
-        // tag, so a crate→file rename in gluon.rs invalidates even if
-        // the on-disk source path happens to coincide. ESP entries are
-        // crate-sourced today; other source kinds need their own tag.
+        // tag, so a crate→file switch in gluon.rs invalidates even if
+        // the on-disk source path happens to coincide.
         let command = hash_parts(
             "gluon.esp-entry.v1",
-            &[esp.name.as_bytes(), e.dest_path.as_bytes(), b"crate"],
+            &[esp.name.as_bytes(), e.dest_path.as_bytes(), e.kind_tag],
         );
         let declared = [e.source_path.clone()];
         let outputs = [dest_abs.clone()];
@@ -191,8 +214,8 @@ mod tests {
     use super::*;
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, EspEntry, GroupDef, ProjectDef, ResolvedConfig,
-        ResolvedProfile, TargetDef, TargetSpec,
+        BuildModel, CrateDef, CrateType, EspEntry, EspEntrySource, GroupDef, ProjectDef,
+        ResolvedConfig, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::collections::BTreeMap;
     use std::path::Path;
@@ -275,11 +298,11 @@ mod tests {
                 name: "default".into(),
                 entries: vec![
                     EspEntry {
-                        source_crate: ch_a,
+                        source: EspEntrySource::Crate(ch_a),
                         dest_path: "EFI/BOOT/A.EFI".into(),
                     },
                     EspEntry {
-                        source_crate: ch_b,
+                        source: EspEntrySource::Crate(ch_b),
                         dest_path: "EFI/BOOT/B.EFI".into(),
                     },
                 ],
@@ -369,7 +392,7 @@ mod tests {
             EspDef {
                 name: "default".into(),
                 entries: vec![EspEntry {
-                    source_crate: ch,
+                    source: EspEntrySource::Crate(ch),
                     dest_path: "EFI/BOOT/BOOTX64.EFI".into(),
                 }],
                 span: None,
@@ -681,5 +704,74 @@ mod tests {
             msg.contains("ArtifactMap") || msg.contains("DAG edge"),
             "error must mention the missing-artifact condition: {msg}"
         );
+    }
+
+    #[test]
+    fn ensure_esp_copies_host_file_and_recopies_after_edit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        let source_path = tmp.path().join("bootloader.efi");
+        std::fs::write(&source_path, b"efi").unwrap();
+        std::fs::write(tmp.path().join("limine.conf"), b"timeout: 0\n").unwrap();
+
+        let (mut model, resolved, eh) = make_model_with_esp(tmp.path(), &source_path);
+        let mut artifacts = ArtifactMap::new();
+        artifacts.insert(model.crates.lookup("bootloader").unwrap(), source_path);
+        model.esps.get_mut(eh).unwrap().entries.push(EspEntry {
+            source: EspEntrySource::File("limine.conf".into()),
+            dest_path: "boot/limine.conf".into(),
+        });
+
+        let run = || {
+            ensure_esp(
+                &ctx,
+                &model,
+                &resolved,
+                eh,
+                &artifacts,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .unwrap()
+        };
+        let (esp_dir, _) = run();
+        let dest = esp_dir.join("boot/limine.conf");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"timeout: 0\n");
+        assert!(run().1, "unchanged inputs must be cached");
+
+        std::fs::write(
+            tmp.path().join("limine.conf"),
+            b"timeout: 5\nverbose: yes\n",
+        )
+        .unwrap();
+        assert!(!run().1, "an edited host file must be copied again");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"timeout: 5\nverbose: yes\n");
+    }
+
+    #[test]
+    fn ensure_esp_missing_host_file_names_the_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path());
+        let source_path = tmp.path().join("bootloader.efi");
+        std::fs::write(&source_path, b"efi").unwrap();
+        let (mut model, resolved, eh) = make_model_with_esp(tmp.path(), &source_path);
+        let mut artifacts = ArtifactMap::new();
+        artifacts.insert(model.crates.lookup("bootloader").unwrap(), source_path);
+        model.esps.get_mut(eh).unwrap().entries.push(EspEntry {
+            source: EspEntrySource::File("missing.conf".into()),
+            dest_path: "missing.conf".into(),
+        });
+        let err = ensure_esp(
+            &ctx,
+            &model,
+            &resolved,
+            eh,
+            &artifacts,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("add_file(\"missing.conf\""), "{err}");
     }
 }

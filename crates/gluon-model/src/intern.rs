@@ -10,13 +10,13 @@
 
 use crate::build_model::{
     BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, DepResolution,
-    EspDef, EspEntry, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
+    EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
 use crate::raw_defs::{
     RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef, RawEspDef,
-    RawGroupDef, RawPipelineDef, RawProfileDef,
+    RawEspSource, RawGroupDef, RawPipelineDef, RawProfileDef,
 };
 use crate::source::SourceSpan;
 use std::collections::BTreeMap;
@@ -433,18 +433,24 @@ fn intern_esps(
             .entries
             .iter()
             .filter_map(|en| {
-                let Some(h) = crates.lookup(&en.source_crate) else {
-                    diags.push(
-                        InternDiagnostic::error(format!(
-                            "esp(\"{}\").add: source crate '{}' does not exist in the model",
-                            e.name, en.source_crate
-                        ))
-                        .with_optional_span(e.span.clone()),
-                    );
-                    return None;
+                let source = match &en.source {
+                    RawEspSource::Crate(name) => {
+                        let Some(h) = crates.lookup(name) else {
+                            diags.push(
+                                InternDiagnostic::error(format!(
+                                    "esp(\"{}\").add: source crate '{}' does not exist in the model",
+                                    e.name, name
+                                ))
+                                .with_optional_span(e.span.clone()),
+                            );
+                            return None;
+                        };
+                        EspEntrySource::Crate(h)
+                    }
+                    RawEspSource::File(path) => EspEntrySource::File(path.clone()),
                 };
                 Some(EspEntry {
-                    source_crate: h,
+                    source,
                     dest_path: en.dest_path.clone(),
                 })
             })
