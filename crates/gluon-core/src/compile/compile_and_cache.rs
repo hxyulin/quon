@@ -133,6 +133,12 @@ pub(crate) fn compile_and_cache(
     depfile_fail: Box<DepfileFailDiag>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
+    // Files the builder knows rustc reads but the depfile will not
+    // list (linker script, custom target spec) are tracked the same
+    // way as caller-supplied extra sources.
+    let mut extra_sources = extra_sources;
+    extra_sources.extend(builder.file_inputs());
+
     // Seed the source list from the previous run's depfile if it exists.
     // On a cold build this is empty — the cache entry is also missing,
     // so `is_fresh` returns false regardless.

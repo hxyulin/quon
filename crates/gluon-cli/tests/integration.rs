@@ -975,3 +975,62 @@ fn proc_macro_edit_rebuilds_dependent() {
         "kernel binary does not reflect the proc-macro edit"
     );
 }
+
+/// Editing the linker script must relink the kernel. rustc does not list
+/// `-C link-arg=-T<path>` files in its depfile.
+#[test]
+#[ignore]
+fn linker_script_edit_rebuilds_kernel() {
+    let Some(()) = require_rustc_or_skip("linker_script_edit_rebuilds_kernel") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    build_ok(&fixture, &[]);
+
+    let ld = fixture.join("crates/kernel/kernel.ld");
+    let mut script = fs::read_to_string(&ld).expect("read kernel.ld");
+    script.push_str("\n/* edited */\n");
+    fs::write(&ld, script).expect("write kernel.ld");
+
+    let stderr = build_ok(&fixture, &[]);
+    assert!(
+        built_count(&stderr) > 0,
+        "linker script edit did not rebuild:\n{stderr}"
+    );
+}
+
+/// Editing a custom target JSON spec must rebuild the sysroot and every
+/// crate for that target. rustc does not list the spec in its depfile.
+#[test]
+#[ignore]
+fn target_spec_edit_rebuilds() {
+    let Some(()) = require_rustc_or_skip("target_spec_edit_rebuilds") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    let spec_src = multi_profile_fixture_dir().join("targets/x86_64-unknown-test.json");
+    let spec = fixture.join("targets/x86_64-unknown-test.json");
+    fs::create_dir_all(spec.parent().unwrap()).expect("mkdir targets");
+    fs::copy(&spec_src, &spec).expect("copy target spec");
+    let gluon_rs = fixture.join("gluon.rs");
+    let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
+    let script = script.replace(
+        r#"cfg.target("x86_64-unknown-none")"#,
+        r#"cfg.target_spec("x86_64-unknown-test", "targets/x86_64-unknown-test.json")"#,
+    );
+    fs::write(&gluon_rs, script).expect("write gluon.rs");
+    build_ok(&fixture, &[]);
+
+    let mut json = fs::read_to_string(&spec).expect("read spec");
+    json.push('\n');
+    fs::write(&spec, json).expect("write spec");
+
+    // The sysroot, config crate and kernel are built for the custom
+    // target, so all three must rebuild. The host proc macro does not
+    // read the spec.
+    let stderr = build_ok(&fixture, &[]);
+    assert!(
+        built_count(&stderr) >= 3,
+        "target spec edit did not rebuild the sysroot, config crate and kernel:\n{stderr}"
+    );
+}

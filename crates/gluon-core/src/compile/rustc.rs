@@ -54,6 +54,16 @@ impl Emit {
     }
 }
 
+/// The file rustc reads for a `--target` value, if any.
+///
+/// rustc loads a target spec from disk when the value ends in `.json`.
+/// Builtin triples have no file. The returned path is the spec string
+/// as given, so a relative path resolves against the same directory
+/// rustc resolves it against.
+pub(crate) fn target_spec_file(spec: &str, builtin: bool) -> Option<PathBuf> {
+    (!builtin && spec.ends_with(".json")).then(|| PathBuf::from(spec))
+}
+
 /// Builder for a single `rustc` invocation.
 ///
 /// See the module docs for the canonical token forms each setter produces.
@@ -69,6 +79,10 @@ pub struct RustcCommandBuilder {
     /// of insertion order — see [`RustcCommandBuilder::hash`].
     env: BTreeMap<OsString, OsString>,
     cwd: Option<PathBuf>,
+    /// Files rustc reads that its depfile does not list: the linker
+    /// script and a custom target spec. The cache must track them, or
+    /// editing one leaves every output fresh.
+    file_inputs: Vec<PathBuf>,
 }
 
 impl RustcCommandBuilder {
@@ -78,6 +92,7 @@ impl RustcCommandBuilder {
             args: Vec::new(),
             env: BTreeMap::new(),
             cwd: None,
+            file_inputs: Vec::new(),
         }
     }
 
@@ -139,6 +154,7 @@ impl RustcCommandBuilder {
             self.args.push(OsString::from("--target"));
             self.args.push(OsString::from(spec));
         }
+        self.file_inputs.extend(target_spec_file(spec, builtin));
         self
     }
 
@@ -292,6 +308,7 @@ impl RustcCommandBuilder {
         let mut s = OsString::from("link-arg=-T");
         s.push(path.as_os_str());
         self.args.push(s);
+        self.file_inputs.push(path.to_path_buf());
         self
     }
 
@@ -338,6 +355,19 @@ impl RustcCommandBuilder {
 
     pub fn rustc_path(&self) -> &Path {
         &self.rustc
+    }
+
+    /// Files this invocation reads that rustc's depfile omits (linker
+    /// script, custom target spec). Relative paths are resolved against
+    /// the builder's cwd when one is set, matching what rustc opens.
+    pub fn file_inputs(&self) -> Vec<PathBuf> {
+        self.file_inputs
+            .iter()
+            .map(|p| match &self.cwd {
+                Some(cwd) if p.is_relative() => cwd.join(p),
+                _ => p.clone(),
+            })
+            .collect()
     }
 
     /// Materialise a [`std::process::Command`] ready to spawn.

@@ -59,7 +59,7 @@ pub fn ensure_sysroot(
     let sysroot_lib_dir = ctx.layout.sysroot_lib_dir(target);
 
     // Fast-path inputs. The Composite entry uses the rustc binary path
-    // as its single file input — the cache layer's mtime+size+sha256
+    // (plus the target spec, for custom targets) as its file inputs — the cache layer's mtime+size+sha256
     // fingerprinting catches toolchain swaps. The `aux_hash` rolls in
     // the version_hash, which catches commit-hash bumps that share the
     // same on-disk file fingerprint (e.g. a binary rebuilt at the same
@@ -70,7 +70,13 @@ pub fn ensure_sysroot(
     let core_rlib_sentinel = sysroot_lib_dir.join("libcore-gluon-core.rlib");
     let aux = composite_aux_hash(&[&ctx.rustc_info.version_hash()]);
     let cache_key = format!("sysroot:{}", target.name);
-    let inputs = vec![ctx.rustc_info.rustc_path.clone()];
+    // A custom target spec changes how every sysroot crate compiles,
+    // and rustc's depfile does not list it, so it is an input too.
+    let mut inputs = vec![ctx.rustc_info.rustc_path.clone()];
+    inputs.extend(crate::compile::rustc::target_spec_file(
+        &target.spec,
+        target.builtin,
+    ));
 
     {
         let mut cache = ctx

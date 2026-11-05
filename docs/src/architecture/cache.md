@@ -177,7 +177,12 @@ The binary dependencies matter because output paths are fixed by
 the same path, so the dependent's argv hash does not change. Tracking
 the dependency's file makes its new content invalidate the dependent.
 A dependency rebuilt to identical bytes passes the hash fallback and
-does not cascade. The parser only handles the subset
+does not cascade.
+
+rustc does not list two other files it reads: the linker script
+passed as `-C link-arg=-T<path>` and a custom target spec passed to
+`--target`. `RustcCommandBuilder` records both when they are set, and
+`compile_and_cache` adds them to the tracked inputs. The parser only handles the subset
 of Make syntax rustc actually emits — see
 [external dependencies](./external-deps.md) for the format details.
 
@@ -206,7 +211,8 @@ adding it at the end of the order, never inserting it.
 Composite entries are written by:
 
 - **Sysroot** (`sysroot::ensure_sysroot`) — key `sysroot:<target_name>`,
-  inputs `[rustc_path]`, aux from `RustcInfo::version_hash`.
+  inputs `[rustc_path]` plus the target spec for custom JSON targets,
+  aux from `RustcInfo::version_hash`.
 - **ESP** (`compile/esp.rs`) — key `esp:<name>:<dest>`, one entry per
   ESP entry destination path.
 - **Image** (`image::build_image`) — key `image:<name>`.
