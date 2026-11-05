@@ -23,6 +23,9 @@ clap = { version = "4", features = ["derive"] }
 # strips escape codes when stderr is not a terminal or NO_COLOR is set.
 anstream = "1"
 anstyle = "1"
+# Width of stderr, so the progress line never wraps: a wrapped line
+# cannot be erased in place.
+terminal_size = "0.4"
 anyhow = "1"
 # Used only by `gluon internal dump-dsl` to emit a stable JSON wrapper
 # around the DSL signature list. Already in the workspace dep tree via

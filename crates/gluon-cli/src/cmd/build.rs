@@ -39,6 +39,8 @@ pub fn run_pipeline(
         workers,
         &mut reporter,
     )?;
+    // Erases the progress line before the `Finished` line prints.
+    drop(reporter);
     shell.finished(
         &ctx.resolved.profile,
         Counts {
