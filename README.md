@@ -47,17 +47,27 @@ cd gluon
 cargo install --path crates/gluon-cli
 ```
 
-**Create `gluon.rs` in your project root:**
+**Generate `gluon.rs` from your Cargo workspace:**
+
+```sh
+cd my-kernel             # the directory with the workspace Cargo.toml
+gluon init --bootloader limine --limine 11.4.1
+```
+
+`gluon init` reads the target, kernel package and linker script from the
+workspace and leaves a `// TODO:` comment for each setting it cannot find.
+See [Generating gluon.rs](docs/src/getting-started/init.md). To write the
+file by hand instead, start from this:
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use gluon_config::{Config, Result};
 
 fn main() -> Result<()> {
     let mut cfg = Config::new();
 
     cfg.project("my-kernel", "0.1.0");
-
     let target = cfg.target("x86_64-unknown-none");
+    cfg.cargo_workspace(".");
 
     cfg.profile("dev")
         .target(target)
@@ -67,11 +77,8 @@ fn main() -> Result<()> {
 
     cfg.group("kernel")
         .target(target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs")
-            .linker_script("crates/kernel/kernel.ld");
+        .package("kernel")
+        .linker_script("crates/kernel/kernel.ld");
 
     cfg.qemu("qemu-system-x86_64")
         .machine("q35")

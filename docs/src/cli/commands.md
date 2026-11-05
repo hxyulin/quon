@@ -17,6 +17,27 @@ These flags apply to all commands.
 
 ## Commands
 
+### `gluon init`
+
+Write a `gluon.rs` for the Cargo workspace in the current directory. Gluon
+reads the target, kernel package, linker script and version from the
+workspace and its toolchain files, and writes a `// TODO:` comment for each
+setting it cannot find. See [Generating gluon.rs](../getting-started/init.md).
+
+| Flag | Description |
+|------|-------------|
+| `--target <TRIPLE>` | Target triple or `.json` spec; repeatable. Overrides inference. |
+| `--kernel <PACKAGE>` | Workspace member that holds the kernel. |
+| `--bootloader limine\|uefi\|none` | How `gluon run` boots the kernel. Default: `none`. |
+| `--limine <VERSION>` | Pin a Limine release with an empty hash; the first build prints the hash. |
+| `--force` | Overwrite an existing `gluon.rs`. |
+| `--dry-run` | Print the file instead of writing it. |
+
+```sh
+gluon init
+gluon init --bootloader limine --limine 11.4.1
+```
+
 ### `gluon build`
 
 Build the project. Compiles all crates in the build model using the resolved

@@ -6,6 +6,7 @@
 
 - [Installation](./getting-started/installation.md)
 - [Your First Project](./getting-started/first-project.md)
+- [Generating gluon.rs](./getting-started/init.md)
 - [Building and Running](./getting-started/building-and-running.md)
 
 # Configuration Guide

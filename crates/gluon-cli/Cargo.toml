@@ -33,6 +33,8 @@ anyhow = "1"
 # around the DSL signature list. Already in the workspace dep tree via
 # `gluon-core`, so this is a zero-cost addition.
 serde_json = "1"
+# `gluon init` reads `.cargo/config.toml` and `rust-toolchain.toml`.
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

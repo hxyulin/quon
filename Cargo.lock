@@ -352,6 +352,7 @@ dependencies = [
  "gluon-core",
  "serde_json",
  "tempfile",
+ "toml",
 ]
 
 [[package]]

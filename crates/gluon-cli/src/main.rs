@@ -28,6 +28,11 @@ fn run() -> Result<()> {
         return cmd::external::run(args);
     }
 
+    // `init` writes the gluon.rs that every other command needs.
+    if let cli::Command::Init(args) = &cli.command {
+        return cmd::init::run(args);
+    }
+
     // `manifest` reads a Cargo workspace directly; it needs no gluon.rs.
     if let cli::Command::Manifest(sub) = &cli.command {
         return cmd::manifest::run(sub, cli.target.as_deref());
@@ -112,6 +117,7 @@ fn run() -> Result<()> {
         | cli::Command::Clippy(_)
         | cli::Command::Clean(_)
         | cli::Command::Fmt(_)
+        | cli::Command::Init(_)
         | cli::Command::Vendor(_)
         | cli::Command::Manifest(_)
         | cli::Command::External(_) => {

@@ -81,6 +81,9 @@ pub enum Command {
     /// `rustc` for `clippy-driver` (resolved via `$CLIPPY_DRIVER`,
     /// then a sibling-of-rustc heuristic, then `$PATH`).
     Clippy(ClippyArgs),
+    /// Write a `gluon.rs` for the Cargo workspace in the current
+    /// directory, from what its manifests and toolchain files declare.
+    Init(InitArgs),
     /// Run `rustfmt` over every crate. Pass `--check` to verify
     /// formatting without rewriting (matches `cargo fmt --check`).
     Fmt(FmtArgs),
@@ -140,6 +143,48 @@ pub struct FmtArgs {
     /// unformatted files.
     #[arg(long)]
     pub check: bool,
+}
+
+/// Arguments for `gluon init`.
+#[derive(clap::Args, Debug)]
+pub struct InitArgs {
+    /// Target triple or `.json` target spec; repeatable. The first one
+    /// builds the workspace. Default: `build.target` in
+    /// `.cargo/config.toml`, else `targets` in `rust-toolchain.toml`.
+    // The id matches the global `--target`, so clap does not add that
+    // flag to `init` a second time.
+    #[arg(id = "target", short = 't', long = "target", value_name = "TRIPLE")]
+    pub targets: Vec<String>,
+    /// Workspace package that holds the kernel. Default: the only
+    /// package with a bin target.
+    #[arg(long, value_name = "PACKAGE")]
+    pub kernel: Option<String>,
+    /// How QEMU boots the kernel. Default: `limine` with `--limine`,
+    /// else `none`.
+    #[arg(long, value_enum)]
+    pub bootloader: Option<Bootloader>,
+    /// Limine release to fetch. The SHA-256 is left empty, so the first
+    /// build fails and prints it.
+    #[arg(long, value_name = "VERSION")]
+    pub limine: Option<String>,
+    /// Overwrite an existing `gluon.rs`.
+    #[arg(long)]
+    pub force: bool,
+    /// Print the file instead of writing it.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// How the generated `gluon.rs` boots the kernel.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bootloader {
+    /// Limine over UEFI: Limine's `BOOTX64.EFI`, `limine.conf` and the
+    /// kernel on an ESP.
+    Limine,
+    /// The kernel is a UEFI application on an ESP.
+    Uefi,
+    /// Build only; the QEMU section is commented out.
+    None,
 }
 
 /// Arguments for `gluon clean`.
@@ -367,6 +412,44 @@ mod tests {
                 );
             }
             other => panic!("expected Configure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_init_with_repeated_targets() {
+        let cli = Cli::try_parse_from([
+            "gluon",
+            "init",
+            "--target",
+            "x86_64-unknown-none",
+            "-t",
+            "aarch64-unknown-none",
+            "--bootloader",
+            "limine",
+            "--dry-run",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Init(a) => {
+                assert_eq!(a.targets, ["x86_64-unknown-none", "aarch64-unknown-none"]);
+                assert_eq!(a.bootloader, Some(Bootloader::Limine));
+                assert!(a.dry_run);
+                assert!(!a.force);
+            }
+            other => panic!("expected Init, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn global_target_before_init_reaches_init() {
+        // `InitArgs::targets` shares the global flag's id, so clap does
+        // not propagate a second `--target` into `init`, and a value
+        // given before the subcommand still lands in `targets`.
+        let cli =
+            Cli::try_parse_from(["gluon", "-t", "x86_64-unknown-none", "init"]).expect("parse");
+        match cli.command {
+            Command::Init(a) => assert_eq!(a.targets, ["x86_64-unknown-none"]),
+            other => panic!("expected Init, got {other:?}"),
         }
     }
 
