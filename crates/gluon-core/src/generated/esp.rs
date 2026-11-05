@@ -32,7 +32,7 @@ use gluon_model::{BuildModel, EspDef, Handle, ResolvedConfig};
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::compile::ArtifactMap;
+use crate::compile::extern_map::ArtifactLookup;
 
 /// Assemble the ESP directory for one [`EspDef`], returning the
 /// directory path and a `was_cached` flag indicating whether the
@@ -51,7 +51,7 @@ pub fn ensure_esp(
     model: &BuildModel,
     resolved: &ResolvedConfig,
     esp_handle: Handle<EspDef>,
-    artifacts: &ArtifactMap,
+    artifacts: &dyn ArtifactLookup,
     stdout: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
     let esp = model.esps.get(esp_handle).ok_or_else(|| {
@@ -202,7 +202,7 @@ pub fn ensure_esp(
 mod tests {
     use super::*;
     use crate::cache::Cache;
-    use crate::compile::{BuildLayout, RustcInfo};
+    use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, CrateDef, CrateType, EspEntry, GroupDef, ProjectDef, ResolvedConfig,
         ResolvedProfile, TargetDef, TargetSpec,

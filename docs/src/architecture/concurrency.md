@@ -99,86 +99,63 @@ The flock and the atomic rename are layered: the flock prevents
 concurrent build logic; the atomic rename is the last-mile defence
 against truncation if the flock is somehow defeated.
 
-## In-process: scheduler snapshot
+## In-process: result slots
 
 Inside a single build, the scheduler runs many rustc compiles in
-parallel via the `WorkerPool`. The compile artefacts they produce
-need to be visible to subsequent stages (e.g. an `Image` node needs
-the ESP path produced by an earlier `Esp` node).
+parallel via the `WorkerPool`. The outputs they produce must be
+visible to later nodes (an `Image` node needs the ESP directory an
+earlier `Esp` node assembled).
 
-Stage 8 collapsed four independent `Mutex`-guarded maps
-(`sysroots`, `artifacts`, `esps`, `images`) into one
-`Mutex<ArtifactsSnapshot>`:
+The dispatcher holds one `OnceLock<NodeResult>` per node, indexed by
+`NodeId`:
 
 ```rust
-struct ArtifactsSnapshot {
-    sysroots:  BTreeMap<Handle<TargetDef>, PathBuf>,
-    artifacts: ArtifactMap,
-    esps:      BTreeMap<Handle<EspDef>, PathBuf>,
-    images:    BTreeMap<Handle<ImageDef>, PathBuf>,
+struct NodeResult {
+    primary: Option<PathBuf>, // rlib, binary, sysroot dir, ESP dir, image, ...
+    was_cached: bool,
 }
 ```
 
 ### Dispatch protocol
 
-Each per-node dispatch arm in the scheduler follows this protocol:
+1. The worker runs the node's helper. The helper reads the outputs of
+   its inputs through a `ResultView`, which looks a crate handle,
+   target, ESP or image up in the slots.
+2. When the helper succeeds, the dispatch arm writes the node's own
+   slot. A slot is written once; a second write is a scheduler bug and
+   fails the node.
 
-1. **Lock** the `Mutex<ArtifactsSnapshot>`, **clone** the snapshot,
-   **drop** the lock.
-2. **Run** the per-node helper with `&ArtifactsSnapshot` (immutable,
-   owned clone). The helper compiles, formats, or otherwise produces
-   work output.
-3. **Lock** the mutex again, **merge** the helper's `NodeOutput`
-   into the canonical state via `ArtifactsSnapshot::merge`, **drop**
-   the lock.
+No lock is involved. A node is dispatched only after all of its DAG
+inputs finished, and `OnceLock` publishes a written value to every
+thread that reads it afterwards, so a node never reads a slot that is
+still being written. Each lookup is a map probe, not a copy, so a build
+does O(1) work per input instead of copying every output so far at
+each dispatch.
 
-The lock is held for two short windows — clone and merge — never
-across the helper itself. Helpers are pure functions over an
-immutable view; they cannot deadlock against each other or against
-the scheduler.
+`BuildSummary` (built and cached counts, ESP, image and build-step
+paths) is assembled from the slots after the pool joins.
 
-The dispatch arm is the **sole mutation point** for the canonical
-snapshot. Per-node helpers never see a `Mutex`.
+### Failures
 
-### Why a single bundle and not finer-grained locks?
+On a failure the pool stops dispatching and waits for in-flight jobs.
+Each failure is labelled with the node's name (`crate kernel
+(x86_64-unknown-none, dev)`, `sysroot x86_64-unknown-none`) and the
+list is sorted by `NodeId`, so two simultaneous failures are reported
+in the same order whichever finished first. Job output is still
+printed live, in completion order.
 
-Pre-Stage-8, each map had its own `Mutex<BTreeMap<…>>`. Helpers
-locked individually as they needed paths. This produced two
-problems:
-
-- **Lock-across-helper.** Some helpers needed multiple maps and
-  held locks while compiling — risky and a future deadlock waiting
-  to happen.
-- **Argument plumbing.** Each helper signature carried four
-  `&Mutex<…>` fields. Adding a new artefact kind required threading
-  another mutex through every dispatch arm.
-
-A single `Mutex<ArtifactsSnapshot>` is conceptually simpler, has
-one lock for workers to contend on (which is fine — each helper
-takes the lock for nanoseconds, not for the duration of a compile),
-and centralises the merge logic in `ArtifactsSnapshot::merge`.
-
-### Snapshot rebuild cost
-
-Cloning the snapshot at each dispatch is `O(n)` in the number of
-artefacts. Current artefact-map sizes are well under 100 entries
-even on big projects, so this is dominated by rustc spawn cost. If
-profiling ever shows the clone dominating, the next step is
-`Arc<RwLock>` reads with copy-on-write semantics — but this is
-unlikely to be needed.
+`build_with_workers` saves the cache manifest after a failed build as
+well. A node records itself in the in-memory cache only after its
+outputs are complete, so the records of nodes that finished stay valid
+and those nodes do not rebuild next time.
 
 ## Mutex poisoning
 
-The scheduler's mutexes use `lock_or_poison` to convert a poisoned
-lock into `Error::Config` rather than panicking. Mutex poisoning
-happens when a thread panics while holding the lock; without
-recovery, every subsequent `lock()` would re-panic. Converting to
-an error lets the build fail cleanly with a diagnostic.
-
-This is defensive only — in practice the helpers should never panic
-while holding the lock (they hold it only across `Vec`/`BTreeMap`
-inserts), but the conversion is cheap and the alternative
-(uncatchable abort) is bad for users.
+The one in-process mutex left is the cache's (`CompileCtx::cache`).
+Callers convert a poisoned lock into `Error::Config("cache mutex
+poisoned")` rather than panicking, so a panic in one worker fails the
+build with a diagnostic instead of aborting. The lock is held only
+across in-memory record reads and writes, never across a rustc spawn.
 
 ## Determinism interaction
 
@@ -187,8 +164,7 @@ Concurrency does not break determinism — see
 order is fully deterministic. At `-j > 1`, *artefact bytes* are
 identical across runs but completion order is not.
 
-The snapshot mechanism preserves determinism: each helper sees a
-stable point-in-time view of upstream outputs, so its rustc argv
-(and therefore its cache key) is a deterministic function of which
-DAG dependencies completed before it ran — and the DAG itself is
+The result slots preserve determinism: a helper reads only the slots
+of its DAG inputs, which are all set before it runs, so its rustc argv
+(and therefore its cache key) depends only on the DAG, which is itself
 deterministic.

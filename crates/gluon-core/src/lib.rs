@@ -85,7 +85,7 @@ pub fn resolve_config(
 }
 
 /// Top-level build entry point. Builds the DAG, runs the scheduler,
-/// persists the cache manifest on success, and returns a
+/// persists the cache manifest (also after a failed build), and returns a
 /// [`BuildSummary`] describing how many cacheable steps actually ran
 /// rustc versus how many were short-circuited by the cache.
 ///
@@ -146,7 +146,7 @@ pub fn build_with_workers(
         &ctx.rustc_info,
         &resolved.project_root,
     )?;
-    let summary = scheduler::execute_pipeline(
+    let outcome = scheduler::execute_pipeline(
         ctx,
         model,
         resolved,
@@ -155,15 +155,20 @@ pub fn build_with_workers(
         workers,
         &mut stdout,
         &mut stderr,
-    )?;
-    // Persist the cache on success so the next run benefits from this build's
-    // freshness records. On failure we intentionally skip the save — a partial
-    // build's cache entries are written eagerly inside the per-node helpers, so
-    // any nodes that succeeded are already recorded.
-    ctx.cache
+    );
+    // Persist the cache whether or not the build failed. Each node
+    // records itself in the in-memory cache only after its outputs are
+    // complete, so every record is valid on its own; saving after a
+    // failure keeps the crates that did compile from rebuilding next
+    // time. A failed save is reported only when the build itself
+    // succeeded, so it never hides the build error.
+    let saved = ctx
+        .cache
         .lock()
-        .map_err(|_| Error::Config("cache mutex poisoned".into()))?
-        .save()?;
+        .map_err(|_| Error::Config("cache mutex poisoned".into()))
+        .and_then(|mut cache| cache.save());
+    let summary = outcome?;
+    saved?;
     Ok(summary)
 }
 

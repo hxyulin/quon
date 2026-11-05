@@ -178,7 +178,7 @@ impl<'a> Substituter<'a> {
             ))
         })?;
 
-        let path = self.ctx.image_paths.get(&handle).ok_or_else(|| {
+        let path = self.ctx.artifacts.image(handle).ok_or_else(|| {
             Error::Compile(format!(
                 "rule '{}': ${{image:{}}} — image is declared but no output path is \
                  registered yet (ensure the rule's pipeline stage runs after the image \
@@ -260,7 +260,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule(
@@ -299,7 +298,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule(
@@ -325,7 +323,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("testrule", vec!["café-${profile}-naïve".into()]);
@@ -345,7 +342,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("badrule", vec!["${nope}".into()]);
@@ -373,7 +369,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("badrule", vec!["${unterminated".into()]);
@@ -403,7 +398,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("testrule", vec!["$HOME/no_brace".into()]);
@@ -426,7 +420,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = RuleDef {
@@ -499,7 +492,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("strip", vec!["objcopy".into(), "${artifact:kernel}".into()]);
@@ -519,7 +511,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("badrule", vec!["${artifact:nonexistent}".into()]);
@@ -540,8 +531,8 @@ mod tests {
     // Image substitution tests
     // -----------------------------------------------------------------------
     //
-    // ${image:name} mirrors ${artifact:crate} but resolves through the
-    // scheduler's image_paths map instead of the per-crate ArtifactMap.
+    // ${image:name} mirrors ${artifact:crate} but resolves through
+    // `ArtifactLookup::image` instead of a crate artifact.
     // The shape parallels the artifact tests above.
 
     #[test]
@@ -549,7 +540,7 @@ mod tests {
         use gluon_model::ImageDef;
 
         let tmp = tempfile::tempdir().unwrap();
-        let (layout, mut model, resolved, artifacts) = make_ctx_parts(tmp.path());
+        let (layout, mut model, resolved, mut artifacts) = make_ctx_parts(tmp.path());
 
         let (image_h, _) = model.images.insert(
             "boot-disk".into(),
@@ -559,15 +550,13 @@ mod tests {
             },
         );
         let image_path = tmp.path().join("build/images/boot-disk.img");
-        let mut image_paths = std::collections::BTreeMap::new();
-        image_paths.insert(image_h, image_path.clone());
+        artifacts.set_image(image_h, image_path.clone());
 
         let ctx = RuleCtx {
             layout: &layout,
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: &image_paths,
         };
 
         let rule = make_rule(
@@ -608,7 +597,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("checksum", vec!["${image:gamma}".into()]);
@@ -635,14 +623,13 @@ mod tests {
             },
         );
 
-        // image_paths is empty: simulates a rule that fires before the
+        // No image is recorded: simulates a rule that fires before the
         // image scheduler node has produced any output.
         let ctx = RuleCtx {
             layout: &layout,
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("checksum", vec!["${image:boot-disk}".into()]);
@@ -666,7 +653,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("badrule", vec!["${image:}".into()]);
@@ -687,7 +673,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("badrule", vec!["${artifact:}".into()]);
@@ -716,7 +701,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("testrule", vec!["${project_root}/keys/sign.key".into()]);
@@ -739,7 +723,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("testrule", vec!["echo $${HOME}".into()]);
@@ -759,7 +742,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
 
         let rule = make_rule("testrule", vec!["cost: $$5".into()]);

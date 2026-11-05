@@ -5,7 +5,7 @@
 //! Backed by `BTreeMap` for cache-key stability — see
 //! `docs/src/architecture/determinism.md`.
 
-use gluon_model::{BuildModel, BuildStepDef, CrateDef, Handle, TargetDef};
+use gluon_model::{BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, TargetDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +30,46 @@ pub struct ArtifactMap {
     crates: BTreeMap<Handle<CrateDef>, PathBuf>,
     config_crates: BTreeMap<Handle<TargetDef>, PathBuf>,
     build_steps: BTreeMap<Handle<BuildStepDef>, PathBuf>,
+    esps: BTreeMap<Handle<EspDef>, PathBuf>,
+    images: BTreeMap<Handle<ImageDef>, PathBuf>,
+}
+
+/// Read access to the outputs of nodes that have already run.
+///
+/// Per-node helpers (ESP, image, rule, build step, crate compile) take
+/// `&dyn ArtifactLookup` instead of a concrete map. The scheduler
+/// passes a view over its per-node result slots, so a dispatch reads
+/// its inputs without a lock or a copy. Tests pass an [`ArtifactMap`]
+/// filled by hand.
+pub trait ArtifactLookup: Sync {
+    /// Primary artifact of a crate.
+    fn get(&self, h: Handle<CrateDef>) -> Option<&Path>;
+    /// Config crate rlib for a cross target.
+    fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path>;
+    /// Output file of a build step.
+    fn get_build_step(&self, h: Handle<BuildStepDef>) -> Option<&Path>;
+    /// Assembled ESP directory.
+    fn esp(&self, h: Handle<EspDef>) -> Option<&Path>;
+    /// Built disk image.
+    fn image(&self, h: Handle<ImageDef>) -> Option<&Path>;
+}
+
+impl ArtifactLookup for ArtifactMap {
+    fn get(&self, h: Handle<CrateDef>) -> Option<&Path> {
+        ArtifactMap::get(self, h)
+    }
+    fn config_crate(&self, target: Handle<TargetDef>) -> Option<&Path> {
+        ArtifactMap::config_crate(self, target)
+    }
+    fn get_build_step(&self, h: Handle<BuildStepDef>) -> Option<&Path> {
+        ArtifactMap::get_build_step(self, h)
+    }
+    fn esp(&self, h: Handle<EspDef>) -> Option<&Path> {
+        self.esps.get(&h).map(PathBuf::as_path)
+    }
+    fn image(&self, h: Handle<ImageDef>) -> Option<&Path> {
+        self.images.get(&h).map(PathBuf::as_path)
+    }
 }
 
 impl ArtifactMap {
@@ -106,11 +146,19 @@ impl ArtifactMap {
     }
 
     /// Iterate over `(build_step_handle, path)` pairs in handle-index
-    /// order. Used by the scheduler to populate
-    /// [`crate::scheduler::BuildSummary::build_step_paths`] after the
-    /// pool has joined.
+    /// order.
     pub fn build_steps_iter(&self) -> impl Iterator<Item = (Handle<BuildStepDef>, &Path)> + '_ {
         self.build_steps.iter().map(|(h, p)| (*h, p.as_path()))
+    }
+
+    /// Record an assembled ESP directory.
+    pub fn set_esp(&mut self, h: Handle<EspDef>, path: PathBuf) {
+        self.esps.insert(h, path);
+    }
+
+    /// Record a built disk image.
+    pub fn set_image(&mut self, h: Handle<ImageDef>, path: PathBuf) {
+        self.images.insert(h, path);
     }
 }
 
@@ -134,7 +182,7 @@ impl ArtifactMap {
 /// directly so the unified namespace stays consistent across the codebase.
 pub fn resolve_artifact_by_name<'a>(
     model: &BuildModel,
-    artifacts: &'a ArtifactMap,
+    artifacts: &'a dyn ArtifactLookup,
     name: &str,
 ) -> Option<&'a Path> {
     if let Some(h) = model.crates.lookup(name) {

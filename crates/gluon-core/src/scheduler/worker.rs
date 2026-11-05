@@ -50,7 +50,9 @@
 //! thread-killing). All results — successes and failures — are drained to the
 //! sinks in completion order. The final return is
 //! `Err(Error::Diagnostics(diags))` where `diags` collects every error seen,
-//! in completion order.
+//! sorted by `NodeId` so the failure report does not depend on which job
+//! finished first. Each error is prefixed with the node's
+//! [`JobDispatcher::label`].
 
 use super::dag::{Dag, NodeId};
 use crate::error::{Diagnostic, Error, Result};
@@ -130,6 +132,41 @@ pub struct BuildSummary {
 /// `Mutex` or atomic operations if state is needed).
 pub trait JobDispatcher: Sync {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()>;
+
+    /// Name of `node` in failure messages. The pipeline dispatcher names
+    /// the crate, target and profile; the default is the bare id.
+    fn label(&self, node: NodeId) -> String {
+        format!("node {node}")
+    }
+}
+
+/// Collects job failures and renders them in `NodeId` order.
+#[derive(Default)]
+struct Failures {
+    by_node: Vec<(NodeId, Diagnostic)>,
+    /// Sink I/O errors, which belong to no node; reported last.
+    other: Vec<Diagnostic>,
+}
+
+impl Failures {
+    fn is_empty(&self) -> bool {
+        self.by_node.is_empty() && self.other.is_empty()
+    }
+
+    fn push_node(&mut self, dispatcher: &dyn JobDispatcher, node: NodeId, e: &Error) {
+        let diag = Diagnostic::error(format!("{}: {}", dispatcher.label(node), error_message(e)));
+        self.by_node.push((node, diag));
+    }
+
+    fn into_result(mut self) -> Result<()> {
+        if self.is_empty() {
+            return Ok(());
+        }
+        self.by_node.sort_by_key(|(node, _)| *node);
+        let mut diags: Vec<Diagnostic> = self.by_node.into_iter().map(|(_, d)| d).collect();
+        diags.extend(self.other);
+        Err(Error::Diagnostics(diags))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +253,7 @@ fn execute_single(
 
     let total = dag.len();
     let mut finished = 0usize;
-    let mut errors: Vec<Diagnostic> = Vec::new();
+    let mut errors = Failures::default();
 
     while !ready.is_empty() {
         // Once an error has occurred, stop dispatching new jobs. There are no
@@ -260,10 +297,7 @@ fn execute_single(
                 }
             }
             Err(e) => {
-                errors.push(Diagnostic::error(format!(
-                    "node {node_id}: {}",
-                    error_message(&e)
-                )));
+                errors.push_node(dispatcher, node_id, &e);
                 // Do not propagate dependents — they can never run.
             }
         }
@@ -275,11 +309,7 @@ fn execute_single(
         return Err(render_deadlock_error(dag, &in_degree, total - finished));
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::Diagnostics(errors))
-    }
+    errors.into_result()
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +354,7 @@ fn execute_parallel(
 
     let total = dag.len();
     let mut finished = 0usize;
-    let mut errors: Vec<Diagnostic> = Vec::new();
+    let mut errors = Failures::default();
     let mut errored = false;
     let mut in_flight: usize = 0;
 
@@ -413,11 +443,15 @@ fn execute_parallel(
             // immediately, so in-flight jobs can still complete and the scope
             // exits cleanly.
             if let Err(e) = stdout.write_all(&job_stdout) {
-                errors.push(Diagnostic::error(format!("sink I/O error (stdout): {e}")));
+                errors
+                    .other
+                    .push(Diagnostic::error(format!("sink I/O error (stdout): {e}")));
                 errored = true;
             }
             if let Err(e) = stderr.write_all(&job_stderr) {
-                errors.push(Diagnostic::error(format!("sink I/O error (stderr): {e}")));
+                errors
+                    .other
+                    .push(Diagnostic::error(format!("sink I/O error (stderr): {e}")));
                 errored = true;
             }
 
@@ -432,10 +466,7 @@ fn execute_parallel(
                     }
                 }
                 Err(e) => {
-                    errors.push(Diagnostic::error(format!(
-                        "node {node_id}: {}",
-                        error_message(&e)
-                    )));
+                    errors.push_node(dispatcher, node_id, &e);
                     errored = true;
                     // Dependents cannot run — do not enqueue them.
                 }
@@ -458,11 +489,7 @@ fn execute_parallel(
         return Err(render_deadlock_error(dag, &in_degree, total - finished));
     }
 
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(Error::Diagnostics(errors))
-    }
+    errors.into_result()
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +578,8 @@ mod tests {
         Barrier(Arc<std::sync::Barrier>),
         /// Return an error with the given message.
         Fail(String),
+        /// Sleep, then return an error with the given message.
+        FailAfter(std::time::Duration, String),
         /// Write a deterministic byte pattern into stdout.
         Write,
     }
@@ -585,6 +614,17 @@ mod tests {
             self
         }
 
+        fn with_fail_after(
+            mut self,
+            node_id: NodeId,
+            delay: std::time::Duration,
+            msg: impl Into<String>,
+        ) -> Self {
+            self.behaviors
+                .insert(node_id, NodeBehavior::FailAfter(delay, msg.into()));
+            self
+        }
+
         fn with_write(mut self, node_id: NodeId) -> Self {
             self.behaviors.insert(node_id, NodeBehavior::Write);
             self
@@ -610,11 +650,19 @@ mod tests {
                     Ok(())
                 }
                 Some(NodeBehavior::Fail(msg)) => Err(Error::Compile(msg.clone())),
+                Some(NodeBehavior::FailAfter(delay, msg)) => {
+                    std::thread::sleep(*delay);
+                    Err(Error::Compile(msg.clone()))
+                }
                 Some(NodeBehavior::Write) => {
                     write!(stdout, "NODE-{node}-START\nDATA\nNODE-{node}-END\n").unwrap();
                     Ok(())
                 }
             }
+        }
+
+        fn label(&self, node: NodeId) -> String {
+            format!("test unit {node}")
         }
     }
 
@@ -881,6 +929,42 @@ mod tests {
                     panic!("expected deadlock Err(Compile), got {other:?} (workers={workers})")
                 }
             }
+        }
+    }
+
+    #[test]
+    fn failure_message_starts_with_the_node_label() {
+        let pool = WorkerPool::new(1);
+        let dispatcher = TestDispatcher::new().with_fail(1, "boom");
+        let dag = independent_dag(2);
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        match pool.execute(&dag, &dispatcher, &mut out, &mut err) {
+            Err(Error::Diagnostics(diags)) => {
+                assert_eq!(diags.len(), 1);
+                assert_eq!(diags[0].message, "test unit 1: boom");
+            }
+            other => panic!("expected Err(Diagnostics), got {other:?}"),
+        }
+    }
+
+    /// Node 0 fails after node 1, but the report lists node 0 first.
+    #[test]
+    fn simultaneous_failures_are_reported_in_node_id_order() {
+        use std::time::Duration;
+        let pool = WorkerPool::new(2);
+        let dispatcher = TestDispatcher::new()
+            .with_fail_after(0, Duration::from_millis(200), "slow")
+            .with_fail(1, "fast");
+        let dag = independent_dag(2);
+        let mut out = Vec::<u8>::new();
+        let mut err = Vec::<u8>::new();
+        match pool.execute(&dag, &dispatcher, &mut out, &mut err) {
+            Err(Error::Diagnostics(diags)) => {
+                let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+                assert_eq!(messages, vec!["test unit 0: slow", "test unit 1: fast"]);
+            }
+            other => panic!("expected Err(Diagnostics), got {other:?}"),
         }
     }
 }

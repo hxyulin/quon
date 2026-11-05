@@ -18,7 +18,8 @@
 //! built-in `exec` rule treats inputs as the command + argv and ignores
 //! outputs (which the scheduler uses for cache-invalidation bookkeeping).
 
-use crate::compile::{ArtifactMap, BuildLayout};
+use crate::compile::BuildLayout;
+use crate::compile::extern_map::ArtifactLookup;
 use crate::error::{Error, Result};
 use gluon_model::{BuildModel, ResolvedConfig, RuleDef, RuleHandler};
 use std::collections::BTreeMap;
@@ -39,37 +40,10 @@ pub struct RuleCtx<'a> {
     pub layout: &'a BuildLayout,
     pub resolved: &'a ResolvedConfig,
     pub model: &'a BuildModel,
-    pub artifacts: &'a ArtifactMap,
-    /// Output paths for built images, keyed by [`gluon_model::ImageDef`]
-    /// handle. Used by `${image:<name>}` substitution. May be empty
-    /// when no `image()` blocks were declared, or when the rule fires
-    /// before the scheduler has produced any image artifacts (the
-    /// substitution will then surface a clear "image not built yet"
-    /// diagnostic).
-    pub image_paths: &'a std::collections::BTreeMap<
-        gluon_model::Handle<gluon_model::ImageDef>,
-        std::path::PathBuf,
-    >,
-}
-
-impl<'a> RuleCtx<'a> {
-    /// Static reference to an empty image-path map. Useful for tests
-    /// and call sites that legitimately have no image artifacts to
-    /// expose (e.g. the `gluon vendor` workflow). Avoids forcing every
-    /// caller to thread a local `BTreeMap::new()` through the scope.
-    pub fn empty_image_paths() -> &'static std::collections::BTreeMap<
-        gluon_model::Handle<gluon_model::ImageDef>,
-        std::path::PathBuf,
-    > {
-        use std::sync::OnceLock;
-        static MAP: OnceLock<
-            std::collections::BTreeMap<
-                gluon_model::Handle<gluon_model::ImageDef>,
-                std::path::PathBuf,
-            >,
-        > = OnceLock::new();
-        MAP.get_or_init(std::collections::BTreeMap::new)
-    }
+    /// Outputs of finished nodes. `${image:<name>}` substitution reads
+    /// image paths from here; an image that has not been built yet
+    /// gives a clear "image not built yet" diagnostic.
+    pub artifacts: &'a dyn ArtifactLookup,
 }
 
 /// A rule handler. Implementations receive pre-substituted argument strings —
@@ -331,7 +305,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
         let rule = RuleDef {
             name: "myrule".into(),
@@ -372,7 +345,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
         let rule = RuleDef {
             name: "scriptrule".into(),

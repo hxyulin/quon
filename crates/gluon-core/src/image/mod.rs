@@ -25,14 +25,14 @@ mod partition;
 mod source;
 
 use crate::cache::{CompositeQuery, CompositeRecord, composite_aux_hash};
+use crate::compile::CompileCtx;
+use crate::compile::extern_map::ArtifactLookup;
 use crate::compile::extern_map::resolve_artifact_by_name;
-use crate::compile::{ArtifactMap, CompileCtx};
 use crate::error::{Error, Result};
 use gluon_model::{
-    BuildModel, EspDef, Handle, ImageDef, ImageFormat, ImageSource, PartitionDef, PartitionTable,
+    BuildModel, Handle, ImageDef, ImageFormat, ImageSource, PartitionDef, PartitionTable,
     RawSource, RawWrite, ResolvedConfig,
 };
-use std::collections::BTreeMap;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -54,11 +54,9 @@ pub struct ImageCtx<'a> {
     /// Resolved config — gives us `project_root` for `ImageSource::File`
     /// resolution.
     pub resolved: &'a ResolvedConfig,
-    /// Snapshot of compiled-crate artifact paths.
-    pub artifacts: &'a ArtifactMap,
-    /// Snapshot of assembled-ESP directories. Empty in the unit tests
-    /// for ESP-free images.
-    pub esp_dirs: &'a BTreeMap<Handle<EspDef>, PathBuf>,
+    /// Outputs of finished nodes: crate artifacts, build-step outputs
+    /// and assembled ESP directories.
+    pub artifacts: &'a dyn ArtifactLookup,
 }
 
 /// Assemble the disk image for one [`ImageDef`].
@@ -341,10 +339,10 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
                     Some(h) => h,
                     None => continue,
                 };
-                let dir = ictx.esp_dirs.get(&handle).ok_or_else(|| {
+                let dir = ictx.artifacts.esp(handle).ok_or_else(|| {
                     Error::Compile(format!(
                         "scheduler: image('{}') entry source esp '{}' has no \
-                         entry in esp_dirs (DAG edge missing or ran out of order?)",
+                         assembled directory (DAG edge missing or ran out of order?)",
                         image.name, name
                     ))
                 })?;
@@ -353,7 +351,7 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
                 // walk-and-copy instead of treating it as a single file.
                 out.push(ResolvedEntry {
                     dest_path: entry.dest_path.clone(),
-                    source_path: dir.clone(),
+                    source_path: dir.to_path_buf(),
                     source_kind: StampSource::EspDir { name: name.clone() },
                 });
             }
@@ -972,13 +970,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let mut stdout = Vec::new();
@@ -1045,13 +1041,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let (out1, cached1) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
@@ -1095,13 +1089,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let (_, cached1) = build_image(image_h, &ictx, &mut Vec::new()).unwrap();
@@ -1135,13 +1127,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let err = build_image(image_h, &ictx, &mut Vec::new()).unwrap_err();
@@ -1203,13 +1193,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let mut stdout = Vec::new();
@@ -1289,13 +1277,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
         let err = build_image(image_h, &ictx, &mut Vec::new()).unwrap_err();
         let msg = err.to_string();
@@ -1335,13 +1321,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         let mut stdout = Vec::<u8>::new();
@@ -1387,13 +1371,11 @@ mod tests {
         );
 
         let artifacts = ArtifactMap::new();
-        let esp_dirs = BTreeMap::new();
         let ictx = ImageCtx {
             ctx: &ctx,
             model: &model,
             resolved: &resolved,
             artifacts: &artifacts,
-            esp_dirs: &esp_dirs,
         };
 
         // We need at least one partition or raw_writes for the build

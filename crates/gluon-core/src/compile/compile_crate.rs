@@ -25,9 +25,10 @@ use super::artifact_shape::CrateArtifactShape;
 use super::command_builder::build_rustc_command;
 #[cfg(test)]
 use crate::cache::BuildRecord;
+use crate::compile::extern_map::ArtifactLookup;
 use crate::compile::layout::BuildLayout;
 use crate::compile::rustc::RustcCommandBuilder;
-use crate::compile::{ArtifactMap, CompileCtx, PostCompileStep};
+use crate::compile::{CompileCtx, PostCompileStep};
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, CrateDef, CrateType, ResolvedConfig, ResolvedCrateRef};
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ pub struct CompileCrateInput<'a> {
     pub crate_ref: &'a ResolvedCrateRef,
     /// Map of already-built crate artifacts. The caller (scheduler) must
     /// have populated every dependency of `crate_ref` before calling.
-    pub artifacts: &'a ArtifactMap,
+    pub artifacts: &'a dyn ArtifactLookup,
     /// Path to the pre-built sysroot directory for the active target.
     /// **Required** for cross crates; ignored for host crates.
     pub sysroot_dir: Option<&'a Path>,
@@ -64,7 +65,7 @@ pub struct CompileCrateInput<'a> {
 pub(crate) fn collect_artifact_env_sources(
     crate_def: &CrateDef,
     model: &BuildModel,
-    artifacts: &ArtifactMap,
+    artifacts: &dyn ArtifactLookup,
 ) -> Result<Vec<PathBuf>> {
     let mut out = Vec::with_capacity(crate_def.artifact_env.len());
     for (env_key, dep_name) in &crate_def.artifact_env {

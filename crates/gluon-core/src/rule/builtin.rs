@@ -134,7 +134,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
         let registry = RuleRegistry::with_builtins();
         let rule = make_exec_rule("myrule", vec![]);
@@ -161,7 +160,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
         let registry = RuleRegistry::with_builtins();
 
@@ -204,7 +202,6 @@ mod tests {
             resolved: &resolved,
             model: &model,
             artifacts: &artifacts,
-            image_paths: RuleCtx::empty_image_paths(),
         };
         let registry = RuleRegistry::with_builtins();
 

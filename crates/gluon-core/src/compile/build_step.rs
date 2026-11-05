@@ -36,7 +36,8 @@
 //! disk presence, and their content is captured in the hash.
 
 use crate::cache::{BuildRecord, FreshnessQuery, hash::hash_argv};
-use crate::compile::{ArtifactMap, CompileCtx};
+use crate::compile::CompileCtx;
+use crate::compile::extern_map::ArtifactLookup;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{BuildModel, BuildStepDef, BuildStepInput, Handle, ResolvedConfig};
 use std::collections::BTreeMap;
@@ -61,7 +62,7 @@ pub fn execute_build_step(
     model: &BuildModel,
     resolved: &ResolvedConfig,
     handle: Handle<BuildStepDef>,
-    artifacts: &ArtifactMap,
+    artifacts: &dyn ArtifactLookup,
     stdout_sink: &mut Vec<u8>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
@@ -265,7 +266,7 @@ fn resolve_input(
     input: &BuildStepInput,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    artifacts: &ArtifactMap,
+    artifacts: &dyn ArtifactLookup,
 ) -> Result<String> {
     match input {
         BuildStepInput::Crate { handle } => {
@@ -312,7 +313,7 @@ fn resolve_input(
 mod tests {
     use super::*;
     use crate::cache::Cache;
-    use crate::compile::{BuildLayout, RustcInfo};
+    use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use gluon_model::{
         BuildModel, BuildStepDef, CrateDef, CrateType, GroupDef, ProjectDef, ResolvedConfig,
         ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,

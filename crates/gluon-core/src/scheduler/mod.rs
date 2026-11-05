@@ -10,12 +10,12 @@
 //!
 //! [`execute_pipeline`] wires the above together: builds the DAG, runs the
 //! worker pool, and dispatches each node to the appropriate per-variant
-//! helper. The dispatch protocol — clone the snapshot, run the helper
-//! lock-free, merge the result — is documented in
+//! helper. Each node writes its output to its own result slot once; a
+//! helper reads its inputs' slots through a [`results::ResultView`]. See
 //! `docs/src/architecture/concurrency.md`.
 
 pub mod dag;
-mod snapshot;
+mod results;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
@@ -29,15 +29,14 @@ use crate::rule::{RuleCtx, RuleRegistry};
 use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
 use dag::Dag as DagType;
 use gluon_model::{
-    BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef,
-    TargetDef, TargetSpec,
+    BuildModel, BuildStepDef, CrateDef, EspDef, Handle, ImageDef, ResolvedConfig, ResolvedCrateRef,
+    RuleDef, TargetDef, TargetSpec,
 };
-use snapshot::{ArtifactsSnapshot, NodeOutput};
+use results::{NodeResult, ResultView};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // PipelineDispatcher
@@ -45,9 +44,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Maps each `DagNode` variant to the appropriate helper or compile call.
 ///
-/// Implements `JobDispatcher` so it can be driven by `WorkerPool`. All
-/// shared state is behind `Mutex` so workers can synchronise without
-/// holding broad locks across compilation.
+/// Implements `JobDispatcher` so it can be driven by `WorkerPool`. The
+/// only shared mutable state is `results`, one `OnceLock` per node, which
+/// each node writes once and its dependents read without a lock.
 struct PipelineDispatcher<'a> {
     ctx: &'a CompileCtx,
     model: &'a BuildModel,
@@ -59,88 +58,53 @@ struct PipelineDispatcher<'a> {
     /// are emitted by `build_dag` and the dispatch arm is unreachable.
     vendor_ctx: &'a VendorBuildContext,
     dag: &'a DagType,
-    /// Single canonical-state mutex. Stage 8 collapses the four per-map
-    /// mutexes (sysroots, artifacts, esps, images) into this bundle so
-    /// per-node helpers see only `&ArtifactsSnapshot` clones — never
-    /// shared mutable state. The dispatch arms are the sole mutation
-    /// point: lock once to read-clone before the helper, lock once to
-    /// merge the helper's `NodeOutput` afterwards.
-    state: &'a Mutex<ArtifactsSnapshot>,
-    /// Lock-free counter for nodes that ran rustc to completion.
-    /// `Rule` nodes are not counted (they are not cacheable in MVP-M).
-    built: &'a AtomicUsize,
-    /// Lock-free counter for nodes that returned via the cache fast-path.
-    cached: &'a AtomicUsize,
+    /// `resolved.crates` keyed by handle, so a crate dispatch finds its
+    /// `ResolvedCrateRef` without scanning the list.
+    crate_refs: BTreeMap<Handle<CrateDef>, &'a ResolvedCrateRef>,
+    /// One slot per `NodeId`, written by that node when it succeeds.
+    results: &'a [OnceLock<NodeResult>],
 }
 
-impl<'a> PipelineDispatcher<'a> {
-    /// Increment the appropriate counter for a cacheable node.
-    fn record(&self, was_cached: bool) {
-        if was_cached {
-            self.cached.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.built.fetch_add(1, Ordering::Relaxed);
-        }
+impl PipelineDispatcher<'_> {
+    fn view(&self) -> ResultView<'_> {
+        ResultView::new(self.dag, self.results)
     }
-}
-
-/// Lock a mutex, converting a poisoned-lock panic into a gluon [`Error`].
-///
-/// The scheduler shares several `Mutex`-guarded maps across worker
-/// threads. If any thread panics while holding a lock the mutex is
-/// poisoned and all subsequent `lock()` calls would panic. This helper
-/// converts that into a recoverable `Error::Config` so the build fails
-/// with a diagnostic instead of an abort.
-fn lock_or_poison<'a, T>(
-    mutex: &'a std::sync::Mutex<T>,
-    name: &str,
-) -> Result<std::sync::MutexGuard<'a, T>> {
-    mutex
-        .lock()
-        .map_err(|_| Error::Config(format!("scheduler: {name} mutex poisoned")))
 }
 
 // ---------------------------------------------------------------------------
 // Per-node dispatch helpers
 //
-// Each `dispatch_*` is a pure function over an immutable snapshot — no
-// mutex, no shared state. The dispatch arm acquires the state lock
-// twice: once before the helper to clone the snapshot, once after to
-// merge the helper's `NodeOutput`. Helpers must never see a `Mutex`.
+// Each `dispatch_*` reads its inputs through a `ResultView` and returns
+// `(primary output, was_cached)`. The dispatch arm stores that in the
+// node's result slot. Helpers never see a lock.
 // ---------------------------------------------------------------------------
 
-/// `_snapshot` is unused today (Sysroot has no inputs from prior
-/// nodes) but is part of the dispatch-helper signature shape so all
-/// per-variant fns are uniform.
+type NodeOutcome = (Option<PathBuf>, bool);
+
 fn dispatch_sysroot(
     ctx: &CompileCtx,
     model: &BuildModel,
-    _snapshot: &ArtifactsSnapshot,
     target: Handle<TargetDef>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     let (path, was_cached) =
         crate::sysroot::ensure_sysroot_for_node(ctx, model, target, stdout, stderr)?;
-    Ok(NodeOutput::Sysroot {
-        target,
-        path,
-        was_cached,
-    })
+    Ok((Some(path), was_cached))
 }
 
 fn dispatch_config_crate(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     target: Handle<TargetDef>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     // The DAG wires ConfigCrate(target) → Sysroot(target) so this
     // lookup must always succeed.
-    let sysroot_dir = snapshot.sysroots.get(&target).cloned().ok_or_else(|| {
+    let sysroot_dir = view.sysroot(target).ok_or_else(|| {
         Error::Compile(
             "scheduler: ConfigCrate ran before its Sysroot dependency; \
              DAG edge missing?"
@@ -152,36 +116,22 @@ fn dispatch_config_crate(
         model,
         resolved,
         target,
-        &sysroot_dir,
+        sysroot_dir,
         stdout,
         stderr,
     )?;
-    Ok(NodeOutput::ConfigCrate {
-        target,
-        rlib_path,
-        was_cached,
-    })
+    Ok((Some(rlib_path), was_cached))
 }
 
 fn dispatch_crate(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    snapshot: &ArtifactsSnapshot,
-    crate_handle: Handle<CrateDef>,
+    view: &ResultView<'_>,
+    crate_ref: &ResolvedCrateRef,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
-    let crate_ref = resolved
-        .crates
-        .iter()
-        .find(|r| r.handle == crate_handle)
-        .ok_or_else(|| {
-            Error::Compile(format!(
-                "scheduler: Crate node references handle {:?} not in resolved.crates",
-                crate_handle
-            ))
-        })?;
-
+) -> Result<NodeOutcome> {
+    let crate_handle = crate_ref.handle;
     // For cross crates, look up the pre-built sysroot. The DAG
     // ensures the Sysroot node for this target completed before this
     // Crate node was dispatched. Crates whose group sets
@@ -195,22 +145,16 @@ fn dispatch_crate(
         .and_then(|c| model.groups.get(c.group))
         .map(|g| g.no_sysroot)
         .unwrap_or(false);
-    let sysroot_dir: Option<PathBuf> = if crate_ref.host || group_no_sysroot {
+    let sysroot_dir: Option<&Path> = if crate_ref.host || group_no_sysroot {
         None
     } else {
-        Some(
-            snapshot
-                .sysroots
-                .get(&crate_ref.target)
-                .cloned()
-                .ok_or_else(|| {
-                    Error::Compile(format!(
-                        "scheduler: Crate({:?}) ran before its Sysroot({:?}) dependency \
-                         completed; DAG edge missing?",
-                        crate_handle, crate_ref.target,
-                    ))
-                })?,
-        )
+        Some(view.sysroot(crate_ref.target).ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: Crate({:?}) ran before its Sysroot({:?}) dependency \
+                 completed; DAG edge missing?",
+                crate_handle, crate_ref.target,
+            ))
+        })?)
     };
 
     let (out_path, was_cached) = compile_crate(
@@ -219,80 +163,56 @@ fn dispatch_crate(
             model,
             resolved,
             crate_ref,
-            artifacts: &snapshot.artifacts,
-            sysroot_dir: sysroot_dir.as_deref(),
+            artifacts: view,
+            sysroot_dir,
         },
         stderr,
     )?;
-
-    Ok(NodeOutput::Crate {
-        handle: crate_handle,
-        out_path,
-        was_cached,
-    })
+    Ok((Some(out_path), was_cached))
 }
 
 fn dispatch_esp(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     esp_handle: Handle<EspDef>,
     stdout: &mut Vec<u8>,
-) -> Result<NodeOutput> {
-    let (path, was_cached) = crate::generated::esp::ensure_esp(
-        ctx,
-        model,
-        resolved,
-        esp_handle,
-        &snapshot.artifacts,
-        stdout,
-    )?;
-    Ok(NodeOutput::Esp {
-        handle: esp_handle,
-        path,
-        was_cached,
-    })
+) -> Result<NodeOutcome> {
+    let (path, was_cached) =
+        crate::generated::esp::ensure_esp(ctx, model, resolved, esp_handle, view, stdout)?;
+    Ok((Some(path), was_cached))
 }
 
 fn dispatch_image(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     image_handle: Handle<ImageDef>,
     stdout: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     let ictx = ImageCtx {
         ctx,
         model,
         resolved,
-        artifacts: &snapshot.artifacts,
-        esp_dirs: &snapshot.esps,
+        artifacts: view,
     };
     let (path, was_cached) = build_image(image_handle, &ictx, stdout)?;
-    Ok(NodeOutput::Image {
-        handle: image_handle,
-        path,
-        was_cached,
-    })
+    Ok((Some(path), was_cached))
 }
 
-// 8 args is one above clippy's default limit; bundling would obscure
-// the uniform `(ctx, model, resolved, snapshot, handle, stdout, stderr)`
-// shape shared with the other dispatch_* helpers. The extra arg here
-// is the `rules: &RuleRegistry` only Rule needs.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_rule(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
     rules: &RuleRegistry,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     rule_handle: Handle<RuleDef>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     let rule = model.rules.get(rule_handle).ok_or_else(|| {
         Error::Compile(format!(
             "scheduler: Rule node references handle {:?} not in model.rules",
@@ -303,36 +223,26 @@ fn dispatch_rule(
         layout: &ctx.layout,
         resolved,
         model,
-        artifacts: &snapshot.artifacts,
-        image_paths: &snapshot.images,
+        artifacts: view,
     };
     rules.dispatch(&rule_ctx, rule, stdout, stderr)?;
-    Ok(NodeOutput::Rule)
+    // Rules are not cacheable; the summary does not count them.
+    Ok((None, false))
 }
 
 fn dispatch_build_step(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     handle: Handle<BuildStepDef>,
     stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     let (out_path, was_cached) = crate::compile::build_step::execute_build_step(
-        ctx,
-        model,
-        resolved,
-        handle,
-        &snapshot.artifacts,
-        stdout,
-        stderr,
+        ctx, model, resolved, handle, view, stdout, stderr,
     )?;
-    Ok(NodeOutput::BuildStep {
-        handle,
-        out_path,
-        was_cached,
-    })
+    Ok((Some(out_path), was_cached))
 }
 
 /// Cache key for one vendored-crate build.
@@ -383,9 +293,9 @@ fn build_vendor_cache_key(
 ///
 /// A reached unit without an artifact is a scheduler bug: the DAG makes
 /// every unit wait for its deps, and so for all transitive deps.
-fn collect_vendor_search_dirs(
+fn collect_vendor_search_dirs<'p>(
     vendor_ctx: &VendorBuildContext,
-    vendor_artifacts: &BTreeMap<VendorBuildId, PathBuf>,
+    vendor_artifact: impl Fn(VendorBuildId) -> Option<&'p Path>,
     build: &crate::vendor::cross::graph::VendorCrateBuild,
 ) -> Result<Vec<PathBuf>> {
     use crate::vendor::cross::metadata::CrateKind;
@@ -403,7 +313,7 @@ fn collect_vendor_search_dirs(
         if !seen.insert(id) {
             continue;
         }
-        let path = vendor_artifacts.get(&id).ok_or_else(|| {
+        let path = vendor_artifact(id).ok_or_else(|| {
             Error::Compile(format!(
                 "scheduler: vendor build {} ran before its transitive dep {} completed; \
                  DAG edge missing?",
@@ -425,7 +335,7 @@ fn collect_vendor_search_dirs(
 /// Compile one vendored crate via gluon-driven rustc.
 ///
 /// Mirrors [`dispatch_crate`]'s shape: looks up the build descriptor,
-/// resolves dep `--extern` paths from the snapshot, derives target/sysroot
+/// resolves dep `--extern` paths from the result view, derives target/sysroot
 /// for cross builds (host builds skip both), then delegates to
 /// [`run_compile_and_cache`] for the freshness → spawn → mark_built dance.
 ///
@@ -439,20 +349,19 @@ fn dispatch_vendor_crate(
     model: &BuildModel,
     resolved: &ResolvedConfig,
     vendor_ctx: &VendorBuildContext,
-    snapshot: &ArtifactsSnapshot,
+    view: &ResultView<'_>,
     id: VendorBuildId,
     stderr: &mut Vec<u8>,
-) -> Result<NodeOutput> {
+) -> Result<NodeOutcome> {
     let build = vendor_ctx.get(id).ok_or_else(|| {
         Error::Compile(format!(
             "scheduler: VendorCrate({id}) not found in vendor context (scheduler bug)",
         ))
     })?;
 
-    // --- Resolve dep --extern paths from snapshot.vendor_artifacts ---
+    // --- Resolve dep --extern paths from the deps' result slots ---
     // The DAG wires every dep edge into a vendor → vendor scheduler edge,
-    // so each dep must already be in vendor_artifacts by the time this
-    // arm runs. A miss is a scheduler bug, not a user mistake.
+    // so each dep has finished by the time this arm runs. A miss is a scheduler bug, not a user mistake.
     let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
     for edge in &build.deps {
         let dep_id = vendor_ctx
@@ -464,23 +373,19 @@ fn dispatch_vendor_crate(
                     build.crate_id.name, edge.extern_name,
                 ))
             })?;
-        let dep_path = snapshot
-            .vendor_artifacts
-            .get(&dep_id)
-            .cloned()
-            .ok_or_else(|| {
-                Error::Compile(format!(
-                    "scheduler: vendor build {id} ({}) ran before its dep {dep_id} ({}) \
+        let dep_path = view.vendor(dep_id).map(Path::to_path_buf).ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: vendor build {id} ({}) ran before its dep {dep_id} ({}) \
                  completed; DAG edge missing?",
-                    build.crate_id.name, edge.crate_id.name,
-                ))
-            })?;
+                build.crate_id.name, edge.crate_id.name,
+            ))
+        })?;
         extern_artifacts.insert(edge.extern_name.clone(), dep_path);
     }
 
     // --- Derive target/sysroot/out_dir based on host vs cross ---
     // Host: no --target, no --sysroot, out_dir under host/vendor-deps/.
-    // Cross: triple from TargetDef::spec, sysroot from snapshot, out_dir
+    // Cross: triple from TargetDef::spec, sysroot from the result view, out_dir
     // under cross/<target>/<profile>/vendor-deps/.
     let (target_triple, target_triple_builtin, sysroot_owned, out_dir) = match build.target {
         TargetSpec::Host => (
@@ -497,10 +402,9 @@ fn dispatch_vendor_crate(
                     build.crate_id.name, target_handle,
                 ))
             })?;
-            let sysroot = snapshot
-                .sysroots
-                .get(&target_handle)
-                .cloned()
+            let sysroot = view
+                .sysroot(target_handle)
+                .map(Path::to_path_buf)
                 .ok_or_else(|| {
                     Error::Compile(format!(
                         "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
@@ -523,7 +427,7 @@ fn dispatch_vendor_crate(
     };
 
     // --- Assemble rustc command ---
-    let search_dirs = collect_vendor_search_dirs(vendor_ctx, &snapshot.vendor_artifacts, build)?;
+    let search_dirs = collect_vendor_search_dirs(vendor_ctx, |id| view.vendor(id), build)?;
     let input = VendorCompileInput {
         build,
         extern_artifacts: &extern_artifacts,
@@ -601,186 +505,115 @@ fn dispatch_vendor_crate(
         stderr,
     )?;
 
-    Ok(NodeOutput::VendorCrate {
-        id,
-        out_path,
-        was_cached,
-    })
+    Ok((Some(out_path), was_cached))
 }
 
-impl<'a> JobDispatcher for PipelineDispatcher<'a> {
+/// Human-readable name of a node for failure messages, such as
+/// `crate kernel (x86_64-unknown-none, dev)` or `sysroot x86_64-unknown-none`.
+fn node_label(
+    node: DagNode,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    vendor_ctx: &VendorBuildContext,
+) -> String {
+    let target_name = |h: Handle<TargetDef>| {
+        model
+            .targets
+            .get(h)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| format!("{h:?}"))
+    };
+    let platform = |spec: TargetSpec| match spec {
+        TargetSpec::Host => "host".to_string(),
+        TargetSpec::Cross(t) => format!("{}, {}", target_name(t), resolved.profile.name),
+    };
+    match node {
+        DagNode::Sysroot(t) => format!("sysroot {}", target_name(t)),
+        DagNode::ConfigCrate(t) => format!("config crate ({})", target_name(t)),
+        DagNode::Crate(h) => match model.crates.get(h) {
+            Some(c) => format!("crate {} ({})", c.name, platform(c.target)),
+            None => format!("crate {h:?}"),
+        },
+        DagNode::VendorCrate(id) => match vendor_ctx.get(id) {
+            Some(b) => format!(
+                "vendored crate {} {} ({})",
+                b.crate_id.name,
+                b.crate_id.version,
+                platform(b.target)
+            ),
+            None => format!("vendored crate {id}"),
+        },
+        DagNode::Rule(h) => match model.rules.get(h) {
+            Some(r) => format!("rule {}", r.name),
+            None => format!("rule {h:?}"),
+        },
+        DagNode::Esp(h) => match model.esps.get(h) {
+            Some(e) => format!("esp {}", e.name),
+            None => format!("esp {h:?}"),
+        },
+        DagNode::Image(h) => match model.images.get(h) {
+            Some(i) => format!("image {}", i.name),
+            None => format!("image {h:?}"),
+        },
+        DagNode::BuildStep(h) => match model.build_steps.get(h) {
+            Some(s) => format!("build step {}", s.name),
+            None => format!("build step {h:?}"),
+        },
+    }
+}
+
+impl JobDispatcher for PipelineDispatcher<'_> {
     fn dispatch(&self, node: NodeId, stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> Result<()> {
-        let node_kind = self.dag.nodes[node as usize];
-        match node_kind {
-            // ------------------------------------------------------------------
-            // Sysroot — build the custom sysroot for the target triple.
-            // ------------------------------------------------------------------
-            DagNode::Sysroot(target) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output =
-                    dispatch_sysroot(self.ctx, self.model, &snapshot, target, stdout, stderr)?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("Sysroot output is cacheable");
-                self.record(was_cached);
-                Ok(())
-            }
-
-            // ------------------------------------------------------------------
-            // ConfigCrate — generate + compile `<project>_config` for a target.
-            // ------------------------------------------------------------------
+        let view = self.view();
+        let (ctx, model, resolved) = (self.ctx, self.model, self.resolved);
+        let (primary, was_cached) = match self.dag.nodes[node as usize] {
+            DagNode::Sysroot(target) => dispatch_sysroot(ctx, model, target, stdout, stderr)?,
             DagNode::ConfigCrate(target) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_config_crate(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    &snapshot,
-                    target,
-                    stdout,
-                    stderr,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("ConfigCrate output is cacheable");
-                self.record(was_cached);
-                Ok(())
+                dispatch_config_crate(ctx, model, resolved, &view, target, stdout, stderr)?
             }
-
-            // ------------------------------------------------------------------
-            // Crate — compile a user-declared crate (host or cross).
-            // ------------------------------------------------------------------
-            DagNode::Crate(crate_handle) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_crate(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    &snapshot,
-                    crate_handle,
-                    stderr,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("Crate output is cacheable");
-                self.record(was_cached);
-                // Crate compiles never write to stdout — rustc emits everything
-                // to stderr, which the worker pool flushes per-job.
-                let _ = stdout;
-                Ok(())
+            DagNode::Crate(handle) => {
+                let crate_ref = self.crate_refs.get(&handle).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: Crate node references handle {handle:?} not in \
+                         resolved.crates"
+                    ))
+                })?;
+                // rustc writes everything to stderr; the worker pool
+                // flushes it per job.
+                dispatch_crate(ctx, model, resolved, &view, crate_ref, stderr)?
             }
-
-            // ------------------------------------------------------------------
-            // Esp — assemble an EFI System Partition directory from
-            // built crate artifacts. See generated::esp::ensure_esp.
-            // ------------------------------------------------------------------
-            DagNode::Esp(esp_handle) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_esp(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    &snapshot,
-                    esp_handle,
-                    stdout,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("Esp output is cacheable");
-                self.record(was_cached);
-                let _ = stderr;
-                Ok(())
-            }
-
-            // ------------------------------------------------------------------
-            // Image — assemble a bootable disk image. See image::build_image.
-            // ------------------------------------------------------------------
-            DagNode::Image(image_handle) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_image(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    &snapshot,
-                    image_handle,
-                    stdout,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("Image output is cacheable");
-                self.record(was_cached);
-                let _ = stderr;
-                Ok(())
-            }
-
-            // ------------------------------------------------------------------
-            // Rule — run a user-declared rule through the registry.
-            // ------------------------------------------------------------------
-            DagNode::Rule(rule_handle) => {
-                // Rule nodes are not cacheable in MVP-M — no counter update.
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_rule(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    self.rules,
-                    &snapshot,
-                    rule_handle,
-                    stdout,
-                    stderr,
-                )?;
-                // merge() returns None for Rule — no counter to update.
-                lock_or_poison(self.state, "state")?.merge(output);
-                Ok(())
-            }
-
-            // ------------------------------------------------------------------
-            // BuildStep — invoke a host-bin runner with curated env vars.
-            // ------------------------------------------------------------------
+            DagNode::Esp(handle) => dispatch_esp(ctx, model, resolved, &view, handle, stdout)?,
+            DagNode::Image(handle) => dispatch_image(ctx, model, resolved, &view, handle, stdout)?,
+            DagNode::Rule(handle) => dispatch_rule(
+                ctx, model, resolved, self.rules, &view, handle, stdout, stderr,
+            )?,
             DagNode::BuildStep(handle) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_build_step(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    &snapshot,
-                    handle,
-                    stdout,
-                    stderr,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("BuildStep output is cacheable");
-                self.record(was_cached);
-                Ok(())
+                dispatch_build_step(ctx, model, resolved, &view, handle, stdout, stderr)?
             }
-
-            // ------------------------------------------------------------------
-            // VendorCrate — compile a vendored external crate via gluon-driven
-            // rustc against the per-target sysroot. Dep `--extern` paths
-            // come from `snapshot.vendor_artifacts` (populated by prior
-            // VendorCrate nodes in topological order); cross builds also
-            // pull their sysroot from `snapshot.sysroots`.
-            // ------------------------------------------------------------------
             DagNode::VendorCrate(id) => {
-                let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_vendor_crate(
-                    self.ctx,
-                    self.model,
-                    self.resolved,
-                    self.vendor_ctx,
-                    &snapshot,
-                    id,
-                    stderr,
-                )?;
-                let was_cached = lock_or_poison(self.state, "state")?
-                    .merge(output)
-                    .expect("VendorCrate output is cacheable");
-                self.record(was_cached);
-                let _ = stdout;
-                Ok(())
+                dispatch_vendor_crate(ctx, model, resolved, self.vendor_ctx, &view, id, stderr)?
             }
-        }
+        };
+        self.results[node as usize]
+            .set(NodeResult {
+                primary,
+                was_cached,
+            })
+            .map_err(|_| {
+                Error::Compile(format!(
+                    "scheduler: {} was dispatched twice (scheduler bug)",
+                    self.label(node)
+                ))
+            })
+    }
+
+    fn label(&self, node: NodeId) -> String {
+        node_label(
+            self.dag.nodes[node as usize],
+            self.model,
+            self.resolved,
+            self.vendor_ctx,
+        )
     }
 }
 
@@ -795,22 +628,15 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
 ///
 /// ### Shared state
 ///
-/// `sysroots` and `artifacts` are `Mutex`-wrapped maps updated by the
-/// dispatcher as each node completes. The DAG guarantees topological order:
-/// a node's dependencies are always complete before the node itself runs, so
-/// lookups into these maps are always safe (no missing-key panics in correct
-/// usage).
+/// Each node stores its output in its own `OnceLock` slot. The DAG
+/// guarantees topological order, so a node's inputs are always set
+/// before the node runs and reading them needs no lock.
 ///
 /// ### stdout / stderr
 ///
 /// Per-job output is buffered in `Vec<u8>` inside the worker pool and
 /// flushed to `stdout`/`stderr` as each job completes. This prevents
 /// interleaved rustc output from parallel compilations.
-// Eight inputs is one above clippy's default threshold. Folding them
-// into a `PipelineInputs` bundle would be the right long-term shape
-// (and is queued for a follow-up refactor) but would touch every
-// call site for an orthogonal concern; doing it here would muddy the
-// vendor pipeline diff.
 #[allow(clippy::too_many_arguments)]
 pub fn execute_pipeline(
     ctx: &CompileCtx,
@@ -823,14 +649,7 @@ pub fn execute_pipeline(
     stderr: &mut dyn Write,
 ) -> Result<BuildSummary> {
     let dag = build_dag(resolved, model, vendor_ctx)?;
-
-    let state: Mutex<ArtifactsSnapshot> = Mutex::new(ArtifactsSnapshot::default());
-    // `Relaxed` is sufficient: we only need atomicity, not ordering
-    // relative to other memory operations. The counters are read once
-    // after `pool.execute` returns (a happens-before point already
-    // established by the worker-pool join).
-    let built = AtomicUsize::new(0);
-    let cached = AtomicUsize::new(0);
+    let results: Vec<OnceLock<NodeResult>> = (0..dag.len()).map(|_| OnceLock::new()).collect();
 
     let dispatcher = PipelineDispatcher {
         ctx,
@@ -839,34 +658,49 @@ pub fn execute_pipeline(
         rules,
         vendor_ctx,
         dag: &dag,
-        state: &state,
-        built: &built,
-        cached: &cached,
+        crate_refs: resolved.crates.iter().map(|r| (r.handle, r)).collect(),
+        results: &results,
     };
 
     let pool = WorkerPool::new(workers);
     pool.execute(&dag, &dispatcher, stdout, stderr)?;
 
-    // Drain the snapshot into the summary. The mutex is uncontested
-    // at this point (worker pool has joined), so `into_inner` is safe.
-    let final_state = state
-        .into_inner()
-        .map_err(|_| Error::Config("scheduler: state mutex poisoned".into()))?;
-    let build_step_paths: BTreeMap<_, _> = final_state
-        .artifacts
-        .build_steps_iter()
-        .map(|(h, p)| (h, p.to_path_buf()))
-        .collect();
-
-    Ok(BuildSummary {
-        built: built.load(Ordering::Relaxed),
-        cached: cached.load(Ordering::Relaxed),
-        esp_dirs: final_state.esps,
-        image_paths: final_state.images,
-        build_step_paths,
-    })
+    Ok(summarize(&dag, &results))
 }
 
+/// Assemble the build summary from the result slots after the pool
+/// has joined. Rule nodes are not cacheable and are not counted.
+fn summarize(dag: &DagType, results: &[OnceLock<NodeResult>]) -> BuildSummary {
+    let mut summary = BuildSummary::default();
+    for (node, slot) in dag.nodes.iter().zip(results) {
+        let Some(result) = slot.get() else { continue };
+        if !matches!(node, DagNode::Rule(_)) {
+            if result.was_cached {
+                summary.cached += 1;
+            } else {
+                summary.built += 1;
+            }
+        }
+        let Some(path) = result.primary.clone() else {
+            continue;
+        };
+        match *node {
+            DagNode::Esp(h) => {
+                summary.esp_dirs.insert(h, path);
+            }
+            DagNode::Image(h) => {
+                summary.image_paths.insert(h, path);
+            }
+            DagNode::BuildStep(h) => {
+                summary.build_step_paths.insert(h, path);
+            }
+            _ => {}
+        }
+    }
+    summary
+}
+
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1020,7 +854,12 @@ mod tests {
             vec![edge("a", cross), edge("derive", TargetSpec::Host)],
         );
 
-        let dirs = collect_vendor_search_dirs(&vctx, &artifacts, &kernel).unwrap();
+        let dirs = collect_vendor_search_dirs(
+            &vctx,
+            |id| artifacts.get(&id).map(PathBuf::as_path),
+            &kernel,
+        )
+        .unwrap();
         assert_eq!(
             dirs,
             vec![
@@ -1033,7 +872,7 @@ mod tests {
 
     #[test]
     fn dispatch_vendor_crate_missing_sysroot_for_cross_errors() {
-        // Cross vendor build whose Sysroot isn't in the snapshot — this
+        // Cross vendor build whose Sysroot has not finished — this
         // is the "Sysroot ran after VendorCrate" failure mode.
         let tmp = tempfile::tempdir().expect("tempdir");
         let ctx = make_ctx(tmp.path());
@@ -1048,18 +887,13 @@ mod tests {
                 vec![],
             ))
             .expect("add ok");
-        let snapshot = ArtifactsSnapshot::default(); // empty — no sysroot
+        let dag = Dag::new();
+        let results: Vec<OnceLock<NodeResult>> = Vec::new();
+        let view = ResultView::new(&dag, &results); // empty — nothing finished
         let mut stderr = Vec::<u8>::new();
-        let err = dispatch_vendor_crate(
-            &ctx,
-            &model,
-            &resolved,
-            &vendor_ctx,
-            &snapshot,
-            id,
-            &mut stderr,
-        )
-        .expect_err("must error");
+        let err =
+            dispatch_vendor_crate(&ctx, &model, &resolved, &vendor_ctx, &view, id, &mut stderr)
+                .expect_err("must error");
         match err {
             Error::Compile(msg) => assert!(
                 msg.contains("Sysroot") && msg.contains("DAG edge missing"),
@@ -1072,7 +906,7 @@ mod tests {
     #[test]
     fn dispatch_vendor_crate_missing_dep_artifact_errors() {
         // Dep edge resolves in vendor_ctx but its artifact isn't in
-        // snapshot.vendor_artifacts — the "dep ran after parent" mode.
+        // the result slots — the "dep ran after parent" mode.
         // Use a host build to bypass the sysroot requirement and isolate
         // the dep-artifact lookup.
         use crate::vendor::cross::graph::VendorDepEdge;
@@ -1099,14 +933,16 @@ mod tests {
                 }],
             ))
             .expect("parent add ok");
-        let snapshot = ArtifactsSnapshot::default(); // empty — dep not built
+        let dag = Dag::new();
+        let results: Vec<OnceLock<NodeResult>> = Vec::new();
+        let view = ResultView::new(&dag, &results); // empty — nothing finished
         let mut stderr = Vec::<u8>::new();
         let err = dispatch_vendor_crate(
             &ctx,
             &model,
             &resolved,
             &vendor_ctx,
-            &snapshot,
+            &view,
             parent_id,
             &mut stderr,
         )
@@ -1118,6 +954,53 @@ mod tests {
             ),
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn node_label_names_crate_target_and_profile() {
+        use gluon_model::{CrateDef, CrateType, GroupDef};
+        let (mut model, resolved) = make_minimal_model_and_resolved();
+        let target = resolved.profile.target;
+        let (group, _) = model.groups.insert(
+            "kernel".into(),
+            GroupDef {
+                name: "kernel".into(),
+                target: TargetSpec::Cross(target),
+                ..Default::default()
+            },
+        );
+        let (kernel, _) = model.crates.insert(
+            "kernel".into(),
+            CrateDef {
+                name: "kernel".into(),
+                path: "kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Bin,
+                target: TargetSpec::Cross(target),
+                deps: BTreeMap::new(),
+                dev_deps: BTreeMap::new(),
+                features: Vec::new(),
+                root: None,
+                linker_script: None,
+                group,
+                is_project_crate: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                requires_config: Vec::new(),
+                artifact_deps: Vec::new(),
+                artifact_env: BTreeMap::new(),
+                span: None,
+            },
+        );
+        let vctx = VendorBuildContext::new();
+        assert_eq!(
+            node_label(DagNode::Crate(kernel), &model, &resolved, &vctx),
+            "crate kernel (x86_64-unknown-none, dev)"
+        );
+        assert_eq!(
+            node_label(DagNode::Sysroot(target), &model, &resolved, &vctx),
+            "sysroot x86_64-unknown-none"
+        );
     }
 
     /// Smoke test: an empty crate list still produces a valid DAG (Sysroot +
@@ -1254,7 +1137,7 @@ mod tests {
     /// run is a cache hit; this test asserts not just that it
     /// succeeds (covered by `execute_pipeline_cache_hit_on_second_run`)
     /// but that nothing about the *output set* changes between runs —
-    /// the snapshot-based dispatch must be deterministic.
+    /// the result-slot dispatch must be deterministic.
     #[test]
     #[ignore]
     fn execute_pipeline_j1_is_deterministic_across_runs() {

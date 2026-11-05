@@ -1080,3 +1080,42 @@ fn env_dep_change_rebuilds() {
         "kernel binary does not reflect the env var being unset"
     );
 }
+
+/// A failed build keeps the cache records of the nodes that finished.
+/// The kernel fails after the sysroot, config crate and proc macro have
+/// built. Once the kernel is fixed, only the kernel rebuilds. The failure
+/// names the crate, its target and the profile.
+#[test]
+#[ignore]
+fn failed_build_keeps_records_of_finished_nodes() {
+    let Some(()) = require_rustc_or_skip("failed_build_keeps_records_of_finished_nodes") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let good = fs::read_to_string(&main_rs).expect("read main.rs");
+    fs::write(
+        &main_rs,
+        format!("{good}\ncompile_error!(\"broken on purpose\");\n"),
+    )
+    .expect("break main.rs");
+
+    let out = gluon_command(&fixture)
+        .arg("build")
+        .output()
+        .expect("spawn gluon build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "broken kernel built:\n{stderr}");
+    assert!(
+        stderr.contains("crate kernel (x86_64-unknown-none, dev)"),
+        "failure does not name the crate:\n{stderr}"
+    );
+
+    fs::write(&main_rs, good).expect("restore main.rs");
+    let stderr = build_ok(&fixture, &[]);
+    assert_eq!(
+        built_count(&stderr),
+        1,
+        "nodes that finished before the failure rebuilt:\n{stderr}"
+    );
+}
