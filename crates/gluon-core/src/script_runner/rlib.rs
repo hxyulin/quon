@@ -489,16 +489,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_cargo_output_errors_when_no_artifact() {
-        let stream = r#"{"reason":"build-finished","success":true}"#;
-        assert!(parse_cargo_output(stream.as_bytes()).is_err());
-    }
-
-    #[test]
-    fn parse_cargo_output_skips_non_lib_targets() {
-        // A `compiler-artifact` for a build-script binary must not match.
-        let stream = r#"{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["custom-build"]},"filenames":["/x/build-script-build"]}"#;
-        assert!(parse_cargo_output(stream.as_bytes()).is_err());
+    fn parse_cargo_output_errors_when_no_lib_artifact() {
+        let cases = [
+            (
+                "no compiler-artifact",
+                r#"{"reason":"build-finished","success":true}"#,
+            ),
+            (
+                // A build-script binary must not match.
+                "only a custom-build artifact",
+                r#"{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["custom-build"]},"filenames":["/x/build-script-build"]}"#,
+            ),
+        ];
+        for (name, stream) in cases {
+            assert!(parse_cargo_output(stream.as_bytes()).is_err(), "{name}");
+        }
     }
 
     #[test]

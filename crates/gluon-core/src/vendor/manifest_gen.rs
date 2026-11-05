@@ -325,63 +325,58 @@ mod tests {
     }
 
     #[test]
-    fn git_rev_emits_rev_key() {
-        let out = mk_manifest(&arena(vec![dep(
-            "tokio",
-            DepSource::Git {
-                url: "https://github.com/tokio-rs/tokio.git".into(),
-                reference: GitRef::Rev("abc123def".into()),
-            },
-        )]))
-        .expect("ok");
-        assert_parses_as_toml(&out);
-        assert!(out.contains("git = \"https://github.com/tokio-rs/tokio.git\""));
-        assert!(out.contains("rev = \"abc123def\""));
-        assert!(!out.contains("tag ="));
-        assert!(!out.contains("branch ="));
-    }
-
-    #[test]
-    fn git_tag_emits_tag_key() {
-        let out = mk_manifest(&arena(vec![dep(
-            "x",
-            DepSource::Git {
-                url: "https://example.com/x.git".into(),
-                reference: GitRef::Tag("v1.0".into()),
-            },
-        )]))
-        .expect("ok");
-        assert!(out.contains("tag = \"v1.0\""));
-    }
-
-    #[test]
-    fn git_branch_emits_branch_key() {
-        let out = mk_manifest(&arena(vec![dep(
-            "x",
-            DepSource::Git {
-                url: "https://example.com/x.git".into(),
-                reference: GitRef::Branch("main".into()),
-            },
-        )]))
-        .expect("ok");
-        assert!(out.contains("branch = \"main\""));
-    }
-
-    #[test]
-    fn git_default_ref_emits_no_ref_key() {
-        let out = mk_manifest(&arena(vec![dep(
-            "x",
-            DepSource::Git {
-                url: "https://example.com/x.git".into(),
-                reference: GitRef::Default,
-            },
-        )]))
-        .expect("ok");
-        assert!(!out.contains("rev ="));
-        assert!(!out.contains("tag ="));
-        assert!(!out.contains("branch ="));
-        // But url is present.
-        assert!(out.contains("git ="));
+    fn git_ref_emits_only_its_own_key() {
+        type Keys = &'static [&'static str];
+        let cases: [(&str, &str, GitRef, Keys, Keys); 4] = [
+            (
+                "rev",
+                "https://github.com/tokio-rs/tokio.git",
+                GitRef::Rev("abc123def".into()),
+                &[
+                    "git = \"https://github.com/tokio-rs/tokio.git\"",
+                    "rev = \"abc123def\"",
+                ],
+                &["tag =", "branch ="],
+            ),
+            (
+                "tag",
+                "https://example.com/x.git",
+                GitRef::Tag("v1.0".into()),
+                &["tag = \"v1.0\""],
+                &[],
+            ),
+            (
+                "branch",
+                "https://example.com/x.git",
+                GitRef::Branch("main".into()),
+                &["branch = \"main\""],
+                &[],
+            ),
+            (
+                "default ref",
+                "https://example.com/x.git",
+                GitRef::Default,
+                &["git ="],
+                &["rev =", "tag =", "branch ="],
+            ),
+        ];
+        for (name, url, reference, present, absent) in cases {
+            let out = mk_manifest(&arena(vec![dep(
+                "x",
+                DepSource::Git {
+                    url: url.into(),
+                    reference,
+                },
+            )]))
+            .expect("ok");
+            assert_parses_as_toml(&out);
+            for key in present {
+                assert!(out.contains(key), "{name}: missing {key:?} in:\n{out}");
+            }
+            for key in absent {
+                assert!(!out.contains(key), "{name}: unexpected {key:?} in:\n{out}");
+            }
+        }
     }
 
     #[test]

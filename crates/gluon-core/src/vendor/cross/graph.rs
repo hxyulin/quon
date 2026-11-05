@@ -459,7 +459,7 @@ mod tests {
         // it needs a cross unit and a host unit with the same features
         // (cargo metadata reports one feature set per package).
         let mut memchr = rc("memchr", "2.7.0", CrateKind::Lib, vec![]);
-        memchr.features = vec!["alloc".into()];
+        memchr.features = vec!["alloc".into(), "std".into()];
         let mut crates = BTreeMap::new();
         crates.insert(cid("memchr", "2.7.0"), memchr);
         crates.insert(
@@ -490,7 +490,7 @@ mod tests {
         let cross = TargetSpec::Cross(target_handle());
         assert_eq!(units(&nodes, "memchr"), vec![cross, TargetSpec::Host]);
         for n in nodes.iter().filter(|n| n.crate_id.name == "memchr") {
-            assert_eq!(n.features, vec!["alloc".to_string()]);
+            assert_eq!(n.features, vec!["alloc".to_string(), "std".to_string()]);
         }
 
         // Each edge resolves to the unit on the expected platform, so
@@ -719,27 +719,5 @@ mod tests {
         assert_eq!(n1, n2);
         let names: Vec<&str> = n1.iter().map(|n| n.crate_id.name.as_str()).collect();
         assert_eq!(names, vec!["a", "m", "z"], "BTreeMap order");
-    }
-
-    #[test]
-    fn dep_edges_propagate_features_independently() {
-        // Sanity check that features on the parent crate are passed
-        // through unchanged — they're load-bearing for the rustc
-        // command builder in the next slice.
-        let mut bf = rc("bitflags", "2.11.0", CrateKind::Lib, vec![]);
-        bf.features = vec!["alloc".into(), "std".into()];
-        let mut crates = BTreeMap::new();
-        crates.insert(cid("bitflags", "2.11.0"), bf);
-        let graph = ResolvedGraph {
-            target: target_handle(),
-            crates,
-            roots: vec![cid("bitflags", "2.11.0")],
-        };
-
-        let nodes = build_vendor_nodes(&graph);
-        assert_eq!(
-            nodes[0].features,
-            vec!["alloc".to_string(), "std".to_string()]
-        );
     }
 }

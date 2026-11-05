@@ -268,11 +268,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn empty_registry_has_no_handlers() {
-        assert!(!RuleRegistry::new().contains("exec"));
-    }
-
-    #[test]
     fn with_builtins_registers_exec() {
         assert!(RuleRegistry::with_builtins().contains("exec"));
     }

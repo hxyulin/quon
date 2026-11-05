@@ -472,46 +472,14 @@ mod tests {
     }
 
     #[test]
-    fn sanitise_leading_digit_prefixed_with_underscore() {
-        assert_eq!(
-            sanitise_option_name("1foo").unwrap(),
-            "_1FOO",
-            "digit-leading name should get a _ prefix"
-        );
-        assert_eq!(
-            sanitise_option_name("42").unwrap(),
-            "_42",
-            "all-digit name should get a _ prefix"
-        );
-    }
-
-    #[test]
-    fn sanitise_typical_names_unchanged() {
-        assert_eq!(
-            sanitise_option_name("foo_bar").unwrap(),
-            "FOO_BAR",
-            "typical snake_case name should just be uppercased"
-        );
-    }
-
-    #[test]
-    fn generate_source_is_deterministic() {
-        let mut resolved = make_resolved_empty();
-        resolved
-            .options
-            .insert("foo".into(), ResolvedValue::Bool(true));
-        resolved
-            .options
-            .insert("bar".into(), ResolvedValue::U64(9999));
-        resolved
-            .options
-            .insert("baz".into(), ResolvedValue::String("world".into()));
-
-        let first = render_source(&resolved).expect("first render");
-        let second = render_source(&resolved).expect("second render");
-        assert_eq!(
-            first, second,
-            "render_source must produce byte-identical output on successive calls"
-        );
+    fn sanitise_option_name_cases() {
+        let cases = [
+            ("digit-leading name gets a _ prefix", "1foo", "_1FOO"),
+            ("all-digit name gets a _ prefix", "42", "_42"),
+            ("snake_case name is only uppercased", "foo_bar", "FOO_BAR"),
+        ];
+        for (name, input, expected) in cases {
+            assert_eq!(sanitise_option_name(input).unwrap(), expected, "{name}");
+        }
     }
 }

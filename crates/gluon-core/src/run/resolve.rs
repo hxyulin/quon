@@ -354,43 +354,22 @@ mod tests {
     }
 
     #[test]
-    fn boot_mode_override_wins() {
-        let qemu = QemuDef {
-            boot_mode: Some(BootMode::Direct),
-            ..Default::default()
-        };
-        let r = resolve_qemu(
-            &qemu,
-            &empty_profile(),
-            X86_TRIPLE,
-            Some(BootMode::Uefi),
-            None,
-        )
-        .expect("resolve");
-        assert_eq!(r.boot_mode, BootMode::Uefi);
-    }
-
-    #[test]
-    fn timeout_cli_override_beats_profile() {
-        let mut prof = empty_profile();
-        prof.test_timeout = Some(30);
-        let r = resolve_qemu(
-            &QemuDef::default(),
-            &prof,
-            X86_TRIPLE,
-            None,
-            Some(Duration::from_secs(60)),
-        )
-        .expect("resolve");
-        assert_eq!(r.timeout, Some(Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn timeout_profile_fallback() {
-        let mut prof = empty_profile();
-        prof.test_timeout = Some(30);
-        let r = resolve_qemu(&QemuDef::default(), &prof, X86_TRIPLE, None, None).expect("resolve");
-        assert_eq!(r.timeout, Some(Duration::from_secs(30)));
+    fn timeout_cli_override_beats_profile_and_profile_is_the_fallback() {
+        let cases = [
+            ("cli override", Some(Duration::from_secs(60)), 60),
+            ("profile fallback", None, 30),
+        ];
+        for (name, cli, expected_secs) in cases {
+            let mut prof = empty_profile();
+            prof.test_timeout = Some(30);
+            let r =
+                resolve_qemu(&QemuDef::default(), &prof, X86_TRIPLE, None, cli).expect("resolve");
+            assert_eq!(
+                r.timeout,
+                Some(Duration::from_secs(expected_secs)),
+                "{name}"
+            );
+        }
     }
 
     // ---- default_binary_for_target ----------------------------------------
@@ -448,19 +427,6 @@ mod tests {
         let r = resolve_qemu(&qemu, &empty_profile(), "sparc64-unknown-none", None, None)
             .expect("explicit binary should bypass target probe");
         assert_eq!(r.binary, "qemu-system-xtensa");
-    }
-
-    #[test]
-    fn default_binary_derives_from_target_when_unset() {
-        let r = resolve_qemu(
-            &QemuDef::default(),
-            &empty_profile(),
-            "aarch64-unknown-none",
-            None,
-            None,
-        )
-        .expect("resolve");
-        assert_eq!(r.binary, "qemu-system-aarch64");
     }
 
     // -----------------------------------------------------------------

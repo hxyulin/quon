@@ -1137,86 +1137,57 @@ mod tests {
         );
     }
 
-    // Old lockfile (no artifact_path) → diagnostic. The auto_register
-    // must not silently soldier on with an empty map; the consumer's
-    // compile would then fail with a confusing "missing extern" error.
+    // An old lockfile has no artifact_path. Auto-registration must not
+    // carry on with an empty map, or the consumer's compile fails with a
+    // confusing "missing extern" error. A recorded path that was wiped
+    // (e.g. `rm -rf build/`) gets its own message so the diagnostic can
+    // suggest the right fix.
     #[test]
-    fn auto_register_errors_when_artifact_path_missing_from_lock() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().to_path_buf();
-        let layout = minimal_layout(&project);
+    fn auto_register_errors_when_artifact_is_unusable() {
+        let cases = [
+            ("artifact_path missing from lock", None, "no artifact_path"),
+            (
+                "artifact file missing on disk",
+                Some("does-not-exist.rlib"),
+                "missing artifact",
+            ),
+        ];
+        for (name, artifact, expected) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let project = tmp.path().to_path_buf();
+            let layout = minimal_layout(&project);
 
-        let mut model = model_with_deps(vec![external_dep(
-            "syn",
-            DepSource::CratesIo {
-                version: "2.0".into(),
-            },
-        )]);
-        let fingerprint =
-            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
-        let lock = VendorLock {
-            version: VendorLock::CURRENT_VERSION,
-            fingerprint,
-            search_dirs: Vec::new(),
-            packages: vec![VendorLockPackage {
-                name: "syn".into(),
-                version: "2.0.117".into(),
-                target: "host".into(),
-                kind: VendorPackageKind::Lib,
-                source: "crates-io".into(),
-                checksum: Some("sha256:x".into()),
-                artifact_path: None,
-            }],
-        };
-        let lock_path = layout.gluon_lock(&project);
-        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        lock.save_atomic(&lock_path).unwrap();
+            let mut model = model_with_deps(vec![external_dep(
+                "syn",
+                DepSource::CratesIo {
+                    version: "2.0".into(),
+                },
+            )]);
+            let fingerprint =
+                fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+            let lock = VendorLock {
+                version: VendorLock::CURRENT_VERSION,
+                fingerprint,
+                search_dirs: Vec::new(),
+                packages: vec![VendorLockPackage {
+                    name: "syn".into(),
+                    version: "2.0.117".into(),
+                    target: "host".into(),
+                    kind: VendorPackageKind::Lib,
+                    source: "crates-io".into(),
+                    checksum: Some("sha256:x".into()),
+                    artifact_path: artifact.map(|f| project.join(f)),
+                }],
+            };
+            let lock_path = layout.gluon_lock(&project);
+            std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+            lock.save_atomic(&lock_path).unwrap();
 
-        let err = auto_register_vendored_deps(&mut model, &layout, &project).expect_err("fail");
-        let msg = err.to_string();
-        assert!(msg.contains("no artifact_path"), "msg: {msg}");
-        assert!(msg.contains("gluon vendor"), "msg: {msg}");
-    }
-
-    // The recorded path was wiped (e.g. user ran `rm -rf build/` or
-    // similar). Distinct error from the missing-field case so the
-    // diagnostic can suggest the right fix.
-    #[test]
-    fn auto_register_errors_when_artifact_file_missing_on_disk() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().to_path_buf();
-        let layout = minimal_layout(&project);
-
-        let mut model = model_with_deps(vec![external_dep(
-            "syn",
-            DepSource::CratesIo {
-                version: "2.0".into(),
-            },
-        )]);
-        let fingerprint =
-            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
-        let lock = VendorLock {
-            version: VendorLock::CURRENT_VERSION,
-            fingerprint,
-            search_dirs: Vec::new(),
-            packages: vec![VendorLockPackage {
-                name: "syn".into(),
-                version: "2.0.117".into(),
-                target: "host".into(),
-                kind: VendorPackageKind::Lib,
-                source: "crates-io".into(),
-                checksum: Some("sha256:x".into()),
-                artifact_path: Some(project.join("does-not-exist.rlib")),
-            }],
-        };
-        let lock_path = layout.gluon_lock(&project);
-        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        lock.save_atomic(&lock_path).unwrap();
-
-        let err = auto_register_vendored_deps(&mut model, &layout, &project).expect_err("fail");
-        let msg = err.to_string();
-        assert!(msg.contains("missing artifact"), "msg: {msg}");
-        assert!(msg.contains("gluon vendor"), "msg: {msg}");
+            let err = auto_register_vendored_deps(&mut model, &layout, &project).expect_err("fail");
+            let msg = err.to_string();
+            assert!(msg.contains(expected), "{name}: {msg}");
+            assert!(msg.contains("gluon vendor"), "{name}: {msg}");
+        }
     }
 
     // Defensive call pattern: callers may auto_register on every model

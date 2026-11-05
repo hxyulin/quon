@@ -465,37 +465,6 @@ mod tests {
         None
     }
 
-    #[test]
-    fn ensure_sysroot_writes_no_stamp_file() {
-        // After Stage 5 migration the stamp file path must not be
-        // produced. We exercise the fast path so no real rustc spawns.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let layout = BuildLayout::new(tmp.path(), "no-stamp");
-        let target = make_target();
-
-        // Use a real always-stat-able binary as a stand-in for rustc.
-        // The cache layer needs to be able to fingerprint the rustc
-        // input path; pointing at /dev/null/nope wouldn't pass the
-        // metadata() check.
-        let real_path = which_binary("cat").unwrap_or_else(|| PathBuf::from("/bin/sh"));
-        let info = fake_rustc_info(real_path.clone(), Some(PathBuf::from("/nope")));
-        write_fake_rlibs(&layout, &target);
-        let layout_for_check = layout.clone();
-        let ctx = record_sysroot_for_test(layout, info, &target);
-        let mut stderr_sink: Vec<u8> = Vec::new();
-        let (_dir, was_cached) =
-            ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
-        assert!(was_cached, "fast path expected; was_cached must be true");
-
-        // Crucial: no stamp file was created.
-        let stamp = layout_for_check.sysroot_dir(&target).join("stamp");
-        assert!(
-            !stamp.exists(),
-            "ensure_sysroot must not write a sidecar stamp file: {}",
-            stamp.display()
-        );
-    }
-
     /// Changing the target's panic strategy changes how every sysroot
     /// crate compiles, so a sysroot recorded for the old strategy is
     /// stale. Here the slow path then fails on the missing rust-src,

@@ -299,83 +299,57 @@ mod tests {
     }
 
     #[test]
-    fn uefi_mode_with_esp_dir_mounts_fat_rw() {
-        let tmp = tempfile::tempdir().unwrap();
-        let esp = tmp.path().join("esp");
-        std::fs::create_dir_all(&esp).unwrap();
+    fn uefi_mode_drive_spec_per_source() {
+        // The disk case pins a plain raw drive with no `if=ide`: OVMF
+        // probes any attached disk for an EFI System Partition.
+        type Configure = fn(&mut ResolvedQemu, PathBuf);
+        let cases: [(&str, &str, Configure, &str); 3] = [
+            (
+                "esp dir",
+                "esp",
+                |r, p| r.esp = Some(EspSource::Dir(p)),
+                "format=raw,file=fat:rw:",
+            ),
+            (
+                "esp image",
+                "disk.img",
+                |r, p| r.esp = Some(EspSource::Image(p)),
+                "format=raw,file=",
+            ),
+            (
+                "disk",
+                "hybrid.img",
+                |r, p| r.disk = Some(p),
+                "format=raw,file=",
+            ),
+        ];
+        for (name, file, configure, prefix) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join(file);
+            if name == "esp dir" {
+                std::fs::create_dir_all(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"stub").unwrap();
+            }
 
-        let mut r = stub_resolved();
-        r.boot_mode = BootMode::Uefi;
-        r.esp = Some(EspSource::Dir(esp.clone()));
-        let ovmf = ResolvedOvmf {
-            code: PathBuf::from("/a"),
-            vars: PathBuf::from("/b"),
-        };
-        let mut args: Vec<OsString> = Vec::new();
-        UefiAssembler
-            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
-            .unwrap();
-        let a = args_to_strings(&args);
-        let expected = format!("format=raw,file=fat:rw:{}", esp.display());
-        assert!(
-            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
-            "expected fat:rw drive for {}, got {:?}",
-            esp.display(),
-            a
-        );
-    }
-
-    #[test]
-    fn uefi_mode_with_esp_image_mounts_raw() {
-        let tmp = tempfile::tempdir().unwrap();
-        let img = tmp.path().join("disk.img");
-        std::fs::write(&img, b"stub").unwrap();
-
-        let mut r = stub_resolved();
-        r.boot_mode = BootMode::Uefi;
-        r.esp = Some(EspSource::Image(img.clone()));
-        let ovmf = ResolvedOvmf {
-            code: PathBuf::from("/a"),
-            vars: PathBuf::from("/b"),
-        };
-        let mut args: Vec<OsString> = Vec::new();
-        UefiAssembler
-            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
-            .unwrap();
-        let a = args_to_strings(&args);
-        let expected = format!("format=raw,file={}", img.display());
-        assert!(
-            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
-            "expected raw image drive, got {:?}",
-            a
-        );
-    }
-
-    #[test]
-    fn uefi_mode_with_disk_attaches_raw_drive_no_ide_bus() {
-        let tmp = tempfile::tempdir().unwrap();
-        let disk = tmp.path().join("hybrid.img");
-        std::fs::write(&disk, b"stub").unwrap();
-
-        let mut r = stub_resolved();
-        r.boot_mode = BootMode::Uefi;
-        r.disk = Some(disk.clone());
-        let ovmf = ResolvedOvmf {
-            code: PathBuf::from("/a"),
-            vars: PathBuf::from("/b"),
-        };
-        let mut args: Vec<OsString> = Vec::new();
-        UefiAssembler
-            .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
-            .unwrap();
-        let a = args_to_strings(&args);
-        // UEFI hybrid: a plain raw drive (no `if=ide` — OVMF probes any
-        // attached disk for an EFI System Partition).
-        let expected = format!("format=raw,file={}", disk.display());
-        assert!(
-            a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
-            "expected raw UEFI drive without ide bus pin, got: {a:?}"
-        );
+            let mut r = stub_resolved();
+            r.boot_mode = BootMode::Uefi;
+            configure(&mut r, path.clone());
+            let ovmf = ResolvedOvmf {
+                code: PathBuf::from("/a"),
+                vars: PathBuf::from("/b"),
+            };
+            let mut args: Vec<OsString> = Vec::new();
+            UefiAssembler
+                .assemble(&mut args, &r, Path::new("/k"), Some(&ovmf), false)
+                .unwrap();
+            let a = args_to_strings(&args);
+            let expected = format!("{prefix}{}", path.display());
+            assert!(
+                a.windows(2).any(|w| w[0] == "-drive" && w[1] == expected),
+                "{name}: expected -drive {expected}, got {a:?}"
+            );
+        }
     }
 
     #[test]

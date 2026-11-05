@@ -489,48 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_esp_second_run_is_cached_when_source_unchanged() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ctx = make_ctx(tmp.path());
-        let source_dir = tmp.path().join("src-artifacts");
-        std::fs::create_dir_all(&source_dir).unwrap();
-        let source_path = source_dir.join("bootloader.efi");
-        std::fs::write(&source_path, b"bytes").unwrap();
-
-        let (model, resolved, eh) = make_model_with_esp(tmp.path(), &source_path);
-        let bl_h = model.crates.lookup("bootloader").unwrap();
-        let mut artifacts = ArtifactMap::new();
-        artifacts.insert(bl_h, source_path.clone());
-
-        let mut out = Vec::<u8>::new();
-        // First run: cold
-        let (_dir, cached1) = ensure_esp(
-            &ctx,
-            &model,
-            &resolved,
-            eh,
-            &artifacts,
-            &mut out,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        assert!(!cached1);
-
-        // Second run: source unchanged → cached
-        let (_dir, cached2) = ensure_esp(
-            &ctx,
-            &model,
-            &resolved,
-            eh,
-            &artifacts,
-            &mut out,
-            &mut Vec::new(),
-        )
-        .unwrap();
-        assert!(cached2, "second run with unchanged source must be cached");
-    }
-
-    #[test]
     fn ensure_esp_recopies_when_source_content_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path());

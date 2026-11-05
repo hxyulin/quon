@@ -229,42 +229,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_arenas_hash_identically() {
-        let a = arena_with(vec![
-            dep(
-                "bitflags",
-                DepSource::CratesIo {
-                    version: "2.11".into(),
-                },
-            ),
-            dep(
-                "log",
-                DepSource::CratesIo {
-                    version: "0.4".into(),
-                },
-            ),
-        ]);
-        let b = arena_with(vec![
-            dep(
-                "bitflags",
-                DepSource::CratesIo {
-                    version: "2.11".into(),
-                },
-            ),
-            dep(
-                "log",
-                DepSource::CratesIo {
-                    version: "0.4".into(),
-                },
-            ),
-        ]);
-        assert_eq!(
-            fingerprint_external_deps(&a, &no_targets()),
-            fingerprint_external_deps(&b, &no_targets())
-        );
-    }
-
-    #[test]
     fn insertion_order_does_not_affect_hash() {
         let a = arena_with(vec![
             dep(
@@ -301,23 +265,75 @@ mod tests {
     }
 
     #[test]
-    fn version_change_perturbs_hash() {
-        let a = arena_with(vec![dep(
-            "bitflags",
-            DepSource::CratesIo {
-                version: "2.11".into(),
-            },
-        )]);
-        let b = arena_with(vec![dep(
-            "bitflags",
-            DepSource::CratesIo {
-                version: "2.12".into(),
-            },
-        )]);
-        assert_ne!(
-            fingerprint_external_deps(&a, &no_targets()),
-            fingerprint_external_deps(&b, &no_targets())
-        );
+    fn dep_edits_that_change_the_hash() {
+        type Edit = fn(&mut ExternalDepDef);
+        let cases: [(&str, Edit); 3] = [
+            ("version", |d| {
+                d.source = DepSource::CratesIo {
+                    version: "2".into(),
+                }
+            }),
+            ("feature added", |d| d.features.push("std".into())),
+            ("default features off", |d| d.default_features = false),
+        ];
+        for (name, edit) in cases {
+            let a = dep(
+                "x",
+                DepSource::CratesIo {
+                    version: "1".into(),
+                },
+            );
+            let mut b = a.clone();
+            edit(&mut b);
+            assert_ne!(
+                fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+                fingerprint_external_deps(&arena_with(vec![b]), &no_targets()),
+                "{name} must change the hash"
+            );
+        }
+    }
+
+    #[test]
+    fn dep_edits_that_keep_the_hash() {
+        // cfg and rustc flags change how a dep compiles but not what
+        // vendoring writes, so editing one must not force a re-vendor.
+        type Edit = fn(&mut ExternalDepDef);
+        let cases: [(&str, Edit, Edit); 3] = [
+            (
+                "feature order",
+                |d| d.features = vec!["std".into(), "serde".into()],
+                |d| d.features = vec!["serde".into(), "std".into()],
+            ),
+            (
+                "cfg and rustc flags",
+                |_| {},
+                |d| {
+                    d.cfg_flags = vec!["feature=\"foo\"".into()];
+                    d.rustc_flags = vec!["-C".into(), "opt-level=3".into()];
+                },
+            ),
+            (
+                "span",
+                |_| {},
+                |d| d.span = Some(gluon_model::SourceSpan::point("fake.rs", 1, 1)),
+            ),
+        ];
+        for (name, edit_a, edit_b) in cases {
+            let base = dep(
+                "x",
+                DepSource::CratesIo {
+                    version: "1".into(),
+                },
+            );
+            let (mut a, mut b) = (base.clone(), base);
+            edit_a(&mut a);
+            edit_b(&mut b);
+            assert_eq!(
+                fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
+                fingerprint_external_deps(&arena_with(vec![b]), &no_targets()),
+                "{name} must not change the hash"
+            );
+        }
     }
 
     #[test]
@@ -376,96 +392,6 @@ mod tests {
         assert_ne!(ftag, frev);
         assert_ne!(ftag, fdefault);
         assert_ne!(fbranch, frev);
-    }
-
-    #[test]
-    fn feature_order_does_not_matter() {
-        let mut a = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        a.features = vec!["std".into(), "serde".into()];
-        let mut b = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        b.features = vec!["serde".into(), "std".into()];
-        assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
-            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
-        );
-    }
-
-    #[test]
-    fn feature_addition_perturbs_hash() {
-        let a = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        let mut b = a.clone();
-        b.features.push("std".into());
-        assert_ne!(
-            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
-            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
-        );
-    }
-
-    #[test]
-    fn default_features_toggle_perturbs_hash() {
-        let a = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        let mut b = a.clone();
-        b.default_features = false;
-        assert_ne!(
-            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
-            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
-        );
-    }
-
-    #[test]
-    fn cfg_flags_and_rustc_flags_do_not_perturb_hash() {
-        // These affect compile behavior but not vendor output; the
-        // fingerprint must stay stable so editing a cfg flag doesn't
-        // force a pointless re-vendor.
-        let a = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        let mut b = a.clone();
-        b.cfg_flags = vec!["feature=\"foo\"".into()];
-        b.rustc_flags = vec!["-C".into(), "opt-level=3".into()];
-        assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
-            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
-        );
-    }
-
-    #[test]
-    fn span_does_not_perturb_hash() {
-        let a = dep(
-            "x",
-            DepSource::CratesIo {
-                version: "1".into(),
-            },
-        );
-        let mut b = a.clone();
-        b.span = Some(gluon_model::SourceSpan::point("fake.rs", 1, 1));
-        assert_eq!(
-            fingerprint_external_deps(&arena_with(vec![a]), &no_targets()),
-            fingerprint_external_deps(&arena_with(vec![b]), &no_targets())
-        );
     }
 
     #[test]

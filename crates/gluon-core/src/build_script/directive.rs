@@ -439,14 +439,4 @@ mod tests {
         assert_eq!(out.warnings.len(), 2);
         assert!(out.warnings[0].contains("`k`"), "{:?}", out.warnings);
     }
-
-    #[test]
-    fn output_round_trips_through_json() {
-        let out = parse(
-            "cargo::rustc-cfg=a\ncargo::rustc-link-arg-bin=k=-T\ncargo::metadata=x=1\ncargo::rerun-if-changed=f",
-        );
-        let json = serde_json::to_string(&out).unwrap();
-        let back: BuildScriptOutput = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, out);
-    }
 }

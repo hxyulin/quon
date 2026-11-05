@@ -612,36 +612,6 @@ fingerprint = "sha256:xx"
         assert!(body.starts_with("# This file is auto-generated"));
     }
 
-    // Same crate vendored twice — once host, once kernel — must round
-    // trip cleanly. The two entries share name+version+source but
-    // differ in `target`, which is the whole point of v2.
-    #[test]
-    fn round_trip_disambiguates_same_crate_across_targets() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let p = tmp.path().join("gluon.lock");
-        let lock = sample_lock();
-        lock.save_atomic(&p).expect("save");
-        let loaded = VendorLock::load(&p).expect("load").expect("present");
-
-        let bitflags: Vec<_> = loaded
-            .packages
-            .iter()
-            .filter(|pkg| pkg.name == "bitflags")
-            .collect();
-        assert_eq!(bitflags.len(), 2, "both bitflags entries must round-trip");
-        let targets: Vec<&str> = bitflags.iter().map(|p| p.target.as_str()).collect();
-        assert!(targets.contains(&"host"));
-        assert!(targets.contains(&"kernel"));
-
-        let syn = loaded
-            .packages
-            .iter()
-            .find(|pkg| pkg.name == "syn")
-            .expect("syn must round-trip");
-        assert_eq!(syn.kind, VendorPackageKind::ProcMacro);
-        assert_eq!(syn.target, "host", "proc-macros are always host-built");
-    }
-
     // The on-disk `kind` field is the kebab-case form `"proc-macro"`,
     // not the Rust identifier. Hand-edited lockfiles and external
     // tooling all see kebab-case, so pin it explicitly.

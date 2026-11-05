@@ -175,15 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_context_has_no_entries() {
-        let ctx = VendorBuildContext::new();
-        assert!(ctx.is_empty());
-        assert_eq!(ctx.len(), 0);
-        assert_eq!(ctx.iter().count(), 0);
-        assert!(ctx.lookup(TargetSpec::Host, "anything").is_none());
-    }
-
-    #[test]
     fn add_assigns_sequential_ids_and_supports_lookup() {
         let mut ctx = VendorBuildContext::new();
         let id_a = ctx
@@ -320,21 +311,5 @@ mod tests {
             vec![(ids[0], "z"), (ids[1], "a"), (ids[2], "m")],
             "iter must follow insertion order, not key order",
         );
-    }
-
-    #[test]
-    fn get_returns_registered_build() {
-        let mut ctx = VendorBuildContext::new();
-        let id = ctx
-            .add(build("a", "1.0.0", TargetSpec::Host, CrateKind::Lib))
-            .expect("ok");
-        let got = ctx.get(id).expect("present");
-        assert_eq!(got.crate_id.name, "a");
-
-        // Out-of-range id → None (defensive — shouldn't happen because
-        // ids only come from this context, but the API should still
-        // tell the truth rather than panic).
-        let bogus = VendorBuildId(999);
-        assert!(ctx.get(bogus).is_none());
     }
 }

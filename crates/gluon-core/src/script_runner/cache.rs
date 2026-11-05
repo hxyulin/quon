@@ -303,49 +303,44 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn compute_key_changes_with_script_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s1 = tmp.path().join("a.rs");
-        let s2 = tmp.path().join("b.rs");
-        let rlib = tmp.path().join("librlib.rlib");
-        fs::write(&s1, b"fn main() {}").unwrap();
-        fs::write(&s2, b"fn main() { /* different */ }").unwrap();
-        fs::write(&rlib, b"fake rlib bytes").unwrap();
-
-        let k1 = compute_key(&s1, "rustc 1", &[&rlib], &mut memo()).expect("k1");
-        let k2 = compute_key(&s2, "rustc 1", &[&rlib], &mut memo()).expect("k2");
-        assert_ne!(k1, k2, "different scripts must produce different keys");
-    }
-
-    #[test]
-    fn compute_key_changes_with_rlib_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = tmp.path().join("a.rs");
-        let r1 = tmp.path().join("r1.rlib");
-        let r2 = tmp.path().join("r2.rlib");
-        fs::write(&s, b"fn main() {}").unwrap();
-        fs::write(&r1, b"first").unwrap();
-        fs::write(&r2, b"second").unwrap();
-
-        let k1 = compute_key(&s, "rustc 1", &[&r1], &mut memo()).expect("k1");
-        let k2 = compute_key(&s, "rustc 1", &[&r2], &mut memo()).expect("k2");
-        assert_ne!(k1, k2, "different rlibs must produce different keys");
-    }
-
-    #[test]
-    fn compute_key_changes_with_rustc_version() {
-        let tmp = tempfile::tempdir().unwrap();
-        let s = tmp.path().join("a.rs");
-        let r = tmp.path().join("r.rlib");
-        fs::write(&s, b"fn main() {}").unwrap();
-        fs::write(&r, b"rlib").unwrap();
-
-        let k1 = compute_key(&s, "rustc 1.85", &[&r], &mut memo()).expect("k1");
-        let k2 = compute_key(&s, "rustc 1.86", &[&r], &mut memo()).expect("k2");
-        assert_ne!(
-            k1, k2,
-            "different rustc versions must produce different keys"
-        );
+    fn compute_key_changes_with_each_input() {
+        // Each case holds two (script, rlib, rustc version) inputs that
+        // differ in one field only.
+        type Input = (&'static [u8], &'static [u8], &'static str);
+        let cases: [(&str, Input, Input); 3] = [
+            (
+                "script content",
+                (b"fn main() {}", b"fake rlib bytes", "rustc 1"),
+                (
+                    b"fn main() { /* different */ }",
+                    b"fake rlib bytes",
+                    "rustc 1",
+                ),
+            ),
+            (
+                "rlib content",
+                (b"fn main() {}", b"first", "rustc 1"),
+                (b"fn main() {}", b"second", "rustc 1"),
+            ),
+            (
+                "rustc version",
+                (b"fn main() {}", b"rlib", "rustc 1.85"),
+                (b"fn main() {}", b"rlib", "rustc 1.86"),
+            ),
+        ];
+        for (name, a, b) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let key = |tag: &str, (script, rlib, rustc): Input| {
+                let s = tmp.path().join(format!("{tag}.rs"));
+                let r = tmp.path().join(format!("{tag}.rlib"));
+                fs::write(&s, script).unwrap();
+                fs::write(&r, rlib).unwrap();
+                compute_key(&s, rustc, &[&r], &mut memo()).expect(tag)
+            };
+            let k1 = key("a", a);
+            let k2 = key("b", b);
+            assert_ne!(k1, k2, "different {name} must produce different keys");
+        }
     }
 
     #[test]

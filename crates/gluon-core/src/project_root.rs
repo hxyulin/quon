@@ -77,45 +77,34 @@ mod tests {
     }
 
     #[test]
-    fn finds_gluon_rs_in_starting_directory() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        fs::write(tmp.path().join("gluon.rs"), b"// stub").expect("write script");
+    fn finds_gluon_rs_from_each_start() {
+        type MakeStart = fn(&Path) -> PathBuf;
+        let cases: [(&str, MakeStart); 3] = [
+            ("starting directory", |root| root.to_path_buf()),
+            ("nested subdirectory", |root| {
+                let nested = root.join("a").join("b").join("c");
+                fs::create_dir_all(&nested).expect("mkdir nested");
+                nested
+            }),
+            ("file path as start", |root| {
+                let nested = root.join("a");
+                fs::create_dir_all(&nested).expect("mkdir nested");
+                let some_file = nested.join("foo.rs");
+                fs::write(&some_file, b"fn main(){}").expect("write file");
+                some_file
+            }),
+        ];
+        for (name, make_start) in cases {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            fs::write(tmp.path().join("gluon.rs"), b"// stub").expect("write script");
+            let start = make_start(tmp.path());
 
-        let got = find_project_root(tmp.path()).expect("should find");
-        assert_eq!(
-            got.canonicalize().unwrap(),
-            tmp.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
-    fn finds_gluon_rs_from_nested_subdirectory() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        fs::write(tmp.path().join("gluon.rs"), b"// stub").expect("write script");
-
-        let nested = tmp.path().join("a").join("b").join("c");
-        fs::create_dir_all(&nested).expect("mkdir nested");
-
-        let got = find_project_root(&nested).expect("should find via walk");
-        assert_eq!(
-            got.canonicalize().unwrap(),
-            tmp.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
-    fn accepts_file_path_as_start() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        fs::write(tmp.path().join("gluon.rs"), b"// stub").expect("write script");
-        let nested = tmp.path().join("a");
-        fs::create_dir_all(&nested).expect("mkdir nested");
-        let some_file = nested.join("foo.rs");
-        fs::write(&some_file, b"fn main(){}").expect("write file");
-
-        let got = find_project_root(&some_file).expect("should find via walk from file");
-        assert_eq!(
-            got.canonicalize().unwrap(),
-            tmp.path().canonicalize().unwrap()
-        );
+            let got = find_project_root(&start).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(
+                got.canonicalize().unwrap(),
+                tmp.path().canonicalize().unwrap(),
+                "{name}"
+            );
+        }
     }
 }

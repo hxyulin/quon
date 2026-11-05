@@ -171,33 +171,23 @@ mod tests {
     }
 
     #[test]
-    fn file_content_change_perturbs_hash() {
-        let t = tempfile::tempdir().unwrap();
-        seed(t.path(), &[("a.txt", b"alpha")]);
-        let h1 = checksum_vendored_dir(t.path()).unwrap();
-        seed(t.path(), &[("a.txt", b"ALPHA")]);
-        let h2 = checksum_vendored_dir(t.path()).unwrap();
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn adding_a_file_perturbs_hash() {
-        let t = tempfile::tempdir().unwrap();
-        seed(t.path(), &[("a.txt", b"alpha")]);
-        let h1 = checksum_vendored_dir(t.path()).unwrap();
-        seed(t.path(), &[("b.txt", b"new")]);
-        let h2 = checksum_vendored_dir(t.path()).unwrap();
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn renaming_a_file_perturbs_hash() {
-        let t = tempfile::tempdir().unwrap();
-        seed(t.path(), &[("a.txt", b"alpha")]);
-        let h1 = checksum_vendored_dir(t.path()).unwrap();
-        std::fs::rename(t.path().join("a.txt"), t.path().join("b.txt")).unwrap();
-        let h2 = checksum_vendored_dir(t.path()).unwrap();
-        assert_ne!(h1, h2);
+    fn tree_edits_change_the_hash() {
+        type Edit = fn(&Path);
+        let cases: [(&str, Edit); 3] = [
+            ("content change", |d| seed(d, &[("a.txt", b"ALPHA")])),
+            ("file added", |d| seed(d, &[("b.txt", b"new")])),
+            ("file renamed", |d| {
+                std::fs::rename(d.join("a.txt"), d.join("b.txt")).unwrap()
+            }),
+        ];
+        for (name, edit) in cases {
+            let t = tempfile::tempdir().unwrap();
+            seed(t.path(), &[("a.txt", b"alpha")]);
+            let h1 = checksum_vendored_dir(t.path()).unwrap();
+            edit(t.path());
+            let h2 = checksum_vendored_dir(t.path()).unwrap();
+            assert_ne!(h1, h2, "{name} must change the hash");
+        }
     }
 
     #[test]

@@ -430,79 +430,73 @@ mod tests {
     }
 
     #[test]
-    fn parse_picks_rlib_for_lib_artifact() {
-        // Trimmed cargo output for syn 2.0.117 — kept terse for
-        // readability. Real cargo output has many more fields; only
-        // the ones we read are required.
-        let stdout = r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#syn@2.0.117","target":{"name":"syn","kind":["lib"]},"filenames":["/tmp/build/release/deps/libsyn-abcdef.rlib","/tmp/build/release/deps/libsyn-abcdef.rmeta"]}"#;
-        let map = parse_cargo_build_artifacts(stdout).artifacts;
-        assert_eq!(map.len(), 1);
-        assert_eq!(
-            map.get("syn"),
-            Some(&PathBuf::from("/tmp/build/release/deps/libsyn-abcdef.rlib")),
-        );
+    fn parse_picks_the_linkable_file_per_kind() {
+        // Trimmed cargo output: only the fields the parser reads.
+        type Expected = &'static [(&'static str, &'static str)];
+        let cases: [(&str, &str, Expected); 3] = [
+            (
+                "lib takes the rlib, not the rmeta",
+                r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#syn@2.0.117","target":{"name":"syn","kind":["lib"]},"filenames":["/tmp/build/release/deps/libsyn-abcdef.rlib","/tmp/build/release/deps/libsyn-abcdef.rmeta"]}"#,
+                &[("syn", "/tmp/build/release/deps/libsyn-abcdef.rlib")],
+            ),
+            (
+                // The key has an underscore: cargo normalises the
+                // package's hyphen.
+                "proc macro takes the dylib",
+                r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106","target":{"name":"proc_macro2","kind":["proc-macro"]},"filenames":["/tmp/build/release/deps/libproc_macro2-xyz.dylib","/tmp/build/release/deps/libproc_macro2-xyz.rmeta"]}"#,
+                &[(
+                    "proc_macro2",
+                    "/tmp/build/release/deps/libproc_macro2-xyz.dylib",
+                )],
+            ),
+            (
+                "proc macro takes .so and .dll",
+                r#"{"reason":"compiler-artifact","target":{"name":"foo","kind":["proc-macro"]},"filenames":["/x/libfoo-1.so"]}
+{"reason":"compiler-artifact","target":{"name":"bar","kind":["proc-macro"]},"filenames":["C:\\x\\bar-1.dll"]}
+"#,
+                &[("bar", r"C:\x\bar-1.dll"), ("foo", "/x/libfoo-1.so")],
+            ),
+        ];
+        for (name, stdout, expected) in cases {
+            let map = parse_cargo_build_artifacts(stdout).artifacts;
+            let got: Vec<(&str, String)> = map
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.to_string_lossy().into_owned()))
+                .collect();
+            let expected: Vec<(&str, String)> =
+                expected.iter().map(|(k, v)| (*k, v.to_string())).collect();
+            assert_eq!(got, expected, "{name}");
+        }
     }
 
     #[test]
-    fn parse_picks_dylib_for_proc_macro_artifact() {
-        let stdout = r#"{"reason":"compiler-artifact","package_id":"registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106","target":{"name":"proc_macro2","kind":["proc-macro"]},"filenames":["/tmp/build/release/deps/libproc_macro2-xyz.dylib","/tmp/build/release/deps/libproc_macro2-xyz.rmeta"]}"#;
-        let map = parse_cargo_build_artifacts(stdout).artifacts;
-        assert_eq!(map.len(), 1);
-        // Note the underscore — cargo normalises the package's hyphen.
-        assert_eq!(
-            map.get("proc_macro2"),
-            Some(&PathBuf::from(
-                "/tmp/build/release/deps/libproc_macro2-xyz.dylib"
-            )),
-        );
-    }
-
-    #[test]
-    fn parse_handles_so_and_dll_for_proc_macro() {
-        let so_line = r#"{"reason":"compiler-artifact","target":{"name":"foo","kind":["proc-macro"]},"filenames":["/x/libfoo-1.so"]}"#;
-        let dll_line = r#"{"reason":"compiler-artifact","target":{"name":"bar","kind":["proc-macro"]},"filenames":["C:\\x\\bar-1.dll"]}"#;
-        let map = parse_cargo_build_artifacts(&format!("{so_line}\n{dll_line}\n")).artifacts;
-        assert_eq!(map.len(), 2);
-        assert_eq!(
-            map.get("foo").map(|p| p.to_string_lossy().into_owned()),
-            Some("/x/libfoo-1.so".into())
-        );
-        assert_eq!(
-            map.get("bar").map(|p| p.to_string_lossy().into_owned()),
-            Some(r"C:\x\bar-1.dll".into())
-        );
-    }
-
-    #[test]
-    fn parse_skips_non_compiler_artifact_messages() {
-        // build-finished, compiler-message (a diagnostic), and
-        // build-script-executed all appear in real cargo output and
-        // must not produce map entries.
-        let stdout = r#"{"reason":"build-script-executed","package_id":"x","linked_libs":[]}
+    fn parse_records_nothing_for_skipped_messages() {
+        let cases = [
+            (
+                // All three appear in real cargo output.
+                "non compiler-artifact messages",
+                r#"{"reason":"build-script-executed","package_id":"x","linked_libs":[]}
 {"reason":"compiler-message","package_id":"x","message":{"rendered":"warning: ..."}}
 {"reason":"build-finished","success":true}
-"#;
-        let map = parse_cargo_build_artifacts(stdout).artifacts;
-        assert!(map.is_empty(), "got: {map:?}");
-    }
-
-    #[test]
-    fn parse_skips_workspace_stub_package() {
-        // The scratch workspace's own `[lib]` entry produces a
-        // compiler-artifact too — we must not record it because no
-        // consumer would ever --extern against it.
-        let stdout = r#"{"reason":"compiler-artifact","target":{"name":"gluon-vendor-workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-x.rlib"]}
-{"reason":"compiler-artifact","target":{"name":"gluon_vendor_workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-y.rlib"]}"#;
-        let map = parse_cargo_build_artifacts(stdout).artifacts;
-        assert!(map.is_empty(), "stub leaked: {map:?}");
-    }
-
-    #[test]
-    fn parse_skips_bin_and_test_kinds() {
-        let stdout = r#"{"reason":"compiler-artifact","target":{"name":"runme","kind":["bin"]},"filenames":["/tmp/runme"]}
-{"reason":"compiler-artifact","target":{"name":"my_test","kind":["test"]},"filenames":["/tmp/test-bin"]}"#;
-        let map = parse_cargo_build_artifacts(stdout).artifacts;
-        assert!(map.is_empty(), "got: {map:?}");
+"#,
+            ),
+            (
+                // No consumer ever passes `--extern` for the scratch
+                // workspace's own `[lib]`.
+                "workspace stub package",
+                r#"{"reason":"compiler-artifact","target":{"name":"gluon-vendor-workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-x.rlib"]}
+{"reason":"compiler-artifact","target":{"name":"gluon_vendor_workspace","kind":["lib"]},"filenames":["/tmp/release/deps/libgluon_vendor_workspace-y.rlib"]}"#,
+            ),
+            (
+                "bin and test kinds",
+                r#"{"reason":"compiler-artifact","target":{"name":"runme","kind":["bin"]},"filenames":["/tmp/runme"]}
+{"reason":"compiler-artifact","target":{"name":"my_test","kind":["test"]},"filenames":["/tmp/test-bin"]}"#,
+            ),
+        ];
+        for (name, stdout) in cases {
+            let map = parse_cargo_build_artifacts(stdout).artifacts;
+            assert!(map.is_empty(), "{name}: got {map:?}");
+        }
     }
 
     #[test]
@@ -570,8 +564,10 @@ not json at all
 
     #[test]
     fn spawn_failure_is_diagnosed() {
-        // Point $CARGO at a binary that cannot possibly exist so we
-        // exercise the spawn-error arm of run_cargo_vendor.
+        // Point $CARGO at a binary that cannot exist so each subprocess
+        // hits its spawn-error arm. The message must name the bogus path,
+        // and for `cargo metadata` also the subcommand, so the user can
+        // tell which subprocess failed.
         let tmp = tempfile::tempdir().expect("tempdir");
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -582,44 +578,34 @@ not json at all
         .unwrap();
         std::fs::write(ws.join("lib.rs"), b"").unwrap();
 
-        let bogus = "/nonexistent/gluon-vendor-test-cargo-missing";
-        let result = temp_env::with_var("CARGO", Some(bogus), || {
+        let vendor_bogus = "/nonexistent/gluon-vendor-test-cargo-missing";
+        let vendor = temp_env::with_var("CARGO", Some(vendor_bogus), || {
             run_cargo_vendor(&ws, &tmp.path().join("out"), VendorFlags::default())
         });
-
-        let err = result.expect_err("must fail — bogus CARGO path");
-        let msg = err.to_string();
-        assert!(msg.contains("failed to spawn"), "msg: {msg}");
-        assert!(msg.contains(bogus), "msg: {msg}");
-    }
-
-    #[test]
-    fn metadata_spawn_failure_is_diagnosed() {
-        // Same shape as spawn_failure_is_diagnosed but exercises the
-        // `cargo metadata` arm. Confirms the diagnostic includes both
-        // the headline ("failed to spawn `cargo metadata`") and the
-        // bogus path so the user can tell which subprocess failed.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let ws = tmp.path().join("ws");
-        std::fs::create_dir_all(&ws).unwrap();
-        std::fs::write(
-            ws.join("Cargo.toml"),
-            b"[package]\nname=\"x\"\nversion=\"0.0.0\"\nedition=\"2021\"\n[lib]\npath=\"lib.rs\"\n",
-        )
-        .unwrap();
-        std::fs::write(ws.join("lib.rs"), b"").unwrap();
-
-        let bogus = "/nonexistent/gluon-vendor-test-cargo-metadata-missing";
-        let vendor = ws.join("vendor");
-        let result = temp_env::with_var("CARGO", Some(bogus), || {
-            run_cargo_metadata(&ws, &vendor, VendorFlags::default())
+        let metadata_bogus = "/nonexistent/gluon-vendor-test-cargo-metadata-missing";
+        let metadata = temp_env::with_var("CARGO", Some(metadata_bogus), || {
+            run_cargo_metadata(&ws, &ws.join("vendor"), VendorFlags::default())
         });
 
-        let err = result.expect_err("must fail — bogus CARGO path");
-        let msg = err.to_string();
-        assert!(msg.contains("failed to spawn"), "msg: {msg}");
-        assert!(msg.contains("cargo metadata"), "msg: {msg}");
-        assert!(msg.contains(bogus), "msg: {msg}");
+        let cases = [
+            ("cargo vendor", vendor_bogus, vendor.err(), None),
+            (
+                "cargo metadata",
+                metadata_bogus,
+                metadata.err(),
+                Some("cargo metadata"),
+            ),
+        ];
+        for (name, bogus, err, subcommand) in cases {
+            let msg = err
+                .unwrap_or_else(|| panic!("{name}: must fail with a bogus CARGO path"))
+                .to_string();
+            assert!(msg.contains("failed to spawn"), "{name}: {msg}");
+            assert!(msg.contains(bogus), "{name}: {msg}");
+            if let Some(sub) = subcommand {
+                assert!(msg.contains(sub), "{name}: {msg}");
+            }
+        }
     }
 
     #[test]

@@ -549,24 +549,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_quote_passes_plain_strings() {
-        assert_eq!(shell_quote("q35"), "q35");
-        assert_eq!(shell_quote("/path/to/file.fd"), "/path/to/file.fd");
-        assert_eq!(shell_quote("format=raw,file=foo"), "format=raw,file=foo");
-    }
-
-    #[test]
-    fn shell_quote_wraps_strings_with_spaces() {
-        assert_eq!(shell_quote("hello world"), "'hello world'");
-    }
-
-    #[test]
-    fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("it's"), "'it'\\''s'");
-    }
-
-    #[test]
-    fn shell_quote_empty_string() {
-        assert_eq!(shell_quote(""), "''");
+    fn shell_quote_cases() {
+        let cases = [
+            ("q35", "q35"),
+            ("/path/to/file.fd", "/path/to/file.fd"),
+            ("format=raw,file=foo", "format=raw,file=foo"),
+            ("hello world", "'hello world'"),
+            ("it's", "'it'\\''s'"),
+            ("", "''"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(shell_quote(input), expected, "input {input:?}");
+        }
     }
 }

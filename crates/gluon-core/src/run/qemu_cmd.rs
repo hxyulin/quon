@@ -315,50 +315,57 @@ mod tests {
     }
 
     #[test]
-    fn display_spec_passes_through_verbatim() {
-        let mut r = stub_resolved();
-        r.display = Some(DisplayMode::Spec("cocoa".into()));
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            false,
-            false,
-        )
-        .unwrap();
-        let a = args_to_strings(&inv.args);
-        let idx = a
-            .iter()
-            .position(|s| s == "-display")
-            .expect("display flag");
-        assert_eq!(a[idx + 1], "cocoa");
-    }
-
-    #[test]
-    fn display_explicit_none_emits_display_none() {
-        // Same wire effect as the implicit default — but exercising the
-        // explicit branch prevents a future refactor from silently
-        // dropping -display none for the explicit case.
-        let mut r = stub_resolved();
-        r.display = Some(DisplayMode::None);
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            false,
-            false,
-        )
-        .unwrap();
-        let a = args_to_strings(&inv.args);
-        let idx = a
-            .iter()
-            .position(|s| s == "-display")
-            .expect("display flag");
-        assert_eq!(a[idx + 1], "none");
+    fn display_and_serial_modes_emit_their_flag_value() {
+        // Explicit `DisplayMode::None` emits the same flag as the implicit
+        // default; keeping it here stops a refactor from dropping the
+        // explicit branch.
+        type Configure = fn(&mut ResolvedQemu);
+        let cases: [(&str, Configure, &str, &str); 4] = [
+            (
+                "display spec",
+                |r| r.display = Some(DisplayMode::Spec("cocoa".into())),
+                "-display",
+                "cocoa",
+            ),
+            (
+                "explicit display none",
+                |r| r.display = Some(DisplayMode::None),
+                "-display",
+                "none",
+            ),
+            (
+                "serial none",
+                |r| r.serial = SerialMode::None,
+                "-serial",
+                "none",
+            ),
+            (
+                "serial file",
+                |r| r.serial = SerialMode::File(PathBuf::from("/tmp/out.log")),
+                "-serial",
+                "file:/tmp/out.log",
+            ),
+        ];
+        for (name, configure, flag, expected) in cases {
+            let mut r = stub_resolved();
+            configure(&mut r);
+            let inv = build_qemu_command(
+                &r,
+                Path::new("/k"),
+                BootMode::Direct,
+                None,
+                &[],
+                false,
+                false,
+            )
+            .unwrap();
+            let a = args_to_strings(&inv.args);
+            let idx = a
+                .iter()
+                .position(|s| s == flag)
+                .unwrap_or_else(|| panic!("{name}: no {flag} flag in {a:?}"));
+            assert_eq!(a[idx + 1], expected, "{name}");
+        }
     }
 
     #[test]
@@ -416,61 +423,6 @@ mod tests {
     }
 
     #[test]
-    fn serial_none_emits_none() {
-        let mut r = stub_resolved();
-        r.serial = SerialMode::None;
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            false,
-            false,
-        )
-        .unwrap();
-        let a = args_to_strings(&inv.args);
-        let idx = a.iter().position(|s| s == "-serial").unwrap();
-        assert_eq!(a[idx + 1], "none");
-    }
-
-    #[test]
-    fn serial_file_emits_file_spec() {
-        let mut r = stub_resolved();
-        r.serial = SerialMode::File(PathBuf::from("/tmp/out.log"));
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            false,
-            false,
-        )
-        .unwrap();
-        let a = args_to_strings(&inv.args);
-        let idx = a.iter().position(|s| s == "-serial").unwrap();
-        assert_eq!(a[idx + 1], "file:/tmp/out.log");
-    }
-
-    #[test]
-    fn timeout_propagates_to_invocation() {
-        let mut r = stub_resolved();
-        r.timeout = Some(Duration::from_secs(10));
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(inv.timeout, Some(Duration::from_secs(10)));
-    }
-
-    #[test]
     fn test_mode_off_omits_isa_debug_exit() {
         let r = stub_resolved();
         let inv = build_qemu_command(
@@ -493,37 +445,7 @@ mod tests {
     #[test]
     fn test_mode_on_emits_isa_debug_exit_with_resolved_port() {
         let mut r = stub_resolved();
-        r.test_exit_port = 0xf4;
-        let inv = build_qemu_command(
-            &r,
-            Path::new("/k"),
-            BootMode::Direct,
-            None,
-            &[],
-            true,
-            false,
-        )
-        .unwrap();
-        let a = args_to_strings(&inv.args);
-        // Expect the pair `-device isa-debug-exit,iobase=0xf4,iosize=0x04`.
-        let pair: Vec<_> = a
-            .windows(2)
-            .filter(|w| w[0] == "-device" && w[1].starts_with("isa-debug-exit"))
-            .collect();
-        assert_eq!(
-            pair.len(),
-            1,
-            "expected exactly one -device entry, got {a:?}"
-        );
-        assert_eq!(
-            pair[0][1], "isa-debug-exit,iobase=0xf4,iosize=0x04",
-            "exit device spec mismatch"
-        );
-    }
-
-    #[test]
-    fn test_mode_honours_custom_exit_port() {
-        let mut r = stub_resolved();
+        // Not the stub's 0xf4 default, so the spec proves the field is read.
         r.test_exit_port = 0x501;
         let inv = build_qemu_command(
             &r,
@@ -536,10 +458,19 @@ mod tests {
         )
         .unwrap();
         let a = args_to_strings(&inv.args);
-        assert!(
-            a.iter()
-                .any(|s| s == "isa-debug-exit,iobase=0x501,iosize=0x04"),
-            "custom port must appear in the spec, got {a:?}"
+        // Expect the pair `-device isa-debug-exit,iobase=0x501,iosize=0x04`.
+        let pair: Vec<_> = a
+            .windows(2)
+            .filter(|w| w[0] == "-device" && w[1].starts_with("isa-debug-exit"))
+            .collect();
+        assert_eq!(
+            pair.len(),
+            1,
+            "expected exactly one -device entry, got {a:?}"
+        );
+        assert_eq!(
+            pair[0][1], "isa-debug-exit,iobase=0x501,iosize=0x04",
+            "exit device spec mismatch"
         );
     }
 

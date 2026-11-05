@@ -9,8 +9,7 @@
 //! `format_partition_in_place` or `build_partitioned_disk`.
 //!
 //! See the Stage 7 plan's "Decisions baked in" §1-§4 for why this
-//! is a static-dispatch function rather than a dynamic registry,
-//! and why the test stub is not optional.
+//! is a static-dispatch function rather than a dynamic registry.
 
 use crate::error::{Error, Result};
 use crate::image::ResolvedEntry;
@@ -55,8 +54,6 @@ pub fn select_formatter(
 ) -> Result<&'static dyn PartitionFormatter> {
     match fs_type {
         "fat32" => Ok(&crate::image::fat::Fat32Formatter),
-        #[cfg(test)]
-        "stub" => Ok(&tests::StubFormatter),
         other => Err(Error::Compile(format!(
             "image('{image_name}') partition('{partition_name}'): \
              fs_type '{other}' is not implemented. \
@@ -68,32 +65,6 @@ pub fn select_formatter(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Test-only formatter that records its arguments instead of
-    /// writing anything. Validates the trait shape: confirms that
-    /// a third-party impl can be slotted in without touching the
-    /// dispatcher's existing arms.
-    pub(super) struct StubFormatter;
-
-    impl PartitionFormatter for StubFormatter {
-        fn format_in_place(
-            &self,
-            _image_path: &Path,
-            _start_byte: u64,
-            _len_bytes: u64,
-            scoped_name: &str,
-            entries: &[ResolvedEntry],
-            stdout: &mut Vec<u8>,
-        ) -> Result<()> {
-            use std::io::Write;
-            let _ = writeln!(
-                stdout,
-                "    [stub] {scoped_name}: {} entries",
-                entries.len()
-            );
-            Ok(())
-        }
-    }
 
     #[test]
     fn select_formatter_returns_fat32_for_fat32() {
@@ -115,25 +86,6 @@ mod tests {
         assert!(
             result.is_err(),
             "expected FAT32 to fail on nonexistent path"
-        );
-    }
-
-    #[test]
-    fn select_formatter_returns_stub_in_test_cfg() {
-        let f = select_formatter("stub", "img", "p1").unwrap();
-        let mut stdout = Vec::new();
-        f.format_in_place(
-            std::path::Path::new("/dev/null"),
-            0,
-            0,
-            "img::partition(p1)",
-            &[],
-            &mut stdout,
-        )
-        .unwrap();
-        assert!(
-            String::from_utf8_lossy(&stdout).contains("[stub] img::partition(p1)"),
-            "stub formatter must record the scoped name in stdout"
         );
     }
 

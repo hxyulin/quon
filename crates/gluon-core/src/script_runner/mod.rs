@@ -265,9 +265,18 @@ fn main() -> gluon_config::Result<()> {
     #[test]
     fn compile_and_run_errors_when_no_script() {
         let tmp = tempfile::tempdir().unwrap();
-        let info = match RustcInfo::probe() {
-            Ok(i) => i,
-            Err(_) => return, // skip: no rustc available
+        // The missing-script check runs before rustc is touched, so a
+        // hand-built RustcInfo keeps this test from spawning rustc.
+        let info = RustcInfo {
+            rustc_path: "/nonexistent/rustc".into(),
+            rustc_arg: "rustc".into(),
+            version: "rustc 0.0.0".into(),
+            host_triple: "x86_64-unknown-linux-gnu".into(),
+            commit_hash: None,
+            release: "0.0.0".into(),
+            sysroot: "/nonexistent/sysroot".into(),
+            rust_src: None,
+            mtime_ns: 0,
         };
         let err = compile_and_run(tmp.path(), &tmp.path().join("build"), &info)
             .expect_err("must error when no gluon.rs");

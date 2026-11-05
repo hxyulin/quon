@@ -252,7 +252,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn substitution_expands_known_vars() {
+    fn substitution_expands_args() {
         let tmp = tempfile::tempdir().unwrap();
         let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
         let ctx = RuleCtx {
@@ -262,75 +262,59 @@ mod tests {
             artifacts: &artifacts,
         };
 
+        let cases: Vec<(&str, &str, String)> = vec![
+            (
+                "build_dir",
+                "${build_dir}/foo",
+                format!("{}/foo", tmp.path().join("build").display()),
+            ),
+            ("project_name", "${project_name}", "testproject".into()),
+            ("profile", "${profile}", "debug".into()),
+            ("target", "${target}", "x86_64-test".into()),
+            // A broken loop-advance after the first token would duplicate
+            // or drop bytes around the later ones.
+            (
+                "several vars in one arg",
+                "${project_name}-${profile}-${target}",
+                "testproject-debug-x86_64-test".into(),
+            ),
+            // Earlier drafts used `bytes[i] as char`, which split
+            // multi-byte UTF-8 sequences.
+            (
+                "non-ASCII literal bytes",
+                "café-${profile}-naïve",
+                "café-debug-naïve".into(),
+            ),
+            (
+                "literal $ without brace",
+                "$HOME/no_brace",
+                "$HOME/no_brace".into(),
+            ),
+            (
+                "project_root",
+                "${project_root}/keys/sign.key",
+                format!("{}/keys/sign.key", resolved.project_root.display()),
+            ),
+            ("$$ before brace", "echo $${HOME}", "echo ${HOME}".into()),
+            ("$$ standalone", "cost: $$5", "cost: $5".into()),
+        ];
+
+        // Expand every input in one call so the test also pins that
+        // `expand_args` keeps one output per input, in order.
         let rule = make_rule(
             "testrule",
-            vec![
-                "${build_dir}/foo".into(),
-                "${project_name}".into(),
-                "${profile}".into(),
-                "${target}".into(),
-            ],
+            cases
+                .iter()
+                .map(|(_, input, _)| input.to_string())
+                .collect(),
         );
-
         let args = Substituter::new(&ctx, &rule)
             .expand_args(&rule.inputs)
             .unwrap();
-        assert_eq!(args.len(), 4);
-        assert_eq!(
-            args[0],
-            format!("{}/foo", tmp.path().join("build").display())
-        );
-        assert_eq!(args[1], "testproject");
-        assert_eq!(args[2], "debug");
-        assert_eq!(args[3], "x86_64-test");
-    }
-
-    /// Regression guard: two `${...}` tokens in a single argument must
-    /// both substitute correctly. A broken loop-advance after the first
-    /// substitution would either duplicate or drop bytes around the
-    /// second token.
-    #[test]
-    fn substitution_expands_multiple_vars_in_one_arg() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule(
-            "testrule",
-            vec!["${project_name}-${profile}-${target}".into()],
-        );
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(args, vec!["testproject-debug-x86_64-test".to_string()]);
-    }
-
-    /// Regression guard: non-ASCII characters must survive the slow
-    /// path. Earlier drafts used `bytes[i] as char` which silently split
-    /// multi-byte UTF-8 sequences into invalid scalar values.
-    #[test]
-    fn substitution_preserves_non_ascii_literal_bytes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule("testrule", vec!["café-${profile}-naïve".into()]);
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(args, vec!["café-debug-naïve".to_string()]);
+        assert_eq!(args.len(), cases.len());
+        for ((name, _, expected), got) in cases.iter().zip(&args) {
+            assert_eq!(got, expected, "{name}");
+        }
     }
 
     #[test]
@@ -387,59 +371,6 @@ mod tests {
             }
             other => panic!("expected Error::Compile, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn substitution_literal_dollar_is_preserved() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule("testrule", vec!["$HOME/no_brace".into()]);
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(
-            args[0], "$HOME/no_brace",
-            "literal $ must pass through unchanged"
-        );
-    }
-
-    #[test]
-    fn substitution_handles_outputs_too() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = RuleDef {
-            name: "testrule".into(),
-            inputs: vec!["cmd".into()],
-            outputs: vec!["${build_dir}/out".into()],
-            depends_on: vec![],
-            handler: RuleHandler::Builtin("capture".into()),
-            working_dir: None,
-            span: None,
-        };
-
-        let out_args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.outputs)
-            .unwrap();
-        assert_eq!(out_args.len(), 1);
-        assert_eq!(
-            out_args[0],
-            format!("{}/out", tmp.path().join("build").display())
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -687,69 +618,5 @@ mod tests {
             }
             other => panic!("expected Error::Compile, got {other:?}"),
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // project_root and $$ escape tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn substitution_expands_project_root() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule("testrule", vec!["${project_root}/keys/sign.key".into()]);
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(
-            args[0],
-            format!("{}/keys/sign.key", resolved.project_root.display())
-        );
-    }
-
-    #[test]
-    fn substitution_double_dollar_produces_literal_dollar() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule("testrule", vec!["echo $${HOME}".into()]);
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(args[0], "echo ${HOME}");
-    }
-
-    #[test]
-    fn substitution_double_dollar_standalone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (layout, model, resolved, artifacts) = make_ctx_parts(tmp.path());
-        let ctx = RuleCtx {
-            layout: &layout,
-            resolved: &resolved,
-            model: &model,
-            artifacts: &artifacts,
-        };
-
-        let rule = make_rule("testrule", vec!["cost: $$5".into()]);
-
-        let args = Substituter::new(&ctx, &rule)
-            .expand_args(&rule.inputs)
-            .unwrap();
-        assert_eq!(args[0], "cost: $5");
     }
 }
