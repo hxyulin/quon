@@ -34,7 +34,9 @@
 //! [`crate::unit::UnitGraph::search_dirs`].
 
 use super::compile_crate::CompileUnitInput;
-use super::{CompileCtx, Emit, HOST_DEBUG_INFO, HOST_OPT_LEVEL, RustcCommandBuilder};
+use super::{
+    BuildLayout, CompileCtx, DriverKind, Emit, HOST_DEBUG_INFO, HOST_OPT_LEVEL, RustcCommandBuilder,
+};
 use crate::error::{Error, Result};
 use crate::unit::{BuildUnit, DepTarget, Platform, UnitOrigin, UnitPaths, UnitProfile};
 use gluon_model::{CrateType, TargetDef};
@@ -62,18 +64,57 @@ pub(crate) fn build_unit_command(
     ctx: &CompileCtx,
     input: &CompileUnitInput<'_>,
 ) -> Result<UnitCommand> {
+    build_command(ctx, input, false)
+}
+
+/// Assemble the `gluon clippy` lint pass for a project unit that
+/// [`build_unit_command`] compiles with plain rustc (see
+/// [`needs_lint_pass`]): the same flags, run through clippy-driver with
+/// metadata-only output into `<driver root>/host/lint/`. Nothing links
+/// against that output; the pass exists for its diagnostics.
+pub(crate) fn build_lint_command(
+    ctx: &CompileCtx,
+    input: &CompileUnitInput<'_>,
+) -> Result<UnitCommand> {
+    build_command(ctx, input, true)
+}
+
+/// Whether `gluon clippy` needs a separate lint pass for `unit`.
+///
+/// Project crates on the fixed host profile (proc macros and the host
+/// crates they link) are compiled with plain rustc under every driver,
+/// because dependents load the real dylib and rlibs. Compiling them with
+/// clippy-driver instead would put two programs' records on one shared
+/// output and make `gluon build` and `gluon clippy` rebuild each other's
+/// copy. A second, metadata-only clippy-driver run keeps the shared
+/// output and still reports the user's lints. Vendored units are not
+/// linted: their lints are capped and the user cannot fix them.
+pub(crate) fn needs_lint_pass(ctx: &CompileCtx, unit: &BuildUnit) -> bool {
+    ctx.driver() == DriverKind::Clippy
+        && unit.settings.always_rustc
+        && matches!(unit.origin, UnitOrigin::Crate(_))
+}
+
+fn build_command(
+    ctx: &CompileCtx,
+    input: &CompileUnitInput<'_>,
+    lint: bool,
+) -> Result<UnitCommand> {
     let layout = &ctx.layout;
     let model = input.model;
     let resolved = input.resolved;
     let units = input.units;
     let artifacts = input.artifacts;
     let unit: &BuildUnit = units.get(input.unit);
-    let paths = units.paths(input.unit, layout, model, resolved)?;
+    let mut paths = units.paths(input.unit, layout, model, resolved)?;
+    if lint {
+        paths = lint_paths(&paths, unit, layout);
+    }
 
     // `gluon check` and `gluon clippy` swap the program and the emit
     // kinds. Vendored units are exempt (see `UnitSettings::always_rustc`).
     let driver = ctx.driver();
-    let program = if unit.settings.always_rustc {
+    let program = if unit.settings.always_rustc && !lint {
         ctx.rustc_info.rustc_path.clone()
     } else {
         driver.program(&ctx.rustc_info)
@@ -142,7 +183,9 @@ pub(crate) fn build_unit_command(
     } else {
         &[Emit::Link, Emit::Metadata, Emit::DepInfo]
     };
-    let emit_override = if unit.kind == CrateType::ProcMacro || unit.settings.always_rustc {
+    let emit_override = if lint {
+        DriverKind::Clippy.emit_override()
+    } else if unit.kind == CrateType::ProcMacro || unit.settings.always_rustc {
         None
     } else {
         driver.emit_override()
@@ -288,6 +331,23 @@ pub(crate) fn build_unit_command(
         paths,
         output_path,
     })
+}
+
+/// Paths of the lint pass: metadata and depfile under
+/// `<driver root>/host/lint/`, no incremental directory (rustc and
+/// clippy-driver must not share one).
+fn lint_paths(paths: &UnitPaths, unit: &BuildUnit, layout: &BuildLayout) -> UnitPaths {
+    let out_dir = layout.lint_dir();
+    let stem = format!("{}-{}", unit.crate_name, unit.metadata.short());
+    UnitPaths {
+        depfile_path: out_dir.join(format!("{stem}.d")),
+        rmeta_path: Some(out_dir.join(format!("lib{stem}.rmeta"))),
+        output_path: out_dir.join(format!("lib{stem}.rmeta")),
+        debug_elf_path: None,
+        extra_filename: paths.extra_filename.clone(),
+        incremental_dir: None,
+        out_dir,
+    }
 }
 
 /// Add the search directories of every cargo-built prebuilt artifact

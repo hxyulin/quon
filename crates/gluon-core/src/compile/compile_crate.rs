@@ -152,44 +152,81 @@ pub fn compile(
             _ => (Vec::new(), None),
         };
 
-    crate::compile::run_compile_and_cache(
+    let lint = super::command_builder::needs_lint_pass(ctx, unit)
+        .then(|| super::command_builder::build_lint_command(ctx, &input))
+        .transpose()?;
+
+    let (output_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
         cmd.builder,
-        cache_key,
+        cache_key.clone(),
         cmd.output_path,
         cmd.paths.depfile_path,
         Some(&cmd.paths.out_dir),
-        extra_sources,
+        extra_sources.clone(),
         aux_outputs,
         post_compile_step,
-        Box::new(move |output, rendered| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "rustc failed while building {headline_what}: exit={:?}",
-                    output.status.code(),
-                ))
-                .with_note(format!(
-                    "stderr:\n{}",
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .with_note(format!("command: {rendered}")),
-            ])
-        }),
-        Box::new(move |e| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "built {what} but its depfile at {} could not be read",
-                    depfile_for_diag.display(),
-                ))
-                .with_note(format!("underlying error: {e}"))
-                .with_note(
-                    "the artifact is on disk but the cache was not updated; \
-                     the next run will re-spawn rustc for this crate",
-                ),
-            ])
-        }),
+        rustc_fail_diag(headline_what.clone()),
+        depfile_fail_diag(what.clone(), depfile_for_diag),
         stderr_sink,
-    )
+    )?;
+
+    // The lint pass runs after the real compile, so a hard error is
+    // reported once, by rustc, and the pass only adds clippy's lints.
+    let Some(lint) = lint else {
+        return Ok((output_path, was_cached));
+    };
+    let lint_depfile = lint.paths.depfile_path.clone();
+    let (_, lint_cached) = crate::compile::run_compile_and_cache(
+        ctx,
+        lint.builder,
+        format!("{cache_key}:clippy"),
+        lint.output_path,
+        lint.paths.depfile_path,
+        Some(&lint.paths.out_dir),
+        extra_sources,
+        Vec::new(),
+        None,
+        rustc_fail_diag(format!("{headline_what} (clippy lint pass)")),
+        depfile_fail_diag(what, lint_depfile),
+        stderr_sink,
+    )?;
+    Ok((output_path, was_cached && lint_cached))
+}
+
+fn rustc_fail_diag(headline_what: String) -> Box<crate::compile::compile_and_cache::RustcFailDiag> {
+    Box::new(move |output, rendered| {
+        Error::Diagnostics(vec![
+            Diagnostic::error(format!(
+                "rustc failed while building {headline_what}: exit={:?}",
+                output.status.code(),
+            ))
+            .with_note(format!(
+                "stderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+            .with_note(format!("command: {rendered}")),
+        ])
+    })
+}
+
+fn depfile_fail_diag(
+    what: String,
+    depfile: PathBuf,
+) -> Box<crate::compile::compile_and_cache::DepfileFailDiag> {
+    Box::new(move |e| {
+        Error::Diagnostics(vec![
+            Diagnostic::error(format!(
+                "built {what} but its depfile at {} could not be read",
+                depfile.display(),
+            ))
+            .with_note(format!("underlying error: {e}"))
+            .with_note(
+                "the artifact is on disk but the cache was not updated; \
+                 the next run will re-spawn rustc for this crate",
+            ),
+        ])
+    })
 }
 
 #[cfg(test)]

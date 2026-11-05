@@ -100,7 +100,10 @@ Key layout decisions:
   host profile (no optimisation, no debug info) and `host/deps/`, so
   switching profiles does not rebuild them. `gluon check` and `gluon
   clippy` build them with plain rustc and share them with `gluon build`,
-  because a proc macro needs real rlibs of its dependencies. Other host
+  because a proc macro needs real rlibs of its dependencies. `gluon
+  clippy` then runs clippy-driver over your own proc macros and their
+  host crates a second time, metadata only, into `tool/clippy/host/lint/`,
+  so their lints are still reported. Other host
   crates (host tools, build-step runners) use the active profile and
   `host/profile/<profile>/deps/`, so each profile keeps its own copy.
 - Old files are not deleted when a hash changes. They are never loaded,

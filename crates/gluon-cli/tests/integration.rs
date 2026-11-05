@@ -623,6 +623,64 @@ fn gluon_clippy_cold() {
     );
 }
 
+/// `gluon clippy` lints the project's own proc macros. They are built
+/// with plain rustc so dependents can load the real dylib, which must
+/// not take them out of the lint pass.
+#[test]
+#[ignore]
+fn gluon_clippy_lints_project_proc_macro() {
+    let Some(()) = require_rustc_or_skip("gluon_clippy_lints_project_proc_macro") else {
+        return;
+    };
+    if !clippy_driver_available() {
+        eprintln!("gluon_clippy_lints_project_proc_macro: skipped — clippy-driver not found");
+        return;
+    }
+    let (_tmp, fixture) = setup_fixture();
+    let lib = fixture.join("crates/proc_macro/src/lib.rs");
+    let mut src = fs::read_to_string(&lib).expect("read proc macro source");
+    src.push_str("\npub(crate) fn answer() -> i32 {\n    return 42;\n}\n");
+    fs::write(&lib, src).expect("write proc macro source");
+
+    let output = gluon_command(&fixture)
+        .arg("clippy")
+        .output()
+        .expect("spawn gluon clippy");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "gluon clippy failed: status={:?}, stderr=\n{stderr}",
+        output.status
+    );
+    assert!(
+        stderr.contains("needless_return"),
+        "clippy should report the proc macro's needless return, got: {stderr}"
+    );
+
+    // The real dylib is still shared with `gluon build`, so building
+    // afterwards does not recompile the proc macro.
+    let build = gluon_command(&fixture)
+        .arg("build")
+        .output()
+        .expect("spawn gluon build");
+    assert!(
+        build.status.success(),
+        "build after clippy failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let host_deps = fixture.join("build/host/deps");
+    let dylibs = fs::read_dir(&host_deps)
+        .expect("read host deps")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("libminimal_derive-")
+        })
+        .count();
+    assert!(dylibs > 0, "proc macro dylib missing from {host_deps:?}");
+}
+
 fn clippy_driver_available() -> bool {
     if let Some(path) = std::env::var_os("CLIPPY_DRIVER") {
         return Path::new(&path).is_file();

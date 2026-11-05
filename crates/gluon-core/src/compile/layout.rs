@@ -149,6 +149,14 @@ impl BuildLayout {
         self.root.join("host")
     }
 
+    /// Output directory of the `gluon clippy` lint pass over project
+    /// crates that every driver compiles with plain rustc:
+    /// `<driver root>/host/lint/`. See
+    /// `command_builder::needs_lint_pass`.
+    pub fn lint_dir(&self) -> PathBuf {
+        self.user_crate_root().join("host").join("lint")
+    }
+
     /// Directory of the host units that use the active profile (host
     /// tools, build-step runners): `<driver root>/host/profile/<profile>/`.
     /// Each profile keeps its own copy, so switching back and forth
