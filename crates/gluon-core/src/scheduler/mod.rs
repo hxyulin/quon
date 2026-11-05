@@ -91,9 +91,9 @@ fn dispatch_config_crate(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
+    units: &UnitGraph,
     view: &ResultView<'_>,
     target: Handle<TargetDef>,
-    stdout: &mut Vec<u8>,
     stderr: &mut Vec<u8>,
 ) -> Result<NodeOutcome> {
     // The DAG wires ConfigCrate(target) → Sysroot(target) so this
@@ -105,13 +105,21 @@ fn dispatch_config_crate(
                 .into(),
         )
     })?;
+    // The DAG has a ConfigCrate node only for targets with a unit that
+    // links it, and lowering hashes exactly those.
+    let metadata = units.config_metadata(target).ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: ConfigCrate({target:?}) has no config crate hash; \
+             no unit for this target links it (scheduler bug)"
+        ))
+    })?;
     let (_name, rlib_path, was_cached) = crate::generated::config_crate::ensure_config_crate(
         ctx,
         model,
         resolved,
         target,
+        metadata,
         sysroot_dir,
-        stdout,
         stderr,
     )?;
     Ok((Some(rlib_path), was_cached))
@@ -273,7 +281,7 @@ impl JobDispatcher for PipelineDispatcher<'_> {
         let (primary, was_cached) = match self.dag.nodes[node as usize] {
             DagNode::Sysroot(target) => dispatch_sysroot(ctx, model, target, stdout, stderr)?,
             DagNode::ConfigCrate(target) => {
-                dispatch_config_crate(ctx, model, resolved, &view, target, stdout, stderr)?
+                dispatch_config_crate(ctx, model, resolved, self.units, &view, target, stderr)?
             }
             // rustc writes everything to stderr; the worker pool
             // flushes it per job.

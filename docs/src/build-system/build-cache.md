@@ -60,14 +60,30 @@ and performs a full rebuild.
 ```
 build/
   sysroot/<target>/           # Custom sysroot (shared across profiles)
+  generated/<project>_config/ # Generated config crate sources
   cross/<target>/<profile>/
-    deps/                     # Cross-compiled crate artifacts
+    deps/                     # Cross-compiled libraries and the config crate
+    final/                    # Cross executables, under their plain names
     esp/                      # EFI partitions
-  host/                       # Host-compiled crates (proc macros, etc.)
+    incremental/              # Incremental state, one directory per unit
+  host/
+    deps/                     # Proc macros and the host crates they use
+    profile/<profile>/deps/   # Host tools and build-step runners
   tool/check/                 # Output from gluon check
   tool/clippy/                # Output from gluon clippy
   cache-manifest.json         # Freshness records
 ```
+
+Every library file name carries the unit's metadata hash, for example
+`libkernel_util-3f2a9c1d0b7e6a45.rlib`. Gluon passes the same hash to
+rustc as `-C metadata`. The hash covers what makes a unit a distinct
+artifact: package name, version and source, crate kind, target,
+features, the hashes of its dependencies, and for project crates the
+generated config crate's contents. It leaves out sources, flags, the
+profile and the toolchain. A change to those rebuilds the file in place.
+A change to the identity writes a new file next to the old one, so
+switching between two config presets rebuilds nothing after the first
+build of each.
 
 Key layout decisions:
 
@@ -81,7 +97,11 @@ Key layout decisions:
 - **Host-compiled crates** live in a separate `host/` directory because
   they are compiled for the host triple, not the target triple. Procedural
   macros, vendored host crates and the crates they depend on use a fixed
-  host profile (no optimisation, no debug info) and `host/<crate>/`, so
-  switching profiles does not rebuild them. Other host crates (host tools,
-  build-step runners) use the active profile and `host/<crate>/<profile>/`,
-  so each profile keeps its own copy.
+  host profile (no optimisation, no debug info) and `host/deps/`, so
+  switching profiles does not rebuild them. `gluon check` and `gluon
+  clippy` build them with plain rustc and share them with `gluon build`,
+  because a proc macro needs real rlibs of its dependencies. Other host
+  crates (host tools, build-step runners) use the active profile and
+  `host/profile/<profile>/deps/`, so each profile keeps its own copy.
+- Old files are not deleted when a hash changes. They are never loaded,
+  so they cost disk space only; `gluon clean` removes them.

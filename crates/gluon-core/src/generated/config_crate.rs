@@ -16,13 +16,23 @@
 //! ### Compilation target
 //!
 //! One config crate is compiled per distinct cross target in the resolved
-//! crate list. Each target gets its own rlib under a per-target subdirectory
-//! of `generated/<project>_config/`. Downstream cross crates consume the
-//! config crate for their own target via `--extern`.
+//! crate list, per profile. Downstream cross crates consume the config
+//! crate for their own target via `--extern`.
+//!
+//! ### Identity and layout
+//!
+//! The crate's metadata hash ([`crate::unit::UnitGraph::config_metadata`])
+//! covers its name, the target and the rendered source, so each set of
+//! resolved config values is a separate artifact. The source lives at
+//! `generated/<project>_config/<target>/<h16>/src/lib.rs` and the rlib at
+//! `cross/<target>/<profile>/deps/lib<name>-<h16>.rlib` under the build
+//! root (shared by every driver). Profiles and presets therefore each keep
+//! their own copy, and switching between them rebuilds nothing.
 
 use crate::compile::compile_utils::sanitise_crate_name;
 use crate::compile::{CompileCtx, Emit, PostCompileStep, RustcCommandBuilder};
 use crate::error::{Diagnostic, Error, Result};
+use crate::unit::Metadata;
 use gluon_model::{BuildModel, CrateType, Handle, ResolvedConfig, ResolvedValue, TargetDef};
 use std::collections::BTreeMap;
 use std::fs;
@@ -165,6 +175,15 @@ pub(crate) fn render_source(resolved: &ResolvedConfig) -> Result<String> {
 // Compilation
 // ---------------------------------------------------------------------------
 
+/// `--crate-name` and extern name of the config crate.
+pub(crate) fn config_crate_name(resolved: &ResolvedConfig) -> String {
+    resolved
+        .project
+        .config_crate_name
+        .clone()
+        .unwrap_or_else(|| sanitise_crate_name(&resolved.project.name) + "_config")
+}
+
 /// Ensure the generated `<project>_config` crate is compiled and cached.
 ///
 /// Returns `(crate_name, rlib_path, was_cached)`. `was_cached` is `true`
@@ -187,8 +206,8 @@ pub fn ensure_config_crate(
     model: &BuildModel,
     resolved: &ResolvedConfig,
     target_handle: Handle<TargetDef>,
+    metadata: Metadata,
     sysroot_dir: &Path,
-    _stdout: &mut Vec<u8>,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(String, PathBuf, bool)> {
     let layout = &ctx.layout;
@@ -201,25 +220,23 @@ pub fn ensure_config_crate(
         ))
     })?;
 
-    // Derive the crate name using the same sanitisation rules as compile_crate.
-    let crate_name = resolved
-        .project
-        .config_crate_name
-        .clone()
-        .unwrap_or_else(|| sanitise_crate_name(&resolved.project.name) + "_config");
+    let crate_name = config_crate_name(resolved);
+    let h16 = metadata.short();
+    let extra_filename = format!("-{h16}");
 
-    // Extra-filename suffix — deterministic, matches compile_crate convention.
-    let extra_filename = format!("-gluon-{crate_name}");
-
-    // Output and depfile paths. Per-target subdirectory under the generated
-    // config crate dir so each target gets its own compilation. `gluon clean`
-    // sweeps the entire generated directory.
-    let out_dir = layout.generated_config_crate_dir().join(&target.name);
+    let platform_dir = layout.shared_cross_dir(target, &resolved.profile);
+    let out_dir = platform_dir.join("deps");
     let output_path = out_dir.join(format!("lib{crate_name}{extra_filename}.rlib"));
     let depfile_path = out_dir.join(format!("{crate_name}{extra_filename}.d"));
 
-    // Source paths.
-    let src_dir = out_dir.join("src");
+    // The source path carries the hash, which covers the source, so a
+    // file there never changes content and switching profiles or
+    // presets never rewrites (and so never invalidates) another one.
+    let src_dir = layout
+        .generated_config_crate_dir()
+        .join(&target.name)
+        .join(&h16)
+        .join("src");
     let src_path = src_dir.join("lib.rs");
 
     // --- Write source (only if changed) ---
@@ -243,7 +260,9 @@ pub fn ensure_config_crate(
 
     // --- Assemble rustc command ---
     let sysroot_lib = layout.sysroot_lib_dir(target);
-    let incremental_dir = out_dir.join("incremental");
+    let incremental_dir = platform_dir
+        .join("incremental")
+        .join(format!("{crate_name}-{h16}"));
 
     let mut builder = RustcCommandBuilder::new(&ctx.rustc_info.rustc_path);
     builder
@@ -262,7 +281,7 @@ pub fn ensure_config_crate(
         .debug_info(resolved.profile.debug_info);
 
     // Inject implicit sysroot crates. Must match what build_sysroot_crate
-    // writes (same -gluon-<name> extra-filename convention).
+    // writes (sysroot crates keep the -gluon-<name> extra-filename).
     builder
         .extern_crate("core", &sysroot_lib.join("libcore-gluon-core.rlib"))
         .extern_crate(
@@ -278,15 +297,19 @@ pub fn ensure_config_crate(
             .raw_arg(format!("panic={}", s.as_str()));
     }
 
-    // extra-filename LAST so the canonical token order (and therefore the
-    // cache key hash) stays stable — any flag appended after extra-filename
-    // would shift its position.
+    // metadata and extra-filename LAST, as for every unit, so the token
+    // order (and therefore the cache key hash) stays stable.
     builder
+        .raw_arg("-C")
+        .raw_arg(format!("metadata={}", metadata.hex()))
         .raw_arg("-C")
         .raw_arg(format!("extra-filename={extra_filename}"));
 
     // --- Cache integration (delegated to compile::compile_and_cache) ---
-    let cache_key = format!("config_crate:{}:{}", crate_name, target.name);
+    let cache_key = format!(
+        "config_crate:{crate_name}:{}:{}:{h16}",
+        target.name, resolved.profile.name
+    );
 
     let crate_name_fail = crate_name.clone();
     let crate_name_depfile = crate_name.clone();

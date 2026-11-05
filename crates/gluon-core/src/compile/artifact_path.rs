@@ -7,9 +7,14 @@
 //!
 //! Both functions lower the unit table ([`crate::unit::lower`]) and read
 //! the path from it, so they agree with the command builder by
-//! construction. Lowering is pure and builds nothing. Vendored crates
-//! are not part of the lowered table here, which does not change any
-//! declared crate's path.
+//! construction. Lowering is pure and builds nothing.
+//!
+//! Vendored crates are not part of the lowered table here, because
+//! building the vendor context runs `cargo metadata`. A declared library
+//! that depends on a `cfg.dependency()` cross crate therefore gets a
+//! different metadata hash here than in the build, and its predicted
+//! path is wrong. Cross executables (the usual `artifact_env` target)
+//! have no hash in their path and are unaffected.
 //!
 //! The primary consumer today is [`crate::analyzer`], which needs to
 //! emit `env!("KERNEL_PATH") → /path/to/kernel` mappings into
@@ -196,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_lib_artifact_lands_under_cross_artifact_dir() {
+    fn cross_lib_artifact_lands_under_cross_deps_dir() {
         let mut model = BuildModel::default();
         let th = make_target(&mut model, "x86_64-unknown-none", "x86_64-unknown-none");
         let g = ensure_group(&mut model);
@@ -221,8 +226,11 @@ mod tests {
         );
         let path = expected_crate_artifact_path(&layout(), &model, &resolved, ch).unwrap();
         let s = path.to_string_lossy().replace('\\', "/");
-        assert!(s.contains("/cross/x86_64-unknown-none/dev/kernel/"), "{s}");
-        assert!(s.ends_with("/libkernel-gluon-kernel.rlib"), "{s}");
+        let hash = s
+            .strip_prefix("/tmp/build/cross/x86_64-unknown-none/dev/deps/libkernel-")
+            .and_then(|r| r.strip_suffix(".rlib"))
+            .unwrap_or_else(|| panic!("{s}"));
+        assert_eq!(hash.len(), 16, "{s}");
     }
 
     #[test]
@@ -282,8 +290,12 @@ mod tests {
         );
         let path = expected_crate_artifact_path(&layout(), &model, &resolved, ch).unwrap();
         let s = path.to_string_lossy().replace('\\', "/");
-        assert!(s.contains("/host/tooling/"), "{s}");
-        assert!(s.ends_with("/libtooling-gluon-tooling.rlib"), "{s}");
+        // A host lib no proc macro uses takes the active profile.
+        assert!(
+            s.starts_with("/tmp/build/host/profile/dev/deps/libtooling-"),
+            "{s}"
+        );
+        assert!(s.ends_with(".rlib"), "{s}");
     }
 
     #[test]

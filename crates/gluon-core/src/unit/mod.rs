@@ -13,8 +13,9 @@
 //! reads a unit instead of a `CrateDef` or a `VendorCrateBuild`, so both
 //! sources go through one dispatch and one command builder.
 //!
-//! Output paths and cache keys are derived from the unit, in the same
-//! format each source used before the table existed.
+//! Every unit gets a [`Metadata`] hash (see [`metadata`]) that rustc
+//! receives as `-C metadata`, and that names its files through
+//! `-C extra-filename`.
 //!
 //! ### Profiles
 //!
@@ -23,15 +24,42 @@
 //! - Proc macros, every vendored host unit, and every host unit they
 //!   depend on use the fixed host profile ([`HOST_OPT_LEVEL`],
 //!   [`HOST_DEBUG_INFO`]). Switching between `dev` and `release` does
-//!   not rebuild them, and their output directories stay
-//!   profile-independent.
+//!   not rebuild them, and their output directory is
+//!   profile-independent. They are compiled with plain rustc and full
+//!   codegen under every driver, because a proc macro links real rlibs
+//!   of its deps, so `gluon check` and `gluon build` share them.
 //! - Other host units (host tools and build-step runners declared in
 //!   `gluon.rs`, and their deps) use the active profile, so a slow host
-//!   tool can be optimised. Their output directory and cache key carry
-//!   the profile name, so each profile keeps its own copy.
+//!   tool can be optimised. Their output directory carries the profile
+//!   name, so each profile keeps its own copy.
+//!
+//! ### Layout
+//!
+//! Units of one platform share one `deps/` directory, as in Cargo, and
+//! the hash in each file name keeps them apart. rustc finds transitive
+//! crates there by name and checks their hash, so a unit needs one
+//! `-L dependency=` per platform directory instead of one per dep.
+//!
+//! ```text
+//! <root>/host/deps/                       fixed host profile units
+//! <driver root>/host/profile/<p>/deps/    active-profile host units
+//! <driver root>/cross/<t>/<p>/deps/       declared cross libraries
+//! <driver root>/cross/<t>/<p>/final/      cross executables, unhashed names
+//! <root>/cross/<t>/<p>/deps/              vendored cross units, config crate
+//! <platform dir>/incremental/<unit>-<h16>/
+//! ```
+//!
+//! `<driver root>` is `<root>` under `gluon build` and
+//! `<root>/tool/{check,clippy}` otherwise. Units compiled the same way
+//! under every driver ([`UnitSettings::always_rustc`]) live under
+//! `<root>` so the drivers share them.
 //!
 //! [`HOST_OPT_LEVEL`]: crate::compile::HOST_OPT_LEVEL
 //! [`HOST_DEBUG_INFO`]: crate::compile::HOST_DEBUG_INFO
+
+pub mod metadata;
+
+pub use metadata::Metadata;
 
 use crate::compile::BuildLayout;
 use crate::compile::compile_utils::{
@@ -138,8 +166,10 @@ pub struct UnitSettings {
     /// Pass `-C incremental=<dir>`.
     pub incremental: bool,
     /// Compile with plain rustc and full codegen under `gluon check` and
-    /// `gluon clippy` too. Set for vendored units: the user cannot fix
-    /// their lints, and dependents need real rlibs.
+    /// `gluon clippy` too, into the driver-independent root. Set for
+    /// vendored units (the user cannot fix their lints, and dependents
+    /// need real rlibs) and for fixed-host-profile units (a proc macro
+    /// links real rlibs of its deps).
     pub always_rustc: bool,
 }
 
@@ -172,6 +202,9 @@ pub struct BuildUnit {
     /// (`artifact_deps`).
     pub order_deps: Vec<UnitId>,
     pub settings: UnitSettings,
+    /// Identity hash; see [`metadata`]. Set by [`lower`] once every
+    /// dep's hash is known.
+    pub metadata: Metadata,
 }
 
 /// Where a unit's rustc output lands. Pure path arithmetic.
@@ -186,8 +219,14 @@ pub struct UnitPaths {
     /// `<name>.elf` that rustc writes for a raw binary before objcopy
     /// turns it into `<name>.bin`.
     pub debug_elf_path: Option<PathBuf>,
-    /// `-C extra-filename` value, when the unit uses one.
+    /// `.rmeta` file of a library. Under `gluon check` and `gluon
+    /// clippy` it is the file dependents link against.
+    pub rmeta_path: Option<PathBuf>,
+    /// `-C extra-filename` value, when the unit uses one. Every unit
+    /// but cross executables, which keep stable names in `final/`.
     pub extra_filename: Option<String>,
+    /// `-C incremental` directory, when the unit uses one.
+    pub incremental_dir: Option<PathBuf>,
 }
 
 /// The unit table plus the lookups other nodes use.
@@ -196,6 +235,8 @@ pub struct UnitGraph {
     units: Vec<BuildUnit>,
     unit_of_crate: BTreeMap<Handle<CrateDef>, UnitId>,
     unit_of_vendor: BTreeMap<VendorBuildId, UnitId>,
+    /// Config crate hash per target that has a unit linking it.
+    config_metadata: BTreeMap<Handle<TargetDef>, Metadata>,
 }
 
 impl UnitGraph {
@@ -233,6 +274,61 @@ impl UnitGraph {
         self.unit_of_vendor.get(&id).copied()
     }
 
+    /// Hash of `target`'s config crate. `None` when no unit in this
+    /// build links it.
+    pub fn config_metadata(&self, target: Handle<TargetDef>) -> Option<Metadata> {
+        self.config_metadata.get(&target).copied()
+    }
+
+    /// The directory that holds `id`'s `deps/`, `final/` and
+    /// `incremental/`. See the module docs.
+    fn platform_dir(
+        &self,
+        id: UnitId,
+        layout: &BuildLayout,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+    ) -> Result<PathBuf> {
+        let unit = self.get(id);
+        Ok(match (unit.platform, unit.profile) {
+            (Platform::Host, UnitProfile::Host) => layout.host_dir(),
+            (Platform::Host, UnitProfile::Active) => layout.host_profile_dir(&resolved.profile),
+            (Platform::Cross(t), _) => {
+                let t = target_def(model, t, &unit.name)?;
+                if unit.settings.always_rustc {
+                    layout.shared_cross_dir(t, &resolved.profile)
+                } else {
+                    layout.cross_dir(t, &resolved.profile)
+                }
+            }
+        })
+    }
+
+    /// `-L dependency=` directories for `id`, sorted: its own platform's
+    /// `deps/`, the shared `host/deps/` (where proc macros live; rustc
+    /// may load one re-exported by a dep), and for driver-rooted cross
+    /// units the shared cross `deps/` that holds vendored units. Cargo
+    /// passes the host directory to every cross unit for the same
+    /// reason. Prebuilt artifacts' directories are added by the command
+    /// builder.
+    pub fn search_dirs(
+        &self,
+        id: UnitId,
+        layout: &BuildLayout,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+    ) -> Result<Vec<PathBuf>> {
+        let unit = self.get(id);
+        let mut dirs = BTreeSet::new();
+        dirs.insert(self.platform_dir(id, layout, model, resolved)?.join("deps"));
+        dirs.insert(layout.host_dir().join("deps"));
+        if let Platform::Cross(t) = unit.platform {
+            let t = target_def(model, t, &unit.name)?;
+            dirs.insert(layout.shared_cross_dir(t, &resolved.profile).join("deps"));
+        }
+        Ok(dirs.into_iter().collect())
+    }
+
     /// Output paths of `id`. Errors only when a handle the unit refers
     /// to is missing from the model.
     pub fn paths(
@@ -244,90 +340,59 @@ impl UnitGraph {
     ) -> Result<UnitPaths> {
         let unit = self.get(id);
         let cn = &unit.crate_name;
-        let target = |t: Handle<TargetDef>| target_def(model, t, &unit.name);
-        match unit.origin {
-            UnitOrigin::Crate(h) => {
-                let def = crate_def(model, h)?;
-                let extra = format!("-gluon-{cn}");
-                match (unit.platform, unit.kind) {
-                    (Platform::Host, kind) => {
-                        let out_dir = match unit.profile {
-                            UnitProfile::Host => layout.host_artifact_dir(def),
-                            UnitProfile::Active => {
-                                layout.host_profile_artifact_dir(def, &resolved.profile)
-                            }
-                        };
-                        let output_path = match kind {
-                            CrateType::Bin => out_dir.join(format!("{cn}{extra}")),
-                            CrateType::ProcMacro => {
-                                out_dir.join(proc_macro_file_name(&format!("{cn}{extra}")))
-                            }
-                            _ => out_dir.join(format!("lib{cn}{extra}.rlib")),
-                        };
-                        Ok(UnitPaths {
-                            depfile_path: out_dir.join(format!("{cn}{extra}.d")),
-                            out_dir,
-                            output_path,
-                            debug_elf_path: None,
-                            extra_filename: Some(extra),
-                        })
-                    }
-                    // Cross executables land in `final/` under stable
-                    // names because ESP entries, images, QEMU and users
-                    // refer to them.
-                    (Platform::Cross(t), CrateType::Bin) => {
-                        let t = target(t)?;
-                        let out_dir = layout.cross_final_dir(t, &resolved.profile);
-                        Ok(UnitPaths {
-                            output_path: out_dir
-                                .join(format!("{cn}{}", exe_suffix_for_target(&t.spec))),
-                            depfile_path: out_dir.join(format!("{cn}.d")),
-                            out_dir,
-                            debug_elf_path: None,
-                            extra_filename: None,
-                        })
-                    }
-                    (Platform::Cross(t), CrateType::RawBinary) => {
-                        let out_dir = layout.cross_final_dir(target(t)?, &resolved.profile);
-                        Ok(UnitPaths {
-                            output_path: out_dir.join(format!("{cn}.bin")),
-                            depfile_path: out_dir.join(format!("{cn}.d")),
-                            debug_elf_path: Some(out_dir.join(format!("{cn}.elf"))),
-                            out_dir,
-                            extra_filename: None,
-                        })
-                    }
-                    (Platform::Cross(t), _) => {
-                        let out_dir = layout.cross_artifact_dir(target(t)?, &resolved.profile, def);
-                        Ok(UnitPaths {
-                            output_path: out_dir.join(format!("lib{cn}{extra}.rlib")),
-                            depfile_path: out_dir.join(format!("{cn}{extra}.d")),
-                            out_dir,
-                            debug_elf_path: None,
-                            extra_filename: Some(extra),
-                        })
-                    }
-                }
-            }
-            // Each vendored unit has its own directory, keyed by
-            // platform, so no extra-filename is needed.
-            UnitOrigin::Vendor(_) => {
-                let out_dir = match unit.platform {
-                    Platform::Host => layout.host_vendor_dep_dir(cn),
-                    Platform::Cross(t) => {
-                        layout.cross_vendor_dep_dir(target(t)?, &resolved.profile, cn)
-                    }
-                };
-                let output_path = match unit.kind {
-                    CrateType::ProcMacro => out_dir.join(proc_macro_file_name(cn)),
-                    _ => out_dir.join(format!("lib{cn}.rlib")),
-                };
+        let h16 = unit.metadata.short();
+        let platform_dir = self.platform_dir(id, layout, model, resolved)?;
+        let incremental_dir = unit.settings.incremental.then(|| {
+            platform_dir
+                .join("incremental")
+                .join(format!("{}-{h16}", unit.name))
+        });
+        match (unit.platform, unit.kind) {
+            // Cross executables land in `final/` under stable names
+            // because ESP entries, images, QEMU and users refer to them.
+            (Platform::Cross(t), CrateType::Bin) => {
+                let t = target_def(model, t, &unit.name)?;
+                let out_dir = platform_dir.join("final");
                 Ok(UnitPaths {
+                    output_path: out_dir.join(format!("{cn}{}", exe_suffix_for_target(&t.spec))),
                     depfile_path: out_dir.join(format!("{cn}.d")),
+                    out_dir,
+                    debug_elf_path: None,
+                    rmeta_path: None,
+                    extra_filename: None,
+                    incremental_dir,
+                })
+            }
+            (Platform::Cross(_), CrateType::RawBinary) => {
+                let out_dir = platform_dir.join("final");
+                Ok(UnitPaths {
+                    output_path: out_dir.join(format!("{cn}.bin")),
+                    depfile_path: out_dir.join(format!("{cn}.d")),
+                    debug_elf_path: Some(out_dir.join(format!("{cn}.elf"))),
+                    out_dir,
+                    rmeta_path: None,
+                    extra_filename: None,
+                    incremental_dir,
+                })
+            }
+            (_, kind) => {
+                let out_dir = platform_dir.join("deps");
+                let stem = format!("{cn}-{h16}");
+                let output_path = match kind {
+                    CrateType::Bin | CrateType::RawBinary => out_dir.join(&stem),
+                    CrateType::ProcMacro => out_dir.join(proc_macro_file_name(&stem)),
+                    _ => out_dir.join(format!("lib{stem}.rlib")),
+                };
+                let rmeta_path =
+                    (!kind.is_executable()).then(|| out_dir.join(format!("lib{stem}.rmeta")));
+                Ok(UnitPaths {
+                    depfile_path: out_dir.join(format!("{stem}.d")),
                     out_dir,
                     output_path,
                     debug_elf_path: None,
-                    extra_filename: None,
+                    rmeta_path,
+                    extra_filename: Some(format!("-{h16}")),
+                    incremental_dir,
                 })
             }
         }
@@ -343,7 +408,12 @@ impl UnitGraph {
         resolved: &ResolvedConfig,
     ) -> Result<String> {
         let unit = self.get(id);
-        let sfx = layout.cache_key_suffix();
+        // Units built the same way under every driver share one record.
+        let sfx = if unit.settings.always_rustc {
+            ""
+        } else {
+            layout.cache_key_suffix()
+        };
         let profile = &resolved.profile.name;
         let (prefix, name) = match unit.origin {
             UnitOrigin::Crate(_) => ("crate", unit.name.clone()),
@@ -352,14 +422,23 @@ impl UnitGraph {
                 format!("{}:{}", unit.package.name, unit.package.version),
             ),
         };
+        // Units with a hashed file name get the hash in their key, so
+        // each artifact has its own record and alternating between two
+        // (say, config presets) rebuilds neither. Cross executables have
+        // one output path, so one record.
+        let hash = if unit.platform != Platform::Host && unit.kind.is_executable() {
+            String::new()
+        } else {
+            format!(":{}", unit.metadata.short())
+        };
         Ok(match (unit.platform, unit.profile) {
-            (Platform::Host, UnitProfile::Host) => format!("{prefix}:host:{name}{sfx}"),
+            (Platform::Host, UnitProfile::Host) => format!("{prefix}:host:{name}{hash}{sfx}"),
             (Platform::Host, UnitProfile::Active) => {
-                format!("{prefix}:host:{name}:{profile}{sfx}")
+                format!("{prefix}:host:{name}:{profile}{hash}{sfx}")
             }
             (Platform::Cross(t), _) => {
                 let t = target_def(model, t, &unit.name)?;
-                format!("{prefix}:cross:{name}:{profile}:{}{sfx}", t.name)
+                format!("{prefix}:cross:{name}:{profile}:{}{hash}{sfx}", t.name)
             }
         })
     }
@@ -530,6 +609,7 @@ pub fn lower(
                 incremental: true,
                 always_rustc: false,
             },
+            metadata: Metadata::default(),
         });
     }
 
@@ -582,17 +662,133 @@ pub fn lower(
                 always_rustc: true,
                 ..UnitSettings::default()
             },
+            metadata: Metadata::default(),
         });
     }
 
     uniquify_vendor_names(&mut units, model);
     assign_host_profile(&mut units);
+    let config_metadata = config_crate_hashes(&units, model, resolved)?;
+    assign_metadata(&mut units, model, resolved, &config_metadata)?;
 
     Ok(UnitGraph {
         units,
         unit_of_crate,
         unit_of_vendor,
+        config_metadata,
     })
+}
+
+/// Config crate hash for every target that has a unit linking it. The
+/// source is rendered only when some unit needs it, so a build without
+/// a config crate never fails on a config-option name collision.
+fn config_crate_hashes(
+    units: &[BuildUnit],
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+) -> Result<BTreeMap<Handle<TargetDef>, Metadata>> {
+    let targets: BTreeSet<Handle<TargetDef>> = units
+        .iter()
+        .filter(|u| u.config_crate)
+        .filter_map(|u| match u.platform {
+            Platform::Cross(t) => Some(t),
+            Platform::Host => None,
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let source = crate::generated::config_crate::render_source(resolved)?;
+    let name = crate::generated::config_crate::config_crate_name(resolved);
+    targets
+        .into_iter()
+        .map(|t| {
+            let platform = metadata::platform_identity(Platform::Cross(t), model, resolved)?;
+            Ok((
+                t,
+                metadata::config_crate_metadata(&name, &platform, &source),
+            ))
+        })
+        .collect()
+}
+
+/// Compute every unit's metadata hash, deps first. A cycle is a
+/// lowering bug and fails with the unit names on it.
+fn assign_metadata(
+    units: &mut [BuildUnit],
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    config: &BTreeMap<Handle<TargetDef>, Metadata>,
+) -> Result<()> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        New,
+        Open,
+        Done,
+    }
+    let mut state = vec![State::New; units.len()];
+    for root in 0..units.len() {
+        if state[root] != State::New {
+            continue;
+        }
+        // Iterative DFS: (unit, index of the next dep to visit).
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        state[root] = State::Open;
+        while let Some(&(u, _)) = stack.last() {
+            let dep = {
+                let next = &mut stack.last_mut().expect("non-empty").1;
+                let mut found = None;
+                while *next < units[u].deps.len() {
+                    let target = &units[u].deps[*next].target;
+                    *next += 1;
+                    if let DepTarget::Unit(d) = target {
+                        found = Some(d.index());
+                        break;
+                    }
+                }
+                found
+            };
+            if let Some(d) = dep {
+                match state[d] {
+                    State::Done => {}
+                    State::New => {
+                        state[d] = State::Open;
+                        stack.push((d, 0));
+                    }
+                    State::Open => {
+                        let start = stack.iter().position(|&(x, _)| x == d).unwrap_or(0);
+                        let mut cycle: Vec<&str> = stack[start..]
+                            .iter()
+                            .map(|&(x, _)| units[x].name.as_str())
+                            .collect();
+                        cycle.push(units[d].name.as_str());
+                        return Err(Error::Compile(format!(
+                            "unit lowering: dependency cycle {} (lowering bug)",
+                            cycle.join(" -> ")
+                        )));
+                    }
+                }
+                continue;
+            }
+            stack.pop();
+            let unit = &units[u];
+            let platform = metadata::platform_identity(unit.platform, model, resolved)?;
+            let cfg = match (unit.config_crate, unit.platform) {
+                (true, Platform::Cross(t)) => config.get(&t).copied(),
+                _ => None,
+            };
+            let m = metadata::unit_metadata(
+                unit,
+                &platform,
+                &resolved.project_root,
+                |d| units[d.index()].metadata,
+                cfg,
+            );
+            units[u].metadata = m;
+            state[u] = State::Done;
+        }
+    }
+    Ok(())
 }
 
 /// Resolve a declared crate's external dep: the vendor unit when the
@@ -685,7 +881,9 @@ fn assign_host_profile(units: &mut [BuildUnit]) {
         }
     }
     for id in fixed {
-        units[id.index()].profile = UnitProfile::Host;
+        let unit = &mut units[id.index()];
+        unit.profile = UnitProfile::Host;
+        unit.settings.always_rustc = true;
     }
 }
 
@@ -880,25 +1078,27 @@ mod tests {
                 .unwrap()
                 .output_path
         };
+        let (hh, ch) = (units.get(h).metadata.short(), units.get(c).metadata.short());
+        assert_ne!(hh, ch, "host and target units must not share a hash");
         assert_eq!(
             path(h),
-            PathBuf::from("/proj/build/host/vendor-deps/bitflags/libbitflags.rlib")
+            PathBuf::from(format!("/proj/build/host/deps/libbitflags-{hh}.rlib"))
         );
         assert_eq!(
             path(c),
-            PathBuf::from(
-                "/proj/build/cross/x86_64-unknown-none/dev/vendor-deps/bitflags/libbitflags.rlib"
-            )
+            PathBuf::from(format!(
+                "/proj/build/cross/x86_64-unknown-none/dev/deps/libbitflags-{ch}.rlib"
+            ))
         );
         let key = |u| {
             units
                 .cache_key(u, &layout, &fx.model, &fx.resolved)
                 .unwrap()
         };
-        assert_eq!(key(h), "vendor:host:bitflags:1.2.3");
+        assert_eq!(key(h), format!("vendor:host:bitflags:1.2.3:{hh}"));
         assert_eq!(
             key(c),
-            "vendor:cross:bitflags:1.2.3:dev:x86_64-unknown-none"
+            format!("vendor:cross:bitflags:1.2.3:dev:x86_64-unknown-none:{ch}")
         );
     }
 
@@ -1007,29 +1207,53 @@ mod tests {
         assert_eq!(profile(tool_lib), UnitProfile::Active);
         assert_eq!(profile(kernel), UnitProfile::Active);
 
-        // Host-profile units keep the profile-independent directory;
-        // active-profile host units get the profile in their path and key.
-        let layout = BuildLayout::new("/proj/build", "demo");
+        // Host-profile units share the profile-independent `host/deps/`
+        // under every driver; active-profile host units get the profile
+        // in their path and key, and the driver root.
+        let check = BuildLayout::with_driver(
+            "/proj/build",
+            "demo",
+            crate::compile::driver::DriverKind::Check,
+        );
         let paths = |h| {
             units
-                .paths(units.unit_of(h).unwrap(), &layout, &fx.model, &fx.resolved)
+                .paths(units.unit_of(h).unwrap(), &check, &fx.model, &fx.resolved)
                 .unwrap()
         };
+        let short = |h| units.get(units.unit_of(h).unwrap()).metadata.short();
         assert_eq!(
             paths(derive).out_dir,
-            PathBuf::from("/proj/build/host/derive")
+            PathBuf::from("/proj/build/host/deps")
         );
         assert_eq!(
             paths(tool).output_path,
-            PathBuf::from("/proj/build/host/tool/dev/tool-gluon-tool")
+            PathBuf::from(format!(
+                "/proj/build/tool/check/host/profile/dev/deps/tool-{}",
+                short(tool)
+            ))
         );
         let key = |h| {
             units
-                .cache_key(units.unit_of(h).unwrap(), &layout, &fx.model, &fx.resolved)
+                .cache_key(units.unit_of(h).unwrap(), &check, &fx.model, &fx.resolved)
                 .unwrap()
         };
-        assert_eq!(key(derive), "crate:host:derive");
-        assert_eq!(key(tool), "crate:host:tool:dev");
+        assert_eq!(key(derive), format!("crate:host:derive:{}", short(derive)));
+        assert_eq!(
+            key(tool),
+            format!("crate:host:tool:dev:{}:check", short(tool))
+        );
+        assert!(
+            units
+                .get(units.unit_of(shared).unwrap())
+                .settings
+                .always_rustc
+        );
+        assert!(
+            !units
+                .get(units.unit_of(tool).unwrap())
+                .settings
+                .always_rustc
+        );
     }
 
     #[test]
@@ -1054,5 +1278,267 @@ mod tests {
         let units = fx.lower(&VendorBuildContext::new());
         assert_eq!(units.unit_of(gated), None);
         assert!(units.get(units.unit_of(kernel).unwrap()).deps.is_empty());
+    }
+
+    /// A change to one declared crate's fixture.
+    type Edit = dyn Fn(&mut Fixture, Handle<CrateDef>);
+
+    fn meta(units: &UnitGraph, h: Handle<CrateDef>) -> Metadata {
+        units.get(units.unit_of(h).unwrap()).metadata
+    }
+
+    /// Golden hashes. A change here changes every artifact name, so it
+    /// must be deliberate (bump the domain tag in `metadata.rs`).
+    #[test]
+    fn metadata_golden_values() {
+        let mut fx = Fixture::new();
+        let kernel = fx.add_crate("kernel", CrateType::Lib, false, &[]);
+        let mut vctx = VendorBuildContext::new();
+        let vid = vctx
+            .add(vendor_lib("bitflags", TargetSpec::Host, vec![]))
+            .unwrap();
+        let units = fx.lower(&vctx);
+        assert_eq!(meta(&units, kernel).short(), "dcf3e58fda78f19b");
+        assert_eq!(
+            units
+                .get(units.unit_of_vendor(vid).unwrap())
+                .metadata
+                .short(),
+            "9c70910fd504b049"
+        );
+        assert_eq!(
+            units.config_metadata(fx.target).unwrap().short(),
+            "ba66cb8d00a72b22"
+        );
+    }
+
+    #[test]
+    fn metadata_changes_with_identity_fields() {
+        let base = |edit: &dyn Fn(&mut Fixture, Handle<CrateDef>)| {
+            let mut fx = Fixture::new();
+            let h = fx.add_crate("kernel", CrateType::Lib, false, &[]);
+            edit(&mut fx, h);
+            meta(&fx.lower(&VendorBuildContext::new()), h)
+        };
+        let unchanged = base(&|_, _| {});
+        let edits: [(&str, &Edit); 4] = [
+            ("path", &|fx, h| {
+                fx.model.crates.get_mut(h).unwrap().path = "elsewhere/kernel".into()
+            }),
+            ("kind", &|fx, h| {
+                fx.model.crates.get_mut(h).unwrap().crate_type = CrateType::ProcMacro
+            }),
+            ("platform", &|fx, _| fx.resolved.crates[0].host = true),
+            ("config value", &|fx, _| {
+                fx.resolved
+                    .options
+                    .insert("LOG".into(), gluon_model::ResolvedValue::Bool(true));
+            }),
+        ];
+        for (what, edit) in edits {
+            assert_ne!(base(edit), unchanged, "{what} must change the hash");
+        }
+
+        // Vendored units: version and features.
+        let vendor = |version: &str, features: &[&str]| {
+            let mut b = vendor_lib("bitflags", TargetSpec::Host, vec![]);
+            b.crate_id.version = version.into();
+            b.features = features.iter().map(|f| f.to_string()).collect();
+            let mut vctx = VendorBuildContext::new();
+            let id = vctx.add(b).unwrap();
+            let units = Fixture::new().lower(&vctx);
+            units.get(units.unit_of_vendor(id).unwrap()).metadata
+        };
+        assert_ne!(vendor("1.2.3", &[]), vendor("1.2.4", &[]));
+        assert_ne!(vendor("1.2.3", &[]), vendor("1.2.3", &["std"]));
+        assert_eq!(
+            vendor("1.2.3", &["a", "b"]),
+            vendor("1.2.3", &["b", "a"]),
+            "feature order is not identity"
+        );
+    }
+
+    #[test]
+    fn metadata_ignores_content_fields() {
+        let base = |edit: &dyn Fn(&mut Fixture, Handle<CrateDef>)| {
+            let mut fx = Fixture::new();
+            let h = fx.add_crate("kernel", CrateType::Lib, false, &[]);
+            edit(&mut fx, h);
+            meta(&fx.lower(&VendorBuildContext::new()), h)
+        };
+        let unchanged = base(&|_, _| {});
+        let edits: [(&str, &Edit); 5] = [
+            ("cfg flags", &|fx, h| {
+                fx.model.crates.get_mut(h).unwrap().cfg_flags = vec!["x".into()]
+            }),
+            ("rustc flags", &|fx, h| {
+                fx.model.crates.get_mut(h).unwrap().rustc_flags =
+                    vec!["-Cforce-frame-pointers".into()]
+            }),
+            ("edition", &|fx, h| {
+                fx.model.crates.get_mut(h).unwrap().edition = "2024".into()
+            }),
+            ("profile", &|fx, _| {
+                fx.resolved.profile.name = "release".into();
+                fx.resolved.profile.opt_level = 3;
+            }),
+            ("project location", &|fx, _| {
+                fx.resolved.project_root = PathBuf::from("/moved");
+                fx.resolved.build_dir = PathBuf::from("/moved/build");
+            }),
+        ];
+        for (what, edit) in edits {
+            assert_eq!(base(edit), unchanged, "{what} must not change the hash");
+        }
+    }
+
+    #[test]
+    fn dep_identity_change_propagates_to_dependents() {
+        let hashes = |features: &[&str]| {
+            let mut fx = Fixture::new();
+            let (ext, _) = fx.model.external_deps.insert(
+                "bitflags".into(),
+                ExternalDepDef {
+                    name: "bitflags".into(),
+                    source: DepSource::CratesIo {
+                        version: "1".into(),
+                    },
+                    features: Vec::new(),
+                    default_features: true,
+                    cfg_flags: Vec::new(),
+                    rustc_flags: Vec::new(),
+                    target: TargetSpec::Cross(fx.target),
+                    span: None,
+                },
+            );
+            let lib = fx.add_crate(
+                "klib",
+                CrateType::Lib,
+                false,
+                &[("bitflags", DepResolution::External(ext))],
+            );
+            let kernel = fx.add_crate(
+                "kernel",
+                CrateType::Bin,
+                false,
+                &[("klib", DepResolution::Project(lib))],
+            );
+            let mut b = vendor_lib("bitflags", TargetSpec::Cross(fx.target), vec![]);
+            b.features = features.iter().map(|f| f.to_string()).collect();
+            let mut vctx = VendorBuildContext::new();
+            vctx.add(b).unwrap();
+            let units = fx.lower(&vctx);
+            (meta(&units, lib), meta(&units, kernel))
+        };
+        let (lib_a, kernel_a) = hashes(&[]);
+        let (lib_b, kernel_b) = hashes(&["serde"]);
+        assert_ne!(lib_a, lib_b);
+        assert_ne!(kernel_a, kernel_b);
+    }
+
+    #[test]
+    fn config_values_change_project_units_but_not_vendored_ones() {
+        let hashes = |log: bool| {
+            let mut fx = Fixture::new();
+            fx.resolved
+                .options
+                .insert("LOG".into(), gluon_model::ResolvedValue::Bool(log));
+            let kernel = fx.add_crate("kernel", CrateType::Lib, false, &[]);
+            let mut vctx = VendorBuildContext::new();
+            let vid = vctx
+                .add(vendor_lib("bitflags", TargetSpec::Cross(fx.target), vec![]))
+                .unwrap();
+            let units = fx.lower(&vctx);
+            (
+                meta(&units, kernel),
+                units.get(units.unit_of_vendor(vid).unwrap()).metadata,
+                units.config_metadata(fx.target).unwrap(),
+            )
+        };
+        let (k1, v1, c1) = hashes(false);
+        let (k2, v2, c2) = hashes(true);
+        assert_ne!(c1, c2);
+        assert_ne!(k1, k2);
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn dependency_cycle_is_a_lowering_error() {
+        let mut fx = Fixture::new();
+        let a = fx.add_crate("a", CrateType::Lib, false, &[]);
+        let b = fx.add_crate(
+            "b",
+            CrateType::Lib,
+            false,
+            &[("a", DepResolution::Project(a))],
+        );
+        fx.model.crates.get_mut(a).unwrap().deps.insert(
+            "b".into(),
+            DepDef {
+                version: None,
+                features: Vec::new(),
+                default_features: true,
+                optional: false,
+                resolution: DepResolution::Project(b),
+                span: None,
+            },
+        );
+        let err = lower(&fx.model, &fx.resolved, &VendorBuildContext::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cycle") && (msg.contains("a -> b -> a") || msg.contains("b -> a -> b")),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn cross_units_search_their_platform_and_the_host_deps() {
+        let mut fx = Fixture::new();
+        let kernel = fx.add_crate("kernel", CrateType::Bin, false, &[]);
+        let tool = fx.add_crate("tool", CrateType::Bin, true, &[]);
+        let units = fx.lower(&VendorBuildContext::new());
+        let check =
+            BuildLayout::with_driver("/b", "demo", crate::compile::driver::DriverKind::Check);
+        let dirs = |h| {
+            units
+                .search_dirs(units.unit_of(h).unwrap(), &check, &fx.model, &fx.resolved)
+                .unwrap()
+        };
+        assert_eq!(
+            dirs(kernel),
+            vec![
+                PathBuf::from("/b/cross/x86_64-unknown-none/dev/deps"),
+                PathBuf::from("/b/host/deps"),
+                PathBuf::from("/b/tool/check/cross/x86_64-unknown-none/dev/deps"),
+            ]
+        );
+        assert_eq!(
+            dirs(tool),
+            vec![
+                PathBuf::from("/b/host/deps"),
+                PathBuf::from("/b/tool/check/host/profile/dev/deps"),
+            ]
+        );
+        // Cross executables keep stable names in `final/`.
+        let p = units
+            .paths(
+                units.unit_of(kernel).unwrap(),
+                &check,
+                &fx.model,
+                &fx.resolved,
+            )
+            .unwrap();
+        assert_eq!(
+            p.output_path,
+            PathBuf::from("/b/tool/check/cross/x86_64-unknown-none/dev/final/kernel")
+        );
+        assert_eq!(p.extra_filename, None);
+        assert_eq!(
+            p.incremental_dir,
+            Some(PathBuf::from(format!(
+                "/b/tool/check/cross/x86_64-unknown-none/dev/incremental/kernel-{}",
+                meta(&units, kernel).short()
+            )))
+        );
     }
 }

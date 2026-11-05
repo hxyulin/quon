@@ -10,7 +10,7 @@
 //! adding a content-addressed store) only has to touch one file.
 
 use super::driver::DriverKind;
-use gluon_model::{CrateDef, ResolvedProfile, TargetDef};
+use gluon_model::{ResolvedProfile, TargetDef};
 use std::path::{Path, PathBuf};
 
 /// Pure path-arithmetic view of the gluon build directory.
@@ -25,17 +25,16 @@ use std::path::{Path, PathBuf};
 /// [`DriverKind`] so that `gluon check` and `gluon clippy` cannot
 /// clobber `gluon build` artifacts (and vice versa). Concretely:
 ///
-/// - `DriverKind::Rustc` (the default for `gluon build`) keeps the
-///   historical paths: `<root>/host/<crate>/`,
-///   `<root>/cross/<target>/<profile>/<crate>/`, etc.
+/// - `DriverKind::Rustc` (the default for `gluon build`) uses the
+///   build root: `<root>/cross/<target>/<profile>/deps/`, etc.
 /// - `DriverKind::Check` writes under `<root>/tool/check/...`.
 /// - `DriverKind::Clippy` writes under `<root>/tool/clippy/...`.
 ///
-/// **Sysroot, generated config crate, and the cache manifest are
-/// deliberately *not* partitioned.** The sysroot is built with regular
-/// rustc regardless of the user-facing driver, so re-running it for
-/// every check/clippy invocation would just waste time. The config
-/// crate is similarly driver-agnostic. The cache manifest can safely
+/// **Sysroot, generated config crate, fixed-host-profile units,
+/// vendored crates and the cache manifest are deliberately *not*
+/// partitioned.** They are built with plain rustc regardless of the
+/// user-facing driver, so re-running them for every check/clippy
+/// invocation would just waste time. The cache manifest can safely
 /// be shared because [`super::rustc::RustcCommandBuilder::hash`]
 /// already incorporates the program path and `--emit` kinds, so
 /// driver-specific entries cannot collide on key.
@@ -141,43 +140,45 @@ impl BuildLayout {
             .join("lib")
     }
 
-    /// Per-host-crate artifact directory.
-    ///
-    /// `gluon build`: `<root>/host/<crate>/`.
-    /// `gluon check`: `<root>/tool/check/host/<crate>/`.
-    /// `gluon clippy`: `<root>/tool/clippy/host/<crate>/`.
-    pub fn host_artifact_dir(&self, krate: &CrateDef) -> PathBuf {
-        self.user_crate_root().join("host").join(&krate.name)
+    /// Directory of the fixed-host-profile units (proc macros, their
+    /// deps, vendored host crates): `<root>/host/`. Holds `deps/` and
+    /// `incremental/`. Not partitioned by driver: these units are
+    /// compiled with plain rustc under every driver (see
+    /// `UnitSettings::always_rustc`).
+    pub fn host_dir(&self) -> PathBuf {
+        self.root.join("host")
     }
 
-    /// Artifact directory for a host crate that uses the active profile
-    /// (host tools, build-step runners): `<root>/host/<crate>/<profile>/`.
-    /// Each profile keeps its own copy, so switching back and forth does
-    /// not rebuild it. Proc macros and their deps use the fixed host
-    /// profile and [`Self::host_artifact_dir`].
-    pub fn host_profile_artifact_dir(
-        &self,
-        krate: &CrateDef,
-        profile: &ResolvedProfile,
-    ) -> PathBuf {
-        self.host_artifact_dir(krate).join(&profile.name)
+    /// Directory of the host units that use the active profile (host
+    /// tools, build-step runners): `<driver root>/host/profile/<profile>/`.
+    /// Each profile keeps its own copy, so switching back and forth
+    /// does not rebuild them. The `profile/` level keeps a profile
+    /// named `deps` from colliding with [`Self::host_dir`]'s children.
+    pub fn host_profile_dir(&self, profile: &ResolvedProfile) -> PathBuf {
+        self.user_crate_root()
+            .join("host")
+            .join("profile")
+            .join(&profile.name)
     }
 
-    /// Per-cross-crate artifact directory.
-    ///
-    /// `gluon build`: `<root>/cross/<target>/<profile>/<crate>/`.
-    /// `gluon check`/`clippy`: same path under `<root>/tool/<kind>/`.
-    pub fn cross_artifact_dir(
-        &self,
-        target: &TargetDef,
-        profile: &ResolvedProfile,
-        krate: &CrateDef,
-    ) -> PathBuf {
+    /// Directory of the declared cross units for a (target, profile)
+    /// pair: `<driver root>/cross/<target>/<profile>/`. Holds `deps/`,
+    /// `final/`, `esp/` and `incremental/`.
+    pub fn cross_dir(&self, target: &TargetDef, profile: &ResolvedProfile) -> PathBuf {
         self.user_crate_root()
             .join("cross")
             .join(&target.name)
             .join(&profile.name)
-            .join(&krate.name)
+    }
+
+    /// Like [`Self::cross_dir`] but always under the build root, for
+    /// cross units every driver compiles the same way: vendored crates
+    /// and the generated config crate.
+    pub fn shared_cross_dir(&self, target: &TargetDef, profile: &ResolvedProfile) -> PathBuf {
+        self.root
+            .join("cross")
+            .join(&target.name)
+            .join(&profile.name)
     }
 
     /// Final link/image output directory for a (target, profile) pair.
@@ -185,11 +186,7 @@ impl BuildLayout {
     /// `gluon build`: `<root>/cross/<target>/<profile>/final/`.
     /// `gluon check`/`clippy`: same path under `<root>/tool/<kind>/`.
     pub fn cross_final_dir(&self, target: &TargetDef, profile: &ResolvedProfile) -> PathBuf {
-        self.user_crate_root()
-            .join("cross")
-            .join(&target.name)
-            .join(&profile.name)
-            .join("final")
+        self.cross_dir(target, profile).join("final")
     }
 
     /// ESP assembly output directory for a named `EspDef` under the
@@ -255,16 +252,6 @@ impl BuildLayout {
             .join(format!("{}_config", self.project_name))
     }
 
-    /// Per-crate incremental compilation directory.
-    ///
-    /// `gluon build`: `<root>/incremental/<crate>/`.
-    /// `gluon check`/`clippy`: under `<root>/tool/<kind>/incremental/<crate>/`
-    /// — separate so the metadata-only and full-build incremental
-    /// state don't trample each other.
-    pub fn incremental_dir(&self, krate: &CrateDef) -> PathBuf {
-        self.user_crate_root().join("incremental").join(&krate.name)
-    }
-
     /// Cache file for the probed [`super::RustcInfo`]
     /// (`<root>/.rustc-info.json`).
     pub fn rustc_info_cache(&self) -> PathBuf {
@@ -275,45 +262,6 @@ impl BuildLayout {
     /// (`<root>/target-cfg.json`); see `manifest::platform`.
     pub fn target_cfg_cache(&self) -> PathBuf {
         self.root.join("target-cfg.json")
-    }
-
-    /// Per-crate output directory for a host-pinned vendored crate
-    /// (`<root>/host/vendor-deps/<crate>/`).
-    ///
-    /// Vendored crates are kept in a sibling tree (`vendor-deps/`)
-    /// rather than mixed into the user crate dir so a stray cargo run
-    /// or a user-declared crate named the same as a vendored one can't
-    /// trample its artifacts. `<crate>` is the cargo-normalised name
-    /// (hyphens → underscores) so the path matches what rustc emits
-    /// from `--crate-name`.
-    pub fn host_vendor_dep_dir(&self, cargo_target_name: &str) -> PathBuf {
-        self.user_crate_root()
-            .join("host")
-            .join("vendor-deps")
-            .join(cargo_target_name)
-    }
-
-    /// Per-crate output directory for a cross-target vendored crate
-    /// (`<root>/cross/<target>/<profile>/vendor-deps/<crate>/`).
-    ///
-    /// The `vendor-deps/` separation parallels [`Self::host_vendor_dep_dir`]
-    /// for cross builds. Profile-keyed because rustc invocations differ
-    /// per profile (opt level, debug info), even though cargo's
-    /// resolution itself is profile-agnostic — that means the same
-    /// vendored crate may be compiled twice, once per profile, when
-    /// consumers across profiles use it.
-    pub fn cross_vendor_dep_dir(
-        &self,
-        target: &TargetDef,
-        profile: &ResolvedProfile,
-        cargo_target_name: &str,
-    ) -> PathBuf {
-        self.user_crate_root()
-            .join("cross")
-            .join(&target.name)
-            .join(&profile.name)
-            .join("vendor-deps")
-            .join(cargo_target_name)
     }
 
     // -------- vendor paths (sub-project #3) --------
@@ -404,33 +352,6 @@ mod tests {
         }
     }
 
-    fn krate() -> CrateDef {
-        use gluon_model::{CrateType, TargetSpec};
-        use std::collections::BTreeMap;
-        CrateDef {
-            name: "kernel".into(),
-            path: String::new(),
-            edition: "2024".into(),
-            crate_type: CrateType::Lib,
-            target: TargetSpec::Host,
-            deps: BTreeMap::new(),
-            dev_deps: BTreeMap::new(),
-            features: Vec::new(),
-            root: None,
-            linker_script: None,
-            // The `layout` tests don't actually use `crate_def.group`,
-            // so a placeholder dangling handle is fine.
-            group: Handle::new(0),
-            is_project_crate: true,
-            cfg_flags: Vec::new(),
-            rustc_flags: Vec::new(),
-            requires_config: Vec::new(),
-            artifact_deps: Vec::new(),
-            artifact_env: BTreeMap::new(),
-            span: None,
-        }
-    }
-
     #[test]
     fn root_returned_verbatim() {
         assert_eq!(layout().root(), Path::new("/tmp/fake"));
@@ -477,18 +398,20 @@ mod tests {
     }
 
     #[test]
-    fn host_artifact_path() {
+    fn unit_platform_dirs() {
+        let l = layout();
+        assert_eq!(l.host_dir(), PathBuf::from("/tmp/fake/host"));
         assert_eq!(
-            layout().host_artifact_dir(&krate()),
-            PathBuf::from("/tmp/fake/host/kernel")
+            l.host_profile_dir(&profile()),
+            PathBuf::from("/tmp/fake/host/profile/debug")
         );
-    }
-
-    #[test]
-    fn cross_artifact_path() {
         assert_eq!(
-            layout().cross_artifact_dir(&target(), &profile(), &krate()),
-            PathBuf::from("/tmp/fake/cross/x86_64-test/debug/kernel")
+            l.cross_dir(&target(), &profile()),
+            PathBuf::from("/tmp/fake/cross/x86_64-test/debug")
+        );
+        assert_eq!(
+            l.shared_cross_dir(&target(), &profile()),
+            PathBuf::from("/tmp/fake/cross/x86_64-test/debug")
         );
     }
 
@@ -505,14 +428,6 @@ mod tests {
         assert_eq!(
             layout().generated_config_crate_dir(),
             PathBuf::from("/tmp/fake/generated/demo_config")
-        );
-    }
-
-    #[test]
-    fn incremental_path() {
-        assert_eq!(
-            layout().incremental_dir(&krate()),
-            PathBuf::from("/tmp/fake/incremental/kernel")
         );
     }
 
@@ -558,24 +473,6 @@ mod tests {
     }
 
     #[test]
-    fn host_vendor_dep_dir_uses_cargo_normalised_name() {
-        // proc-macro2 → proc_macro2 in the path so the dir matches what
-        // rustc emits from --crate-name.
-        assert_eq!(
-            layout().host_vendor_dep_dir("proc_macro2"),
-            PathBuf::from("/tmp/fake/host/vendor-deps/proc_macro2")
-        );
-    }
-
-    #[test]
-    fn cross_vendor_dep_dir_keys_on_target_profile_and_crate() {
-        assert_eq!(
-            layout().cross_vendor_dep_dir(&target(), &profile(), "bitflags"),
-            PathBuf::from("/tmp/fake/cross/x86_64-test/debug/vendor-deps/bitflags")
-        );
-    }
-
-    #[test]
     fn vendor_workspace_dir_shared_across_drivers() {
         // Vendoring is a build-tree-wide concern; check/clippy must
         // reuse the same scratch workspace that `gluon build` would.
@@ -609,20 +506,16 @@ mod tests {
     fn check_driver_namespaces_user_crate_dirs_under_tool_check() {
         let l = check_layout();
         assert_eq!(
-            l.host_artifact_dir(&krate()),
-            PathBuf::from("/tmp/fake/tool/check/host/kernel")
+            l.host_profile_dir(&profile()),
+            PathBuf::from("/tmp/fake/tool/check/host/profile/debug")
         );
         assert_eq!(
-            l.cross_artifact_dir(&target(), &profile(), &krate()),
-            PathBuf::from("/tmp/fake/tool/check/cross/x86_64-test/debug/kernel")
+            l.cross_dir(&target(), &profile()),
+            PathBuf::from("/tmp/fake/tool/check/cross/x86_64-test/debug")
         );
         assert_eq!(
             l.cross_final_dir(&target(), &profile()),
             PathBuf::from("/tmp/fake/tool/check/cross/x86_64-test/debug/final")
-        );
-        assert_eq!(
-            l.incremental_dir(&krate()),
-            PathBuf::from("/tmp/fake/tool/check/incremental/kernel")
         );
     }
 
@@ -630,24 +523,25 @@ mod tests {
     fn clippy_driver_namespaces_user_crate_dirs_under_tool_clippy() {
         let l = clippy_layout();
         assert_eq!(
-            l.host_artifact_dir(&krate()),
-            PathBuf::from("/tmp/fake/tool/clippy/host/kernel")
+            l.cross_dir(&target(), &profile()),
+            PathBuf::from("/tmp/fake/tool/clippy/cross/x86_64-test/debug")
         );
     }
 
     #[test]
-    fn rustc_driver_keeps_historical_paths() {
-        // Default `BuildLayout::new` must produce the same paths as
-        // before T3 — anything else would silently break gluon build.
-        let l = layout();
+    fn shared_dirs_ignore_the_driver() {
+        // Units every driver compiles the same way live under the
+        // build root, so `gluon check` reuses what `gluon build` made.
+        let rustc = layout();
+        let check = check_layout();
+        assert_eq!(rustc.host_dir(), check.host_dir());
         assert_eq!(
-            l.host_artifact_dir(&krate()),
-            PathBuf::from("/tmp/fake/host/kernel"),
-            "Rustc driver must keep historical layout"
+            rustc.shared_cross_dir(&target(), &profile()),
+            check.shared_cross_dir(&target(), &profile())
         );
-        assert_eq!(
-            l.cross_artifact_dir(&target(), &profile(), &krate()),
-            PathBuf::from("/tmp/fake/cross/x86_64-test/debug/kernel")
+        assert_ne!(
+            rustc.cross_dir(&target(), &profile()),
+            check.cross_dir(&target(), &profile())
         );
     }
 
@@ -678,17 +572,6 @@ mod tests {
             rustc.generated_config_crate_dir(),
             check.generated_config_crate_dir()
         );
-    }
-
-    #[test]
-    fn check_and_build_user_crate_dirs_do_not_collide() {
-        // The whole point of T3: running gluon check then gluon build
-        // (or vice versa) must not let one's `.rmeta` clobber the
-        // other's `.rlib` in the same directory.
-        let rustc = layout();
-        let check = check_layout();
-        let k = krate();
-        assert_ne!(rustc.host_artifact_dir(&k), check.host_artifact_dir(&k));
     }
 
     #[test]

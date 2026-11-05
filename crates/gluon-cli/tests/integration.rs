@@ -1120,18 +1120,8 @@ fn failed_build_keeps_records_of_finished_nodes() {
     );
 }
 
-/// Switching profiles does not rebuild the proc macro: proc macros use
-/// the fixed host profile and a profile-independent output path.
-/// Building `dev`, `release`, then `dev` again leaves its dylib
-/// untouched. (The config crate is shared by all profiles and still
-/// rebuilds in place on each switch.)
-#[test]
-#[ignore]
-fn profile_switch_does_not_rebuild_proc_macro() {
-    let Some(()) = require_rustc_or_skip("profile_switch_does_not_rebuild_proc_macro") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
+/// Add a `release` profile to the minimal fixture.
+fn add_release_profile(fixture: &Path) {
     let gluon_rs = fixture.join("gluon.rs");
     let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
     let script = script.replace(
@@ -1140,35 +1130,128 @@ fn profile_switch_does_not_rebuild_proc_macro() {
          .debug_info(false)\n        .boot_binary(\"kernel\");\n\n    cfg.qemu(",
     );
     fs::write(&gluon_rs, script).expect("write gluon.rs");
+}
+
+/// Write a shell script that logs every compile (any argv with
+/// `--crate-name`) to `log` and then runs the real rustc. Passed to
+/// the child `gluon` as `RUSTC`.
+#[cfg(unix)]
+fn rustc_spawn_logger(dir: &Path, log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("rustc --print sysroot")
+            .stdout,
+    )
+    .expect("utf-8 sysroot");
+    let real = Path::new(real.trim()).join("bin/rustc");
+    let script = dir.join("rustc-logger.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--crate-name*) echo \"$*\" >> '{}';; esac\nexec '{}' \"$@\"\n",
+            log.display(),
+            real.display()
+        ),
+    )
+    .expect("write rustc logger");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod logger");
+    script
+}
+
+/// Building `dev`, `release`, then `dev` again spawns no rustc on the
+/// last build: every unit, the config crate included, keeps one output
+/// per profile, and proc macros use the fixed host profile.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn profile_switch_back_spawns_no_rustc() {
+    let Some(()) = require_rustc_or_skip("profile_switch_back_spawns_no_rustc") else {
+        return;
+    };
+    let (tmp, fixture) = setup_fixture();
+    add_release_profile(&fixture);
+    let log = tmp.path().join("rustc-spawns.log");
+    let rustc = rustc_spawn_logger(tmp.path(), &log);
 
     let build = |profile: &str| {
+        let _ = fs::remove_file(&log);
         let out = gluon_command(&fixture)
             .args(["--profile", profile, "build"])
+            .env("RUSTC", &rustc)
             .output()
             .expect("spawn gluon build");
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(out.status.success(), "{profile} build failed:\n{stderr}");
-        stderr
-    };
-    let dylib_mtime = || {
-        let dylib = fixture.join("build/host/minimal_derive").join(format!(
-            "{}minimal_derive-gluon-minimal_derive.{}",
-            std::env::consts::DLL_PREFIX,
-            std::env::consts::DLL_EXTENSION
-        ));
-        fs::metadata(&dylib)
-            .and_then(|m| m.modified())
-            .unwrap_or_else(|e| panic!("mtime of {dylib:?}: {e}"))
+        fs::read_to_string(&log).unwrap_or_default()
     };
 
-    build("dev");
-    let before = dylib_mtime();
-    build("release");
-    assert_eq!(
-        dylib_mtime(),
-        before,
-        "release build rebuilt the proc macro"
+    assert!(!build("dev").is_empty(), "cold dev build spawned no rustc");
+    let release = build("release");
+    assert!(
+        !release.contains("--crate-name minimal_derive"),
+        "release build rebuilt the proc macro:\n{release}"
     );
-    build("dev");
-    assert_eq!(dylib_mtime(), before, "dev build rebuilt the proc macro");
+    let dev = build("dev");
+    assert!(
+        dev.is_empty(),
+        "switching back to dev spawned rustc:\n{dev}"
+    );
+}
+
+/// `gluon check` on a library that uses another library. Each checked
+/// library must hand its dependents something rustc can load as an
+/// extern (its `.rmeta`).
+#[test]
+#[ignore]
+fn gluon_check_library_using_library() {
+    let Some(()) = require_rustc_or_skip("gluon_check_library_using_library") else {
+        return;
+    };
+    let (_tmp, fixture) = setup_fixture();
+    for (name, src) in [
+        ("klib_base", "#![no_std]\npub const ANSWER: u32 = 42;\n"),
+        (
+            "klib_top",
+            "#![no_std]\npub fn answer() -> u32 {\n    klib_base::ANSWER\n}\n",
+        ),
+    ] {
+        let dir = fixture.join("crates").join(name).join("src");
+        fs::create_dir_all(&dir).expect("create lib dir");
+        fs::write(dir.join("lib.rs"), src).expect("write lib.rs");
+    }
+    let gluon_rs = fixture.join("gluon.rs");
+    let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
+    let script = script.replace(
+        "    cfg.emit()",
+        "    let mut libs = cfg.group(\"kernel_libs\").target(target).edition(\"2021\");\n    \
+         libs.add(\"klib_base\", \"crates/klib_base\");\n    \
+         libs.add(\"klib_top\", \"crates/klib_top\").dep(\"klib_base\", \"klib_base\");\n    \
+         drop(libs);\n\n    cfg.emit()",
+    );
+    // Only crates reachable from the kernel are part of the build.
+    let script = script.replace(
+        ".dep(\"minimal_derive\", \"minimal_derive\");",
+        ".dep(\"minimal_derive\", \"minimal_derive\")\n        .dep(\"klib_top\", \"klib_top\");",
+    );
+    fs::write(&gluon_rs, script).expect("write gluon.rs");
+    let main_rs = fixture.join("crates/kernel/src/main.rs");
+    let main = fs::read_to_string(&main_rs).expect("read main.rs");
+    fs::write(
+        &main_rs,
+        main.replace(
+            "let _ = HELLO;",
+            "let _ = HELLO;\n    let _ = klib_top::answer();",
+        ),
+    )
+    .expect("write main.rs");
+
+    let out = gluon_command(&fixture)
+        .arg("check")
+        .output()
+        .expect("spawn gluon check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "gluon check failed:\n{stderr}");
 }

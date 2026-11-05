@@ -23,10 +23,17 @@
 //! 9. feature cfgs, then the unit's cfg flags
 //! 10. `--cap-lints`, panic strategy, the unit's raw rustc flags
 //! 11. incremental directory, linker script, `-o` for raw binaries
-//! 12. `-C extra-filename`
+//! 12. `-C metadata`, then `-C extra-filename`
+//!
+//! ### Search paths
+//!
+//! Units of one platform share a `deps/` directory and carry their
+//! metadata hash in their file names, so one `-L dependency=` per
+//! platform directory lets rustc find every transitive crate: it looks
+//! them up by name and checks the hash recorded in the dependent. See
+//! [`crate::unit::UnitGraph::search_dirs`].
 
 use super::compile_crate::CompileUnitInput;
-use super::compile_utils::sanitise_crate_name;
 use super::{CompileCtx, Emit, HOST_DEBUG_INFO, HOST_OPT_LEVEL, RustcCommandBuilder};
 use crate::error::{Error, Result};
 use crate::unit::{BuildUnit, DepTarget, Platform, UnitOrigin, UnitPaths, UnitProfile};
@@ -40,8 +47,9 @@ pub(crate) struct UnitCommand {
     pub(crate) paths: UnitPaths,
     /// The path recorded in the cache and handed to dependents. The
     /// primary artifact, except under `gluon check` and `gluon clippy`,
-    /// where crates (other than proc macros) write no artifact and the
-    /// depfile stands in for it.
+    /// where libraries write only their `.rmeta` (which dependents
+    /// load) and executables write nothing, so their depfile stands
+    /// in.
     pub(crate) output_path: PathBuf,
 }
 
@@ -121,11 +129,7 @@ pub(crate) fn build_unit_command(
     if let (true, Platform::Cross(t)) = (unit.config_crate, unit.platform)
         && let Some(config_path) = artifacts.config_crate(t)
     {
-        let config_extern_name = resolved
-            .project
-            .config_crate_name
-            .clone()
-            .unwrap_or_else(|| sanitise_crate_name(&resolved.project.name) + "_config");
+        let config_extern_name = crate::generated::config_crate::config_crate_name(resolved);
         builder.extern_crate(&config_extern_name, config_path);
     }
 
@@ -145,7 +149,10 @@ pub(crate) fn build_unit_command(
     };
     builder.emit_with_dep_info_path(emit_override.unwrap_or(default_emit), &paths.depfile_path);
 
-    let mut search_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut search_dirs: BTreeSet<PathBuf> = units
+        .search_dirs(input.unit, layout, model, resolved)?
+        .into_iter()
+        .collect();
     for dep in &unit.deps {
         match &dep.target {
             DepTarget::Unit(d) => {
@@ -184,7 +191,7 @@ pub(crate) fn build_unit_command(
             }
         }
     }
-    collect_transitive_dirs(input, unit, &mut search_dirs)?;
+    collect_prebuilt_dirs(input, unit, &mut search_dirs);
     for dir in &search_dirs {
         builder.library_search_dependency(dir);
     }
@@ -248,11 +255,8 @@ pub(crate) fn build_unit_command(
         builder.raw_arg(flag.as_str());
     }
 
-    if unit.settings.incremental
-        && let UnitOrigin::Crate(h) = unit.origin
-        && let Some(def) = model.crates.get(h)
-    {
-        builder.incremental(&layout.incremental_dir(def));
+    if let Some(dir) = &paths.incremental_dir {
+        builder.incremental(dir);
     }
 
     if let Some(ls) = &unit.settings.linker_script {
@@ -265,16 +269,19 @@ pub(crate) fn build_unit_command(
         builder.raw_arg("-o").raw_arg(elf.as_os_str());
     }
 
+    builder
+        .raw_arg("-C")
+        .raw_arg(format!("metadata={}", unit.metadata.hex()));
     if let Some(extra) = &paths.extra_filename {
         builder
             .raw_arg("-C")
             .raw_arg(format!("extra-filename={extra}"));
     }
 
-    let output_path = if emit_override.is_some() {
-        paths.depfile_path.clone()
-    } else {
-        paths.output_path.clone()
+    let output_path = match (emit_override, &paths.rmeta_path) {
+        (None, _) => paths.output_path.clone(),
+        (Some(_), Some(rmeta)) => rmeta.clone(),
+        (Some(_), None) => paths.depfile_path.clone(),
     };
     Ok(UnitCommand {
         builder,
@@ -283,22 +290,19 @@ pub(crate) fn build_unit_command(
     })
 }
 
-/// Add the directory of every unit reachable through `unit`'s deps, for
-/// `-L dependency=<dir>`.
-///
-/// `--extern` covers only direct deps, but rustc also loads every crate
-/// recorded in a direct dep's metadata by name, so it needs a search
-/// path for the rest. Each unit has its own output directory, so this
-/// collects one entry per transitive dep.
+/// Add the search directories of every cargo-built prebuilt artifact
+/// reachable through `unit`'s deps. Prebuilt artifacts live outside the
+/// unit layout, so the platform `deps/` directories do not cover their
+/// own deps.
 ///
 /// The walk does not descend into a proc macro's deps: those are linked
-/// into the proc-macro dylib, and they are host units, whose directories
-/// must not appear on a cross unit's search path.
-fn collect_transitive_dirs(
+/// into the proc-macro dylib, and they are host artifacts, whose
+/// directories must not appear on a cross unit's search path.
+fn collect_prebuilt_dirs(
     input: &CompileUnitInput<'_>,
     unit: &BuildUnit,
     dirs: &mut BTreeSet<PathBuf>,
-) -> Result<()> {
+) {
     let units = input.units;
     let mut seen = BTreeSet::new();
     let mut stack: Vec<_> = unit
@@ -313,28 +317,18 @@ fn collect_transitive_dirs(
         if !seen.insert(id) {
             continue;
         }
-        let path = input.artifacts.unit(id).ok_or_else(|| {
-            Error::Compile(format!(
-                "{} ran before its transitive dep {} finished (scheduler bug)",
-                unit.name,
-                units.get(id).name,
-            ))
-        })?;
-        if let Some(parent) = path.parent() {
-            dirs.insert(parent.to_path_buf());
-        }
         let dep = units.get(id);
-        if dep.kind != CrateType::ProcMacro {
-            for d in &dep.deps {
-                match &d.target {
-                    DepTarget::Unit(u) => stack.push(*u),
-                    DepTarget::Prebuilt {
-                        search_dirs: more, ..
-                    } => dirs.extend(more.iter().cloned()),
-                    DepTarget::Missing { .. } => {}
-                }
+        if dep.kind == CrateType::ProcMacro {
+            continue;
+        }
+        for d in &dep.deps {
+            match &d.target {
+                DepTarget::Unit(u) => stack.push(*u),
+                DepTarget::Prebuilt {
+                    search_dirs: more, ..
+                } => dirs.extend(more.iter().cloned()),
+                DepTarget::Missing { .. } => {}
             }
         }
     }
-    Ok(())
 }

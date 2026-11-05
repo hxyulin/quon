@@ -188,8 +188,9 @@ sysroot crates included. Gluon parses that file (see `cache::depinfo`)
 into the `sources` slice for `FreshnessQuery` / `BuildRecord`.
 
 The binary dependencies matter because output paths are fixed by
-`-C extra-filename=-gluon-<name>`. A rebuilt dependency is written to
-the same path, so the dependent's argv hash does not change. Tracking
+`-C extra-filename=-<metadata hash>`, and the metadata hash covers a
+unit's identity, not its sources or flags. A rebuilt dependency is
+written to the same path, so the dependent's argv hash does not change. Tracking
 the dependency's file makes its new content invalidate the dependent.
 A dependency rebuilt to identical bytes passes the hash fallback and
 does not cascade.
@@ -216,7 +217,7 @@ out-dir → implicit-externs? → config-crate-extern? → emit →
 explicit-externs → dependency-search-dirs → proc-macro-extern? →
 opt-level → debug-info → lto? → feature-cfgs → cfg-flags →
 cap-lints? → panic-strategy? → extra-rustc-flags → incremental? →
-linker-script? → raw-binary-output? → extra-filename?
+linker-script? → raw-binary-output? → metadata → extra-filename?
 ```
 
 `?` marks tokens that appear only when applicable (host crates skip

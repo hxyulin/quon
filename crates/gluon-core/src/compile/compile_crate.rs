@@ -544,11 +544,25 @@ mod tests {
         let crate_def = model.crates.get(ch).unwrap();
         let cref = host_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
-        assert_eq!(key, "crate:host:demo");
+        assert_eq!(mask_hash(&key), "crate:host:demo:H");
+    }
+
+    /// Replace the 16-hex-digit metadata hash in a cache key with `H`.
+    fn mask_hash(key: &str) -> String {
+        key.split(':')
+            .map(|part| {
+                if part.len() == 16 && part.chars().all(|c| c.is_ascii_hexdigit()) {
+                    "H"
+                } else {
+                    part
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(":")
     }
 
     #[test]
-    fn build_cache_key_host_crate_with_check_driver_appends_suffix() {
+    fn build_cache_key_host_proc_macro_is_shared_by_drivers() {
         let mut model = BuildModel::default();
         let th = insert_target(
             &mut model,
@@ -569,7 +583,9 @@ mod tests {
         let crate_def = model.crates.get(ch).unwrap();
         let cref = host_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
-        assert_eq!(key, "crate:host:demo:check");
+        // Proc macros are built with plain rustc under every driver, so
+        // `gluon check` reuses the record `gluon build` wrote.
+        assert_eq!(mask_hash(&key), "crate:host:demo:H");
     }
 
     /// A host crate no proc macro depends on (a host tool) uses the
@@ -595,7 +611,7 @@ mod tests {
         let crate_def = model.crates.get(ch).unwrap();
         let key =
             build_cache_key(&layout, &model, &resolved, crate_def, &host_ref(ch, th)).unwrap();
-        assert_eq!(key, "crate:host:mktool:debug");
+        assert_eq!(mask_hash(&key), "crate:host:mktool:debug:H");
     }
 
     #[test]
@@ -620,7 +636,10 @@ mod tests {
         let cref = cross_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
         // Profile name comes from `make_profile` -> "debug".
-        assert_eq!(key, "crate:cross:kernel:debug:x86_64-unknown-none");
+        assert_eq!(
+            mask_hash(&key),
+            "crate:cross:kernel:debug:x86_64-unknown-none:H"
+        );
     }
 
     #[test]
@@ -645,7 +664,10 @@ mod tests {
         let crate_def = model.crates.get(ch).unwrap();
         let cref = cross_ref(ch, th);
         let key = build_cache_key(&layout, &model, &resolved, crate_def, &cref).unwrap();
-        assert_eq!(key, "crate:cross:kernel:debug:x86_64-unknown-none:clippy");
+        assert_eq!(
+            mask_hash(&key),
+            "crate:cross:kernel:debug:x86_64-unknown-none:H:clippy"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -730,11 +752,15 @@ mod tests {
         assert_eq!(args[crate_name_pos + 1], "my_lib");
 
         // The predicted output filename must match what rustc will write:
-        // `lib<NORMALIZED>-gluon-<NORMALIZED>.rlib`.
+        // `lib<NORMALIZED><extra-filename>.rlib`.
+        let extra = args
+            .iter()
+            .find_map(|a| a.strip_prefix("extra-filename="))
+            .expect("extra-filename flag missing");
         let output_name = output_path.file_name().unwrap().to_str().unwrap();
-        assert_eq!(output_name, "libmy_lib-gluon-my_lib.rlib");
+        assert_eq!(output_name, format!("libmy_lib{extra}.rlib"));
         let dep_name = depfile_path.file_name().unwrap().to_str().unwrap();
-        assert_eq!(dep_name, "my_lib-gluon-my_lib.d");
+        assert_eq!(dep_name, format!("my_lib{extra}.d"));
     }
 
     #[test]
@@ -1361,6 +1387,14 @@ mod tests {
         .unwrap();
         let argv_hash =
             crate::compile::compile_and_cache::rustc_cache_hash(&builder, &ctx_for_hash.rustc_info);
+        let cache_key = build_cache_key(
+            &ctx_for_hash.layout,
+            &model,
+            &resolved,
+            model.crates.get(ch).unwrap(),
+            &crate_ref,
+        )
+        .unwrap();
         drop(ctx_for_hash); // release the in-memory cache
 
         // Create the output file so output_path.exists() is true in is_fresh.
@@ -1370,9 +1404,6 @@ mod tests {
         // Pre-populate the manifest on disk with a matching BuildRecord.
         // Sources is empty because no depfile exists → sources_for_query is
         // also empty, so the set-comparison in is_fresh passes trivially.
-        // A host lib no proc macro depends on uses the active profile,
-        // whose name ("debug") is part of its key.
-        let cache_key = "crate:host:cached_crate:debug".to_string();
         {
             let mut cache = Cache::load(&manifest_path).0;
             cache
@@ -1414,7 +1445,7 @@ mod tests {
 
     /// Regression guard: cross Bin crates must NOT emit `-C extra-filename` or
     /// `-o`, and the output path must end with just the crate name (no
-    /// `-gluon-<name>` suffix). This exercises the special-case code in
+    /// metadata-hash suffix). This exercises the special-case code in
     /// `build_rustc_command` that keeps cross binary names clean.
     #[test]
     fn flag_assembly_cross_bin_omits_extra_filename_and_uses_out_dir_in_final() {
@@ -1466,7 +1497,7 @@ mod tests {
             "cross Bin must not emit -o, got: {args:?}"
         );
 
-        // Output should be at <cross_final_dir>/hello, not <...>/hello-gluon-hello.
+        // Output should be at <cross_final_dir>/hello, with no hash suffix.
         assert!(
             output_path.ends_with("hello"),
             "output path should end with crate name, got: {output_path:?}"
@@ -1742,7 +1773,7 @@ mod tests {
         let crate_ref = host_ref(ch, th);
         let artifacts = ArtifactMap::new();
 
-        let (builder, _, _) = build_rustc_command(
+        let (builder, output_path, _) = build_rustc_command(
             &ctx,
             &CompileCrateInput {
                 model: &model,
@@ -1771,6 +1802,20 @@ mod tests {
         assert!(
             !emit_arg.contains("link"),
             "DriverKind::Check should suppress link emit, got {emit_arg}"
+        );
+
+        // Dependents link against the `.rmeta`, the only file a checked
+        // library writes. Handing them the depfile breaks every
+        // library-to-library dependency under `gluon check`.
+        let extra = args
+            .iter()
+            .find_map(|a| a.strip_prefix("extra-filename="))
+            .expect("extra-filename flag missing");
+        assert_eq!(
+            output_path,
+            tmp.path()
+                .join("build/tool/check/host/profile/debug/deps")
+                .join(format!("liblib1{extra}.rmeta"))
         );
     }
 
@@ -2110,7 +2155,7 @@ mod tests {
         resolved: &ResolvedConfig,
         vctx: &VendorBuildContext,
         which: crate::vendor::cross::context::VendorBuildId,
-    ) -> (Vec<String>, PathBuf, PathBuf) {
+    ) -> (Vec<String>, PathBuf, PathBuf, String) {
         let units = lower(model, resolved, vctx).unwrap();
         let mut artifacts = ArtifactMap::new();
         for (id, unit) in units.iter() {
@@ -2133,6 +2178,10 @@ mod tests {
             args_as_strings(&cmd.builder),
             cmd.output_path,
             cmd.builder.rustc_path().to_path_buf(),
+            units
+                .get(units.unit_of_vendor(which).unwrap())
+                .metadata
+                .short(),
         )
     }
 
@@ -2165,7 +2214,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (args, output, program) = vendor_command(&ctx, &model, &resolved, &vctx, syn);
+        let (args, output, program, h16) = vendor_command(&ctx, &model, &resolved, &vctx, syn);
         assert_eq!(program, PathBuf::from("/usr/bin/rustc"));
         assert!(
             !args.iter().any(|a| a == "--target" || a == "--sysroot"),
@@ -2180,11 +2229,12 @@ mod tests {
             args.iter().any(|a| a.starts_with("--emit=link")),
             "{args:?}"
         );
+        // Shared with `gluon build`: the build root, not `tool/clippy/`.
         assert_eq!(
             output,
-            tmp.path()
-                .join("build/tool/clippy/host/vendor-deps/syn")
-                .join(crate::compile::compile_utils::proc_macro_file_name("syn"))
+            tmp.path().join("build/host/deps").join(
+                crate::compile::compile_utils::proc_macro_file_name(&format!("syn-{h16}"))
+            )
         );
     }
 
@@ -2223,7 +2273,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (args, output, _) = vendor_command(&ctx, &model, &resolved, &vctx, top);
+        let (args, output, _, h16) = vendor_command(&ctx, &model, &resolved, &vctx, top);
         assert!(
             args.iter().any(|a| a == "--target=x86_64-unknown-none"),
             "{args:?}"
@@ -2242,25 +2292,28 @@ mod tests {
             !args.iter().any(|a| a.contains("_config")),
             "vendored crates do not link the config crate: {args:?}"
         );
-        // Transitive deps are on the search path, except what is linked
-        // into the proc macro.
-        let search: Vec<&str> = args
+        // Transitive deps are found through the platform `deps/`
+        // directories: one for the target, one for the host.
+        let search: Vec<String> = args
             .windows(2)
             .filter(|w| w[0] == "-L")
-            .map(|w| w[1].as_str())
+            .map(|w| w[1].clone())
             .collect();
+        let build = tmp.path().join("build");
         assert_eq!(
             search,
             vec![
-                "dependency=/built/a",
-                "dependency=/built/b",
-                "dependency=/built/derive",
+                format!(
+                    "dependency={}",
+                    build.join("cross/x86/debug/deps").display()
+                ),
+                format!("dependency={}", build.join("host/deps").display()),
             ]
         );
+        assert!(args.iter().any(|a| a.starts_with("metadata=")), "{args:?}");
         assert_eq!(
             output,
-            tmp.path()
-                .join("build/cross/x86/debug/vendor-deps/top/libtop.rlib")
+            build.join(format!("cross/x86/debug/deps/libtop-{h16}.rlib"))
         );
     }
 }

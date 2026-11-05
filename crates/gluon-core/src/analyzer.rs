@@ -930,15 +930,27 @@ mod tests {
             .get("KERNEL_PATH")
             .and_then(Value::as_str)
             .expect("KERNEL_PATH must be present");
-        // The path must be the layout-derived future location of the
-        // kernel rlib. Cross lib → cross_artifact_dir, libname-gluon-name.rlib.
+        // The path must be the future location of the kernel rlib, as
+        // the unit table (and so the compile step) computes it.
+        let units = crate::unit::lower(
+            &model,
+            &resolved,
+            &crate::vendor::cross::context::VendorBuildContext::new(),
+        )
+        .unwrap();
+        let expected = units
+            .paths(
+                units.unit_of(kernel_h).unwrap(),
+                &layout(),
+                &model,
+                &resolved,
+            )
+            .unwrap()
+            .output_path;
+        assert_eq!(Path::new(kernel_path), expected);
         assert!(
-            kernel_path.contains("/cross/x86_64-unknown-none/dev/kernel/"),
-            "KERNEL_PATH should point at the layout-derived kernel dir, got: {kernel_path}"
-        );
-        assert!(
-            kernel_path.ends_with("/libkernel-gluon-kernel.rlib"),
-            "KERNEL_PATH should end at the deterministic rlib filename, got: {kernel_path}"
+            kernel_path.contains("/cross/x86_64-unknown-none/dev/deps/libkernel-"),
+            "KERNEL_PATH should point at the cross deps dir, got: {kernel_path}"
         );
 
         // The kernel crate itself has no artifact_env, so its env is empty.
