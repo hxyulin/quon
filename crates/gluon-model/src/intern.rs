@@ -10,7 +10,8 @@
 
 use crate::build_model::{
     BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, DepResolution,
-    EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef, PipelineStep, ProfileDef, TargetSpec,
+    DownloadDef, EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef, PipelineStep, ProfileDef,
+    TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
@@ -58,6 +59,7 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         config_options: raw.config_options,
         presets: raw.presets,
         qemu: raw.qemu,
+        downloads: raw.downloads,
         ..Default::default()
     };
 
@@ -83,7 +85,13 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         .bootloader
         .as_ref()
         .map(|b| intern_bootloader(b, &model.crates, &mut diags));
-    intern_esps(&raw.esps, &model.crates, &mut model.esps, &mut diags);
+    intern_esps(
+        &raw.esps,
+        &model.crates,
+        &model.downloads,
+        &mut model.esps,
+        &mut diags,
+    );
     intern_build_steps(
         &raw.build_steps,
         &model.crates,
@@ -422,6 +430,7 @@ fn intern_bootloader(
 fn intern_esps(
     raw: &Arena<RawEspDef>,
     crates: &Arena<CrateDef>,
+    downloads: &Arena<DownloadDef>,
     out: &mut Arena<EspDef>,
     diags: &mut Vec<InternDiagnostic>,
 ) {
@@ -448,6 +457,20 @@ fn intern_esps(
                         EspEntrySource::Crate(h)
                     }
                     RawEspSource::File(path) => EspEntrySource::File(path.clone()),
+                    RawEspSource::Download(name) => {
+                        let Some(h) = downloads.lookup(name) else {
+                            diags.push(
+                                InternDiagnostic::error(format!(
+                                    "esp(\"{}\").add_download: download '{}' is not declared \
+                                     (declare it with cfg.download(...) or cfg.limine(...))",
+                                    e.name, name
+                                ))
+                                .with_optional_span(e.span.clone()),
+                            );
+                            return None;
+                        };
+                        EspEntrySource::Download(h)
+                    }
                 };
                 Some(EspEntry {
                     source,
@@ -685,5 +708,44 @@ mod tests {
             ),
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn intern_resolves_esp_downloads_and_drops_undeclared_ones() {
+        let mut raw = fixture_with_target_and_profile();
+        raw.downloads.insert(
+            "limine/BOOTX64.EFI".into(),
+            DownloadDef {
+                name: "limine/BOOTX64.EFI".into(),
+                url: "https://example.com/BOOTX64.EFI".into(),
+                sha256: String::new(),
+                span: None,
+            },
+        );
+        let entry = |source| crate::raw_defs::RawEspEntry {
+            source,
+            dest_path: "x".into(),
+        };
+        raw.esps.insert(
+            "default".into(),
+            RawEspDef {
+                name: "default".into(),
+                entries: vec![
+                    entry(RawEspSource::Download("limine/BOOTX64.EFI".into())),
+                    entry(RawEspSource::Download("limine/BOOTIA32.EFI".into())),
+                ],
+                span: None,
+            },
+        );
+        let (model, diags) = intern(raw);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("limine/BOOTIA32.EFI"));
+        let esp = model
+            .esps
+            .get(model.esps.lookup("default").unwrap())
+            .unwrap();
+        let h = model.downloads.lookup("limine/BOOTX64.EFI").unwrap();
+        assert_eq!(esp.entries.len(), 1);
+        assert_eq!(esp.entries[0].source, EspEntrySource::Download(h));
     }
 }

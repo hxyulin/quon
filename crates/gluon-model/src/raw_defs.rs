@@ -242,6 +242,8 @@ pub enum RawEspSource {
     Crate(String),
     /// A host file, relative to the project root.
     File(String),
+    /// A pinned download, by name.
+    Download(String),
 }
 
 /// Raw form of [`crate::build_model::BuildStepDef`].

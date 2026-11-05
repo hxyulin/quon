@@ -509,6 +509,7 @@ fn error_message(e: &Error) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         Error::Io { path, source } => format!("I/O error at {}: {}", path.display(), source),
+        Error::Download { .. } => e.to_string(),
         // Run-path errors never reach the scheduler today; fall back to the
         // Display impl so they still render sensibly if they ever do.
         other @ (Error::NoBootBinary { .. }

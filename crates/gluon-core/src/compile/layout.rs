@@ -230,6 +230,13 @@ impl BuildLayout {
             .join(esp_name)
     }
 
+    /// Cache of pinned downloads: `<root>/downloads/`. Shared by every
+    /// driver and profile, since each file is keyed by its SHA-256.
+    /// See `crate::download`.
+    pub fn downloads_dir(&self) -> PathBuf {
+        self.root.join("downloads")
+    }
+
     /// Path of an image artifact (`<root>/images/<name>.img`).
     ///
     /// Image outputs are profile-agnostic: a single `image()` block in

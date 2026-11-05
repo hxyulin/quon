@@ -90,6 +90,42 @@ pub struct BuildModel {
     /// fine with `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qemu: Option<QemuDef>,
+    /// Pinned downloads (`cfg.download(...)`, `cfg.limine(...)`).
+    /// ESP and image entries refer to them by name.
+    #[serde(default)]
+    pub downloads: Arena<DownloadDef>,
+}
+
+/// A file fetched over HTTPS and checked against a pinned SHA-256.
+/// `gluon-core::download` fetches it the first time an ESP or image
+/// entry needs it and caches it under `build/downloads/<sha256>/`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DownloadDef {
+    pub name: String,
+    pub url: String,
+    /// Lowercase hex SHA-256 of the file. Empty means "not pinned
+    /// yet": the build fails and prints the fetched file's hash.
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl DownloadDef {
+    /// File name of the cached copy: the URL's last path segment, so
+    /// `build/downloads/` stays readable.
+    pub fn file_name(&self) -> &str {
+        let path = self.url.split(['?', '#']).next().unwrap_or_default();
+        match path.rsplit('/').next() {
+            Some(name) if !name.is_empty() && name != "." && name != ".." => name,
+            _ => "download",
+        }
+    }
+}
+
+impl Named for DownloadDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Project metadata.
@@ -789,6 +825,8 @@ pub enum ImageSource {
     File(String),
     /// An assembled ESP directory (by name).
     Esp(String),
+    /// A pinned download (see [`DownloadDef`]), by name.
+    Download(String),
 }
 
 /// Partition-table flavour. Sector 0 layout differs by variant — MBR
@@ -1105,6 +1143,8 @@ pub enum EspEntrySource {
     /// A host file, relative to the project root. Projects ship
     /// bootloader configuration files (such as `limine.conf`) this way.
     File(String),
+    /// A pinned download (see [`DownloadDef`]).
+    Download(Handle<DownloadDef>),
 }
 
 impl EspEntrySource {
@@ -1112,7 +1152,7 @@ impl EspEntrySource {
     pub fn crate_handle(&self) -> Option<Handle<CrateDef>> {
         match self {
             Self::Crate(h) => Some(*h),
-            Self::File(_) => None,
+            Self::File(_) | Self::Download(_) => None,
         }
     }
 }

@@ -22,6 +22,7 @@ pub enum StampSource {
     Crate { name: String },
     EspDir { name: String },
     File { path: String },
+    Download { name: String },
 }
 
 impl StampSource {
@@ -45,6 +46,11 @@ impl StampSource {
             StampSource::File { path } => {
                 let mut v = b"file\0".to_vec();
                 v.extend_from_slice(path.as_bytes());
+                v
+            }
+            StampSource::Download { name } => {
+                let mut v = b"download\0".to_vec();
+                v.extend_from_slice(name.as_bytes());
                 v
             }
         }

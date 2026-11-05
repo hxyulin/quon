@@ -104,6 +104,9 @@ pub enum Error {
     #[error("compile error: {0}")]
     Compile(String),
 
+    #[error("download '{name}': {message}")]
+    Download { name: String, message: String },
+
     #[error("profile '{profile}' has no boot_binary set — required by `gluon run`")]
     NoBootBinary { profile: String },
 

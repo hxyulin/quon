@@ -12,6 +12,7 @@ pub mod build_script;
 pub mod cache;
 pub mod compile;
 pub mod config;
+pub mod download;
 pub mod error;
 pub mod fmt;
 pub mod generated;

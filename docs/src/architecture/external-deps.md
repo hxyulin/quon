@@ -262,6 +262,35 @@ Both are standard for custom-sysroot flows. If the rust compiler
 ever stabilises sysroot building (unlikely soon), these can be
 removed.
 
+## Pinned downloads and curl
+
+**Where:** `download` (fetch and verify), `gluon-config`'s
+`Config::download` and `Config::limine`.
+**What we depend on:** a `curl` binary on `PATH`, and Limine's
+`v<version>-binary` tags at
+`https://raw.githubusercontent.com/Limine-Bootloader/Limine`.
+
+`cfg.download(name, url, sha256)` declares a file that ESP entries
+(`add_download`) and image entries (`add_entry_download`) can use.
+`cfg.limine(version).file(name, sha256)` builds the URL of a file in
+Limine's binary tag and declares it as `limine/<name>`. Nothing is
+fetched unless an entry uses a download.
+
+Gluon runs `curl --fail --location --proto =https,file` instead of
+linking an HTTP client: every supported host ships curl, and a TLS
+stack would cost more build time than the rest of `gluon-core`. The
+file goes to a temporary name in `build/downloads/<sha256>/`, is
+hashed, and is renamed into place only when the hash matches. The
+cached copy is hashed again on every use. An empty hash or a mismatch
+fails the build with the fetched file's hash in the message, so an
+upgrade is: change the version, empty the hash, build, check the
+source, and pin the printed hash.
+
+Limine moved its repository to Codeberg and later back to GitHub. The
+Codeberg repository is archived and its tags stop at 11.2.1, so the
+helper uses GitHub. Tags, unlike the `v<major>.x-binary` branches, do
+not move, and the pinned hash catches a tag that does.
+
 ## Summary table
 
 | Surface | Where | Breakage signal |
@@ -271,4 +300,5 @@ removed.
 | QEMU flags | `run::qemu_cmd`, `run::boot_mode` | argv golden tests diff |
 | OVMF system paths | `run::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
 | hadris-fat API | `image::fat` | compile error or image-hash test diff |
+| curl, Limine binary tags | `download`, `Config::limine` | `Error::Download` with both hashes |
 | FAT32 size minimum | `image::mod::compute_size_bytes` | image refuses to mount |

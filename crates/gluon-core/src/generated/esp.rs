@@ -1,7 +1,8 @@
 //! ESP assembly helper.
 //!
 //! An [`EspDef`] declares a list of `(source, dest_path)` pairs. A
-//! source is a crate's primary output or a host file. At build time,
+//! source is a crate's primary output, a host file, or a pinned
+//! download (fetched here through [`crate::download`]). At build time,
 //! after every referenced source crate has compiled, the `EspBuild`
 //! scheduler node calls [`ensure_esp`] to copy each source into the
 //! configured destination inside the ESP directory.
@@ -120,6 +121,19 @@ pub fn ensure_esp(
                     )));
                 }
                 (abs, path.as_str(), &b"file"[..])
+            }
+            EspEntrySource::Download(h) => {
+                let def = model.downloads.get(*h).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "scheduler: EspBuild('{}') download handle {h:?} not in model.downloads",
+                        esp.name
+                    ))
+                })?;
+                let (path, fetched) = crate::download::ensure_download(&ctx.layout, def)?;
+                if fetched {
+                    let _ = writeln!(stdout, "  Downloaded {} ({})", def.name, def.url);
+                }
+                (path, def.name.as_str(), &b"download"[..])
             }
         };
         entries.push(ResolvedEntry {

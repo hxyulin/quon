@@ -285,6 +285,7 @@ fn describe_source(s: &StampSource) -> String {
         StampSource::Crate { name } => format!("crate({name})"),
         StampSource::EspDir { name } => format!("esp({name})"),
         StampSource::File { path } => format!("file({path})"),
+        StampSource::Download { name } => format!("download({name})"),
     }
 }
 

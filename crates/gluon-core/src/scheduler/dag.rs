@@ -373,6 +373,8 @@ pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNo
                     // Host files exist before gluon runs; the image node
                     // checks their freshness itself.
                     ImageSource::File(_) => None,
+                    // Fetched by the image node itself.
+                    ImageSource::Download(_) => None,
                 })
                 .collect();
             // Raw writes of compiled crates (a boot sector or stage blob

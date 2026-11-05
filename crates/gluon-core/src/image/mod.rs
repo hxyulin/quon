@@ -378,6 +378,26 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
                     source_kind: StampSource::File { path: path.clone() },
                 });
             }
+            ImageSource::Download(name) => {
+                let def = ictx
+                    .model
+                    .downloads
+                    .lookup(name)
+                    .and_then(|h| ictx.model.downloads.get(h))
+                    .ok_or_else(|| {
+                        Error::Compile(format!(
+                            "image('{}') add_entry_download('{}', '{}'): download '{}' is not \
+                             declared (declare it with cfg.download(...) or cfg.limine(...))",
+                            image.name, name, entry.dest_path, name
+                        ))
+                    })?;
+                let (path, _) = crate::download::ensure_download(&ictx.ctx.layout, def)?;
+                out.push(ResolvedEntry {
+                    dest_path: entry.dest_path.clone(),
+                    source_path: path,
+                    source_kind: StampSource::Download { name: name.clone() },
+                });
+            }
         }
     }
     Ok(out)

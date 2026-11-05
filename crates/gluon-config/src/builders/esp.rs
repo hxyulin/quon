@@ -42,6 +42,17 @@ impl<'cfg> EspBuilder<'cfg> {
         self.push("add_file", RawEspSource::File(path.into()), dest_path)
     }
 
+    /// Append an ESP entry: copy the pinned download `name` (declared
+    /// with `cfg.download(...)` or `cfg.limine(...)`) to `dest_path`.
+    /// `dest_path` follows the rules of [`Self::add`].
+    pub fn add_download(self, name: &str, dest_path: &str) -> Self {
+        self.push(
+            "add_download",
+            RawEspSource::Download(name.into()),
+            dest_path,
+        )
+    }
+
     fn push(mut self, method: &str, source: RawEspSource, dest_path: &str) -> Self {
         if self.state.is_duplicate() {
             return self;

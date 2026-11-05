@@ -1,4 +1,6 @@
-use crate::build_model::{ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef, TargetDef};
+use crate::build_model::{
+    DownloadDef, ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef, TargetDef,
+};
 use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
@@ -46,6 +48,8 @@ pub struct RawBuildModel {
     pub build_steps: Arena<RawBuildStepDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qemu: Option<QemuDef>,
+    #[serde(default)]
+    pub downloads: Arena<DownloadDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
     /// `cfg.cargo_workspace(dir)`. Consumed by manifest expansion

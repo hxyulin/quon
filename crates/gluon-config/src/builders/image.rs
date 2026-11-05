@@ -81,6 +81,17 @@ impl<'cfg> ImageBuilder<'cfg> {
         self
     }
 
+    /// Append a pinned download (declared with `cfg.download(...)` or
+    /// `cfg.limine(...)`) to the image's flat filesystem.
+    pub fn add_entry_download(mut self, name: &str, dest_path: &str) -> Self {
+        let entry = ImageEntry {
+            source: ImageSource::Download(name.into()),
+            dest_path: dest_path.into(),
+        };
+        self.modify(|img| img.entries.push(entry));
+        self
+    }
+
     /// Append an assembled ESP entry to the image's flat filesystem.
     pub fn add_entry_esp(mut self, esp_name: &str, dest_path: &str) -> Self {
         let entry = ImageEntry {
