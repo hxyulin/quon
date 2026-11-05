@@ -1368,6 +1368,7 @@ mod tests {
                     sources: Vec::new(),
                     output_path: output_path.clone(),
                     env_deps: BTreeMap::new(),
+                    started_at: std::time::SystemTime::now(),
                 })
                 .expect("mark_built");
             cache.save().expect("save");

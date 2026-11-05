@@ -196,6 +196,7 @@ pub fn execute_build_step(
         cmd.env(k, v);
     }
 
+    let started_at = std::time::SystemTime::now();
     let output = cmd.output().map_err(|e| Error::Io {
         path: runner_path.to_path_buf(),
         source: e,
@@ -249,6 +250,7 @@ pub fn execute_build_step(
             sources,
             output_path: output_path.clone(),
             env_deps: BTreeMap::new(),
+            started_at,
         })?;
     }
 

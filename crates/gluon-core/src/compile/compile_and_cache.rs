@@ -208,6 +208,7 @@ pub(crate) fn compile_and_cache(
     };
 
     let mut cmd = builder.into_command();
+    let started_at = std::time::SystemTime::now();
     let output = cmd.output().map_err(|e| Error::Io {
         path: ctx.rustc_info.rustc_path.clone(),
         source: e,
@@ -262,6 +263,7 @@ pub(crate) fn compile_and_cache(
             output_path: output_path.clone(),
             // The values rustc saw, as it recorded them.
             env_deps: depinfo.env,
+            started_at,
         })?;
     }
 

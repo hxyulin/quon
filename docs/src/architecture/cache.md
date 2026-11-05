@@ -81,6 +81,15 @@ populate the hash, so the second touch also rebuilds*: the fallback
 would never actually kick in. Eager hashing costs one full read per
 build, which is dwarfed by the compile itself.
 
+`mark_built` runs after the tool exits, so it hashes the files as
+they are then, not as the tool read them. `BuildRecord::started_at`
+is the time just before the spawn. A source whose mtime is at or
+after it may have been edited during the build; `mark_built` records
+an unmatchable fingerprint for it (mtime 0, no hash), so the next
+build reruns the tool. Cargo uses the same rule. A filesystem with
+coarse mtimes can round an edit made during the build down to before
+`started_at`, which this does not catch.
+
 ## Atomic persistence
 
 `CacheManifest::save_atomic` writes the manifest using

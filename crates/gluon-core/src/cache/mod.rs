@@ -60,6 +60,10 @@ pub struct BuildRecord {
     pub output_path: PathBuf,
     /// Environment variables the build read and the values it saw.
     pub env_deps: BTreeMap<String, Option<String>>,
+    /// Wall-clock time just before the tool was spawned. A source whose
+    /// mtime is at or after this may have been edited while the tool
+    /// ran, so the tool may have read the old content.
+    pub started_at: SystemTime,
 }
 
 impl Cache {
@@ -220,6 +224,24 @@ impl Cache {
                 path: src.clone(),
                 source: e,
             })?;
+            // A source modified at or after the spawn may have been
+            // edited while the tool ran, so its current content is not
+            // necessarily what the tool read. Record a fingerprint that
+            // can never match (mtime 0, no hash) so the next check
+            // rebuilds. This is Cargo's rule too. Filesystems with coarse
+            // mtimes can round an edit made during the build down to
+            // before `started_at`; that window is not covered.
+            if mtime >= rec.started_at {
+                source_files.insert(
+                    src.clone(),
+                    FileFingerprint {
+                        mtime_ns: 0,
+                        size: meta.len(),
+                        sha256: None,
+                    },
+                );
+                continue;
+            }
             let mtime_ns = mtime
                 .duration_since(UNIX_EPOCH)
                 .map_err(|e| {
@@ -506,6 +528,7 @@ mod tests {
             sources,
             output_path: output,
             env_deps: BTreeMap::new(),
+            started_at: SystemTime::now(),
         }
     }
 
@@ -739,6 +762,26 @@ mod tests {
 
         let sources = vec![a.clone(), a];
         assert!(cache.is_fresh(&basic_query("k", argv, &sources, &out)));
+    }
+
+    #[test]
+    fn source_modified_during_build_is_stale() {
+        // The file's mtime is after the build started, so the compiler
+        // may have read an older version. Recording its current hash
+        // would mark the edit as built.
+        let fx = Fixture::new();
+        let out = fx.touch_output("a.rlib");
+        let argv = [14u8; 32];
+        let started_at = SystemTime::now() - Duration::from_secs(10);
+        let a = fx.write("a.rs", b"edited mid-build");
+
+        let mut cache = Cache::load(&fx.manifest_path).0;
+        let mut rec = record("k", argv, vec![a.clone()], out.clone());
+        rec.started_at = started_at;
+        cache.mark_built(rec).expect("mark");
+
+        let sources = vec![a];
+        assert!(!cache.is_fresh(&basic_query("k", argv, &sources, &out)));
     }
 
     #[test]
