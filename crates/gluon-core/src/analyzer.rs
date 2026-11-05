@@ -128,8 +128,12 @@ pub fn generate_rust_project_json(
         // Cross crates also depend on the generated config crate (the
         // DAG mirrors this — see scheduler::dag::build_dag rule 2).
         // Host crates do not.
+        // Manifest units link the config crate only in a group that
+        // asks for it, matching `unit::lower`.
+        let links_config = !cref.host
+            && (krate.cargo.is_none() || model.groups.get(krate.group).is_some_and(|g| g.config));
         let mut deps: Vec<Value> = Vec::new();
-        if !cref.host {
+        if links_config {
             deps.push(json!({
                 "name": "config",
                 "crate": CONFIG_CRATE_INDEX,
@@ -164,7 +168,15 @@ pub fn generate_rust_project_json(
         // itself to populate those. Duplicating them here would risk
         // diverging from rust-analyzer's own derivation on toolchain
         // updates and makes the JSON noisier for no benefit.
-        let cfg: Vec<String> = krate.cfg_flags.clone();
+        //
+        // Resolved features come first, as rustc receives them. They are
+        // empty for crates declared with `group.add`.
+        let cfg: Vec<String> = krate
+            .features
+            .iter()
+            .map(|f| format!("feature=\"{f}\""))
+            .chain(krate.cfg_flags.iter().cloned())
+            .collect();
 
         // --- target ---
         //
@@ -202,10 +214,15 @@ pub fn generate_rust_project_json(
         // emit. The user will see other crates indexed correctly and
         // can fix the offending declaration; failing the whole file
         // would leave the IDE blind.
-        let env_map: BTreeMap<String, String> = resolve_crate_env(krate, model, |h| {
+        let mut env_map: BTreeMap<String, String> = resolve_crate_env(krate, model, |h| {
             expected_crate_artifact_path(layout, model, resolved, h).ok()
         })
         .unwrap_or_default();
+        // Manifest units also get the `CARGO_*` env rustc sees, so
+        // `env!("CARGO_PKG_VERSION")` resolves in the editor.
+        if let Some(cargo) = &krate.cargo {
+            env_map.extend(cargo.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
         let env_json: serde_json::Map<String, Value> = env_map
             .into_iter()
             .map(|(k, v)| (k, Value::String(v)))
@@ -217,7 +234,9 @@ pub fn generate_rust_project_json(
             "deps": deps,
             "cfg": cfg,
             "env": Value::Object(env_json),
-            "is_workspace_member": true,
+            // Path dependencies outside the Cargo workspace are not
+            // members; every declared crate is.
+            "is_workspace_member": krate.cargo.is_none() || krate.is_project_crate,
             "is_proc_macro": krate.crate_type == CrateType::ProcMacro,
             "source": {
                 "include_dirs": [crate_dir.to_string_lossy()],
@@ -417,6 +436,7 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
         }
     }
 
@@ -740,6 +760,48 @@ mod tests {
         let cfg = json["crates"][1]["cfg"].as_array().unwrap();
         assert_eq!(cfg.len(), 1, "expected only user cfg_flags, got: {cfg:?}");
         assert_eq!(cfg[0], "feature=\"smp\"");
+    }
+
+    /// A manifest unit gets its feature cfgs, its `CARGO_*` env, and no
+    /// config crate dep when its group does not ask for one.
+    #[test]
+    fn manifest_unit_gets_features_env_and_no_config_dep() {
+        let (mut model, th) = make_fixture();
+        let (ch, _) = model.crates.insert(
+            "util".into(),
+            CrateDef {
+                name: "util".into(),
+                path: "crates/util".into(),
+                target: TargetSpec::Cross(th),
+                features: vec!["default".into(), "extra".into()],
+                cfg_flags: vec!["fast".into()],
+                is_project_crate: false,
+                cargo: Some(gluon_model::CargoUnitDef {
+                    rustc_name: "util".into(),
+                    env: BTreeMap::from([("CARGO_PKG_NAME".into(), "util".into())]),
+                    ..Default::default()
+                }),
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(
+            th,
+            vec![ResolvedCrateRef {
+                handle: ch,
+                target: th,
+                host: false,
+            }],
+        );
+        let info = Arc::new(fake_rustc_info(None));
+        let json = generate_rust_project_json(&model, &resolved, &layout(), &info);
+        let entry = &json["crates"][1];
+        assert_eq!(
+            entry["cfg"],
+            json!(["feature=\"default\"", "feature=\"extra\"", "fast"])
+        );
+        assert_eq!(entry["env"]["CARGO_PKG_NAME"], "util");
+        assert_eq!(entry["deps"], json!([]), "group `g` has config off");
+        assert_eq!(entry["is_workspace_member"], false);
     }
 
     #[test]

@@ -535,6 +535,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: BTreeMap::new(),
                 span: None,
+                cargo: None,
             },
         );
         let (h, _) = model.build_steps.insert(

@@ -2,6 +2,7 @@
 
 use crate::builders::BuilderState;
 use crate::config::Config;
+use crate::error::ConfigError;
 use gluon_model::{CrateType, Handle, RawCrateDef, RawDepDef};
 
 /// Chainable builder returned by [`crate::builders::GroupBuilder::add`].
@@ -22,8 +23,57 @@ impl<'cfg> CrateBuilder<'cfg> {
         }
     }
 
+    /// Whether this builder names a workspace package
+    /// ([`crate::builders::GroupBuilder::package`]).
+    fn is_package_root(&self) -> bool {
+        match &self.state {
+            BuilderState::Valid { state: handle, .. } => self
+                .cfg
+                .raw
+                .crates
+                .get(*handle)
+                .is_some_and(|c| c.manifest.is_some()),
+            BuilderState::Duplicate { .. } => false,
+        }
+    }
+
+    /// Reject a method that would duplicate what the package's
+    /// `Cargo.toml` says. Returns true when the method must not apply.
+    fn manifest_owns(&mut self, method: &str, what: &str) -> bool {
+        if !self.is_package_root() {
+            return false;
+        }
+        let name = self.state.name().to_string();
+        self.cfg.diagnostics.push(ConfigError::new(format!(
+            "`{method}` on package root '{name}': {what} come from the package's Cargo.toml"
+        )));
+        true
+    }
+
+    /// Reject a package-root-only method on a crate added with
+    /// `group.add(...)`. Returns true when the method must not apply.
+    fn needs_package_root(&mut self, method: &str) -> bool {
+        if self.state.is_duplicate() || self.is_package_root() {
+            return false;
+        }
+        let name = self.state.name().to_string();
+        self.cfg.diagnostics.push(ConfigError::new(format!(
+            "`{method}` on crate '{name}': only valid on a `group.package(...)` root"
+        )));
+        true
+    }
+
     /// Set the crate type (binary, library, proc-macro, etc.).
+    ///
+    /// On a package root only [`CrateType::RawBinary`] (and the no-op
+    /// [`CrateType::Bin`]) are accepted: they turn the package's bins
+    /// into flat binaries. Every other type comes from the manifest.
     pub fn crate_type(mut self, kind: CrateType) -> Self {
+        if !matches!(kind, CrateType::Bin | CrateType::RawBinary)
+            && self.manifest_owns("crate_type", "lib and bin targets")
+        {
+            return self;
+        }
         self.modify(|c| c.crate_type = kind);
         self
     }
@@ -31,8 +81,38 @@ impl<'cfg> CrateBuilder<'cfg> {
     /// Override the crate root source file (defaults to the crate type
     /// convention, e.g. `src/lib.rs` or `src/main.rs`).
     pub fn root(mut self, path: &str) -> Self {
+        if self.manifest_owns("root", "target source paths") {
+            return self;
+        }
         let p = path.to_string();
         self.modify(|c| c.root = Some(p));
+        self
+    }
+
+    /// Enable features on a package root, like `cargo build --features`.
+    pub fn features(mut self, features: &[&str]) -> Self {
+        if self.needs_package_root("features") {
+            return self;
+        }
+        self.modify(|c| {
+            if let Some(m) = &mut c.manifest {
+                m.features.extend(features.iter().map(|f| f.to_string()));
+            }
+        });
+        self
+    }
+
+    /// Do not enable the package root's `default` feature, like
+    /// `cargo build --no-default-features`.
+    pub fn no_default_features(mut self) -> Self {
+        if self.needs_package_root("no_default_features") {
+            return self;
+        }
+        self.modify(|c| {
+            if let Some(m) = &mut c.manifest {
+                m.default_features = false;
+            }
+        });
         self
     }
 
@@ -60,6 +140,9 @@ impl<'cfg> CrateBuilder<'cfg> {
     /// Add a dependency edge. `extern_name` is the key used in `--extern`
     /// flags; `crate_name` is the crate that provides the rlib.
     pub fn dep(mut self, extern_name: &str, crate_name: &str) -> Self {
+        if self.manifest_owns("dep", "dependencies") {
+            return self;
+        }
         let dep = RawDepDef {
             crate_name: crate_name.into(),
             ..Default::default()
@@ -83,6 +166,9 @@ impl<'cfg> CrateBuilder<'cfg> {
         crate_name: &str,
         configure: F,
     ) -> Self {
+        if self.manifest_owns("dep_with", "dependencies") {
+            return self;
+        }
         let key = extern_name.to_string();
         let cn = crate_name.to_string();
         self.modify(|c| {
@@ -145,6 +231,60 @@ impl<'cfg> CrateBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
+    use gluon_model::CrateType;
+
+    #[test]
+    fn package_root_rejects_methods_that_duplicate_the_manifest() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("k")
+            .target(t)
+            .package("hadron-acpi")
+            .dep("a", "a")
+            .dep_with("b", "b", |_| {})
+            .root("src/other.rs")
+            .crate_type(CrateType::ProcMacro)
+            .crate_type(CrateType::RawBinary);
+        let msgs: Vec<&str> = cfg.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            msgs,
+            vec![
+                "`dep` on package root 'hadron-acpi': dependencies come from the package's \
+                 Cargo.toml",
+                "`dep_with` on package root 'hadron-acpi': dependencies come from the \
+                 package's Cargo.toml",
+                "`root` on package root 'hadron-acpi': target source paths come from the \
+                 package's Cargo.toml",
+                "`crate_type` on package root 'hadron-acpi': lib and bin targets come from \
+                 the package's Cargo.toml",
+            ]
+        );
+        let h = cfg.raw.crates.lookup("hadron-acpi").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
+        assert!(k.deps.is_empty());
+        assert!(k.root.is_none());
+        assert_eq!(k.crate_type, CrateType::RawBinary);
+    }
+
+    #[test]
+    fn root_features_rejected_on_declared_crate() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("k")
+            .target(t)
+            .add("foo", "crates/foo")
+            .features(&["a"])
+            .no_default_features();
+        let msgs: Vec<&str> = cfg.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            msgs,
+            vec![
+                "`features` on crate 'foo': only valid on a `group.package(...)` root",
+                "`no_default_features` on crate 'foo': only valid on a `group.package(...)` \
+                 root",
+            ]
+        );
+    }
 
     #[test]
     fn cfg_flags_accumulate_in_order() {

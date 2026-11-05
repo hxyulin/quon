@@ -4,7 +4,7 @@ use crate::builders::BuilderState;
 use crate::builders::crate_::CrateBuilder;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{CrateType, Handle, RawCrateDef, RawGroupDef, TargetDef};
+use gluon_model::{CrateType, Handle, RawCrateDef, RawGroupDef, RawManifestRoot, TargetDef};
 
 /// Chainable builder returned by [`Config::group`].
 pub struct GroupBuilder<'cfg> {
@@ -85,6 +85,37 @@ impl<'cfg> GroupBuilder<'cfg> {
     /// Inherits `target` and `default_edition` from this group at the
     /// time of the call.
     pub fn add(&mut self, crate_name: &str, path: &str) -> CrateBuilder<'_> {
+        self.insert_crate(crate_name, path, None)
+    }
+
+    /// Build workspace package `name` for this group's target: its lib
+    /// and every bin whose required features are enabled.
+    ///
+    /// Dependencies, features, edition, lib and bin targets and lints
+    /// come from the package's `Cargo.toml` in the workspace named by
+    /// [`Config::cargo_workspace`]. The returned builder takes what
+    /// Cargo has no concept of (linker script, cfg and rustc flags,
+    /// `artifact_env`, `requires_config`, the raw-binary crate type)
+    /// and root features.
+    ///
+    /// The package's units are named after their lib or bin. The lib
+    /// keeps the package name unless a bin of the package has it, in
+    /// which case the lib is `<name>@lib`.
+    pub fn package(&mut self, name: &str) -> CrateBuilder<'_> {
+        let root = RawManifestRoot {
+            package: name.into(),
+            features: Vec::new(),
+            default_features: true,
+        };
+        self.insert_crate(name, "", Some(root))
+    }
+
+    fn insert_crate(
+        &mut self,
+        crate_name: &str,
+        path: &str,
+        manifest: Option<RawManifestRoot>,
+    ) -> CrateBuilder<'_> {
         // Propagate Duplicate state on the parent group.
         if self.state.is_duplicate() {
             let state = BuilderState::Duplicate {
@@ -132,6 +163,8 @@ impl<'cfg> GroupBuilder<'cfg> {
             requires_config: Vec::new(),
             artifact_deps: Vec::new(),
             artifact_env: Default::default(),
+            manifest,
+            cargo: None,
             span: None,
         };
 
@@ -270,6 +303,28 @@ mod tests {
         let group = cfg.raw.groups.get(h).unwrap();
         assert_eq!(group.crates, vec!["a".to_string(), "b".to_string()]);
         assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn package_inserts_manifest_root() {
+        let mut cfg = Config::new();
+        let t = cfg.target("x");
+        cfg.group("kernel")
+            .target(t)
+            .package("hadron-kernel")
+            .features(&["log"])
+            .no_default_features()
+            .linker_script("link.ld");
+        let h = cfg.raw.crates.lookup("hadron-kernel").unwrap();
+        let k = cfg.raw.crates.get(h).unwrap();
+        let root = k.manifest.as_ref().expect("package root");
+        assert_eq!(root.package, "hadron-kernel");
+        assert_eq!(root.features, vec!["log".to_string()]);
+        assert!(!root.default_features);
+        assert_eq!(k.path, "");
+        assert_eq!(k.linker_script.as_deref(), Some("link.ld"));
+        assert_eq!(k.group, "kernel");
+        assert!(cfg.diagnostics.is_empty(), "{:?}", cfg.diagnostics);
     }
 
     #[test]

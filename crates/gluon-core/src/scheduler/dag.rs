@@ -582,6 +582,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: std::collections::BTreeMap::new(),
                 span: None,
+                cargo: None,
             }
         }
 

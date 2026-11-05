@@ -261,6 +261,7 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
         };
         let (ch_a, _) = model
             .crates
@@ -360,6 +361,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: BTreeMap::new(),
                 span: None,
+                cargo: None,
             },
         );
         let (eh, _) = model.esps.insert(

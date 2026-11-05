@@ -111,7 +111,7 @@ pub fn compile_and_run(
         ))
     })?;
 
-    finalize(raw, project_root)
+    finalize(raw, project_root, build_dir, rustc_info)
 }
 
 /// Spawn the compiled script binary and capture its stdout. Stderr is
@@ -136,13 +136,19 @@ fn run_script_binary(bin: &Path) -> Result<Vec<u8>> {
 
 /// Final-stage transform: resolve `kconfig_includes` against the
 /// project root, merge their lowered options/presets into the raw
-/// model, run intern, and translate any intern diagnostics into
-/// gluon-core's [`Diagnostic`] type.
+/// model, expand Cargo workspace package roots into crates
+/// ([`crate::manifest::lower::expand`]), run intern, and translate any
+/// intern diagnostics into gluon-core's [`Diagnostic`] type.
 ///
 /// Mirrors `gluon-config/src/builders/config_option.rs` for cross-source
 /// duplicate detection so `.rs` and `.kconfig` users see the same
 /// diagnostic wording.
-fn finalize(mut raw: RawBuildModel, project_root: &Path) -> Result<BuildModel> {
+fn finalize(
+    mut raw: RawBuildModel,
+    project_root: &Path,
+    build_dir: &Path,
+    rustc_info: &RustcInfo,
+) -> Result<BuildModel> {
     // Drain the include list — it's a sidecar field that doesn't belong
     // in the final BuildModel and we don't want it accidentally
     // re-serialised downstream.
@@ -175,6 +181,20 @@ fn finalize(mut raw: RawBuildModel, project_root: &Path) -> Result<BuildModel> {
             }
             raw.presets.insert(name, preset);
         }
+    }
+
+    // Manifests are read here, on every run, not by the script binary:
+    // editing a Cargo.toml must not recompile gluon.rs, and the
+    // expansion can never be stale. The cfg probe cache is the same
+    // file the build layout names (`BuildLayout::target_cfg_cache`).
+    let warnings = crate::manifest::lower::expand(
+        &mut raw,
+        project_root,
+        rustc_info,
+        Some(&build_dir.join("target-cfg.json")),
+    )?;
+    for w in &warnings {
+        eprintln!("{w}");
     }
 
     let (model, intern_diags) = gluon_model::intern(raw);

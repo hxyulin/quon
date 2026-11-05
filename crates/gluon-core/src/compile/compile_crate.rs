@@ -504,6 +504,7 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
         }
     }
 

@@ -482,6 +482,7 @@ mod tests {
             artifact_deps: vec![],
             artifact_env: Default::default(),
             span: None,
+            cargo: None,
         };
         let (handle, _) = model.crates.insert("kernel".into(), crate_def);
         let artifact_path = tmp.path().join("build/cross/x86_64-test/debug/kernel");

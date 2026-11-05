@@ -1,0 +1,20 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+
+[dependencies]
+util = { workspace = true, features = ["extra"] }
+helpers = { package = "util-helpers", path = "../helpers" }
+fixture-derive = { path = "../derive" }
+
+[features]
+default = ["log"]
+log = []
+unused = []
+
+[lints]
+workspace = true

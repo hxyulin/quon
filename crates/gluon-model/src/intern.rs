@@ -165,6 +165,20 @@ fn intern_crates(
     // skipped entirely (with a diagnostic). Pass 2 silently skips crates
     // that didn't make it into `out`.
     for (_, c) in raw.iter() {
+        // Manifest expansion (gluon-core, before intern) replaces every
+        // package root with its units. A root that reaches intern has
+        // no source, edges or crate type to build from.
+        if let Some(m) = &c.manifest {
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "crate '{}' names workspace package '{}', but the Cargo workspace was \
+                     not expanded",
+                    c.name, m.package
+                ))
+                .with_optional_span(c.span.clone()),
+            );
+            continue;
+        }
         let Some(group) = groups.lookup(&c.group) else {
             diags.push(
                 InternDiagnostic::error(format!(
@@ -212,6 +226,7 @@ fn intern_crates(
                 requires_config: c.requires_config.clone(),
                 artifact_deps: c.artifact_deps.clone(),
                 artifact_env: c.artifact_env.clone(),
+                cargo: c.cargo.clone(),
                 span: c.span.clone(),
             },
         );
@@ -628,6 +643,41 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("unknown target 'nonexistent'")),
             "expected dangling-target diagnostic, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn intern_rejects_unexpanded_package_root() {
+        let mut raw = fixture_with_target_and_profile();
+        raw.groups.insert(
+            "k".into(),
+            RawGroupDef {
+                name: "k".into(),
+                target: "x86_64-unknown-none".into(),
+                ..Default::default()
+            },
+        );
+        raw.crates.insert(
+            "kernel".into(),
+            RawCrateDef {
+                name: "kernel".into(),
+                group: "k".into(),
+                manifest: Some(crate::raw_defs::RawManifestRoot {
+                    package: "kernel".into(),
+                    features: Vec::new(),
+                    default_features: true,
+                }),
+                ..Default::default()
+            },
+        );
+        let (model, diags) = intern(raw);
+        assert!(model.crates.lookup("kernel").is_none());
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains(
+                "names workspace package 'kernel', but the Cargo workspace was not expanded"
+            ),
+            "{diags:?}"
         );
     }
 }

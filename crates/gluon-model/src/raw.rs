@@ -2,8 +2,8 @@ use crate::build_model::{ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef,
 use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
-    RawBootloaderDef, RawBuildStepDef, RawCrateDef, RawEspDef, RawGroupDef, RawPipelineDef,
-    RawProfileDef,
+    RawBootloaderDef, RawBuildStepDef, RawCargoWorkspace, RawCrateDef, RawEspDef, RawGroupDef,
+    RawPipelineDef, RawProfileDef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -48,6 +48,10 @@ pub struct RawBuildModel {
     pub qemu: Option<QemuDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
+    /// `cfg.cargo_workspace(dir)`. Consumed by manifest expansion
+    /// before intern, like `kconfig_includes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_workspace: Option<RawCargoWorkspace>,
 }
 
 #[cfg(test)]

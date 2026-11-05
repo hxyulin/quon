@@ -373,8 +373,57 @@ pub struct CrateDef {
     /// referenced crate to `artifact_deps` so the DAG enforces ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_env: BTreeMap<String, String>,
+    /// Set on crates lowered from a Cargo manifest; `None` for crates
+    /// declared with `group.add(...)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo: Option<CargoUnitDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+}
+
+/// What a crate lowered from a Cargo manifest carries beyond a
+/// declared crate: the data rustc needs that Cargo would pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoUnitDef {
+    /// `--crate-name`: the lib name or bin name, `-` replaced by `_`.
+    /// The crate's `name` is the unit name (`syn@host`), which differs.
+    pub rustc_name: String,
+    pub package: CargoPackageDef,
+    /// Every feature the package declares, sorted, for
+    /// `--check-cfg cfg(feature, values(...))`.
+    pub declared_features: Vec<String>,
+    /// Extra `--check-cfg` arguments from
+    /// `[lints.rust.unexpected_cfgs] check-cfg = [...]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_cfg: Vec<String>,
+    /// Lint levels from `[lints]`, sorted by priority, then name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lints: Vec<CargoLint>,
+    /// `CARGO_PKG_*`, `CARGO_MANIFEST_*`, `CARGO_CRATE_NAME` and, where
+    /// they apply, `CARGO_PRIMARY_PACKAGE` and `CARGO_BIN_NAME`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+/// The package a manifest unit is built from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoPackageDef {
+    pub name: String,
+    pub version: String,
+    /// Manifest directory, relative to the project root when it lies
+    /// under it.
+    pub manifest_dir: String,
+}
+
+/// One `[lints]` entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoLint {
+    /// `rust`, `clippy` or `rustdoc`.
+    pub tool: String,
+    pub name: String,
+    /// `allow`, `warn`, `deny` or `forbid`.
+    pub level: String,
+    pub priority: i8,
 }
 
 /// Resolved dependency target. Project deps point to a sibling
@@ -1185,6 +1234,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: BTreeMap::new(),
                 span: None,
+                cargo: None,
             },
         );
         let (_, inserted) = m.esps.insert(
@@ -1234,6 +1284,7 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
         };
         c.artifact_env.insert("KERNEL_PATH".into(), "kernel".into());
         c.artifact_deps.push("kernel".into());
@@ -1305,6 +1356,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: BTreeMap::new(),
                 span: None,
+                cargo: None,
             },
         );
 

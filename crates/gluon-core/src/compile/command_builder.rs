@@ -20,7 +20,8 @@
 //! 6. `-L dependency=` directories, sorted
 //! 7. `--extern proc_macro` for proc macros
 //! 8. opt-level, debuginfo, LTO
-//! 9. feature cfgs, then the unit's cfg flags
+//! 9. feature cfgs, then the unit's cfg flags, then for manifest units
+//!    `--check-cfg` declarations and lint levels
 //! 10. `--cap-lints`, panic strategy, the unit's raw rustc flags
 //! 11. build-script output: `--cfg`, `--check-cfg`, `-l`, link args,
 //!     then `-L` for the link-search paths of the unit's closure
@@ -51,7 +52,8 @@ use crate::build_script::{LinkArg, LinkArgTarget};
 use crate::compile::extern_map::ArtifactLookup;
 use crate::error::{Error, Result};
 use crate::unit::{
-    BuildUnit, DepTarget, Platform, UnitGraph, UnitId, UnitOrigin, UnitPaths, UnitProfile,
+    BuildUnit, CargoSettings, DepTarget, Platform, UnitGraph, UnitId, UnitOrigin, UnitPaths,
+    UnitProfile,
 };
 use gluon_model::{CrateType, TargetDef};
 use std::collections::BTreeSet;
@@ -307,6 +309,10 @@ fn build_command(
     for flag in &unit.settings.cfg_flags {
         builder.cfg(flag);
     }
+    if let Some(cargo) = &unit.settings.cargo {
+        let clippy = driver == DriverKind::Clippy && !unit.settings.always_rustc;
+        push_cargo_settings(&mut builder, cargo, clippy);
+    }
     if unit.settings.cap_lints {
         builder.raw_arg("--cap-lints").raw_arg("allow");
     }
@@ -454,6 +460,40 @@ fn lint_paths(paths: &UnitPaths, unit: &BuildUnit, layout: &BuildLayout) -> Unit
         extra_filename: paths.extra_filename.clone(),
         incremental_dir: None,
         out_dir,
+    }
+}
+
+/// Append what Cargo passes for a manifest unit: `--check-cfg`
+/// declarations, lint levels, and the `CARGO_*` env. All of it lands in
+/// the argv or env, so the cache sees a change through the command
+/// hash.
+///
+/// `clippy::` lints go only to `clippy-driver` (`clippy` is true when
+/// the unit runs under it), the only driver that knows them;
+/// `rustdoc::` lints go nowhere, because Gluon never runs rustdoc.
+/// Cargo does the same.
+fn push_cargo_settings(builder: &mut RustcCommandBuilder, cargo: &CargoSettings, clippy: bool) {
+    for decl in &cargo.check_cfg {
+        builder.raw_arg("--check-cfg").raw_arg(decl.as_str());
+    }
+    for lint in &cargo.lints {
+        let name = match lint.tool.as_str() {
+            "rust" => lint.name.clone(),
+            "clippy" if clippy => format!("clippy::{}", lint.name),
+            _ => continue,
+        };
+        let flag = match lint.level.as_str() {
+            "allow" => "-A",
+            "warn" => "-W",
+            "deny" => "-D",
+            "forbid" => "-F",
+            // Manifest expansion rejects other levels.
+            _ => continue,
+        };
+        builder.raw_arg(flag).raw_arg(name);
+    }
+    for (k, v) in &cargo.env {
+        builder.env(k.as_str(), v.as_str());
     }
 }
 

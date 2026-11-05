@@ -19,8 +19,9 @@ pub use intern::{InternDiagnostic, intern};
 pub use kconfig::*;
 pub use raw::RawBuildModel;
 pub use raw_defs::{
-    RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef, RawEspDef,
-    RawEspEntry, RawGroupDef, RawPipelineDef, RawPipelineStep, RawProfileDef,
+    RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCargoWorkspace, RawCrateDef,
+    RawDepDef, RawEspDef, RawEspEntry, RawGroupDef, RawManifestRoot, RawPipelineDef,
+    RawPipelineStep, RawProfileDef,
 };
 pub use resolved::*;
 pub use source::SourceSpan;

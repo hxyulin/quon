@@ -6,7 +6,7 @@
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
-use crate::build_model::{BootMode, BootloaderKind, CrateType, default_true};
+use crate::build_model::{BootMode, BootloaderKind, CargoUnitDef, CrateType, default_true};
 use crate::handle::Named;
 use crate::kconfig::ConfigValue;
 use crate::source::SourceSpan;
@@ -150,8 +150,35 @@ pub struct RawCrateDef {
     pub artifact_deps: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_env: BTreeMap<String, String>,
+    /// Set by `group.package(...)`: this entry names a workspace
+    /// package. Manifest expansion replaces it with the package's
+    /// units before intern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<RawManifestRoot>,
+    /// Set by manifest expansion on the crates it lowers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo: Option<CargoUnitDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+}
+
+/// A workspace package named as a root in `gluon.rs`, like
+/// `cargo build -p <package> --features ...`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawManifestRoot {
+    pub package: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    #[serde(default = "default_true")]
+    pub default_features: bool,
+}
+
+/// `cfg.cargo_workspace(dir)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawCargoWorkspace {
+    /// Directory holding the workspace `Cargo.toml`, relative to the
+    /// project root.
+    pub dir: String,
 }
 
 impl Named for RawCrateDef {
@@ -431,6 +458,8 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
+            manifest: None,
         };
         c.deps.insert(
             "log".into(),

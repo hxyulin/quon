@@ -69,8 +69,8 @@ use crate::error::{Error, Result};
 use crate::vendor::cross::context::{VendorBuildContext, VendorBuildId};
 use crate::vendor::cross::metadata::CrateKind;
 use gluon_model::{
-    BuildModel, CrateDef, CrateType, DepResolution, ExternalArtifactKey, Handle, ResolvedConfig,
-    TargetDef, TargetSpec,
+    BuildModel, CargoLint, CargoUnitDef, CrateDef, CrateType, DepResolution, ExternalArtifactKey,
+    Handle, ResolvedConfig, TargetDef, TargetSpec,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -188,6 +188,54 @@ pub struct UnitSettings {
     /// need real rlibs) and for fixed-host-profile units (a proc macro
     /// links real rlibs of its deps).
     pub always_rustc: bool,
+    /// What Cargo would also pass. Set for manifest units only, so
+    /// declared crates' commands do not change.
+    pub cargo: Option<CargoSettings>,
+}
+
+/// Flags and env a manifest unit gets because Cargo passes them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CargoSettings {
+    /// `--check-cfg` values: `docsrs` and `test`, the declared
+    /// features, the `unexpected_cfgs` lint's `check-cfg` list, and one
+    /// per `cfg_flag` Gluon injects, so `unexpected_cfgs` warns only
+    /// about cfgs nobody declared.
+    pub check_cfg: Vec<String>,
+    /// `[lints]`, sorted by priority, then name.
+    pub lints: Vec<CargoLint>,
+    /// `CARGO_PKG_*`, `CARGO_MANIFEST_*`, `CARGO_CRATE_NAME`, and where
+    /// they apply `CARGO_PRIMARY_PACKAGE` and `CARGO_BIN_NAME`.
+    pub env: BTreeMap<String, String>,
+}
+
+/// Build a manifest unit's [`CargoSettings`]. `cfg_flags` are the
+/// unit's Gluon `cfg_flag`s, declared to `--check-cfg` so they do not
+/// trip `unexpected_cfgs`.
+fn cargo_settings(c: &CargoUnitDef, cfg_flags: &[String]) -> CargoSettings {
+    let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
+    // Cargo's own declarations: `docsrs` and `test` always, and every
+    // declared feature (an empty `values()` still declares the key).
+    let features: Vec<String> = c.declared_features.iter().map(|f| quote(f)).collect();
+    let mut check_cfg = vec![
+        "cfg(docsrs,test)".to_string(),
+        format!("cfg(feature, values({}))", features.join(", ")),
+    ];
+    check_cfg.extend(c.check_cfg.iter().cloned());
+    for flag in cfg_flags {
+        // `name` or `name="value"`, as `--cfg` takes them.
+        let decl = match flag.split_once('=') {
+            Some((name, value)) => {
+                format!("cfg({}, values({}))", name.trim(), value.trim())
+            }
+            None => format!("cfg({})", flag.trim()),
+        };
+        check_cfg.push(decl);
+    }
+    CargoSettings {
+        check_cfg,
+        lints: c.lints.clone(),
+        env: c.env.clone(),
+    }
 }
 
 /// One rustc invocation for a crate.
@@ -615,12 +663,15 @@ pub fn lower(
         } else {
             Platform::Cross(cref.target)
         };
-        let no_sysroot = model
-            .groups
-            .get(def.group)
-            .map(|g| g.no_sysroot)
-            .unwrap_or(false);
+        let group = model.groups.get(def.group);
+        let no_sysroot = group.map(|g| g.no_sysroot).unwrap_or(false);
         let links_sysroot = platform != Platform::Host && !no_sysroot;
+        // Manifest units link the config crate only in a group that asks
+        // for it, so workspace dependencies (in the synthetic `cargo:`
+        // groups) do not. Declared crates keep linking it whenever they
+        // link the sysroot.
+        let links_config =
+            links_sysroot && (def.cargo.is_none() || group.map(|g| g.config).unwrap_or(false));
         let crate_dir = resolved.project_root.join(&def.path);
         let src = match &def.root {
             Some(root) => crate_dir.join(root),
@@ -661,23 +712,40 @@ pub fn lower(
             .filter_map(|h| unit_of_crate.get(&h).copied())
             .collect();
 
+        let (crate_name, package) = match &def.cargo {
+            Some(c) => (
+                c.rustc_name.clone(),
+                PackageKey {
+                    name: c.package.name.clone(),
+                    version: c.package.version.clone(),
+                    source: PackageSource::Path(PathBuf::from(&c.package.manifest_dir)),
+                },
+            ),
+            None => (
+                normalize_crate_name(&def.name).into_owned(),
+                PackageKey {
+                    name: def.name.clone(),
+                    version: "0.0.0".into(),
+                    source: PackageSource::Path(PathBuf::from(&def.path)),
+                },
+            ),
+        };
+
         units.push(BuildUnit {
             name: def.name.clone(),
-            crate_name: normalize_crate_name(&def.name).into_owned(),
+            crate_name,
             origin: UnitOrigin::Crate(cref.handle),
-            package: PackageKey {
-                name: def.name.clone(),
-                version: "0.0.0".into(),
-                source: PackageSource::Path(PathBuf::from(&def.path)),
-            },
+            package,
             kind: def.crate_type,
             platform,
             profile: UnitProfile::Active,
             sysroot: links_sysroot,
-            config_crate: links_sysroot,
+            config_crate: links_config,
             src,
             edition: def.edition.clone(),
-            features: Vec::new(),
+            // Empty for declared crates; resolved features for manifest
+            // units.
+            features: def.features.clone(),
             deps,
             order_deps,
             settings: UnitSettings {
@@ -691,6 +759,10 @@ pub fn lower(
                     .map(|ls| resolved.project_root.join(ls)),
                 incremental: true,
                 always_rustc: false,
+                cargo: def
+                    .cargo
+                    .as_ref()
+                    .map(|c| cargo_settings(c, &def.cfg_flags)),
             },
             metadata: Metadata::default(),
         });
@@ -763,15 +835,18 @@ pub fn lower(
     })
 }
 
-/// Config crate hash for every target that has a unit linking it. The
-/// source is rendered only when some unit needs it, so a build without
-/// a config crate never fails on a config-option name collision.
+/// Config crate hash for every target that has a unit linking it, and
+/// for the profile's target, whose config crate the DAG builds
+/// unconditionally (a manifest project whose units all sit in groups
+/// without `config(true)` links none). A rendering error, such as a
+/// config-option name collision, fails lowering only when some unit
+/// links the config crate.
 fn config_crate_hashes(
     units: &[BuildUnit],
     model: &BuildModel,
     resolved: &ResolvedConfig,
 ) -> Result<BTreeMap<Handle<TargetDef>, Metadata>> {
-    let targets: BTreeSet<Handle<TargetDef>> = units
+    let linked: BTreeSet<Handle<TargetDef>> = units
         .iter()
         .filter(|u| u.config_crate)
         .filter_map(|u| match u.platform {
@@ -779,10 +854,13 @@ fn config_crate_hashes(
             Platform::Host => None,
         })
         .collect();
-    if targets.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let source = crate::generated::config_crate::render_source(resolved)?;
+    let mut targets = linked.clone();
+    targets.insert(resolved.profile.target);
+    let source = match crate::generated::config_crate::render_source(resolved) {
+        Ok(s) => s,
+        Err(_) if linked.is_empty() => return Ok(BTreeMap::new()),
+        Err(e) => return Err(e),
+    };
     let name = crate::generated::config_crate::config_crate_name(resolved);
     targets
         .into_iter()
@@ -1100,6 +1178,7 @@ mod tests {
                     artifact_deps: Vec::new(),
                     artifact_env: BTreeMap::new(),
                     span: None,
+                    cargo: None,
                 },
             );
             self.resolved.crates.push(ResolvedCrateRef {

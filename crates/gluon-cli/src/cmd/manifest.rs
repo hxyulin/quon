@@ -1,5 +1,6 @@
 //! `gluon manifest`: print what Gluon reads from a Cargo workspace and
-//! how it resolves features. Builds do not use this yet.
+//! how it resolves features. Builds resolve the workspace named by
+//! `cfg.cargo_workspace` the same way, for the roots in `gluon.rs`.
 
 use crate::cli::{ManifestArgs, ManifestCommand, ManifestUnitsArgs};
 use anyhow::{Context, Result, bail};

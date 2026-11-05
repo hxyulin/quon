@@ -746,6 +746,7 @@ mod tests {
                 artifact_deps: Vec::new(),
                 artifact_env: BTreeMap::new(),
                 span: None,
+                cargo: None,
             },
         );
         resolved.crates.push(gluon_model::ResolvedCrateRef {
@@ -1114,6 +1115,7 @@ mod tests {
             artifact_deps: Vec::new(),
             artifact_env: BTreeMap::new(),
             span: None,
+            cargo: None,
         };
         let (crate_handle, _) = model.crates.insert("hello".into(), crate_def);
 

@@ -689,6 +689,25 @@ impl Config {
         crate::builders::DependencyBuilder { cfg: self, state }
     }
 
+    /// Name the Cargo workspace whose packages `group.package(...)`
+    /// builds. `dir` holds the workspace `Cargo.toml` and is relative
+    /// to the project root. At most one per project.
+    ///
+    /// Like [`Self::include_kconfig`], nothing is read here: Gluon reads
+    /// the manifests on every run, after `gluon.rs` has run, so editing
+    /// a `Cargo.toml` does not recompile `gluon.rs`.
+    pub fn cargo_workspace(&mut self, dir: &str) {
+        if let Some(prev) = &self.raw.cargo_workspace {
+            self.diagnostics
+                .push(crate::error::ConfigError::new(format!(
+                    "cargo_workspace is declared more than once (\"{}\" and \"{dir}\")",
+                    prev.dir
+                )));
+            return;
+        }
+        self.raw.cargo_workspace = Some(gluon_model::RawCargoWorkspace { dir: dir.into() });
+    }
+
     /// Record a `.kconfig` file path for host-side parsing.
     ///
     /// The file is **not parsed here** — `gluon-config` cannot depend on
@@ -727,6 +746,20 @@ mod tests {
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert!(de.project.is_none());
         assert!(de.kconfig_includes.is_empty());
+    }
+
+    #[test]
+    fn cargo_workspace_is_recorded_once() {
+        let mut cfg = Config::new();
+        cfg.cargo_workspace(".");
+        cfg.cargo_workspace("other");
+        assert_eq!(cfg.raw.cargo_workspace.as_ref().unwrap().dir, ".");
+        assert_eq!(cfg.diagnostics.len(), 1);
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("cargo_workspace is declared more than once")
+        );
     }
 }
 

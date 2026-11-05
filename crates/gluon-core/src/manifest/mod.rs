@@ -7,11 +7,13 @@
 //!   a [`sources::RegistrySources`] map).
 //! - [`platform`] probes target cfgs and matches `[target.'...']` keys.
 //! - [`resolve`] resolves features per domain into a [`UnitGraph`].
+//! - [`lower`] expands `group.package(...)` roots in the raw build
+//!   model into crates, before intern.
 //!
-//! Builds do not use this module yet; `gluon manifest` prints what it
-//! reads.
+//! `gluon manifest` prints what the loader and resolver produce.
 
 pub mod lock;
+pub mod lower;
 pub mod platform;
 pub mod resolve;
 pub mod schema;

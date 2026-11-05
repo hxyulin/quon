@@ -1,0 +1,24 @@
+# Cargo workspace built end to end by `gluon build` (see gluon.rs).
+# Path dependencies only: registry dependencies need manifest stage 4.
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.3.1"
+edition = "2021"
+authors = ["Gluon Tests", "Second Author"]
+description = "manifest build fixture"
+license = "MIT"
+
+[workspace.dependencies]
+util = { path = "crates/util", default-features = false }
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+missing_debug_implementations = { level = "allow", priority = -1 }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fixture_cfg)"] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
