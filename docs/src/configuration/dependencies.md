@@ -99,6 +99,32 @@ gluon vendor --offline    # No network access (lockfile must exist)
 4. On subsequent builds, Gluon automatically registers vendored crates into the
    build model and compiles them with `rustc` alongside your project crates.
 
+### Build scripts
+
+A dependency built for a cross target (`.target(kernel)`) is compiled by
+Gluon with `rustc`, and so is every crate in its closure. When one of those
+crates has a build script (`build.rs`), Gluon compiles the script for the
+host, runs it with the environment Cargo gives scripts, and applies its
+`cargo:` directives (`rustc-cfg`, `rustc-env`, `rustc-link-lib`, `OUT_DIR`
+and the rest) to the crate's `rustc` command.
+
+- A script configuring a crate built for the target sees `TARGET` set to
+  that target, and `CARGO_ENCODED_RUSTFLAGS` includes Gluon's sysroot, so a
+  probe that compiles a test file sees the same `core` the crate links.
+- Proc macros, build scripts and their dependencies are host units with
+  a fixed host profile (`opt-level=0`, no debuginfo).
+- A script reruns when a path it named with `rerun-if-changed`, a variable
+  it named with `rerun-if-env-changed`, the script itself or the toolchain
+  changes. A script that names no input reruns when any file in its package
+  changes.
+- Warnings from these scripts are shown with `gluon -v` only, as Cargo hides
+  warnings from dependencies.
+
+Outputs live next to the other host and target units:
+`build/host/build/<package>-<hash>/` holds a compiled script, and
+`build/{host,cross/<target>/<profile>}/build/<package>-<hash>/` holds a run,
+with `out/` (the script's `OUT_DIR`) and `output` (its stdout).
+
 ### Version control
 
 The `gluon.lock` file should be committed to version control. This ensures that

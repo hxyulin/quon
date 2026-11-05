@@ -14,12 +14,13 @@
 //!   declared deps) and follows normal edges, stopping at proc macros.
 //!   Each crate in it gets a [`TargetSpec::Cross`] unit.
 //! - The **host closure** holds every proc macro reached from either
-//!   closure and every dep of a host unit. Each crate in it gets a
-//!   [`TargetSpec::Host`] unit.
+//!   closure, every build-dependency of a placed crate with a build
+//!   script, and every normal dep of a host unit. Each crate in it gets
+//!   a [`TargetSpec::Host`] unit.
 //!
 //! A crate in both closures (for example `memchr` used by a kernel crate
 //! and by a proc macro) gets two units. Crates reached by neither, such
-//! as those only behind dropped build or dev edges, get none.
+//! as those only behind dev edges, get none.
 //!
 //! An edge from a unit to a proc macro points at the host unit. Every
 //! other edge stays on the parent's platform.
@@ -33,13 +34,12 @@
 //! (`serde` with `std` on host only) gets the union on both platforms,
 //! which can break a `no_std` target build.
 //!
-//! # Build scripts are rejected
+//! # Build scripts
 //!
-//! Any placed crate with `has_build_script == true` produces a hard
-//! error naming the offender and the consumer chain that pulled it in
-//! (root → … → offender), so the user can see which declared dep is
-//! responsible. All offenders are collected in one pass and reported
-//! together, so the user does not have to fix them one at a time.
+//! Each unit of a crate with a build script carries a
+//! [`VendorBuildScript`]: the script, its build-dep edges (always to
+//! host units), and the package metadata. `crate::unit::lower` turns
+//! it into a script unit and one run per owning unit.
 //!
 //! No I/O happens here: [`build_vendor_nodes`] is a pure function over
 //! the parsed graph, which keeps it cheap to test against synthetic
@@ -51,6 +51,7 @@ use std::path::PathBuf;
 use gluon_model::TargetSpec;
 
 use super::metadata::{CrateId, CrateKind, ResolvedGraph};
+use crate::build_script::PackageInfo;
 
 /// One vendored crate's scheduler-node descriptor.
 ///
@@ -75,6 +76,18 @@ pub struct VendorCrateBuild {
     pub edition: String,
     pub features: Vec<String>,
     pub deps: Vec<VendorDepEdge>,
+    /// Set when the package has a build script that runs for this unit.
+    pub build_script: Option<VendorBuildScript>,
+}
+
+/// The build script of a [`VendorCrateBuild`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VendorBuildScript {
+    pub path: PathBuf,
+    pub edition: String,
+    /// Build-dep edges. Every target is [`TargetSpec::Host`].
+    pub build_deps: Vec<VendorDepEdge>,
+    pub package: PackageInfo,
 }
 
 /// One outgoing dep edge with its post-lowering target. The `target`
@@ -87,68 +100,20 @@ pub struct VendorDepEdge {
     pub target: TargetSpec,
 }
 
-/// One offender's identity plus the chain of crates that pulled it in.
-///
-/// `consumer_chain[0]` is always a graph root (a user-declared
-/// `external_dep`); `consumer_chain.last()` is always the offender
-/// itself. For an offender that *is* a root, the chain has length 1.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuildScriptOffender {
-    pub crate_id: CrateId,
-    pub consumer_chain: Vec<CrateId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum GraphError {
-    /// One or more vendored crates declare a `build.rs`. The MVP cross
-    /// pipeline can't run them, so the whole graph is rejected.
-    #[error("{}", format_build_script_error(.0))]
-    BuildScripts(Vec<BuildScriptOffender>),
-}
-
-fn format_build_script_error(offenders: &[BuildScriptOffender]) -> String {
-    let mut out = String::from(
-        "vendored crate(s) declare a build script (build.rs); gluon's MVP \
-         cross-target pipeline does not yet support build scripts. Offenders:\n",
-    );
-    for off in offenders {
-        let chain = off
-            .consumer_chain
-            .iter()
-            .map(|c| format!("{c}"))
-            .collect::<Vec<_>>()
-            .join(" → ");
-        out.push_str(&format!(
-            "  - {} (pulled in via: {})\n",
-            off.crate_id, chain
-        ));
-    }
-    out
-}
-
 /// Lower a [`ResolvedGraph`] into a deterministic list of
-/// [`VendorCrateBuild`]s, or fail with the full set of build-script
-/// offenders.
+/// [`VendorCrateBuild`]s.
 ///
 /// Output order is the [`BTreeMap`] order of the graph's `CrateId` keys
 /// (sorted by `(name, version)`), with a crate's cross unit before its
 /// host unit, so two runs with the same input produce identical output.
 /// The scheduler does its own topological pass.
-pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Result<Vec<VendorCrateBuild>, GraphError> {
+pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Vec<VendorCrateBuild> {
     let placement = place_units(graph);
-
-    let offenders: Vec<BuildScriptOffender> = graph
-        .crates
-        .iter()
-        .filter(|(id, c)| c.has_build_script && placement.contains_key(*id))
-        .map(|(id, _)| BuildScriptOffender {
-            crate_id: id.clone(),
-            consumer_chain: shortest_chain_to(graph, id),
-        })
-        .collect();
-    if !offenders.is_empty() {
-        return Err(GraphError::BuildScripts(offenders));
-    }
+    let host_edge = |d: &super::metadata::ResolvedDep| VendorDepEdge {
+        extern_name: d.extern_name.clone(),
+        crate_id: d.crate_id.clone(),
+        target: TargetSpec::Host,
+    };
 
     let mut nodes = Vec::with_capacity(graph.crates.len());
     for (id, c) in &graph.crates {
@@ -177,10 +142,16 @@ pub fn build_vendor_nodes(graph: &ResolvedGraph) -> Result<Vec<VendorCrateBuild>
                 edition: c.edition.clone(),
                 features: c.features.clone(),
                 deps,
+                build_script: c.build_script.as_ref().map(|b| VendorBuildScript {
+                    path: b.path.clone(),
+                    edition: b.edition.clone(),
+                    build_deps: b.build_deps.iter().map(host_edge).collect(),
+                    package: b.package.clone(),
+                }),
             });
         }
     }
-    Ok(nodes)
+    nodes
 }
 
 /// Which platforms a crate needs a unit on.
@@ -220,6 +191,11 @@ fn place_units(graph: &ResolvedGraph) -> BTreeMap<CrateId, Platforms> {
             let dep_target = edge_target(target, kind_of(graph, &d.crate_id));
             queue.push_back((d.crate_id.clone(), dep_target));
         }
+        // Build scripts run on the host, so their deps are host units
+        // whatever platform the script's package is built for.
+        for d in c.build_script.iter().flat_map(|b| &b.build_deps) {
+            queue.push_back((d.crate_id.clone(), TargetSpec::Host));
+        }
     }
     placed
 }
@@ -242,68 +218,12 @@ fn edge_target(parent: TargetSpec, dep_kind: CrateKind) -> TargetSpec {
     }
 }
 
-/// Shortest path from any root to `target`, used in build-script
-/// diagnostics.
-///
-/// Roots are iterated in sorted order so the chosen chain is
-/// deterministic on ties. If no root reaches `target` (shouldn't
-/// happen for a graph produced by `parse_metadata`), we fall back
-/// to a one-element chain so the diagnostic still names the offender.
-fn shortest_chain_to(graph: &ResolvedGraph, target: &CrateId) -> Vec<CrateId> {
-    if graph.roots.contains(target) {
-        return vec![target.clone()];
-    }
-    let mut roots: Vec<&CrateId> = graph.roots.iter().collect();
-    roots.sort();
-    let mut best: Option<Vec<CrateId>> = None;
-    for root in roots {
-        if let Some(path) = bfs_path(graph, root, target) {
-            match &best {
-                None => best = Some(path),
-                Some(b) if path.len() < b.len() => best = Some(path),
-                _ => {}
-            }
-        }
-    }
-    best.unwrap_or_else(|| vec![target.clone()])
-}
-
-fn bfs_path(graph: &ResolvedGraph, root: &CrateId, target: &CrateId) -> Option<Vec<CrateId>> {
-    let mut parent: BTreeMap<CrateId, Option<CrateId>> = BTreeMap::new();
-    parent.insert(root.clone(), None);
-    let mut queue: VecDeque<CrateId> = VecDeque::new();
-    queue.push_back(root.clone());
-    while let Some(cur) = queue.pop_front() {
-        if &cur == target {
-            let mut chain = Vec::new();
-            let mut node = Some(cur);
-            while let Some(n) = node {
-                let next = parent.get(&n).cloned().flatten();
-                chain.push(n);
-                node = next;
-            }
-            chain.reverse();
-            return Some(chain);
-        }
-        let Some(cn) = graph.crates.get(&cur) else {
-            continue;
-        };
-        for dep in &cn.deps {
-            if !parent.contains_key(&dep.crate_id) && graph.crates.contains_key(&dep.crate_id) {
-                parent.insert(dep.crate_id.clone(), Some(cur.clone()));
-                queue.push_back(dep.crate_id.clone());
-            }
-        }
-    }
-    None
-}
-
 // -------------------- tests --------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vendor::cross::metadata::{ResolvedCrate, ResolvedDep};
+    use crate::vendor::cross::metadata::{ResolvedBuildScript, ResolvedCrate, ResolvedDep};
     use gluon_model::{Handle, TargetDef};
 
     fn target_handle() -> Handle<TargetDef> {
@@ -330,7 +250,7 @@ mod tests {
             kind,
             features: vec![],
             deps,
-            has_build_script: false,
+            build_script: None,
         }
     }
 
@@ -354,7 +274,7 @@ mod tests {
             roots: vec![cid("bitflags", "2.11.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].target, TargetSpec::Cross(target_handle()));
         assert_eq!(nodes[0].kind, CrateKind::Lib);
@@ -383,7 +303,7 @@ mod tests {
             roots: vec![cid("derive_user", "1.0.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         let syn = nodes.iter().find(|n| n.crate_id.name == "syn").unwrap();
         assert_eq!(syn.target, TargetSpec::Host, "proc-macro must be host");
 
@@ -438,7 +358,7 @@ mod tests {
             roots: vec![cid("user", "1.0.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         let syn = nodes.iter().find(|n| n.crate_id.name == "syn").unwrap();
         let quote_edge = syn
             .deps
@@ -520,7 +440,7 @@ mod tests {
             roots: vec![cid("kernel", "1.0.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         let cross = TargetSpec::Cross(target_handle());
         assert_eq!(units(&nodes, "kernel"), vec![cross]);
         for name in ["derive", "syn", "proc-macro2", "unicode-ident"] {
@@ -566,7 +486,7 @@ mod tests {
             roots: vec![cid("kernel", "1.0.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         let cross = TargetSpec::Cross(target_handle());
         assert_eq!(units(&nodes, "memchr"), vec![cross, TargetSpec::Host]);
         for n in nodes.iter().filter(|n| n.crate_id.name == "memchr") {
@@ -607,127 +527,179 @@ mod tests {
             crates,
             roots: vec![cid("derive", "1.0.0")],
         };
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         assert_eq!(units(&nodes, "derive"), vec![TargetSpec::Host]);
     }
 
-    #[test]
-    fn unreachable_crates_get_no_unit_and_are_not_rejected() {
-        // `cc` is in the metadata only as a build-dep, an edge the
-        // parser drops. It has no unit, so its own build script does
-        // not reject the graph.
-        let mut cc = rc("cc", "1.0.0", CrateKind::Lib, vec![]);
-        cc.has_build_script = true;
-        let mut crates = BTreeMap::new();
-        crates.insert(cid("cc", "1.0.0"), cc);
-        crates.insert(
-            cid("bitflags", "2.11.0"),
-            rc("bitflags", "2.11.0", CrateKind::Lib, vec![]),
-        );
-        let graph = ResolvedGraph {
+    /// Give `c` a build script with `build_deps`.
+    fn with_script(mut c: ResolvedCrate, build_deps: Vec<ResolvedDep>) -> ResolvedCrate {
+        c.build_script = Some(ResolvedBuildScript {
+            path: c.manifest_dir.join("build.rs"),
+            edition: "2021".into(),
+            build_deps,
+            package: PackageInfo {
+                name: c.name.clone(),
+                version: c.version.clone(),
+                links: None,
+                manifest_dir: c.manifest_dir.clone(),
+                manifest_path: c.manifest_dir.join("Cargo.toml"),
+                ..PackageInfo::default()
+            },
+        });
+        c
+    }
+
+    fn graph_of(crates: Vec<ResolvedCrate>, roots: &[&str]) -> ResolvedGraph {
+        let crates: BTreeMap<CrateId, ResolvedCrate> = crates
+            .into_iter()
+            .map(|c| (cid(&c.name, &c.version), c))
+            .collect();
+        let roots = roots
+            .iter()
+            .map(|r| {
+                crates
+                    .keys()
+                    .find(|k| k.name == *r)
+                    .expect("root is in the graph")
+                    .clone()
+            })
+            .collect();
+        ResolvedGraph {
             target: target_handle(),
             crates,
-            roots: vec![cid("bitflags", "2.11.0")],
-        };
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+            roots,
+        }
+    }
+
+    #[test]
+    fn crates_reached_by_no_edge_get_no_unit() {
+        // `cc` has a build script but nothing reaches it.
+        let graph = graph_of(
+            vec![
+                with_script(rc("cc", "1.0.0", CrateKind::Lib, vec![]), vec![]),
+                rc("bitflags", "2.11.0", CrateKind::Lib, vec![]),
+            ],
+            &["bitflags"],
+        );
+        let nodes = build_vendor_nodes(&graph);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].crate_id.name, "bitflags");
     }
 
     #[test]
-    fn build_script_offender_at_root_is_reported_with_chain_of_one() {
-        let mut crates = BTreeMap::new();
-        let mut bad = rc("bad", "1.0.0", CrateKind::Lib, vec![]);
-        bad.has_build_script = true;
-        crates.insert(cid("bad", "1.0.0"), bad);
-        let graph = ResolvedGraph {
-            target: target_handle(),
-            crates,
-            roots: vec![cid("bad", "1.0.0")],
-        };
-
-        let err = build_vendor_nodes(&graph).expect_err("must reject");
-        let GraphError::BuildScripts(offenders) = err;
-        assert_eq!(offenders.len(), 1);
-        assert_eq!(offenders[0].crate_id, cid("bad", "1.0.0"));
-        assert_eq!(offenders[0].consumer_chain, vec![cid("bad", "1.0.0")]);
-    }
-
-    #[test]
-    fn build_script_offender_transitive_reports_full_chain() {
-        // root → mid → bad(has_build_script). Chain must be
-        // [root, mid, bad].
-        let mut crates = BTreeMap::new();
-        let mut bad = rc("bad", "1.0.0", CrateKind::Lib, vec![]);
-        bad.has_build_script = true;
-        crates.insert(cid("bad", "1.0.0"), bad);
-        crates.insert(
-            cid("mid", "1.0.0"),
-            rc("mid", "1.0.0", CrateKind::Lib, vec![dep("bad", "1.0.0")]),
-        );
-        crates.insert(
-            cid("root", "1.0.0"),
-            rc("root", "1.0.0", CrateKind::Lib, vec![dep("mid", "1.0.0")]),
-        );
-        let graph = ResolvedGraph {
-            target: target_handle(),
-            crates,
-            roots: vec![cid("root", "1.0.0")],
-        };
-
-        let err = build_vendor_nodes(&graph).expect_err("must reject");
-        let GraphError::BuildScripts(offenders) = err;
-        assert_eq!(
-            offenders[0].consumer_chain,
+    fn crate_with_a_build_script_carries_it_on_each_unit() {
+        // kernel → zc (script), kernel → derive (proc macro) → zc. Both
+        // units of zc run the script.
+        let graph = graph_of(
             vec![
-                cid("root", "1.0.0"),
-                cid("mid", "1.0.0"),
-                cid("bad", "1.0.0")
+                with_script(rc("zc", "0.8.0", CrateKind::Lib, vec![]), vec![]),
+                rc(
+                    "derive",
+                    "1.0.0",
+                    CrateKind::ProcMacro,
+                    vec![dep("zc", "0.8.0")],
+                ),
+                rc(
+                    "kernel",
+                    "1.0.0",
+                    CrateKind::Lib,
+                    vec![dep("derive", "1.0.0"), dep("zc", "0.8.0")],
+                ),
             ],
+            &["kernel"],
+        );
+        let nodes = build_vendor_nodes(&graph);
+        let zc: Vec<&VendorCrateBuild> = nodes.iter().filter(|n| n.crate_id.name == "zc").collect();
+        assert_eq!(zc.len(), 2);
+        for n in zc {
+            let script = n.build_script.as_ref().expect("script kept");
+            assert_eq!(script.path, PathBuf::from("/vendor/zc-0.8.0/build.rs"));
+            assert_eq!(script.package.name, "zc");
+        }
+        let kernel = nodes.iter().find(|n| n.crate_id.name == "kernel").unwrap();
+        assert!(kernel.build_script.is_none());
+    }
+
+    #[test]
+    fn build_deps_and_their_deps_are_host_only() {
+        // kernel-sys (cross, script) has build-dep cc → shlex. Only the
+        // script uses them, so they are host units, and the edges from
+        // the script point at the host.
+        let graph = graph_of(
+            vec![
+                rc("shlex", "1.0.0", CrateKind::Lib, vec![]),
+                rc("cc", "1.0.0", CrateKind::Lib, vec![dep("shlex", "1.0.0")]),
+                with_script(
+                    rc("kernel-sys", "0.1.0", CrateKind::Lib, vec![]),
+                    vec![dep("cc", "1.0.0")],
+                ),
+            ],
+            &["kernel-sys"],
+        );
+        let nodes = build_vendor_nodes(&graph);
+        let cross = TargetSpec::Cross(target_handle());
+        assert_eq!(units(&nodes, "kernel-sys"), vec![cross]);
+        assert_eq!(units(&nodes, "cc"), vec![TargetSpec::Host]);
+        assert_eq!(units(&nodes, "shlex"), vec![TargetSpec::Host]);
+        let sys = nodes
+            .iter()
+            .find(|n| n.crate_id.name == "kernel-sys")
+            .unwrap();
+        let script = sys.build_script.as_ref().unwrap();
+        assert_eq!(
+            script.build_deps,
+            vec![VendorDepEdge {
+                extern_name: "cc".into(),
+                crate_id: cid("cc", "1.0.0"),
+                target: TargetSpec::Host,
+            }]
+        );
+        assert!(
+            sys.deps.is_empty(),
+            "a build-dep is not linked into the crate"
         );
     }
 
     #[test]
-    fn multiple_build_script_offenders_are_collected_in_one_error() {
-        let mut crates = BTreeMap::new();
-        let mut a = rc("a", "1.0.0", CrateKind::Lib, vec![]);
-        a.has_build_script = true;
-        let mut b = rc("b", "2.0.0", CrateKind::Lib, vec![]);
-        b.has_build_script = true;
-        crates.insert(cid("a", "1.0.0"), a);
-        crates.insert(cid("b", "2.0.0"), b);
-        let graph = ResolvedGraph {
-            target: target_handle(),
-            crates,
-            roots: vec![cid("a", "1.0.0"), cid("b", "2.0.0")],
-        };
-
-        let err = build_vendor_nodes(&graph).expect_err("must reject");
-        let GraphError::BuildScripts(offenders) = err;
-        assert_eq!(offenders.len(), 2);
-        // BTreeMap iteration is sorted by CrateId, so a@1.0.0 before b@2.0.0.
-        assert_eq!(offenders[0].crate_id, cid("a", "1.0.0"));
-        assert_eq!(offenders[1].crate_id, cid("b", "2.0.0"));
+    fn crate_that_is_a_build_dep_and_a_normal_dep_gets_two_units() {
+        // memchr is linked into the kernel and used by a build script.
+        let graph = graph_of(
+            vec![
+                rc("memchr", "2.7.0", CrateKind::Lib, vec![]),
+                with_script(
+                    rc(
+                        "kernel",
+                        "1.0.0",
+                        CrateKind::Lib,
+                        vec![dep("memchr", "2.7.0")],
+                    ),
+                    vec![dep("memchr", "2.7.0")],
+                ),
+            ],
+            &["kernel"],
+        );
+        let nodes = build_vendor_nodes(&graph);
+        let cross = TargetSpec::Cross(target_handle());
+        assert_eq!(units(&nodes, "memchr"), vec![cross, TargetSpec::Host]);
+        let mut ctx = super::super::context::VendorBuildContext::new();
+        for n in nodes {
+            ctx.add(n).expect("no duplicate (target, name) key");
+        }
     }
 
     #[test]
-    fn proc_macro_with_build_script_is_still_rejected() {
-        // ProcMacro kind doesn't excuse a build script — both are
-        // independent failure modes, and only the build-script bit
-        // gates lowering.
-        let mut crates = BTreeMap::new();
-        let mut pm = rc("pm", "1.0.0", CrateKind::ProcMacro, vec![]);
-        pm.has_build_script = true;
-        crates.insert(cid("pm", "1.0.0"), pm);
-        let graph = ResolvedGraph {
-            target: target_handle(),
-            crates,
-            roots: vec![cid("pm", "1.0.0")],
-        };
-
-        let err = build_vendor_nodes(&graph).expect_err("must reject");
-        let GraphError::BuildScripts(o) = err;
-        assert_eq!(o.len(), 1);
+    fn proc_macro_with_a_build_script_is_a_host_unit_with_its_script() {
+        let graph = graph_of(
+            vec![
+                with_script(rc("pm", "1.0.0", CrateKind::ProcMacro, vec![]), vec![]),
+                rc("user", "1.0.0", CrateKind::Lib, vec![dep("pm", "1.0.0")]),
+            ],
+            &["user"],
+        );
+        let nodes = build_vendor_nodes(&graph);
+        assert_eq!(units(&nodes, "pm"), vec![TargetSpec::Host]);
+        let pm = nodes.iter().find(|n| n.crate_id.name == "pm").unwrap();
+        assert!(pm.build_script.is_some());
     }
 
     #[test]
@@ -742,8 +714,8 @@ mod tests {
             roots: vec![cid("z", "1.0.0"), cid("a", "1.0.0"), cid("m", "1.0.0")],
         };
 
-        let n1 = build_vendor_nodes(&graph).expect("ok");
-        let n2 = build_vendor_nodes(&graph).expect("ok");
+        let n1 = build_vendor_nodes(&graph);
+        let n2 = build_vendor_nodes(&graph);
         assert_eq!(n1, n2);
         let names: Vec<&str> = n1.iter().map(|n| n.crate_id.name.as_str()).collect();
         assert_eq!(names, vec!["a", "m", "z"], "BTreeMap order");
@@ -764,7 +736,7 @@ mod tests {
             roots: vec![cid("bitflags", "2.11.0")],
         };
 
-        let nodes = build_vendor_nodes(&graph).expect("ok");
+        let nodes = build_vendor_nodes(&graph);
         assert_eq!(
             nodes[0].features,
             vec!["alloc".to_string(), "std".to_string()]

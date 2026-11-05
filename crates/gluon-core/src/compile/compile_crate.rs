@@ -99,12 +99,18 @@ pub fn compile(
     let label = input.units.label(input.unit, model, input.resolved);
 
     // Owned copies for the error closures, which outlive `unit`.
+    let script = if unit.is_build_script {
+        "build script of "
+    } else {
+        ""
+    };
     let what = match unit.origin {
-        UnitOrigin::Crate(_) => format!("crate '{}'", unit.name),
-        UnitOrigin::Vendor(_) => format!("vendored crate '{}'", unit.package.name),
+        UnitOrigin::Crate(_) => format!("{script}crate '{}'", unit.name),
+        UnitOrigin::Vendor(_) => format!("{script}vendored crate '{}'", unit.package.name),
     };
     let headline_what = match unit.platform {
         Platform::Host => match unit.origin {
+            _ if unit.is_build_script => what.clone(),
             UnitOrigin::Crate(_) => format!("host crate '{}'", unit.name),
             UnitOrigin::Vendor(_) => format!("vendored crate '{}' for host", unit.package.name),
         },
@@ -2172,6 +2178,7 @@ mod tests {
                     target: *target,
                 })
                 .collect(),
+            build_script: None,
         }
     }
 

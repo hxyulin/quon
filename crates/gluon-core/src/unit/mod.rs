@@ -8,6 +8,11 @@
 //! - every crate in `ResolvedConfig::crates` (declared in `gluon.rs`),
 //! - every build in the [`VendorBuildContext`] (`cfg.dependency()`
 //!   crates compiled for a cross target, plus their host proc macros).
+//! - the build script of every vendored crate that has one: a host
+//!   executable unit, plus one [`ScriptRun`] per owning unit. Owners
+//!   whose script would compile identically (same package, features
+//!   and build-deps, such as a crate built for host and target) share
+//!   one script unit.
 //!
 //! The scheduler has one compile node per unit, and the command builder
 //! reads a unit instead of a `CrateDef` or a `VendorCrateBuild`, so both
@@ -47,6 +52,8 @@
 //! <driver root>/cross/<t>/<p>/final/      cross executables, unhashed names
 //! <root>/cross/<t>/<p>/deps/              vendored cross units, config crate
 //! <platform dir>/incremental/<unit>-<h16>/
+//! <root>/host/build/<pkg>-<h16>/          a compiled build script
+//! <owner platform dir>/build/<pkg>-<h16>/ a run: out/ (OUT_DIR), output
 //! ```
 //!
 //! `<driver root>` is `<root>` under `gluon build` and
@@ -270,6 +277,9 @@ pub struct BuildUnit {
     /// Identity hash; see [`metadata`]. Set by [`lower`] once every
     /// dep's hash is known.
     pub metadata: Metadata,
+    /// The unit compiles a package's build script (a host `Bin` named
+    /// `build_script_build`). Its deps are the package's build-deps.
+    pub is_build_script: bool,
 }
 
 /// Where a unit's rustc output lands. Pure path arithmetic.
@@ -473,6 +483,23 @@ impl UnitGraph {
         let cn = &unit.crate_name;
         let h16 = unit.metadata.short();
         let platform_dir = self.platform_dir(id, layout, model, resolved)?;
+        // A compiled build script gets its own directory, as in Cargo,
+        // next to the run directories of its owners.
+        if unit.is_build_script {
+            let out_dir = platform_dir
+                .join("build")
+                .join(format!("{}-{h16}", unit.package.name));
+            let stem = format!("{cn}-{h16}");
+            return Ok(UnitPaths {
+                output_path: out_dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX)),
+                depfile_path: out_dir.join(format!("{stem}.d")),
+                out_dir,
+                debug_elf_path: None,
+                rmeta_path: None,
+                extra_filename: Some(format!("-{h16}")),
+                incremental_dir: None,
+            });
+        }
         let incremental_dir = unit.settings.incremental.then(|| {
             platform_dir
                 .join("incremental")
@@ -546,13 +573,16 @@ impl UnitGraph {
             layout.cache_key_suffix()
         };
         let profile = &resolved.profile.name;
-        let (prefix, name) = match unit.origin {
+        let (prefix, mut name) = match unit.origin {
             UnitOrigin::Crate(_) => ("crate", unit.name.clone()),
             UnitOrigin::Vendor(_) => (
                 "vendor",
                 format!("{}:{}", unit.package.name, unit.package.version),
             ),
         };
+        if unit.is_build_script {
+            name.push_str(":build-script");
+        }
         // Units with a hashed file name get the hash in their key, so
         // each artifact has its own record and alternating between two
         // (say, config presets) rebuilds neither. Cross executables have
@@ -590,13 +620,39 @@ impl UnitGraph {
                 format!("{name}, {}", resolved.profile.name)
             }
         };
+        // A run is labelled `build script of <owner label>`; a script
+        // unit is the compile, which several owners may share.
+        let platform = if unit.is_build_script {
+            "compile".to_string()
+        } else {
+            platform
+        };
+        let what = if unit.is_build_script {
+            "build script of "
+        } else {
+            ""
+        };
         match unit.origin {
-            UnitOrigin::Crate(_) => format!("crate {} ({platform})", unit.name),
+            UnitOrigin::Crate(_) => format!("{what}crate {} ({platform})", unit.name),
             UnitOrigin::Vendor(_) => format!(
-                "vendored crate {} {} ({platform})",
+                "{what}vendored crate {} {} ({platform})",
                 unit.package.name, unit.package.version
             ),
         }
+    }
+
+    /// Runs whose output `run`'s script reads as `DEP_<LINKS>_*`: the
+    /// runs of the owner's direct deps whose package declares `links`.
+    pub fn links_dep_runs(&self, run: RunId) -> Vec<RunId> {
+        self.get(self.run(run).owner)
+            .deps
+            .iter()
+            .filter_map(|d| match d.target {
+                DepTarget::Unit(u) => self.build_script_of(u),
+                _ => None,
+            })
+            .filter(|r| self.run(*r).package.links.is_some())
+            .collect()
     }
 }
 
@@ -765,6 +821,7 @@ pub fn lower(
                     .map(|c| cargo_settings(c, &def.cfg_flags)),
             },
             metadata: Metadata::default(),
+            is_build_script: false,
         });
     }
 
@@ -818,21 +875,131 @@ pub fn lower(
                 ..UnitSettings::default()
             },
             metadata: Metadata::default(),
+            is_build_script: false,
         });
     }
+
+    let runs = lower_vendor_scripts(&mut units, vendor_ctx, &unit_of_vendor)?;
 
     uniquify_vendor_names(&mut units, model);
     assign_host_profile(&mut units);
     let config_metadata = config_crate_hashes(&units, model, resolved)?;
     assign_metadata(&mut units, model, resolved, &config_metadata)?;
 
-    Ok(UnitGraph {
+    let mut graph = UnitGraph {
         units,
         unit_of_crate,
         unit_of_vendor,
         config_metadata,
         ..UnitGraph::default()
-    })
+    };
+    for run in runs {
+        graph.add_script_run(run)?;
+    }
+    Ok(graph)
+}
+
+/// Add a script unit for every vendored build that has a build script,
+/// and return one run per owner. Owners that would compile the same
+/// script (same package, features and build-dep units) share one
+/// unit, so a crate built for host and target compiles its script once
+/// and runs it twice.
+fn lower_vendor_scripts(
+    units: &mut Vec<BuildUnit>,
+    vendor_ctx: &VendorBuildContext,
+    unit_of_vendor: &BTreeMap<VendorBuildId, UnitId>,
+) -> Result<Vec<ScriptRun>> {
+    type ScriptKey = (String, String, Vec<String>, Vec<UnitId>);
+    let mut script_of: BTreeMap<ScriptKey, UnitId> = BTreeMap::new();
+    let mut per_package: BTreeMap<String, usize> = BTreeMap::new();
+    let mut runs = Vec::new();
+    for (id, build) in vendor_ctx.iter() {
+        let Some(script) = &build.build_script else {
+            continue;
+        };
+        let mut deps = Vec::with_capacity(script.build_deps.len());
+        for edge in &script.build_deps {
+            let dep = vendor_ctx
+                .lookup(edge.target, &edge.extern_name)
+                .and_then(|d| unit_of_vendor.get(&d).copied())
+                .ok_or_else(|| {
+                    Error::Compile(format!(
+                        "unit lowering: build script of vendor build {id} ({}) references \
+                         unresolved build-dep ({:?}, {}); vendor graph lowering produced an \
+                         inconsistent edge",
+                        build.crate_id, edge.target, edge.extern_name
+                    ))
+                })?;
+            deps.push(UnitDep {
+                extern_name: edge.extern_name.clone(),
+                target: DepTarget::Unit(dep),
+            });
+        }
+        let key: ScriptKey = (
+            build.crate_id.name.clone(),
+            build.crate_id.version.clone(),
+            build.features.clone(),
+            deps.iter()
+                .filter_map(|d| match d.target {
+                    DepTarget::Unit(u) => Some(u),
+                    _ => None,
+                })
+                .collect(),
+        );
+        let script_unit = match script_of.get(&key) {
+            Some(&u) => u,
+            None => {
+                let u = UnitId(units.len() as u32);
+                // Unit names are unique; a package rarely has two
+                // script units, and the second gets a counter.
+                let n = per_package.entry(build.crate_id.name.clone()).or_default();
+                *n += 1;
+                let name = match *n {
+                    1 => format!("{}@build-script", build.crate_id.name),
+                    n => format!("{}@build-script-{n}", build.crate_id.name),
+                };
+                units.push(BuildUnit {
+                    name,
+                    crate_name: "build_script_build".into(),
+                    origin: UnitOrigin::Vendor(id),
+                    package: PackageKey {
+                        name: build.crate_id.name.clone(),
+                        version: build.crate_id.version.clone(),
+                        source: PackageSource::Registry,
+                    },
+                    kind: CrateType::Bin,
+                    platform: Platform::Host,
+                    // Set to the fixed host profile by
+                    // `assign_host_profile`, like every vendored host
+                    // unit.
+                    profile: UnitProfile::Active,
+                    sysroot: false,
+                    config_crate: false,
+                    src: script.path.clone(),
+                    edition: script.edition.clone(),
+                    // Scripts test features with `cfg!(feature = ..)`.
+                    features: build.features.clone(),
+                    deps,
+                    order_deps: Vec::new(),
+                    settings: UnitSettings {
+                        cap_lints: true,
+                        always_rustc: true,
+                        ..UnitSettings::default()
+                    },
+                    metadata: Metadata::default(),
+                    is_build_script: true,
+                });
+                script_of.insert(key, u);
+                u
+            }
+        };
+        runs.push(ScriptRun {
+            script: script_unit,
+            owner: unit_of_vendor[&id],
+            package: script.package.clone(),
+        });
+    }
+    Ok(runs)
 }
 
 /// Config crate hash for every target that has a unit linking it, and
@@ -954,7 +1121,8 @@ fn assign_metadata(
 }
 
 /// Resolve a declared crate's external dep: the vendor unit when the
-/// cross pipeline built one, else the cargo-built host artifact, else
+/// cross pipeline built one (on the dep's platform, or on the host for
+/// a proc macro), else the cargo-built host artifact, else
 /// [`DepTarget::Missing`].
 fn external_dep_target(
     model: &BuildModel,
@@ -965,6 +1133,19 @@ fn external_dep_target(
 ) -> DepTarget {
     if let Some(u) = vendor_ctx
         .lookup(ext.target, extern_name)
+        .and_then(|id| unit_of_vendor.get(&id))
+    {
+        return DepTarget::Unit(*u);
+    }
+    // A proc macro declared as a cross dep is placed on the host only
+    // (`vendor::cross::graph`), so its unit is under `Host`.
+    if let Some(u) = vendor_ctx
+        .lookup(TargetSpec::Host, extern_name)
+        .filter(|id| {
+            vendor_ctx
+                .get(*id)
+                .is_some_and(|b| b.kind == CrateKind::ProcMacro)
+        })
         .and_then(|id| unit_of_vendor.get(&id))
     {
         return DepTarget::Unit(*u);
@@ -1003,7 +1184,7 @@ fn uniquify_vendor_names(units: &mut [BuildUnit], model: &BuildModel) {
         *count.entry(u.name.clone()).or_default() += 1;
     }
     for u in units.iter_mut() {
-        if matches!(u.origin, UnitOrigin::Vendor(_)) && count[&u.name] > 1 {
+        if matches!(u.origin, UnitOrigin::Vendor(_)) && !u.is_build_script && count[&u.name] > 1 {
             let suffix = match u.platform {
                 Platform::Host => "host".to_string(),
                 Platform::Cross(t) => model
@@ -1208,7 +1389,198 @@ mod tests {
             edition: "2021".into(),
             features: vec![],
             deps,
+            build_script: None,
         }
+    }
+
+    /// `vendor_lib` with a build script whose build-deps are `build_deps`
+    /// (host crates) and whose package declares `links`.
+    fn vendor_scripted(
+        name: &str,
+        target: TargetSpec,
+        deps: Vec<VendorDepEdge>,
+        build_deps: &[&str],
+        links: Option<&str>,
+    ) -> VendorCrateBuild {
+        let mut b = vendor_lib(name, target, deps);
+        b.build_script = Some(crate::vendor::cross::graph::VendorBuildScript {
+            path: PathBuf::from(format!("/vendor/{name}/build.rs")),
+            edition: "2021".into(),
+            build_deps: build_deps
+                .iter()
+                .map(|d| VendorDepEdge {
+                    extern_name: d.replace('-', "_"),
+                    crate_id: CrateId {
+                        name: d.to_string(),
+                        version: "1.2.3".into(),
+                    },
+                    target: TargetSpec::Host,
+                })
+                .collect(),
+            package: crate::build_script::PackageInfo {
+                name: name.into(),
+                version: "1.2.3".into(),
+                links: links.map(str::to_owned),
+                manifest_dir: PathBuf::from(format!("/vendor/{name}")),
+                manifest_path: PathBuf::from(format!("/vendor/{name}/Cargo.toml")),
+                ..Default::default()
+            },
+        });
+        b
+    }
+
+    fn edge(name: &str, target: TargetSpec) -> VendorDepEdge {
+        VendorDepEdge {
+            extern_name: name.replace('-', "_"),
+            crate_id: CrateId {
+                name: name.into(),
+                version: "1.2.3".into(),
+            },
+            target,
+        }
+    }
+
+    #[test]
+    fn vendored_build_script_is_one_host_unit_with_a_run_per_owner() {
+        let fx = Fixture::new();
+        let cross = TargetSpec::Cross(fx.target);
+        let mut vctx = VendorBuildContext::new();
+        let cc = vctx
+            .add(vendor_lib("cc", TargetSpec::Host, vec![]))
+            .unwrap();
+        let host = vctx
+            .add(vendor_scripted(
+                "zc",
+                TargetSpec::Host,
+                vec![],
+                &["cc"],
+                None,
+            ))
+            .unwrap();
+        let target = vctx
+            .add(vendor_scripted("zc", cross, vec![], &["cc"], None))
+            .unwrap();
+        let units = fx.lower(&vctx);
+        let [cc, host, target] = [cc, host, target].map(|v| units.unit_of_vendor(v).unwrap());
+
+        let runs: Vec<&ScriptRun> = units.runs().map(|(_, r)| r).collect();
+        assert_eq!(runs.len(), 2, "one run per owner");
+        assert_eq!(runs[0].owner, host);
+        assert_eq!(runs[1].owner, target);
+        assert_eq!(
+            runs[0].script, runs[1].script,
+            "same package and features compile one script"
+        );
+        let script = units.get(runs[0].script);
+        assert!(script.is_build_script);
+        assert_eq!(script.crate_name, "build_script_build");
+        assert_eq!(script.kind, CrateType::Bin);
+        assert_eq!(script.platform, Platform::Host);
+        assert_eq!(script.profile, UnitProfile::Host);
+        assert!(script.settings.cap_lints && script.settings.always_rustc);
+        assert_eq!(script.src, PathBuf::from("/vendor/zc/build.rs"));
+        assert_eq!(
+            script.deps,
+            vec![UnitDep {
+                extern_name: "cc".into(),
+                target: DepTarget::Unit(cc),
+            }]
+        );
+
+        let layout = BuildLayout::new("/proj/build", "demo");
+        let h16 = script.metadata.short();
+        let paths = units
+            .paths(runs[0].script, &layout, &fx.model, &fx.resolved)
+            .unwrap();
+        assert_eq!(
+            paths.output_path,
+            PathBuf::from(format!(
+                "/proj/build/host/build/zc-{h16}/build_script_build-{h16}{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+        );
+        assert_eq!(
+            units.label(runs[0].script, &fx.model, &fx.resolved),
+            "build script of vendored crate zc 1.2.3 (compile)"
+        );
+        assert_eq!(
+            units
+                .cache_key(runs[0].script, &layout, &fx.model, &fx.resolved)
+                .unwrap(),
+            format!("vendor:host:zc:1.2.3:build-script:{h16}")
+        );
+
+        let dag = build_dag(&fx.resolved, &fx.model, &units).unwrap();
+        let id = |n: DagNode| dag.node_index[&n];
+        for (r, owner) in [(RunId(0), host), (RunId(1), target)] {
+            let run = id(DagNode::RunBuildScript(r));
+            assert!(dag.edges_out[&id(DagNode::Compile(runs[0].script))].contains(&run));
+            assert!(dag.edges_out[&run].contains(&id(DagNode::Compile(owner))));
+        }
+        assert!(
+            dag.edges_out[&id(DagNode::Compile(cc))]
+                .contains(&id(DagNode::Compile(runs[0].script)))
+        );
+    }
+
+    #[test]
+    fn different_features_compile_two_scripts() {
+        let fx = Fixture::new();
+        let cross = TargetSpec::Cross(fx.target);
+        let mut vctx = VendorBuildContext::new();
+        vctx.add(vendor_scripted("zc", TargetSpec::Host, vec![], &[], None))
+            .unwrap();
+        let mut b = vendor_scripted("zc", cross, vec![], &[], None);
+        b.features = vec!["derive".into()];
+        vctx.add(b).unwrap();
+        let units = fx.lower(&vctx);
+        let scripts: Vec<UnitId> = units.runs().map(|(_, r)| r.script).collect();
+        assert_ne!(scripts[0], scripts[1]);
+        assert_eq!(units.get(scripts[1]).features, ["derive"]);
+        assert_ne!(units.get(scripts[0]).name, units.get(scripts[1]).name);
+    }
+
+    #[test]
+    fn run_of_a_links_dep_feeds_the_dependents_run() {
+        // consumer (script) → probe-sys (script, links = "probe"), and
+        // consumer → plain (script, no links).
+        let fx = Fixture::new();
+        let cross = TargetSpec::Cross(fx.target);
+        let mut vctx = VendorBuildContext::new();
+        let probe = vctx
+            .add(vendor_scripted(
+                "probe-sys",
+                cross,
+                vec![],
+                &[],
+                Some("probe"),
+            ))
+            .unwrap();
+        let plain = vctx
+            .add(vendor_scripted("plain", cross, vec![], &[], None))
+            .unwrap();
+        let consumer = vctx
+            .add(vendor_scripted(
+                "consumer",
+                cross,
+                vec![edge("plain", cross), edge("probe-sys", cross)],
+                &[],
+                None,
+            ))
+            .unwrap();
+        let units = fx.lower(&vctx);
+        let run_of = |v| {
+            units
+                .build_script_of(units.unit_of_vendor(v).unwrap())
+                .unwrap()
+        };
+        let (probe, plain, consumer) = (run_of(probe), run_of(plain), run_of(consumer));
+        assert_eq!(units.links_dep_runs(consumer), vec![probe]);
+
+        let dag = build_dag(&fx.resolved, &fx.model, &units).unwrap();
+        let id = |r| dag.node_index[&DagNode::RunBuildScript(r)];
+        assert!(dag.edges_out[&id(probe)].contains(&id(consumer)));
+        assert!(!dag.edges_out[&id(plain)].contains(&id(consumer)));
     }
 
     #[test]
@@ -1262,6 +1634,45 @@ mod tests {
         assert_eq!(
             key(c),
             format!("vendor:cross:bitflags:1.2.3:dev:x86_64-unknown-none:{ch}")
+        );
+    }
+
+    /// A proc macro declared as a cross dep has only a host unit
+    /// (placement by reachability), so a declared crate's edge to it
+    /// must resolve to that host unit.
+    #[test]
+    fn declared_crate_dep_on_a_vendored_proc_macro_resolves_to_its_host_unit() {
+        let mut fx = Fixture::new();
+        let (ext, _) = fx.model.external_deps.insert(
+            "hello-derive".into(),
+            ExternalDepDef {
+                name: "hello-derive".into(),
+                source: DepSource::CratesIo {
+                    version: "0.1".into(),
+                },
+                features: Vec::new(),
+                default_features: true,
+                cfg_flags: Vec::new(),
+                rustc_flags: Vec::new(),
+                target: TargetSpec::Cross(fx.target),
+                span: None,
+            },
+        );
+        let kernel = fx.add_crate(
+            "kernel",
+            CrateType::Lib,
+            false,
+            &[("hello_derive", DepResolution::External(ext))],
+        );
+        let mut vctx = VendorBuildContext::new();
+        let mut pm = vendor_lib("hello-derive", TargetSpec::Host, vec![]);
+        pm.kind = CrateKind::ProcMacro;
+        let vid = vctx.add(pm).unwrap();
+        let units = fx.lower(&vctx);
+        let k = units.get(units.unit_of(kernel).unwrap());
+        assert_eq!(
+            k.deps[0].target,
+            DepTarget::Unit(units.unit_of_vendor(vid).unwrap())
         );
     }
 
@@ -1706,7 +2117,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Build-script runs (synthetic: no lowering creates them yet)
+    // Build-script runs, synthetic: a declared host bin stands in for
+    // the script, so the data path is tested without a vendor graph.
     // ---------------------------------------------------------------
 
     mod script_runs {

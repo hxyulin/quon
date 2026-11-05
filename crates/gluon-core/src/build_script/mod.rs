@@ -10,10 +10,11 @@
 //! - [`run`]: run a compiled script as a `RunBuildScript` node, with a
 //!   fingerprint record that stores the parsed output.
 //!
-//! The scheduler has the run node and passes its output to the owner's
-//! rustc command (`compile::command_builder`). No unit has a run yet:
-//! lowering does not create them, and vendored crates with a build
-//! script are still rejected by `vendor::cross::graph::build_vendor_nodes`.
+//! `crate::unit::lower` creates a script unit and its runs for every
+//! vendored crate with a build script. The scheduler runs each one as a
+//! `RunBuildScript` node and passes its output to the owner's rustc
+//! command (`compile::command_builder`). Crates declared in `gluon.rs`
+//! and manifest packages do not run build scripts yet.
 
 pub mod directive;
 pub mod env;

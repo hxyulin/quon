@@ -170,6 +170,7 @@ mod tests {
             edition: "2021".into(),
             features: vec![],
             deps: vec![],
+            build_script: None,
         }
     }
 

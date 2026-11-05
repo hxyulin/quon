@@ -172,7 +172,8 @@ unparsable record is stale (`FormatChanged`), never a build error.
 A `RunBuildScript` node's command is the script binary's path, the
 environment Gluon sets and the package directory. Its declared input is
 the script binary, its discovered inputs are the `rerun-if-changed`
-paths (every file in the package when the script prints none), and its
+paths (every file in the package when the script prints none, skipping
+`target/`, dot-directories and Gluon's build directory), and its
 env values are the `rerun-if-env-changed` names. The record's `data`
 holds the parsed output, so a hit hands it to the owner without running
 the script. The output reaches the owner's argv and env, so a changed

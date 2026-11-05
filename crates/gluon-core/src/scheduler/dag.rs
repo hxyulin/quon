@@ -284,7 +284,7 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel, units: &UnitGrap
 /// | Node | Inputs |
 /// |---|---|
 /// | `Compile(u)` | `Sysroot(t)` if the unit links the sysroot; `ConfigCrate(t)` if it links the config crate; `Compile` of each dep unit and each order dep (`artifact_deps`); `RunBuildScript(r)` if the unit has a build-script run |
-/// | `RunBuildScript(r)` | `Compile` of the script; `Sysroot(t)` when the owner is a cross unit that links the sysroot, because probe-style scripts compile against it |
+/// | `RunBuildScript(r)` | `Compile` of the script; `Sysroot(t)` when the owner is a cross unit that links the sysroot, because probe-style scripts compile against it; the runs of the owner's direct deps whose package declares `links`, whose metadata the script reads as `DEP_<LINKS>_*` |
 /// | `ConfigCrate(t)` | `Sysroot(t)` |
 /// | `Esp(e)` | `Compile` of each entry's source crate |
 /// | `Image(i)` | per entry and raw write: crate name → `Compile`, else build-step name → `BuildStep`; ESP name → `Esp`. Host files have no node |
@@ -338,6 +338,12 @@ pub fn inputs(node: DagNode, units: &UnitGraph, model: &BuildModel) -> Vec<DagNo
             if let (true, Platform::Cross(t)) = (owner.sysroot, owner.platform) {
                 out.push(DagNode::Sysroot(t));
             }
+            out.extend(
+                units
+                    .links_dep_runs(r)
+                    .into_iter()
+                    .map(DagNode::RunBuildScript),
+            );
             out
         }
         DagNode::Esp(h) => model
@@ -2026,6 +2032,7 @@ mod tests {
             edition: "2021".into(),
             features: vec![],
             deps,
+            build_script: None,
         }
     }
 

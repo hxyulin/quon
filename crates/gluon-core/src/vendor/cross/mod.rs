@@ -14,9 +14,8 @@
 //!   [`metadata::ResolvedGraph`].
 //! - [`graph`] — lower a `ResolvedGraph` into scheduler-node
 //!   descriptors ([`graph::VendorCrateBuild`]), placing each crate on
-//!   the host, the target, or both by reachability from proc macros,
-//!   and rejecting `build.rs`-bearing crates (build scripts are not yet
-//!   supported).
+//!   the host, the target, or both by reachability from proc macros
+//!   and build scripts.
 //! - [`context`] — the side-table the scheduler reads to dispatch
 //!   vendor builds. Lives outside [`gluon_model::BuildModel`] because
 //!   vendor builds are synthesised at `vendor_sync` time, not declared
@@ -127,8 +126,7 @@ pub fn populate_cross_vendor_workspaces(
 ///    rather than a silent fetch.
 /// 2. Parse the JSON into a [`metadata::ResolvedGraph`].
 /// 3. Lower into [`graph::VendorCrateBuild`]s via
-///    [`graph::build_vendor_nodes`] (host placement by reachability +
-///    build.rs rejection).
+///    [`graph::build_vendor_nodes`] (host placement by reachability).
 /// 4. Register every build with the returned context. A host unit
 ///    that an earlier target registered identically is reused.
 ///
@@ -142,8 +140,6 @@ pub fn populate_cross_vendor_workspaces(
 ///   `gluon vendor` since adding cross deps): diagnostic includes the
 ///   expected path and a "run `gluon vendor`" hint.
 /// - `cargo metadata` fails or produces non-parseable JSON.
-/// - The graph contains a build-script crate (MVP scope rejection
-///   raised by [`graph::build_vendor_nodes`]).
 /// - Two cross workspaces register different host units under the same
 ///   name, typically a proc macro resolved at different versions or
 ///   features per cross target. Surfaced verbatim from
@@ -185,19 +181,21 @@ pub fn build_cross_vendor_context(
             &ProbeTarget::for_target(target, project_root),
             Some(&layout.target_cfg_cache()),
         )?;
-        let graph = metadata::parse_metadata(&json, *target_handle, &platform).map_err(|e| {
-            Error::Diagnostics(vec![Diagnostic::error(format!(
-                "failed to parse cargo metadata for target '{}': {e}",
-                target.name,
-            ))])
-        })?;
-        let builds = graph::build_vendor_nodes(&graph).map_err(|e| {
-            Error::Diagnostics(vec![Diagnostic::error(format!(
-                "failed to lower vendored graph for target '{}': {e}",
-                target.name,
-            ))])
-        })?;
-        for build in builds {
+        // Build-dependency edges are matched against the host, where
+        // build scripts run.
+        let host = platform::probe(
+            rustc_info,
+            &ProbeTarget::Host,
+            Some(&layout.target_cfg_cache()),
+        )?;
+        let graph =
+            metadata::parse_metadata(&json, *target_handle, &platform, &host).map_err(|e| {
+                Error::Diagnostics(vec![Diagnostic::error(format!(
+                    "failed to parse cargo metadata for target '{}': {e}",
+                    target.name,
+                ))])
+            })?;
+        for build in graph::build_vendor_nodes(&graph) {
             add_unit(&mut ctx, build).map_err(|e| {
                 Error::Diagnostics(vec![Diagnostic::error(format!(
                     "duplicate vendor build registration for target '{}': {e}",
@@ -451,6 +449,7 @@ mod tests {
             edition: "2021".into(),
             features: features.iter().map(|f| f.to_string()).collect(),
             deps: Vec::new(),
+            build_script: None,
         }
     }
 

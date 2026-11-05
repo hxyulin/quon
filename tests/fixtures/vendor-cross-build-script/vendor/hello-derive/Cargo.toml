@@ -1,0 +1,14 @@
+[package]
+name = "hello-derive"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+pm2 = "1.0"
+qt = "1.0"
+
+[build-dependencies]
+bd-helper = "0.1"

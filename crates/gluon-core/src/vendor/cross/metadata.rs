@@ -32,12 +32,18 @@
 //! - `dev-dependencies` — vendored deps don't run their tests through
 //!   gluon, so dev-only edges would just bloat the graph and pull in
 //!   crates we never compile.
-//! - `build-dependencies` — MVP scope rejects any vendored crate with
-//!   a `build.rs` (see [`ResolvedCrate::has_build_script`]); the
-//!   build-deps that would feed those scripts are therefore irrelevant.
-//! - Target-conditional deps that don't apply to our compile target —
-//!   the `dep_kinds[].target` key is matched against the target's
-//!   probed cfg set. (See [`is_dep_active_for_target`].)
+//! - Target-conditional deps that don't apply to the platform they are
+//!   built for: a normal edge's `dep_kinds[].target` key is matched
+//!   against the cross target's probed cfg set, a build edge's against
+//!   the host's, since build scripts run on the host. (See
+//!   [`is_dep_active`].)
+//!
+//! # Build scripts
+//!
+//! A package with a `custom-build` target gets a
+//! [`ResolvedBuildScript`]: the script path, its build-dependency edges
+//! (`dep_kinds[].kind == "build"`), and the package metadata Cargo
+//! passes to the script as `CARGO_PKG_*`.
 //!
 //! # Version handling
 //!
@@ -48,6 +54,7 @@
 //! semver semantics, swap the field type in [`CrateId`] and the
 //! string-parse points; everything else round-trips unchanged.
 
+use crate::build_script::PackageInfo;
 use crate::manifest::platform::{TargetPlatform, parse_platform};
 use gluon_model::{Handle, TargetDef};
 use serde::Deserialize;
@@ -160,10 +167,22 @@ pub struct ResolvedCrate {
     /// Direct dependencies edges, sorted by `extern_name` for
     /// deterministic downstream iteration.
     pub deps: Vec<ResolvedDep>,
-    /// `true` if any of the package's targets has `kind:
-    /// "custom-build"`. The graph-build pass turns this into a hard
-    /// error — MVP scope rejects vendored `build.rs`.
-    pub has_build_script: bool,
+    /// Set when the package has a `custom-build` target.
+    pub build_script: Option<ResolvedBuildScript>,
+}
+
+/// A package's build script, as `cargo metadata` describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBuildScript {
+    /// The script's `src_path` (`build.rs`, or `package.build`).
+    pub path: PathBuf,
+    /// Edition of the `custom-build` target.
+    pub edition: String,
+    /// Build-dependency edges, sorted by `extern_name`. They are
+    /// compiled for the host.
+    pub build_deps: Vec<ResolvedDep>,
+    /// `CARGO_PKG_*`, `CARGO_MANIFEST_*` and `links` for the script.
+    pub package: PackageInfo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +220,25 @@ struct RawPackage {
     edition: String,
     manifest_path: PathBuf,
     targets: Vec<RawTarget>,
+    // Package metadata for a build script's `CARGO_PKG_*`.
+    #[serde(default)]
+    links: Option<String>,
+    #[serde(default)]
+    authors: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    homepage: Option<String>,
+    #[serde(default)]
+    repository: Option<String>,
+    #[serde(default)]
+    license: Option<String>,
+    #[serde(default)]
+    license_file: Option<String>,
+    #[serde(default)]
+    rust_version: Option<String>,
+    #[serde(default)]
+    readme: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,11 +297,13 @@ struct RawDepKind {
 /// caller must pass it in. The handle is stored on the graph and used
 /// downstream when emitting scheduler nodes and artifact keys.
 /// `platform` is the target's probed cfg set, used to keep the
-/// target-conditional edges that apply.
+/// target-conditional normal edges that apply. `host` is the host's,
+/// used for build edges.
 pub fn parse_metadata(
     json: &str,
     target: Handle<TargetDef>,
     platform: &TargetPlatform,
+    host: &TargetPlatform,
 ) -> Result<ResolvedGraph> {
     let raw: RawMetadata = serde_json::from_str(json)?;
     let resolve = raw.resolve.ok_or(ParseError::MissingResolve)?;
@@ -291,7 +331,7 @@ pub fn parse_metadata(
         if Some(node.id.as_str()) == stub_id {
             // Roots = direct deps of the synthetic workspace package.
             for dep in &node.deps {
-                if !is_dep_active_for_target(dep, platform)? {
+                if !is_dep_active(dep, None, platform)? {
                     continue;
                 }
                 let pkg = by_id.get(dep.pkg.as_str()).copied().ok_or_else(|| {
@@ -328,10 +368,10 @@ pub fn parse_metadata(
         };
 
         let (kind, lib_target) = pick_lib_target(pkg)?;
-        let has_build_script = pkg
+        let script_target = pkg
             .targets
             .iter()
-            .any(|t| t.kind.iter().any(|k| k == "custom-build"));
+            .find(|t| t.kind.iter().any(|k| k == "custom-build"));
 
         // manifest_dir is the parent of manifest_path. cargo always
         // emits absolute manifest_paths so this is unambiguous.
@@ -341,10 +381,14 @@ pub fn parse_metadata(
             .map(PathBuf::from)
             .unwrap_or_default();
 
-        // Filter, sort, and lower the dep edges.
+        // Filter, sort, and lower the dep edges. One edge can be both
+        // a normal and a build dep.
         let mut deps: Vec<ResolvedDep> = Vec::new();
+        let mut build_deps: Vec<ResolvedDep> = Vec::new();
         for d in &node.deps {
-            if !is_dep_active_for_target(d, platform)? {
+            let normal = is_dep_active(d, None, platform)?;
+            let build = script_target.is_some() && is_dep_active(d, Some("build"), host)?;
+            if !normal && !build {
                 continue;
             }
             let dep_pkg =
@@ -354,15 +398,42 @@ pub fn parse_metadata(
                     .ok_or_else(|| ParseError::MissingPackage {
                         pkg_id: d.pkg.clone(),
                     })?;
-            deps.push(ResolvedDep {
+            let edge = ResolvedDep {
                 extern_name: d.name.clone(),
                 crate_id: CrateId {
                     name: dep_pkg.name.clone(),
                     version: dep_pkg.version.clone(),
                 },
-            });
+            };
+            if build {
+                build_deps.push(edge.clone());
+            }
+            if normal {
+                deps.push(edge);
+            }
         }
         deps.sort_by(|a, b| a.extern_name.cmp(&b.extern_name));
+        build_deps.sort_by(|a, b| a.extern_name.cmp(&b.extern_name));
+        let build_script = script_target.map(|t| ResolvedBuildScript {
+            path: t.src_path.clone(),
+            edition: t.edition.clone().unwrap_or_else(|| pkg.edition.clone()),
+            build_deps,
+            package: PackageInfo {
+                name: pkg.name.clone(),
+                version: pkg.version.clone(),
+                authors: pkg.authors.clone(),
+                description: pkg.description.clone(),
+                homepage: pkg.homepage.clone(),
+                repository: pkg.repository.clone(),
+                license: pkg.license.clone(),
+                license_file: pkg.license_file.clone(),
+                rust_version: pkg.rust_version.clone(),
+                readme: pkg.readme.clone(),
+                links: pkg.links.clone(),
+                manifest_dir: manifest_dir.clone(),
+                manifest_path: pkg.manifest_path.clone(),
+            },
+        });
 
         let mut features = node.features.clone();
         features.sort();
@@ -383,7 +454,7 @@ pub fn parse_metadata(
                 kind,
                 features,
                 deps,
-                has_build_script,
+                build_script,
             },
         );
     }
@@ -456,27 +527,26 @@ fn pick_lib_target(pkg: &RawPackage) -> Result<(CrateKind, &RawTarget)> {
     }
 }
 
-/// Decide whether a dep edge is active for our compile target.
+/// Decide whether a dep edge is active as a `kind` dep (`None` for
+/// normal, `Some("build")` for build) on `platform`.
 ///
-/// MVP semantics:
-///
-/// 1. Skip dev-deps and build-deps entirely. Vendored crates don't
-///    run tests through gluon (no dev) and we reject `build.rs`-bearing
-///    crates outright (no build).
-/// 2. Keep a target-conditional normal dep only when its key (a
+/// 1. Dev-deps are never active: vendored crates don't run tests
+///    through gluon.
+/// 2. A target-conditional entry is active only when its key (a
 ///    `cfg(...)` expression or a target name) matches `platform`, the
-///    cfg set `rustc --print cfg` reports for the compile target.
+///    cfg set `rustc --print cfg` reports. Normal deps are matched
+///    against the cross target, build deps against the host.
 ///
 /// One edge can carry several `dep_kinds` entries (the same dep listed
 /// under `[dependencies]` and a `[target.*.dependencies]` table); the
-/// edge is active if any normal entry applies.
-fn is_dep_active_for_target(dep: &RawNodeDep, platform: &TargetPlatform) -> Result<bool> {
+/// edge is active if any entry of `kind` applies.
+fn is_dep_active(dep: &RawNodeDep, kind: Option<&str>, platform: &TargetPlatform) -> Result<bool> {
     if dep.dep_kinds.is_empty() {
         // Older cargo versions (< 1.41) didn't emit dep_kinds at all;
         // those edges are unconditional normal deps by definition.
-        return Ok(true);
+        return Ok(kind.is_none());
     }
-    for dk in dep.dep_kinds.iter().filter(|dk| dk.kind.is_none()) {
+    for dk in dep.dep_kinds.iter().filter(|dk| dk.kind.as_deref() == kind) {
         let Some(key) = &dk.target else {
             return Ok(true);
         };
@@ -499,6 +569,14 @@ mod tests {
 
     fn target_handle() -> Handle<TargetDef> {
         Handle::<TargetDef>::new(0)
+    }
+
+    fn host_platform() -> TargetPlatform {
+        TargetPlatform::from_cfg_lines(
+            "x86_64-unknown-linux-gnu",
+            ["target_arch=\"x86_64\"", "target_os=\"linux\"", "unix"],
+        )
+        .unwrap()
     }
 
     fn none_platform() -> TargetPlatform {
@@ -571,7 +649,13 @@ mod tests {
 
     #[test]
     fn minimal_graph_drops_workspace_stub_and_lifts_root() {
-        let g = parse_metadata(MINIMAL_JSON, target_handle(), &none_platform()).expect("parse ok");
+        let g = parse_metadata(
+            MINIMAL_JSON,
+            target_handle(),
+            &none_platform(),
+            &host_platform(),
+        )
+        .expect("parse ok");
         assert_eq!(g.target, target_handle());
         assert_eq!(g.crates.len(), 1, "stub must be filtered out");
         assert_eq!(
@@ -592,7 +676,7 @@ mod tests {
         assert_eq!(bf.kind, CrateKind::Lib);
         assert_eq!(bf.edition, "2021");
         assert!(bf.deps.is_empty());
-        assert!(!bf.has_build_script);
+        assert!(bf.build_script.is_none());
         assert_eq!(bf.manifest_dir, PathBuf::from("/vendor/bitflags-2.11.0"));
         assert_eq!(
             bf.lib_path,
@@ -708,8 +792,13 @@ mod tests {
 
     #[test]
     fn transitive_graph_keeps_dep_edges_and_normalises_proc_macro_name() {
-        let g =
-            parse_metadata(TRANSITIVE_JSON, target_handle(), &none_platform()).expect("parse ok");
+        let g = parse_metadata(
+            TRANSITIVE_JSON,
+            target_handle(),
+            &none_platform(),
+            &host_platform(),
+        )
+        .expect("parse ok");
         assert_eq!(g.crates.len(), 3);
         assert_eq!(
             g.roots,
@@ -759,9 +848,7 @@ mod tests {
     }
 
     #[test]
-    fn build_script_is_flagged_not_rejected() {
-        // Graph-build (next module) is what turns has_build_script into
-        // a hard error — the parser just records the fact.
+    fn build_script_is_recorded() {
         let json = r#"
         {
           "packages": [
@@ -799,7 +886,8 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect("parse ok");
         let hb = g
             .crates
             .get(&CrateId {
@@ -807,7 +895,21 @@ mod tests {
                 version: "1.0.0".into(),
             })
             .expect("has-build present");
-        assert!(hb.has_build_script);
+        let script = hb.build_script.as_ref().expect("build script recorded");
+        assert_eq!(
+            script.path,
+            PathBuf::from("/vendor/has-build-1.0.0/build.rs")
+        );
+        assert_eq!(
+            script.edition, "2021",
+            "package edition when the target has none"
+        );
+        assert_eq!(script.package.name, "has-build");
+        assert_eq!(
+            script.package.manifest_path,
+            PathBuf::from("/vendor/has-build-1.0.0/Cargo.toml")
+        );
+        assert_eq!(script.package.links, None);
         assert_eq!(hb.kind, CrateKind::Lib);
     }
 
@@ -849,7 +951,8 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect("parse ok");
         let a = g
             .crates
             .get(&CrateId {
@@ -862,6 +965,102 @@ mod tests {
             "dev edge must be filtered, got: {:?}",
             a.deps
         );
+    }
+
+    #[test]
+    fn build_deps_follow_host_cfgs_and_package_metadata_is_kept() {
+        // `s` has a build script. Its edges: `both` (normal and build),
+        // `cc` (build), `unix_tool` (build, cfg(unix): the host is
+        // Linux), `win_tool` (build, cfg(windows)).
+        let pkg = |name: &str| {
+            format!(
+                r#"{{"id": "registry+x#{name}@1.0.0", "name": "{name}", "version": "1.0.0",
+                    "edition": "2021", "manifest_path": "/vendor/{name}/Cargo.toml",
+                    "targets": [{{"name": "{name}", "kind": ["lib"], "src_path": "/vendor/{name}/src/lib.rs"}}]}}"#
+            )
+        };
+        let edge = |name: &str, kinds: &str| {
+            format!(
+                r#"{{"name": "{name}", "pkg": "registry+x#{name}@1.0.0", "dep_kinds": [{kinds}]}}"#
+            )
+        };
+        let leaf = |name: &str| {
+            format!(r#"{{"id": "registry+x#{name}@1.0.0", "deps": [], "features": []}}"#)
+        };
+        let json = format!(
+            r#"{{
+              "packages": [
+                {{"id": "registry+x#s@1.0.0", "name": "s", "version": "1.0.0-beta.1",
+                  "edition": "2018", "manifest_path": "/vendor/s/Cargo.toml",
+                  "links": "s", "authors": ["A <a@x>", "B"], "description": "d",
+                  "license": "MIT", "rust_version": "1.70", "readme": "README.md",
+                  "targets": [
+                    {{"name": "s", "kind": ["lib"], "src_path": "/vendor/s/src/lib.rs"}},
+                    {{"name": "build-script-build", "kind": ["custom-build"],
+                      "src_path": "/vendor/s/build/main.rs", "edition": "2021"}}
+                  ]}},
+                {both}, {cc}, {unix_tool}, {win_tool},
+                {{"id": "path+file:///scratch#gluon-vendor-workspace@0.0.0",
+                  "name": "gluon-vendor-workspace", "version": "0.0.0", "edition": "2021",
+                  "manifest_path": "/scratch/Cargo.toml",
+                  "targets": [{{"name": "stub", "kind": ["lib"], "src_path": "/scratch/lib.rs"}}]}}
+              ],
+              "workspace_members": ["path+file:///scratch#gluon-vendor-workspace@0.0.0"],
+              "resolve": {{
+                "nodes": [
+                  {{"id": "registry+x#s@1.0.0", "features": [], "deps": [
+                    {e_both}, {e_cc}, {e_unix}, {e_win}
+                  ]}},
+                  {l_both}, {l_cc}, {l_unix}, {l_win},
+                  {{"id": "path+file:///scratch#gluon-vendor-workspace@0.0.0", "features": [],
+                    "deps": [{{"name": "s", "pkg": "registry+x#s@1.0.0",
+                              "dep_kinds": [{{"kind": null, "target": null}}]}}]}}
+                ]
+              }}
+            }}"#,
+            both = pkg("both"),
+            cc = pkg("cc"),
+            unix_tool = pkg("unix_tool"),
+            win_tool = pkg("win_tool"),
+            e_both = edge(
+                "both",
+                r#"{"kind": null, "target": null}, {"kind": "build", "target": null}"#
+            ),
+            e_cc = edge("cc", r#"{"kind": "build", "target": null}"#),
+            e_unix = edge("unix_tool", r#"{"kind": "build", "target": "cfg(unix)"}"#),
+            e_win = edge("win_tool", r#"{"kind": "build", "target": "cfg(windows)"}"#),
+            l_both = leaf("both"),
+            l_cc = leaf("cc"),
+            l_unix = leaf("unix_tool"),
+            l_win = leaf("win_tool"),
+        );
+        let g = parse_metadata(&json, target_handle(), &none_platform(), &host_platform())
+            .expect("parse ok");
+        let s = g
+            .crates
+            .get(&CrateId {
+                name: "s".into(),
+                version: "1.0.0-beta.1".into(),
+            })
+            .unwrap();
+        let names = |deps: &[ResolvedDep]| -> Vec<String> {
+            deps.iter().map(|d| d.extern_name.clone()).collect()
+        };
+        assert_eq!(names(&s.deps), ["both"]);
+        let script = s.build_script.as_ref().unwrap();
+        assert_eq!(names(&script.build_deps), ["both", "cc", "unix_tool"]);
+        assert_eq!(script.path, PathBuf::from("/vendor/s/build/main.rs"));
+        assert_eq!(script.edition, "2021");
+        let p = &script.package;
+        assert_eq!(p.version, "1.0.0-beta.1");
+        assert_eq!(p.links.as_deref(), Some("s"));
+        assert_eq!(p.authors, ["A <a@x>", "B"]);
+        assert_eq!(p.description.as_deref(), Some("d"));
+        assert_eq!(p.license.as_deref(), Some("MIT"));
+        assert_eq!(p.rust_version.as_deref(), Some("1.70"));
+        assert_eq!(p.readme.as_deref(), Some("README.md"));
+        assert_eq!(p.homepage, None);
+        assert_eq!(p.manifest_dir, PathBuf::from("/vendor/s"));
     }
 
     #[test]
@@ -902,7 +1101,8 @@ mod tests {
           }
         }
         "#;
-        let g = parse_metadata(json, target_handle(), &none_platform()).expect("parse ok");
+        let g = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect("parse ok");
         let a = g
             .crates
             .get(&CrateId {
@@ -915,14 +1115,16 @@ mod tests {
         // Keys that apply to x86_64-unknown-none keep the edge.
         for key in [r#"cfg(target_os = \"none\")"#, "x86_64-unknown-none"] {
             let json = json.replace("cfg(unix)", key);
-            let g = parse_metadata(&json, target_handle(), &none_platform()).expect("parse ok");
+            let g = parse_metadata(&json, target_handle(), &none_platform(), &host_platform())
+                .expect("parse ok");
             let a = g.crates.values().find(|c| c.name == "a").unwrap();
             assert_eq!(a.deps.len(), 1, "edge with key {key} must be kept");
             assert_eq!(a.deps[0].extern_name, "unix_only");
         }
 
         let json = json.replace("cfg(unix)", "cfg(unix");
-        let err = parse_metadata(&json, target_handle(), &none_platform()).expect_err("bad key");
+        let err = parse_metadata(&json, target_handle(), &none_platform(), &host_platform())
+            .expect_err("bad key");
         assert!(
             matches!(err, ParseError::InvalidPlatform { .. }),
             "got: {err:?}"
@@ -937,7 +1139,8 @@ mod tests {
           "workspace_members": []
         }
         "#;
-        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect_err("must error");
         assert!(matches!(err, ParseError::MissingResolve), "got: {err:?}");
     }
 
@@ -979,7 +1182,8 @@ mod tests {
           }
         }
         "#;
-        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect_err("must error");
         assert!(
             matches!(err, ParseError::AmbiguousLibKind { .. }),
             "got: {err:?}"
@@ -1021,7 +1225,8 @@ mod tests {
           }
         }
         "#;
-        let err = parse_metadata(json, target_handle(), &none_platform()).expect_err("must error");
+        let err = parse_metadata(json, target_handle(), &none_platform(), &host_platform())
+            .expect_err("must error");
         assert!(
             matches!(err, ParseError::NoLibTarget { .. }),
             "got: {err:?}"

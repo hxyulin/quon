@@ -33,6 +33,7 @@ use gluon_model::{
     BuildModel, BuildStepDef, EspDef, Handle, ImageDef, ResolvedConfig, RuleDef, TargetDef,
 };
 use results::{NodeResult, ResultView};
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -58,6 +59,62 @@ struct PipelineDispatcher<'a> {
     node_of_unit: &'a [NodeId],
     /// One slot per `NodeId`, written by that node when it succeeds.
     results: &'a [OnceLock<NodeResult>],
+    /// `rustc --print cfg` of each platform that has a build-script
+    /// owner, probed once before dispatch.
+    script_cfgs: &'a ScriptCfgs,
+}
+
+/// Target cfgs per owner platform (`None` for the host), as `(name,
+/// value)` pairs in rustc's order, without `debug_assertions`.
+type ScriptCfgs = BTreeMap<Option<Handle<TargetDef>>, Vec<(String, Option<String>)>>;
+
+/// Probe the cfgs of every platform a build script configures. Done
+/// once per build, before dispatch, so parallel runs do not race on the
+/// probe cache file. A build without runs probes nothing.
+fn probe_script_cfgs(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    units: &UnitGraph,
+) -> Result<ScriptCfgs> {
+    use crate::manifest::platform::{ProbeTarget, probe};
+    use cargo_platform::Cfg;
+    let mut out = ScriptCfgs::new();
+    for (_, run) in units.runs() {
+        let key = match units.get(run.owner).platform {
+            Platform::Host => None,
+            Platform::Cross(t) => Some(t),
+        };
+        if out.contains_key(&key) {
+            continue;
+        }
+        let target = match key {
+            None => ProbeTarget::Host,
+            Some(t) => {
+                let def = model.targets.get(t).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "build-script cfg probe: target handle {t:?} not in the model"
+                    ))
+                })?;
+                ProbeTarget::for_target(def, &resolved.project_root)
+            }
+        };
+        let platform = probe(
+            &ctx.rustc_info,
+            &target,
+            Some(&ctx.layout.target_cfg_cache()),
+        )?;
+        let cfgs = platform
+            .cfgs
+            .into_iter()
+            .map(|c| match c {
+                Cfg::Name(n) => (n.name, None),
+                Cfg::KeyPair(k, v) => (k.name, Some(v)),
+            })
+            .collect();
+        out.insert(key, cfgs);
+    }
+    Ok(out)
 }
 
 impl PipelineDispatcher<'_> {
@@ -175,16 +232,20 @@ fn dispatch_compile(
 
 /// Run one build script for its owner; see [`crate::build_script::run`].
 ///
-/// Not yet given: `rustc --print cfg` values (`CARGO_CFG_*`), the
-/// platform's rustflags, and `links` metadata from deps (`DEP_*`). No
-/// lowered unit has a run yet; the stage that lowers vendored build
-/// scripts fills these in.
+/// The script's environment is assembled from the owner unit, the
+/// probed cfgs of its platform (`CARGO_CFG_*`, plus `debug_assertions`
+/// when the owner's opt-level is 0, as rustc then enables them), the
+/// flags Gluon passes to every crate of the platform (the panic
+/// strategy), and the `links` metadata of the owner's direct deps
+/// (`DEP_*`).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_run_build_script(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
     units: &UnitGraph,
     view: &ResultView<'_>,
+    script_cfgs: &ScriptCfgs,
     r: RunId,
     stderr: &mut Vec<u8>,
 ) -> Result<NodeResult> {
@@ -214,12 +275,18 @@ fn dispatch_run_build_script(
     };
     let spec_file;
     let gluon_sysroot;
+    let mut target_rustflags = Vec::new();
     let platform = match owner.platform {
         Platform::Host => ScriptPlatform::Host,
         Platform::Cross(t) => {
             let target = model.targets.get(t).ok_or_else(|| {
                 Error::Compile(format!("{what}: target handle {t:?} not in the model"))
             })?;
+            // Every crate of the target gets the sysroot's panic
+            // strategy (see the command builder), so probes must too.
+            if let Some(s) = target.panic_strategy {
+                target_rustflags.push(format!("-Cpanic={}", s.as_str()));
+            }
             spec_file = crate::compile::rustc::target_spec_file(&target.spec, target.builtin);
             gluon_sysroot = view
                 .sysroot(t)
@@ -236,6 +303,30 @@ fn dispatch_run_build_script(
             }
         }
     };
+    let cfg_key = match owner.platform {
+        Platform::Host => None,
+        Platform::Cross(t) => Some(t),
+    };
+    let mut target_cfgs = script_cfgs.get(&cfg_key).cloned().ok_or_else(|| {
+        Error::Compile(format!(
+            "scheduler: {what} has no probed target cfgs (scheduler bug)"
+        ))
+    })?;
+    if opt_level == 0 {
+        target_cfgs.push(("debug_assertions".into(), None));
+    }
+    let mut dep_metadata = Vec::new();
+    for dep_run in units.links_dep_runs(r) {
+        let out = view.build_script(dep_run).ok_or_else(|| {
+            Error::Compile(format!(
+                "scheduler: {what} ran before the build script of {} finished; \
+                 DAG edge missing?",
+                units.label(units.run(dep_run).owner, model, resolved)
+            ))
+        })?;
+        let links = units.run(dep_run).package.links.clone().unwrap_or_default();
+        dep_metadata.push((links, out.metadata.clone()));
+    }
     let cargo = crate::vendor::cargo_cmd::resolve_cargo();
     let env = script_env(&ScriptEnvInput {
         package: &run.package,
@@ -248,9 +339,9 @@ fn dispatch_run_build_script(
         num_jobs: std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1),
-        target_cfgs: &[],
-        target_rustflags: &[],
-        dep_metadata: &[],
+        target_cfgs: &target_cfgs,
+        target_rustflags: &target_rustflags,
+        dep_metadata: &dep_metadata,
     });
     let (out, was_cached) = crate::build_script::run::run_build_script(
         ctx,
@@ -262,6 +353,9 @@ fn dispatch_run_build_script(
             manifest_dir: &run.package.manifest_dir,
             run_dir: &run_dir,
             has_links: run.package.links.is_some(),
+            // Warnings from vendored scripts are noise the user cannot
+            // act on; `-v` shows them, as in Cargo.
+            show_warnings: ctx.verbose || !owner.settings.cap_lints,
         },
         stderr,
     )?;
@@ -411,9 +505,16 @@ impl JobDispatcher for PipelineDispatcher<'_> {
             DagNode::Compile(unit) => {
                 dispatch_compile(ctx, model, resolved, self.units, &view, unit, stderr)?
             }
-            DagNode::RunBuildScript(r) => {
-                dispatch_run_build_script(ctx, model, resolved, self.units, &view, r, stderr)?
-            }
+            DagNode::RunBuildScript(r) => dispatch_run_build_script(
+                ctx,
+                model,
+                resolved,
+                self.units,
+                &view,
+                self.script_cfgs,
+                r,
+                stderr,
+            )?,
             DagNode::Esp(handle) => plain(dispatch_esp(
                 ctx, model, resolved, &view, handle, stdout, stderr,
             )?),
@@ -479,6 +580,7 @@ pub fn execute_pipeline(
     let units = crate::unit::lower(model, resolved, vendor_ctx)?;
     let dag = build_dag(resolved, model, &units)?;
     let node_of_unit = results::node_of_unit(&dag, &units);
+    let script_cfgs = probe_script_cfgs(ctx, model, resolved, &units)?;
     let results: Vec<OnceLock<NodeResult>> = (0..dag.len()).map(|_| OnceLock::new()).collect();
 
     let dispatcher = PipelineDispatcher {
@@ -490,6 +592,7 @@ pub fn execute_pipeline(
         dag: &dag,
         node_of_unit: &node_of_unit,
         results: &results,
+        script_cfgs: &script_cfgs,
     };
 
     let pool = WorkerPool::new(workers);
@@ -633,6 +736,7 @@ mod tests {
             edition: "2021".into(),
             features: vec![],
             deps,
+            build_script: None,
         }
     }
 

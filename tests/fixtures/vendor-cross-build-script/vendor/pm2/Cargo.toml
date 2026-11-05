@@ -1,0 +1,5 @@
+[package]
+name = "pm2"
+version = "1.0.0"
+edition = "2021"
+description = "Stands in for proc-macro2: a build script that probes $RUSTC."

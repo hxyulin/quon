@@ -54,6 +54,9 @@ pub(crate) struct RunInput<'a> {
     pub run_dir: &'a Path,
     /// The package declares `links`, which allows `cargo::metadata`.
     pub has_links: bool,
+    /// Print the script's `cargo::warning` lines, on a run and when a
+    /// hit replays them. They are recorded either way.
+    pub show_warnings: bool,
 }
 
 /// Check, run and record one build script; see the module docs.
@@ -84,7 +87,9 @@ pub(crate) fn run_build_script(
     match ctx.store.check(&query) {
         Freshness::Fresh(fp) => {
             if let Some(NodeData::BuildScript(out)) = &fp.data {
-                stderr_sink.extend_from_slice(&ctx.store.stderr(&fp));
+                if input.show_warnings {
+                    stderr_sink.extend_from_slice(&ctx.store.stderr(&fp));
+                }
                 return Ok((Arc::clone(out), true));
             }
             // A run record always carries its output; one without is
@@ -151,7 +156,9 @@ pub(crate) fn run_build_script(
     for w in &parsed.warnings {
         warnings.push_str(&format!("warning: {}: {w}\n", input.what));
     }
-    stderr_sink.extend_from_slice(warnings.as_bytes());
+    if input.show_warnings {
+        stderr_sink.extend_from_slice(warnings.as_bytes());
+    }
 
     let env: BTreeMap<String, Option<String>> = parsed
         .rerun_if_env_changed
@@ -284,6 +291,15 @@ mod tests {
         }
 
         fn run(&self, ctx: &CompileCtx, sink: &mut Vec<u8>) -> (Arc<BuildScriptOutput>, bool) {
+            self.run_with(ctx, sink, true)
+        }
+
+        fn run_with(
+            &self,
+            ctx: &CompileCtx,
+            sink: &mut Vec<u8>,
+            show_warnings: bool,
+        ) -> (Arc<BuildScriptOutput>, bool) {
             let run_dir = self.tmp.path().join("build/host/build/pkg-0123");
             let env = [("OUT_DIR".to_string(), OsString::from(run_dir.join("out")))].into();
             run_build_script(
@@ -296,6 +312,7 @@ mod tests {
                     manifest_dir: &self.pkg,
                     run_dir: &run_dir,
                     has_links: false,
+                    show_warnings,
                 },
                 sink,
             )
@@ -331,6 +348,21 @@ mod tests {
             String::from_utf8_lossy(&sink).contains("generated"),
             "warnings replay on a hit"
         );
+    }
+
+    #[test]
+    fn hidden_warnings_are_recorded_and_shown_when_asked() {
+        let fx = Fx::new(BODY);
+        let ctx = fx.ctx();
+        let mut sink = Vec::new();
+        let (out, _) = fx.run_with(&ctx, &mut sink, false);
+        assert!(sink.is_empty(), "{}", String::from_utf8_lossy(&sink));
+        assert_eq!(out.warnings, ["generated"]);
+        let (_, cached) = fx.run_with(&ctx, &mut sink, false);
+        assert!(cached && sink.is_empty());
+        let (_, cached) = fx.run_with(&ctx, &mut sink, true);
+        assert!(cached, "showing warnings does not rerun the script");
+        assert!(String::from_utf8_lossy(&sink).contains("generated"));
     }
 
     #[test]
@@ -424,6 +456,7 @@ mod tests {
                 manifest_dir: &fx.pkg,
                 run_dir: &run_dir,
                 has_links: false,
+                show_warnings: true,
             },
             &mut Vec::new(),
         )
