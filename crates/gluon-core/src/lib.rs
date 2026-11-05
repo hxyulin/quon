@@ -37,7 +37,7 @@ pub use error::{Diagnostic, Error, Level, Result};
 pub use project_root::find_project_root;
 pub use rule::builtin::ExecRule;
 pub use rule::{RuleCtx, RuleFn, RuleRegistry};
-pub use run::{RunOptions, run};
+pub use run::{Prepared, RunOptions};
 pub use scheduler::{
     BuildSummary, Dag, DagNode, JobDispatcher, JobInfo, JobKind, JobOutcome, NodeId, PlainReporter,
     Reporter, WorkerPool, build_dag, execute_pipeline,

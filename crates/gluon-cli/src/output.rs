@@ -184,7 +184,7 @@ pub struct Counts {
 }
 
 /// Cargo's duration format: `0.08s`, `16.40s`, `1m 05s`.
-fn elapsed(d: Duration) -> String {
+pub fn elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     if secs >= 60 {
         format!("{}m {:02}s", secs / 60, secs % 60)

@@ -6,12 +6,12 @@
 
 use super::CmdContext;
 use crate::cli::RunArgs;
-use crate::output::{BuildReporter, Shell};
+use crate::output::{BuildReporter, Counts, Shell, elapsed};
 use anyhow::{Result, bail};
 use gluon_core::Error as CoreError;
 use gluon_core::model::BootMode;
 use std::process::ExitStatus;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Execute the `gluon run` pipeline against the prepared context.
 pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shell) -> Result<()> {
@@ -50,13 +50,49 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
     };
 
     let mut reporter = BuildReporter::new(shell, ctx.ctx.driver());
-    let status = gluon_core::run(&ctx.ctx, &ctx.model, &ctx.resolved, opts, &mut reporter)?;
+    let prepared =
+        gluon_core::run::prepare(&ctx.ctx, &ctx.model, &ctx.resolved, &opts, &mut reporter)?;
+    // Erases the progress line before anything else prints.
+    drop(reporter);
+    let command = prepared.invocation.command_line();
 
     if args.dry_run {
+        // stdout, so scripts and tests can capture the command alone.
+        println!("{command}");
         return Ok(());
     }
+    if let Some(summary) = &prepared.build {
+        shell.finished(
+            &ctx.resolved.profile,
+            Counts {
+                noun: "built",
+                built: summary.built,
+                cached: summary.cached,
+            },
+        );
+    }
+    if args.gdb {
+        // Printed before the spawn: QEMU halts waiting for the
+        // debugger and prints nothing until one connects.
+        shell.note("QEMU halted for GDB on :1234; connect with `target remote :1234`");
+    }
+    // The line marks where Gluon's output ends and the guest's starts.
+    shell.status("Running", format_args!("`{command}`"));
+    let started = Instant::now();
+    let status = gluon_core::run::launch(prepared.invocation)?;
+
     let success_exit_code = ctx.model.qemu.as_ref().and_then(|q| q.success_exit_code);
-    check_exit_status(status, success_exit_code)
+    check_exit_status(status, success_exit_code)?;
+    // A failure is reported by the error instead.
+    shell.status(
+        "Exited",
+        format_args!(
+            "QEMU with status {} after {}",
+            status.code().unwrap_or(0),
+            elapsed(started.elapsed())
+        ),
+    );
+    Ok(())
 }
 
 /// Map QEMU's exit status to the result of `gluon run`.

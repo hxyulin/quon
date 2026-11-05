@@ -13,11 +13,11 @@
 //!   and handles the writable-vars copy. Touches the filesystem.
 //! - [`resolve`] merges `QemuDef` + profile-level overrides into a
 //!   fully-defaulted [`resolve::ResolvedQemu`].
-//! - This file wires those three together behind the public [`run`]
-//!   entry point.
+//! - `entry` wires those three together behind the public [`prepare`]
+//!   and [`launch`] entry points.
 //!
 //! The future `gluon test` command will reuse everything except
-//! [`run`] itself: the test harness will call `build_qemu_command`
+//! [`prepare`] itself: the test harness will call `build_qemu_command`
 //! directly per test binary and interpret exit codes.
 
 pub mod boot_mode;
@@ -26,7 +26,7 @@ pub mod ovmf;
 pub mod qemu_cmd;
 pub mod resolve;
 
-pub use entry::{RunOptions, run};
+pub use entry::{Prepared, RunOptions, launch, prepare};
 pub use ovmf::{ResolvedOvmf, resolve_ovmf};
 pub use qemu_cmd::{QemuInvocation, build_qemu_command};
 pub use resolve::{ResolvedQemu, resolve_qemu};

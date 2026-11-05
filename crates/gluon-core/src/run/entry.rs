@@ -3,8 +3,8 @@
 //! Wires together `build()`, resolve, OVMF resolution (when needed),
 //! argv assembly, and QEMU spawn.
 //!
-//! Public surface: [`run`] plus the [`RunOptions`] struct the CLI
-//! populates from its clap-parsed args. Keeping everything else in
+//! Public surface: [`prepare`] and [`launch`] plus the [`RunOptions`]
+//! struct the CLI populates from its clap-parsed args. Keeping everything else in
 //! sibling submodules means the whole pipeline stays unit-testable in
 //! isolation: `qemu_cmd` is pure, `resolve` is pure, `ovmf` only
 //! touches the filesystem behind an injected context, and this file
@@ -15,19 +15,18 @@ use super::qemu_cmd::{QemuInvocation, build_qemu_command};
 use super::resolve::{resolve_disk_source, resolve_qemu};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
-use crate::scheduler::Reporter;
+use crate::scheduler::{BuildSummary, Reporter};
 use crate::{build_with_reporter, model::BootMode};
 use gluon_model::{BuildModel, EspSource, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::time::{Duration, Instant};
 
-/// Knobs passed into [`run`] by the CLI layer.
+/// Knobs passed into [`prepare`] by the CLI layer.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     /// Forces `BootMode::Uefi` / `BootMode::Direct`, overriding whatever
@@ -41,9 +40,9 @@ pub struct RunOptions {
     pub extra_args: Vec<OsString>,
     /// Worker count for the preceding `build()` step. `None` = auto.
     pub workers: Option<usize>,
-    /// Print the assembled QEMU command and exit 0 without spawning.
-    /// Used by integration tests and for users sanity-checking a
-    /// config.
+    /// Skip the build and the ESP existence checks, so the caller can
+    /// print the assembled QEMU command without spawning it. Used by
+    /// integration tests and for users sanity-checking a config.
     pub dry_run: bool,
     /// Skip the implicit `build()` step and go straight to the QEMU
     /// spawn. The user is asserting the boot binary on disk is
@@ -55,9 +54,8 @@ pub struct RunOptions {
     /// Implied by `dry_run` (dry-run already skips the build).
     pub no_build: bool,
     /// Start QEMU with a GDB server on :1234 and halt the CPU before
-    /// the first instruction (`-s -S`). A hint line is printed to
-    /// stderr before spawn so the user knows where to point their
-    /// debugger.
+    /// the first instruction (`-s -S`). The CLI prints a hint before
+    /// the spawn so the user knows where to point their debugger.
     pub gdb: bool,
     /// Emit an `-device isa-debug-exit,iobase=<port>,iosize=0x04`
     /// entry in the QEMU argv so the future `gluon test` harness can
@@ -69,11 +67,20 @@ pub struct RunOptions {
     pub test_mode: bool,
 }
 
-/// Run the project defined by `model`/`resolved` under QEMU.
+/// What [`prepare`] produced: the QEMU command, and the summary of the
+/// build that preceded it.
+#[derive(Debug)]
+pub struct Prepared {
+    pub invocation: QemuInvocation,
+    /// `None` when the build was skipped (`dry_run` or `no_build`).
+    pub build: Option<BuildSummary>,
+}
+
+/// Build the project and assemble the QEMU command that runs it.
 ///
 /// Steps, in order:
 ///
-/// 1. **Build.** Invokes [`build_with_workers`] so `gluon run` is
+/// 1. **Build.** Invokes [`build_with_reporter`] so `gluon run` is
 ///    idempotent with the current project state. A failed build
 ///    short-circuits without touching QEMU.
 /// 2. **Locate boot binary.** The resolved profile must have a
@@ -86,14 +93,17 @@ pub struct RunOptions {
 ///    writable-vars copy (when needed) lands under
 ///    `build/ovmf_vars-<profile>.fd`.
 /// 5. **Build argv.** Pure [`build_qemu_command`] call.
-/// 6. **Dry-run short-circuit** or **spawn + wait with timeout**.
-pub fn run(
+///
+/// The caller then prints what it wants (the command for a dry run, a
+/// GDB hint) and hands the invocation to [`launch`]. Splitting here
+/// lets the CLI put its own lines between the build and QEMU's output.
+pub fn prepare(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    opts: RunOptions,
+    opts: &RunOptions,
     reporter: &mut dyn Reporter,
-) -> Result<ExitStatus> {
+) -> Result<Prepared> {
     // Step 1: build (skipped in dry-run or when --no-build is set).
     //
     // Dry-run exists to let users sanity-check their QEMU
@@ -150,7 +160,7 @@ pub fn run(
     //
     // `model.qemu` is `Option<QemuDef>` since Phase G of Stage 4: the CLI
     // is responsible for rejecting an absent qemu block at the entry
-    // point with `Error::QemuNotConfigured`. By the time we reach `run`
+    // point with `Error::QemuNotConfigured`. By the time we reach `prepare`
     // the field must be `Some` — `expect` documents that contract for
     // future readers and produces a panic, not a silent default, if the
     // CLI ever forgets the check. Refactoring the function signature to
@@ -302,42 +312,29 @@ pub fn run(
         opts.dry_run || opts.no_build,
     )?;
 
-    // Step 6: dry-run or spawn.
-    if opts.dry_run {
-        print_invocation(&invocation);
-        // Return a synthetic success. We don't spawn QEMU in dry-run,
-        // and the CLI only cares about the error path (dry-run
-        // failures become Result::Err on the way up).
-        return Ok(synthetic_success());
-    }
-
-    if opts.gdb {
-        // Printed *before* the spawn so the user sees it even if QEMU
-        // blocks waiting for a gdb connection. Stderr (not stdout)
-        // because QEMU's stdio is on stdout/stderr already — we'd
-        // rather not interleave with its serial output.
-        let mut err = std::io::stderr().lock();
-        let _ = writeln!(
-            err,
-            "gluon: QEMU halted for GDB on :1234 — connect with `target remote :1234`"
-        );
-    }
-
-    spawn_and_wait(invocation)
+    Ok(Prepared {
+        invocation,
+        build: build_summary,
+    })
 }
 
-/// Print the command in a copy-pasteable form. Used by `--dry-run`.
-fn print_invocation(inv: &QemuInvocation) {
-    let mut line = String::new();
-    line.push_str(&shell_quote(&inv.binary));
-    for a in &inv.args {
-        line.push(' ');
-        line.push_str(&shell_quote(&a.to_string_lossy()));
+impl QemuInvocation {
+    /// The command in a copy-pasteable form, for `--dry-run` and the
+    /// CLI's `Running` line.
+    pub fn command_line(&self) -> String {
+        let mut line = shell_quote(&self.binary);
+        for a in &self.args {
+            line.push(' ');
+            line.push_str(&shell_quote(&a.to_string_lossy()));
+        }
+        line
     }
-    // Write through stdout explicitly so the ordering is predictable
-    // relative to other print! calls in the process.
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{line}");
+}
+
+/// Spawn QEMU from `invocation` and wait for it; see
+/// [`spawn_and_wait`] for the timeout and signal handling.
+pub fn launch(invocation: QemuInvocation) -> Result<ExitStatus> {
+    spawn_and_wait(invocation)
 }
 
 /// Minimal POSIX-shell quoting suitable for human consumption. We
@@ -487,24 +484,22 @@ fn check_signal(flag: &Arc<AtomicI32>) -> Option<i32> {
     if v == 0 { None } else { Some(v) }
 }
 
-/// Fabricate an `ExitStatus(0)` without spawning a child. Used by the
-/// `--dry-run` path so the return type stays symmetric with the real
-/// spawn path.
-#[cfg(unix)]
-fn synthetic_success() -> ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    ExitStatus::from_raw(0)
-}
-
-#[cfg(windows)]
-fn synthetic_success() -> ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    ExitStatus::from_raw(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_line_quotes_each_argument() {
+        let inv = QemuInvocation {
+            binary: "qemu-system-x86_64".into(),
+            args: vec!["-m".into(), "128M".into(), "-append".into(), "a b".into()],
+            timeout: None,
+        };
+        assert_eq!(
+            inv.command_line(),
+            "qemu-system-x86_64 -m 128M -append 'a b'"
+        );
+    }
 
     #[test]
     fn shell_quote_passes_plain_strings() {
