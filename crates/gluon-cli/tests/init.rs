@@ -6,35 +6,13 @@
 //! `rust-src` component, and the build reads the `limine` crate from
 //! Cargo's registry cache.
 
+mod support;
+
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repository root")
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let name = entry.file_name();
-        if ty.is_dir() && (name == "build" || name == "esp") {
-            continue;
-        }
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(name))?;
-        } else if ty.is_file() {
-            fs::copy(entry.path(), dst.join(name))?;
-        }
-    }
-    Ok(())
-}
+use support::{copy_dir_all, repo_root, rustc_available, seed_sysroot};
 
 /// `gluon` run in `dir`. The tempdir is outside the repository, so its
 /// `rust-toolchain.toml` does not apply; the child names the toolchain.
@@ -55,12 +33,8 @@ fn gluon(dir: &Path, args: &[&str]) -> (bool, String, String) {
 #[test]
 #[ignore]
 fn init_writes_a_gluon_rs_that_builds_the_limine_example() {
-    match gluon_core::RustcInfo::probe() {
-        Ok(info) if info.rust_src.is_some() => {}
-        other => {
-            eprintln!("skipped: rustc with rust-src is unavailable ({other:?})");
-            return;
-        }
+    if !rustc_available("init_writes_a_gluon_rs_that_builds_the_limine_example") {
+        return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("limine-kernel");
@@ -87,6 +61,7 @@ fn init_writes_a_gluon_rs_that_builds_the_limine_example() {
     let (ok, _, stderr) = gluon(&dir, &["init"]);
     assert!(!ok && stderr.contains("--force"), "{stderr}");
 
+    seed_sysroot(&dir);
     let (ok, _, stderr) = gluon(&dir, &["build"]);
     assert!(
         ok,

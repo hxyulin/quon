@@ -30,18 +30,34 @@
 use gluon_core::model::ResolvedValue;
 use std::path::{Path, PathBuf};
 
-/// Walk up from `CARGO_MANIFEST_DIR` (which is `crates/gluon-core` for
-/// this test crate) to the workspace root, then descend into
-/// `tests/fixtures/<name>`. Mirrors the helper used by
-/// `gluon-cli/tests/integration.rs::fixture_source_dir`.
-fn fixture_dir(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/gluon-core has a two-level parent")
-        .join("tests")
-        .join("fixtures")
-        .join(name)
+/// Copy `tests/fixtures/<name>` into a fresh temp dir and return the
+/// temp dir and the copy. Loading a model compiles and runs the
+/// fixture's `gluon.rs` under `<project>/build`, so a copy keeps
+/// `build/` out of the source tree and keeps tests that load the same
+/// fixture from linking one script binary at the same time.
+fn fixture_copy(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures")
+        .join(name);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dst = tmp.path().join(name);
+    copy_dir(&src, &dst);
+    (tmp, dst)
+}
+
+/// Recursive copy that skips `build/`.
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create dir");
+    for entry in std::fs::read_dir(src).expect("read fixture") {
+        let entry = entry.expect("dir entry");
+        let to = dst.join(entry.file_name());
+        let ty = entry.file_type().expect("file type");
+        if ty.is_dir() && entry.file_name() != "build" {
+            copy_dir(&entry.path(), &to);
+        } else if ty.is_file() {
+            std::fs::copy(entry.path(), &to).expect("copy file");
+        }
+    }
 }
 
 #[test]
@@ -51,8 +67,8 @@ fn kconfig_loader_round_trips_against_builder() {
         eprintln!("kconfig_loader_round_trips_against_builder: skipped — rustc probe failed");
         return;
     }
-    let kconfig_dir = fixture_dir("kconfig-minimal");
-    let builder_dir = fixture_dir("kconfig-builder-equiv");
+    let (_kconfig_tmp, kconfig_dir) = fixture_copy("kconfig-minimal");
+    let (_builder_tmp, builder_dir) = fixture_copy("kconfig-builder-equiv");
     assert!(
         kconfig_dir.join("gluon.rs").is_file(),
         "fixture missing at {kconfig_dir:?}"
@@ -108,7 +124,7 @@ fn kconfig_loader_resolves_boolean_expression_form() {
     // hadron-style `flatten_symbols()`: the flat form would treat the
     // referenced symbols as an implicit AND of two requirements
     // (`LOG_ENABLED` AND `DEBUG`), wrongly disabling FANCY_FEATURE.
-    let kconfig_dir = fixture_dir("kconfig-minimal");
+    let (_tmp, kconfig_dir) = fixture_copy("kconfig-minimal");
     let model = gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     let resolved =
         gluon_core::resolve_config(&model, "default", None, &kconfig_dir, None).expect("resolve");
@@ -126,6 +142,9 @@ fn kconfig_loader_resolves_boolean_expression_form() {
         Some(&ResolvedValue::Bool(false)),
         "fixture invariant: DEBUG defaults to false"
     );
+    // FANCY_FEATURE only exists in extras.kconfig, which
+    // options.kconfig pulls in via `source "./extras.kconfig"`, so this
+    // also proves the loader follows source directives.
     assert_eq!(
         resolved.options.get("FANCY_FEATURE"),
         Some(&ResolvedValue::Bool(true)),
@@ -179,23 +198,5 @@ fn depends_on_expr_honours_or_semantics() {
         resolved.options.get("DEP"),
         Some(&ResolvedValue::Bool(true)),
         "DEP should stay on because A || B holds (A is on)"
-    );
-}
-
-#[test]
-#[ignore]
-fn kconfig_source_directive_pulls_extras_into_model() {
-    if gluon_core::RustcInfo::probe().is_err() {
-        eprintln!("kconfig_source_directive_pulls_extras_into_model: skipped — rustc probe failed");
-        return;
-    }
-    // FANCY_FEATURE only exists in extras.kconfig, which options.kconfig
-    // pulls in via `source "./extras.kconfig"`. If the loader didn't
-    // recurse into source directives this option would be missing.
-    let kconfig_dir = fixture_dir("kconfig-minimal");
-    let model = gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
-    assert!(
-        model.config_options.lookup("FANCY_FEATURE").is_some(),
-        "source directive failed to pull in FANCY_FEATURE from extras.kconfig"
     );
 }

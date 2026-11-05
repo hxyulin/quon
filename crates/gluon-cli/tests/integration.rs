@@ -1,171 +1,83 @@
 //! End-to-end CLI integration tests for `gluon-cli`.
 //!
-//! These tests spawn the real `gluon` binary (via `env!("CARGO_BIN_EXE_gluon")`)
-//! against a copy of `tests/fixtures/minimal/` that has been recursively
-//! copied into a `tempfile::TempDir`. Running against a copy (rather than
-//! the on-disk fixture in the source tree) keeps the workspace clean: no
-//! `build/` directories, cached manifests, or generated `rust-project.json`
-//! files leak back into the repository between test runs.
+//! These tests spawn the real `gluon` binary against a copy of
+//! `tests/fixtures/minimal/` in a temp dir, so no `build/` directory or
+//! `rust-project.json` leaks back into the source tree.
 //!
 //! ## What's `#[ignore]`-gated and why
 //!
-//! Tests that reach `gluon-cli`'s `build_context` path — `gluon build`
-//! and `gluon configure` — call `RustcInfo::load_or_probe`, which
-//! spawns `rustc -vV`. `gluon build` also needs the `rust-src`
-//! component to build the custom sysroot. Spawning rustc (let alone
-//! building core/alloc) isn't acceptable in every CI sandbox, so
-//! those tests are `#[ignore]`-gated and use `require_rustc_or_skip`
-//! to *skip* rather than fail when the toolchain is unavailable.
-//! This mirrors the probe-or-skip + `#[ignore]` pattern used by the
-//! scheduler end-to-end tests in `gluon-core`.
+//! `gluon build`, `check`, `clippy` and `configure` spawn rustc, and
+//! builds need the `rust-src` component for the custom sysroot, so
+//! those tests are `#[ignore]`-gated and skip when the toolchain is
+//! missing. The `gluon clean` and `gluon fmt` tests run in the default
+//! suite.
 //!
-//! Tests that do **not** require rustc run in the default suite:
-//!   - The `gluon clean` tests use `build_layout_context`, which
-//!     stops short of the rustc probe — `clean` should work on
-//!     machines with broken or missing toolchains.
+//! ## Sysroots
+//!
+//! Every build test except `gluon_build_cold_then_cache_hit` and
+//! `target_spec_edit_rebuilds` starts from a seeded sysroot (see
+//! `support::seed_sysroot`), which saves about 15 s per test. Those
+//! two build it themselves: the first covers the sysroot build through
+//! the CLI, and the second uses a custom target spec, which a seed
+//! cannot match.
+//!
+//! The freshness checks run as steps of three tests, each on one
+//! fixture, so the suite pays for three cold builds instead of one per
+//! check while the three still run in parallel. A failing step hides
+//! the steps after it; each step's message names it.
+
+mod support;
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use tempfile::TempDir;
+use support::{
+    counts, gluon, gluon_ok, rustc_available, seed_sysroot, seed_sysroot_for, setup_fixture,
+    summary,
+};
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+fn setup() -> (tempfile::TempDir, PathBuf) {
+    setup_fixture("minimal")
+}
 
-/// Copy the on-disk minimal fixture into a fresh tempdir and return a
-/// handle to the tempdir along with the absolute path of the copied
-/// project root (the directory containing the new `gluon.rs`).
-///
-/// The returned `TempDir` is kept alive by the caller; dropping it
-/// cleans up the entire tree.
-fn setup_fixture() -> (TempDir, PathBuf) {
-    let src = fixture_source_dir();
-    assert!(
-        src.join("gluon.rs").is_file(),
-        "fixture missing at {src:?}: check tests/fixtures/minimal/"
+fn kernel_bin(fixture: &Path) -> PathBuf {
+    fixture.join("build/cross/x86_64-unknown-none/dev/final/kernel")
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn append(path: &Path, text: &str) {
+    let mut src = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    src.push_str(text);
+    fs::write(path, src).unwrap_or_else(|e| panic!("write {path:?}: {e}"));
+}
+
+/// Append a `#[used]` static named `name` to the kernel, so `value` (a
+/// `&str` expression) ends up in the binary's bytes.
+fn embed_in_kernel(fixture: &Path, name: &str, value: &str) {
+    append(
+        &fixture.join("crates/kernel/src/main.rs"),
+        &format!("\n#[used]\n#[no_mangle]\npub static {name}: &str = {value};\n"),
     );
-    let tmp = tempfile::tempdir().expect("create tempdir");
-    let dst = tmp.path().join("minimal");
-    copy_dir_all(&src, &dst).expect("copy fixture into tempdir");
-    (tmp, dst)
 }
 
-/// Resolve the on-disk fixture path: `<workspace>/tests/fixtures/minimal/`.
-///
-/// `CARGO_MANIFEST_DIR` for this crate is `<workspace>/crates/gluon-cli`,
-/// so the fixture lives two directories up.
-fn fixture_source_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/gluon-cli has a two-level parent")
-        .join("tests")
-        .join("fixtures")
-        .join("minimal")
-}
-
-/// Recursive copy. Deliberately hand-rolled — we don't want to pull in
-/// `fs_extra` or similar just for tests.
-///
-/// Skips directories named `build` and `esp`: these are gitignored
-/// artifact dirs (see `.gitignore`'s `tests/fixtures/*/build/` and
-/// `tests/fixtures/*/esp/`). A developer who has run `gluon build`
-/// inside a fixture directly will leave half a gigabyte of stale
-/// artefacts behind — copying those into the tempdir makes the test
-/// non-hermetic and breaks `--no-build` / `--dry-run` assertions
-/// because the artefacts that "should not exist" do.
-fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let from = entry.path();
-        let name = entry.file_name();
-        if ty.is_dir() && (name == "build" || name == "esp") {
-            continue;
-        }
-        let to = dst.join(name);
-        if ty.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else if ty.is_file() {
-            fs::copy(&from, &to)?;
-        }
-        // Symlinks and other special file types aren't used in the
-        // fixture, so we silently skip them.
-    }
-    Ok(())
-}
-
-/// Build a `Command` targeting the `gluon` binary produced by cargo for
-/// this integration test run, with its working directory set to the
-/// fixture copy. Stdout/stderr are piped so tests can inspect them.
-fn gluon_command(fixture: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gluon"));
-    cmd.current_dir(fixture);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd
-}
-
-/// Probe rustc up-front; if it's not available or `rust-src` is missing,
-/// print a skip notice and return `None`. Tests use
-/// `let Some(()) = require_rustc_or_skip("test_name") else { return; };`
-/// to bail out cleanly.
-fn require_rustc_or_skip(test_name: &str) -> Option<()> {
-    match gluon_core::RustcInfo::probe() {
-        Ok(info) if info.rust_src.is_some() => Some(()),
-        Ok(_) => {
-            eprintln!("{test_name}: skipped — rust-src component not installed");
-            None
-        }
-        Err(e) => {
-            eprintln!("{test_name}: skipped — rustc probe failed: {e}");
-            None
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-/// Cold build, then a second build that hits the cache.
-///
-/// Asserts:
-///   1. First `gluon build` exits 0 and its "built N, cached M" summary
-///      line has `cached 0` (everything was compiled fresh).
-///   2. The cache manifest contains a `sysroot:<target>` composite entry
-///      after a successful cold build.
-///   3. The kernel binary exists under
-///      `build/cross/<target>/<profile>/final/kernel`.
-///   4. Second `gluon build` exits 0 and its summary has `built 0`
-///      (nothing was rebuilt; everything was cached).
+/// Cold build, then a second build that hits the cache. This is the one
+/// CLI test that builds the sysroot from scratch.
 #[test]
 #[ignore]
 fn gluon_build_cold_then_cache_hit() {
-    let Some(()) = require_rustc_or_skip("gluon_build_cold_then_cache_hit") else {
+    if !rustc_available("gluon_build_cold_then_cache_hit") {
         return;
-    };
-    let (_tmp, fixture) = setup_fixture();
+    }
+    let (_tmp, fixture) = setup();
 
-    // --- First run: cold build ---
-    let first = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn first gluon build");
-    let first_stderr = String::from_utf8_lossy(&first.stderr);
-    assert!(
-        first.status.success(),
-        "first build failed: status={:?}, stderr=\n{first_stderr}",
-        first.status
-    );
-    assert!(
-        first_stderr.contains("built ") && first_stderr.contains("cached 0"),
-        "first build summary should be 'built N, cached 0', got: {first_stderr}"
-    );
+    let first = gluon_ok(&fixture, &["build"]);
+    let (built, cached) = summary(&first);
+    assert!(built > 0, "cold build built nothing:\n{first}");
+    assert_eq!(cached, 0, "cold build found something cached:\n{first}");
 
     // The sysroot's freshness lives in its fingerprint record, not in
     // a sidecar stamp file.
@@ -174,127 +86,32 @@ fn gluon_build_cold_then_cache_hit() {
         store.record_path("sysroot:x86_64-unknown-none").is_file(),
         "expected the sysroot record after a cold build"
     );
-
-    // Kernel binary should exist at cross/<target>/<profile>/final/kernel.
-    let kernel_bin = fixture
-        .join("build")
-        .join("cross")
-        .join("x86_64-unknown-none")
-        .join("dev")
-        .join("final")
-        .join("kernel");
     assert!(
-        kernel_bin.is_file(),
-        "expected kernel binary at {kernel_bin:?} after cold build, stderr:\n{first_stderr}"
+        kernel_bin(&fixture).is_file(),
+        "kernel binary missing after a cold build:\n{first}"
     );
 
-    // --- Second run: everything should be cached ---
-    let second = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn second gluon build");
-    let second_stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(
-        second.status.success(),
-        "second build failed: status={:?}, stderr=\n{second_stderr}",
-        second.status
-    );
-    assert!(
-        second_stderr.contains("built 0"),
-        "second build summary should report 'built 0', got: {second_stderr}"
-    );
-    assert!(
-        second_stderr.contains("cached ") && !second_stderr.contains("cached 0"),
-        "second build summary should report a non-zero 'cached N', got: {second_stderr}"
-    );
-}
-
-/// After a cold build, touch `crates/kernel/src/main.rs` and re-run the
-/// build. At least one crate should be rebuilt (kernel itself, and
-/// possibly others that depend on it — the exact count depends on rebuild
-/// semantics, so we only assert `built > 0`).
-#[test]
-#[ignore]
-fn gluon_build_source_touch_rebuilds_one() {
-    let Some(()) = require_rustc_or_skip("gluon_build_source_touch_rebuilds_one") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-
-    // Cold build first.
-    let first = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("first build");
-    assert!(
-        first.status.success(),
-        "cold build failed: {}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-
-    // Modify main.rs in-place. We rewrite rather than just `touch` so
-    // the content hash changes regardless of what freshness model the
-    // cache uses (content-hash *or* mtime).
-    let main_path = fixture.join("crates/kernel/src/main.rs");
-    let mut src = fs::read_to_string(&main_path).expect("read main.rs");
-    src.push_str("\n// touched by gluon_build_source_touch_rebuilds_one\n");
-    fs::write(&main_path, src).expect("rewrite main.rs");
-
-    let second = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("second build");
-    let second_stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(
-        second.status.success(),
-        "touched rebuild failed: {second_stderr}"
-    );
-    // We only assert "not zero" because whether the rebuild count is
-    // 1, 2, or more depends on how many dependents the scheduler
-    // recompiles for a touched leaf crate.
-    assert!(
-        !second_stderr.contains("built 0"),
-        "touched build should have rebuilt at least one crate, got: {second_stderr}"
-    );
+    let second = gluon_ok(&fixture, &["build"]);
+    assert_eq!(summary(&second), (0, built), "second build:\n{second}");
 }
 
 /// `gluon configure` must write a parseable `rust-project.json` at the
 /// default location, containing the config crate plus one entry per
-/// resolved crate in the fixture (minimal_derive + kernel = 3 total
-/// including the config crate).
+/// resolved crate in the fixture.
 #[test]
 #[ignore]
 fn gluon_configure_emits_valid_json() {
-    let Some(()) = require_rustc_or_skip("gluon_configure_emits_valid_json") else {
+    if !rustc_available("gluon_configure_emits_valid_json") {
         return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-
-    let output = gluon_command(&fixture)
-        .arg("configure")
-        .output()
-        .expect("spawn gluon configure");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon configure failed: status={:?}, stderr={stderr}",
-        output.status
-    );
+    }
+    let (_tmp, fixture) = setup();
+    gluon_ok(&fixture, &["configure"]);
 
     let rp_path = fixture.join("rust-project.json");
-    assert!(
-        rp_path.is_file(),
-        "rust-project.json should exist at {rp_path:?}"
-    );
     let body = fs::read_to_string(&rp_path).expect("read rust-project.json");
 
-    // serde_json is intentionally NOT a dev-dep of gluon-cli (scope
-    // constraint for this chunk), so we do lightweight substring-level
-    // structure checks instead of full deserialization. The file must
-    // start with `{`, declare the top-level `crates` key, mention the
-    // proc-macro crate type via `is_proc_macro`, and reference both
-    // source-tree directories the resolver should have emitted entries
-    // for.
+    // serde_json is not a dev-dependency of gluon-cli, so these are
+    // substring checks on the structure.
     assert!(
         body.trim_start().starts_with('{'),
         "rust-project.json must start with '{{': {body}"
@@ -329,9 +146,7 @@ fn gluon_configure_emits_valid_json() {
         "sysroot_src must end in /library: {body}"
     );
     // Cross crates must carry a `target` field so rust-analyzer evaluates
-    // `#[cfg(target_os = \"none\")]` against the kernel's triple. Host
-    // crates legitimately omit it, but the fixture has a cross kernel, so
-    // at least one `target` key must appear somewhere in the output.
+    // `#[cfg(target_os = "none")]` against the kernel's triple.
     assert!(
         body.contains("\"target\""),
         "at least one crate must declare a target field: {body}"
@@ -339,29 +154,17 @@ fn gluon_configure_emits_valid_json() {
 }
 
 /// `gluon clean` (default: no `--keep-sysroot`) must remove the entire
-/// `build/` directory. We pre-populate it with a sentinel file so we can
-/// confirm the sweep actually ran. Runs without rustc because `clean`
-/// uses the layout-only context.
+/// `build/` directory. Runs without rustc because `clean` uses the
+/// layout-only context.
 #[test]
 fn gluon_clean_removes_build_dir() {
-    let (_tmp, fixture) = setup_fixture();
+    let (_tmp, fixture) = setup();
 
     let build_dir = fixture.join("build");
     fs::create_dir_all(&build_dir).expect("mkdir build");
-    let sentinel = build_dir.join("sentinel");
-    fs::write(&sentinel, b"hello").expect("write sentinel");
+    fs::write(build_dir.join("sentinel"), b"hello").expect("write sentinel");
 
-    let output = gluon_command(&fixture)
-        .arg("clean")
-        .output()
-        .expect("spawn gluon clean");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon clean failed: status={:?}, stderr={stderr}",
-        output.status
-    );
-
+    gluon_ok(&fixture, &["clean"]);
     assert!(
         !build_dir.exists(),
         "build/ should have been removed by gluon clean"
@@ -373,7 +176,7 @@ fn gluon_clean_removes_build_dir() {
 /// Runs without rustc because `clean` uses the layout-only context.
 #[test]
 fn gluon_clean_keep_sysroot_preserves_sysroot() {
-    let (_tmp, fixture) = setup_fixture();
+    let (_tmp, fixture) = setup();
 
     // Fabricate a fake pre-built state: a sysroot rlib, a sysroot
     // record and another record, plus some other build artifact. The
@@ -401,17 +204,7 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
     fs::write(&sysroot_record, b"{}").expect("write sysroot record");
     fs::write(&other_record, b"{}").expect("write other record");
 
-    let output = gluon_command(&fixture)
-        .arg("clean")
-        .arg("--keep-sysroot")
-        .output()
-        .expect("spawn gluon clean --keep-sysroot");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon clean --keep-sysroot failed: status={:?}, stderr={stderr}",
-        output.status
-    );
+    gluon_ok(&fixture, &["clean", "--keep-sysroot"]);
 
     assert!(
         core_rlib.is_file(),
@@ -421,7 +214,6 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
         !other.exists(),
         "non-sysroot build state should have been removed"
     );
-
     assert!(
         sysroot_record.exists(),
         "the sysroot record should survive --keep-sysroot"
@@ -432,258 +224,44 @@ fn gluon_clean_keep_sysroot_preserves_sysroot() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// T7: gluon check / clippy / fmt
-// ---------------------------------------------------------------------------
-
-/// Cold `gluon check` should succeed and report a non-zero "checked N"
-/// summary; the second invocation should hit the cache.
+/// `gluon clippy`:
+/// - lints every crate into `build/tool/clippy/`, including the
+///   project's own proc macro, which is built with plain rustc so
+///   dependents can load the real dylib;
+/// - shares that dylib with `gluon build`;
+/// - lints every crate again after either kind of `gluon clean`, since
+///   both remove `build/tool/`.
 #[test]
 #[ignore]
-fn gluon_check_cold_then_cache_hit() {
-    let Some(()) = require_rustc_or_skip("gluon_check_cold_then_cache_hit") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-
-    let first = gluon_command(&fixture)
-        .arg("check")
-        .output()
-        .expect("spawn first gluon check");
-    let first_stderr = String::from_utf8_lossy(&first.stderr);
-    assert!(
-        first.status.success(),
-        "first check failed: status={:?}, stderr=\n{first_stderr}",
-        first.status
-    );
-    assert!(
-        first_stderr.contains("checked ") && first_stderr.contains("cached 0"),
-        "first check summary should be 'checked N, cached 0', got: {first_stderr}"
-    );
-
-    // Output should land under build/tool/check/, not under the
-    // historical paths used by `gluon build`.
-    let check_root = fixture.join("build").join("tool").join("check");
-    assert!(
-        check_root.is_dir(),
-        "expected build/tool/check/ to exist after `gluon check`, fixture: {fixture:?}"
-    );
-
-    let second = gluon_command(&fixture)
-        .arg("check")
-        .output()
-        .expect("spawn second gluon check");
-    let second_stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(
-        second.status.success(),
-        "second check failed: {second_stderr}"
-    );
-    assert!(
-        second_stderr.contains("checked 0"),
-        "second check should report 'checked 0', got: {second_stderr}"
-    );
-    assert!(
-        second_stderr.contains("cached ") && !second_stderr.contains("cached 0"),
-        "second check should report non-zero 'cached N', got: {second_stderr}"
-    );
-}
-
-/// Running `gluon check` after a successful `gluon build` must NOT
-/// invalidate the build's cache. The second build run should still be
-/// fully cached. This is the regression guard for T3 (cache
-/// namespacing).
-#[test]
-#[ignore]
-fn gluon_check_after_build_does_not_wipe_build_cache() {
-    let Some(()) = require_rustc_or_skip("gluon_check_after_build_does_not_wipe_build_cache")
-    else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-
-    // 1. Cold build.
-    let build1 = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn build #1");
-    assert!(
-        build1.status.success(),
-        "build #1 failed: {}",
-        String::from_utf8_lossy(&build1.stderr)
-    );
-
-    // 2. Run check. Should produce its own artifacts under tool/check/.
-    let check = gluon_command(&fixture)
-        .arg("check")
-        .output()
-        .expect("spawn check");
-    assert!(
-        check.status.success(),
-        "check after build failed: {}",
-        String::from_utf8_lossy(&check.stderr)
-    );
-
-    // 3. Re-run build. Must be fully cached.
-    let build2 = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn build #2");
-    let build2_stderr = String::from_utf8_lossy(&build2.stderr);
-    assert!(build2.status.success(), "build #2 failed: {build2_stderr}");
-    assert!(
-        build2_stderr.contains("built 0"),
-        "build #2 should be fully cached after intervening check, got: {build2_stderr}"
-    );
-
-    // The kernel binary that build #1 wrote must still exist (and not
-    // have been clobbered by check, which only writes metadata).
-    let kernel_bin = fixture
-        .join("build")
-        .join("cross")
-        .join("x86_64-unknown-none")
-        .join("dev")
-        .join("final")
-        .join("kernel");
-    assert!(
-        kernel_bin.is_file(),
-        "kernel binary should still exist after check then build, expected at {kernel_bin:?}"
-    );
-}
-
-/// Cold `gluon clippy`. Skipped if either rustc OR clippy-driver is
-/// missing.
-#[test]
-#[ignore]
-fn gluon_clippy_cold() {
-    let Some(()) = require_rustc_or_skip("gluon_clippy_cold") else {
-        return;
-    };
-    // clippy-driver lookup mirrors `DriverKind::resolve_clippy_driver`:
-    // env var, then sibling-of-rustc, then $PATH. Spawning a probe is
-    // overkill — if the binary isn't present, the gluon clippy run
-    // will surface a useful error and we want the test to skip rather
-    // than fail in CI sandboxes that don't have clippy.
-    if !clippy_driver_available() {
-        eprintln!("gluon_clippy_cold: skipped — clippy-driver not found");
+fn gluon_clippy_lints_every_crate() {
+    if !rustc_available("gluon_clippy_lints_every_crate") {
         return;
     }
-    let (_tmp, fixture) = setup_fixture();
-
-    let output = gluon_command(&fixture)
-        .arg("clippy")
-        .output()
-        .expect("spawn gluon clippy");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon clippy failed: status={:?}, stderr=\n{stderr}",
-        output.status
-    );
-    assert!(
-        stderr.contains("linted "),
-        "clippy summary should contain 'linted N', got: {stderr}"
-    );
-    // Output should land under build/tool/clippy/, separate from build
-    // and check artifacts.
-    let clippy_root = fixture.join("build").join("tool").join("clippy");
-    assert!(
-        clippy_root.is_dir(),
-        "expected build/tool/clippy/ to exist after `gluon clippy`"
-    );
-}
-
-/// `gluon clean` removes `build/tool/`, where clippy keeps its outputs
-/// and records, so the next `gluon clippy` lints every crate again.
-/// `--keep-sysroot` removes it too.
-#[test]
-#[ignore]
-fn gluon_clippy_after_clean_lints_every_crate() {
-    let Some(()) = require_rustc_or_skip("gluon_clippy_after_clean_lints_every_crate") else {
-        return;
-    };
     if !clippy_driver_available() {
-        eprintln!("gluon_clippy_after_clean_lints_every_crate: skipped — clippy-driver not found");
+        eprintln!("gluon_clippy_lints_every_crate: skipped, clippy-driver not found");
         return;
     }
-    let (_tmp, fixture) = setup_fixture();
-    let tool = fixture.join("build").join("tool");
-    let run = |args: &[&str]| {
-        let output = gluon_command(&fixture)
-            .args(args)
-            .output()
-            .expect("spawn gluon");
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        assert!(
-            output.status.success(),
-            "gluon {args:?} failed: status={:?}, stderr=\n{stderr}",
-            output.status
-        );
-        stderr
-    };
-
-    run(&["clippy"]);
-    assert!(tool.is_dir(), "gluon clippy writes build/tool/");
-    run(&["clean", "--keep-sysroot"]);
-    assert!(
-        !tool.exists(),
-        "clean --keep-sysroot must remove build/tool/"
+    let (_tmp, fixture) = setup();
+    seed_sysroot(&fixture);
+    append(
+        &fixture.join("crates/proc_macro/src/lib.rs"),
+        "\npub(crate) fn answer() -> i32 {\n    return 42;\n}\n",
     );
+    let tool = fixture.join("build/tool");
 
-    run(&["clippy"]);
-    run(&["clean"]);
-    assert!(!tool.exists(), "clean must remove build/tool/");
-    let stderr = run(&["clippy"]);
+    let first = gluon_ok(&fixture, &["clippy"]);
+    let (linted, _) = counts(&first, "linted");
+    assert!(linted > 0, "clippy linted nothing:\n{first}");
     assert!(
-        stderr.contains("cached 0"),
-        "clippy after clean must lint every crate, got: {stderr}"
-    );
-}
-
-/// `gluon clippy` lints the project's own proc macros. They are built
-/// with plain rustc so dependents can load the real dylib, which must
-/// not take them out of the lint pass.
-#[test]
-#[ignore]
-fn gluon_clippy_lints_project_proc_macro() {
-    let Some(()) = require_rustc_or_skip("gluon_clippy_lints_project_proc_macro") else {
-        return;
-    };
-    if !clippy_driver_available() {
-        eprintln!("gluon_clippy_lints_project_proc_macro: skipped — clippy-driver not found");
-        return;
-    }
-    let (_tmp, fixture) = setup_fixture();
-    let lib = fixture.join("crates/proc_macro/src/lib.rs");
-    let mut src = fs::read_to_string(&lib).expect("read proc macro source");
-    src.push_str("\npub(crate) fn answer() -> i32 {\n    return 42;\n}\n");
-    fs::write(&lib, src).expect("write proc macro source");
-
-    let output = gluon_command(&fixture)
-        .arg("clippy")
-        .output()
-        .expect("spawn gluon clippy");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon clippy failed: status={:?}, stderr=\n{stderr}",
-        output.status
+        first.contains("needless_return"),
+        "clippy should report the proc macro's needless return:\n{first}"
     );
     assert!(
-        stderr.contains("needless_return"),
-        "clippy should report the proc macro's needless return, got: {stderr}"
+        tool.join("clippy").is_dir(),
+        "clippy writes build/tool/clippy/"
     );
 
-    // The real dylib is still shared with `gluon build`, so building
-    // afterwards does not recompile the proc macro.
-    let build = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn gluon build");
-    assert!(
-        build.status.success(),
-        "build after clippy failed: {}",
-        String::from_utf8_lossy(&build.stderr)
-    );
+    gluon_ok(&fixture, &["build"]);
     let host_deps = fixture.join("build/host/deps");
     let dylibs = fs::read_dir(&host_deps)
         .expect("read host deps")
@@ -695,6 +273,28 @@ fn gluon_clippy_lints_project_proc_macro() {
         })
         .count();
     assert!(dylibs > 0, "proc macro dylib missing from {host_deps:?}");
+
+    gluon_ok(&fixture, &["clean", "--keep-sysroot"]);
+    assert!(
+        !tool.exists(),
+        "clean --keep-sysroot must remove build/tool/"
+    );
+    let again = gluon_ok(&fixture, &["clippy"]);
+    assert_eq!(
+        counts(&again, "linted").0,
+        linted,
+        "clippy after clean --keep-sysroot must lint every crate:\n{again}"
+    );
+
+    gluon_ok(&fixture, &["clean"]);
+    assert!(!tool.exists(), "clean must remove build/tool/");
+    seed_sysroot(&fixture);
+    let again = gluon_ok(&fixture, &["clippy"]);
+    assert_eq!(
+        counts(&again, "linted").0,
+        linted,
+        "clippy after clean must lint every crate:\n{again}"
+    );
 }
 
 fn clippy_driver_available() -> bool {
@@ -733,19 +333,9 @@ fn gluon_fmt_check_passes_on_formatted_fixture() {
         eprintln!("gluon_fmt_check_passes_on_formatted_fixture: skipped — rustfmt not found");
         return;
     }
-    let (_tmp, fixture) = setup_fixture();
+    let (_tmp, fixture) = setup();
 
-    let output = gluon_command(&fixture)
-        .arg("fmt")
-        .arg("--check")
-        .output()
-        .expect("spawn gluon fmt --check");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "gluon fmt --check should pass on a clean fixture, got status={:?}, stderr=\n{stderr}",
-        output.status
-    );
+    let stderr = gluon_ok(&fixture, &["fmt", "--check"]);
     assert!(
         stderr.contains("processed"),
         "fmt summary should report 'processed', got: {stderr}"
@@ -753,30 +343,24 @@ fn gluon_fmt_check_passes_on_formatted_fixture() {
 }
 
 /// `gluon fmt --check` on a deliberately-unformatted source must
-/// exit non-zero and name the offending crate. Mutates a copy of the
-/// fixture so the on-disk source tree is unaffected.
+/// exit non-zero and name the offending crate.
 #[test]
 fn gluon_fmt_check_fails_on_unformatted_fixture() {
     if !rustfmt_available() {
         eprintln!("gluon_fmt_check_fails_on_unformatted_fixture: skipped — rustfmt not found");
         return;
     }
-    let (_tmp, fixture) = setup_fixture();
+    let (_tmp, fixture) = setup();
 
-    // Deliberately misformat one source file. The fixture's
-    // `kernel/src/main.rs` is the obvious target. Multiple statements
-    // on a line is something rustfmt always normalizes.
-    let main_path = fixture.join("crates/kernel/src/main.rs");
-    let contents = fs::read_to_string(&main_path).expect("read main.rs");
-    let bad = format!(
-        "// fmt-check fixture marker\n{}\nfn _trailing(){{let _x =1;let _y= 2;}}\n",
-        contents
+    // Multiple statements on a line is something rustfmt always
+    // normalizes.
+    append(
+        &fixture.join("crates/kernel/src/main.rs"),
+        "\nfn _trailing(){let _x =1;let _y= 2;}\n",
     );
-    fs::write(&main_path, bad).expect("write misformatted main.rs");
 
-    let output = gluon_command(&fixture)
-        .arg("fmt")
-        .arg("--check")
+    let output = gluon(&fixture)
+        .args(["fmt", "--check"])
         .output()
         .expect("spawn gluon fmt --check");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -803,21 +387,6 @@ fn rustfmt_available() -> bool {
         .unwrap_or(false)
 }
 
-// ---------------------------------------------------------------------------
-// Multi-profile fixture: model-level evaluation tests
-// ---------------------------------------------------------------------------
-
-/// Resolve the multi-profile fixture path.
-fn multi_profile_fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/gluon-cli has a two-level parent")
-        .join("tests")
-        .join("fixtures")
-        .join("multi-profile")
-}
-
 /// Loads the multi-profile fixture via `load_build_model` and verifies
 /// the model captures multiple profiles, cfg_flags, dependency features,
 /// and `default_profile`.
@@ -827,18 +396,10 @@ fn multi_profile_fixture_dir() -> PathBuf {
 #[test]
 #[ignore]
 fn multi_profile_fixture_model() {
-    let Some(()) = require_rustc_or_skip("multi_profile_fixture_model") else {
+    if !rustc_available("multi_profile_fixture_model") {
         return;
-    };
-
-    let fixture = multi_profile_fixture_dir();
-    let script = fixture.join("gluon.rs");
-    assert!(
-        script.is_file(),
-        "multi-profile fixture missing gluon.rs at {fixture:?}"
-    );
-
-    let model = gluon_core::load_build_model(&fixture)
+    }
+    let model = gluon_core::load_build_model(&support::fixture_dir("multi-profile"))
         .expect("load_build_model for multi-profile should succeed");
 
     // -- Project & default_profile --
@@ -918,281 +479,8 @@ fn multi_profile_fixture_model() {
 }
 
 // ---------------------------------------------------------------------------
-// Freshness regression tests
-//
-// Each test builds the minimal fixture, changes one input, rebuilds, and
-// asserts on the `built N, cached M` summary or on the kernel binary.
-// Environment variables are set on the child `gluon` process only.
+// Freshness
 // ---------------------------------------------------------------------------
-
-/// Run `gluon build` in `fixture` with `envs` set on the child process.
-/// Panics on failure and returns stderr.
-fn build_ok(fixture: &Path, envs: &[(&str, &str)]) -> String {
-    let out = gluon_command(fixture)
-        .arg("build")
-        .envs(envs.iter().copied())
-        .output()
-        .expect("spawn gluon build");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "gluon build failed:\n{stderr}");
-    stderr
-}
-
-/// Parse N from the `(built N, cached M)` counts on the `Finished` line.
-fn built_count(stderr: &str) -> usize {
-    stderr
-        .lines()
-        .find_map(|l| l.split_once("(built ").map(|(_, rest)| rest))
-        .and_then(|rest| rest.split(',').next())
-        .and_then(|n| n.trim().parse().ok())
-        .unwrap_or_else(|| panic!("no `built N` summary in:\n{stderr}"))
-}
-
-/// An editor creating and deleting a swap file next to a source file
-/// changes the directory mtime but no input. The rebuild must be a no-op.
-#[test]
-#[ignore]
-fn swap_file_in_source_dir_does_not_rebuild() {
-    let Some(()) = require_rustc_or_skip("swap_file_in_source_dir_does_not_rebuild") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    build_ok(&fixture, &[]);
-
-    let swap = fixture.join("crates/kernel/src/.main.rs.swp");
-    fs::write(&swap, b"swap").expect("create swap file");
-    fs::remove_file(&swap).expect("remove swap file");
-
-    let stderr = build_ok(&fixture, &[]);
-    assert_eq!(
-        built_count(&stderr),
-        0,
-        "swap file caused a rebuild:\n{stderr}"
-    );
-}
-
-/// Adding `mod foo;` plus `foo.rs` rebuilds the crate, and a later edit to
-/// `foo.rs` alone rebuilds it again. The depfile tracks the new file.
-#[test]
-#[ignore]
-fn new_module_file_is_tracked() {
-    let Some(()) = require_rustc_or_skip("new_module_file_is_tracked") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    build_ok(&fixture, &[]);
-
-    let main_rs = fixture.join("crates/kernel/src/main.rs");
-    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
-    src.push_str("\nmod foo;\n");
-    fs::write(&main_rs, src).expect("write main.rs");
-    let foo_rs = fixture.join("crates/kernel/src/foo.rs");
-    fs::write(&foo_rs, "pub const A: u32 = 1;\n").expect("write foo.rs");
-
-    let stderr = build_ok(&fixture, &[]);
-    assert!(
-        built_count(&stderr) > 0,
-        "new module did not rebuild:\n{stderr}"
-    );
-
-    fs::write(&foo_rs, "pub const A: u32 = 2;\n").expect("edit foo.rs");
-    let stderr = build_ok(&fixture, &[]);
-    assert!(
-        built_count(&stderr) > 0,
-        "foo.rs edit did not rebuild:\n{stderr}"
-    );
-}
-
-fn kernel_bin(fixture: &Path) -> PathBuf {
-    fixture.join("build/cross/x86_64-unknown-none/dev/final/kernel")
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Append a `#[used]` static to the kernel so `value` (a `&str`
-/// expression) ends up in the binary's bytes.
-fn embed_in_kernel(fixture: &Path, value: &str) {
-    let main_rs = fixture.join("crates/kernel/src/main.rs");
-    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
-    src.push_str(&format!(
-        "\n#[used]\n#[no_mangle]\npub static GLUON_TEST_EMBED: &str = {value};\n"
-    ));
-    fs::write(&main_rs, src).expect("write main.rs");
-}
-
-/// Editing the proc macro must change the kernel binary. Output paths
-/// are fixed, so the kernel's argv does not change when the proc-macro
-/// dylib is rebuilt; the dylib itself must be a tracked input.
-#[test]
-#[ignore]
-fn proc_macro_edit_rebuilds_dependent() {
-    let Some(()) = require_rustc_or_skip("proc_macro_edit_rebuilds_dependent") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    embed_in_kernel(&fixture, "HELLO");
-    build_ok(&fixture, &[]);
-    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
-    assert!(contains_bytes(&bin, b"hello"));
-
-    let pm = fixture.join("crates/proc_macro/src/lib.rs");
-    let src = fs::read_to_string(&pm).expect("read proc macro");
-    fs::write(&pm, src.replace("\\\"hello\\\"", "\\\"proc-macro-v2\\\""))
-        .expect("write proc macro");
-
-    build_ok(&fixture, &[]);
-    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
-    assert!(
-        contains_bytes(&bin, b"proc-macro-v2"),
-        "kernel binary does not reflect the proc-macro edit"
-    );
-}
-
-/// Editing the linker script must relink the kernel. rustc does not list
-/// `-C link-arg=-T<path>` files in its depfile.
-#[test]
-#[ignore]
-fn linker_script_edit_rebuilds_kernel() {
-    let Some(()) = require_rustc_or_skip("linker_script_edit_rebuilds_kernel") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    build_ok(&fixture, &[]);
-
-    let ld = fixture.join("crates/kernel/kernel.ld");
-    let mut script = fs::read_to_string(&ld).expect("read kernel.ld");
-    script.push_str("\n/* edited */\n");
-    fs::write(&ld, script).expect("write kernel.ld");
-
-    let stderr = build_ok(&fixture, &[]);
-    assert!(
-        built_count(&stderr) > 0,
-        "linker script edit did not rebuild:\n{stderr}"
-    );
-}
-
-/// Editing a custom target JSON spec must rebuild the sysroot and every
-/// crate for that target. rustc does not list the spec in its depfile.
-#[test]
-#[ignore]
-fn target_spec_edit_rebuilds() {
-    let Some(()) = require_rustc_or_skip("target_spec_edit_rebuilds") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    let spec_src = multi_profile_fixture_dir().join("targets/x86_64-unknown-test.json");
-    let spec = fixture.join("targets/x86_64-unknown-test.json");
-    fs::create_dir_all(spec.parent().unwrap()).expect("mkdir targets");
-    fs::copy(&spec_src, &spec).expect("copy target spec");
-    let gluon_rs = fixture.join("gluon.rs");
-    let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
-    let script = script.replace(
-        r#"cfg.target("x86_64-unknown-none")"#,
-        r#"cfg.target_spec("x86_64-unknown-test", "targets/x86_64-unknown-test.json")"#,
-    );
-    fs::write(&gluon_rs, script).expect("write gluon.rs");
-    build_ok(&fixture, &[]);
-
-    let mut json = fs::read_to_string(&spec).expect("read spec");
-    json.push('\n');
-    fs::write(&spec, json).expect("write spec");
-
-    // The sysroot, config crate and kernel are built for the custom
-    // target, so all three must rebuild. The host proc macro does not
-    // read the spec.
-    let stderr = build_ok(&fixture, &[]);
-    assert!(
-        built_count(&stderr) >= 3,
-        "target spec edit did not rebuild the sysroot, config crate and kernel:\n{stderr}"
-    );
-}
-
-/// Changing a variable read through `option_env!` must rebuild the crate.
-/// rustc records it as a `# env-dep:` line in the depfile.
-#[test]
-#[ignore]
-fn env_dep_change_rebuilds() {
-    let Some(()) = require_rustc_or_skip("env_dep_change_rebuilds") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    embed_in_kernel(
-        &fixture,
-        r#"match option_env!("GLUON_TEST_ENV_DEP") { Some(v) => v, None => "env-unset" }"#,
-    );
-    const VAR: &str = "GLUON_TEST_ENV_DEP";
-
-    build_ok(&fixture, &[(VAR, "env-value-one")]);
-    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
-    assert!(contains_bytes(&bin, b"env-value-one"));
-
-    let stderr = build_ok(&fixture, &[(VAR, "env-value-one")]);
-    assert_eq!(built_count(&stderr), 0, "unchanged env rebuilt:\n{stderr}");
-
-    build_ok(&fixture, &[(VAR, "env-value-two")]);
-    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
-    assert!(
-        contains_bytes(&bin, b"env-value-two"),
-        "kernel binary does not reflect the env var change"
-    );
-
-    let out = gluon_command(&fixture)
-        .arg("build")
-        .env_remove(VAR)
-        .output()
-        .expect("spawn gluon build");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let bin = fs::read(kernel_bin(&fixture)).expect("read kernel");
-    assert!(
-        contains_bytes(&bin, b"env-unset"),
-        "kernel binary does not reflect the env var being unset"
-    );
-}
-
-/// A failed build keeps the cache records of the nodes that finished.
-/// The kernel fails after the sysroot, config crate and proc macro have
-/// built. Once the kernel is fixed, only the kernel rebuilds. The failure
-/// names the crate, its target and the profile.
-#[test]
-#[ignore]
-fn failed_build_keeps_records_of_finished_nodes() {
-    let Some(()) = require_rustc_or_skip("failed_build_keeps_records_of_finished_nodes") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    let main_rs = fixture.join("crates/kernel/src/main.rs");
-    let good = fs::read_to_string(&main_rs).expect("read main.rs");
-    fs::write(
-        &main_rs,
-        format!("{good}\ncompile_error!(\"broken on purpose\");\n"),
-    )
-    .expect("break main.rs");
-
-    let out = gluon_command(&fixture)
-        .arg("build")
-        .output()
-        .expect("spawn gluon build");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "broken kernel built:\n{stderr}");
-    assert!(
-        stderr.contains("crate kernel (x86_64-unknown-none, dev)"),
-        "failure does not name the crate:\n{stderr}"
-    );
-
-    fs::write(&main_rs, good).expect("restore main.rs");
-    let stderr = build_ok(&fixture, &[]);
-    assert_eq!(
-        built_count(&stderr),
-        1,
-        "nodes that finished before the failure rebuilt:\n{stderr}"
-    );
-}
 
 /// Add a `release` profile to the minimal fixture.
 fn add_release_profile(fixture: &Path) {
@@ -1206,85 +494,9 @@ fn add_release_profile(fixture: &Path) {
     fs::write(&gluon_rs, script).expect("write gluon.rs");
 }
 
-/// Write a shell script that logs every compile (any argv with
-/// `--crate-name`) to `log` and then runs the real rustc. Passed to
-/// the child `gluon` as `RUSTC`.
-#[cfg(unix)]
-fn rustc_spawn_logger(dir: &Path, log: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let real = String::from_utf8(
-        Command::new("rustc")
-            .args(["--print", "sysroot"])
-            .output()
-            .expect("rustc --print sysroot")
-            .stdout,
-    )
-    .expect("utf-8 sysroot");
-    let real = Path::new(real.trim()).join("bin/rustc");
-    let script = dir.join("rustc-logger.sh");
-    fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\ncase \"$*\" in *--crate-name*) echo \"$*\" >> '{}';; esac\nexec '{}' \"$@\"\n",
-            log.display(),
-            real.display()
-        ),
-    )
-    .expect("write rustc logger");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("chmod logger");
-    script
-}
-
-/// Building `dev`, `release`, then `dev` again spawns no rustc on the
-/// last build: every unit, the config crate included, keeps one output
-/// per profile, and proc macros use the fixed host profile.
-#[cfg(unix)]
-#[test]
-#[ignore]
-fn profile_switch_back_spawns_no_rustc() {
-    let Some(()) = require_rustc_or_skip("profile_switch_back_spawns_no_rustc") else {
-        return;
-    };
-    let (tmp, fixture) = setup_fixture();
-    add_release_profile(&fixture);
-    let log = tmp.path().join("rustc-spawns.log");
-    let rustc = rustc_spawn_logger(tmp.path(), &log);
-
-    let build = |profile: &str| {
-        let _ = fs::remove_file(&log);
-        let out = gluon_command(&fixture)
-            .args(["--profile", profile, "build"])
-            .env("RUSTC", &rustc)
-            .output()
-            .expect("spawn gluon build");
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        assert!(out.status.success(), "{profile} build failed:\n{stderr}");
-        fs::read_to_string(&log).unwrap_or_default()
-    };
-
-    assert!(!build("dev").is_empty(), "cold dev build spawned no rustc");
-    let release = build("release");
-    assert!(
-        !release.contains("--crate-name minimal_derive"),
-        "release build rebuilt the proc macro:\n{release}"
-    );
-    let dev = build("dev");
-    assert!(
-        dev.is_empty(),
-        "switching back to dev spawned rustc:\n{dev}"
-    );
-}
-
-/// `gluon check` on a library that uses another library. Each checked
-/// library must hand its dependents something rustc can load as an
-/// extern (its `.rmeta`).
-#[test]
-#[ignore]
-fn gluon_check_library_using_library() {
-    let Some(()) = require_rustc_or_skip("gluon_check_library_using_library") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
+/// Add two kernel libraries, `klib_top` using `klib_base`, and make the
+/// kernel use `klib_top`.
+fn add_library_using_library(fixture: &Path) {
     for (name, src) in [
         ("klib_base", "#![no_std]\npub const ANSWER: u32 = 42;\n"),
         (
@@ -1321,107 +533,372 @@ fn gluon_check_library_using_library() {
         ),
     )
     .expect("write main.rs");
-
-    let out = gluon_command(&fixture)
-        .arg("check")
-        .output()
-        .expect("spawn gluon check");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "gluon check failed:\n{stderr}");
 }
 
-/// A second build with nothing changed spawns no rustc, with one worker
-/// and with several.
+/// Environment variable naming the file [`rustc_spawn_logger`] appends
+/// to. Unset, the logger only runs rustc.
+const RUSTC_LOG: &str = "GLUON_TEST_RUSTC_LOG";
+
+/// A shell script that logs every compile (any argv with
+/// `--crate-name`) to `$GLUON_TEST_RUSTC_LOG` and then runs the real
+/// rustc. Passed to the child `gluon` as `RUSTC`.
+///
+/// Every test shares one script at a fixed path: the rustc path is an
+/// input of every cache record, so a per-test script would never match
+/// the seeded sysroot. The script is only rewritten when its content
+/// changes, through a rename, so a test running it never reads half a
+/// file.
 #[cfg(unix)]
-#[test]
-#[ignore]
-fn noop_build_spawns_no_rustc() {
-    let Some(()) = require_rustc_or_skip("noop_build_spawns_no_rustc") else {
-        return;
-    };
-    for jobs in ["1", "8"] {
-        let (tmp, fixture) = setup_fixture();
+fn rustc_spawn_logger() -> PathBuf {
+    static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(install_rustc_spawn_logger).clone()
+}
+
+#[cfg(unix)]
+fn install_rustc_spawn_logger() -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("rustc --print sysroot")
+            .stdout,
+    )
+    .expect("utf-8 sysroot");
+    let real = Path::new(real.trim()).join("bin/rustc");
+    let body = format!(
+        "#!/bin/sh\nif [ -n \"${RUSTC_LOG}\" ]; then\n  case \"$*\" in *--crate-name*) echo \"$*\" >> \"${RUSTC_LOG}\";; esac\nfi\nexec '{}' \"$@\"\n",
+        real.display()
+    );
+    let script = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rustc-logger.sh");
+    if fs::read_to_string(&script).ok().as_deref() != Some(body.as_str()) {
+        let tmp = script.with_extension(format!("tmp.{}", std::process::id()));
+        fs::write(&tmp, &body).expect("write rustc logger");
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).expect("chmod logger");
+        fs::rename(&tmp, &script).expect("install rustc logger");
+    }
+    script
+}
+
+/// The variable the kernel reads through `option_env!`.
+const ENV_DEP: &str = "GLUON_TEST_ENV_DEP";
+
+/// One fixture, built once, then a series of edits. Each edit asserts
+/// what the next build rebuilds, spawns or prints.
+#[cfg(unix)]
+struct Steps {
+    _tmp: tempfile::TempDir,
+    dir: PathBuf,
+    log: PathBuf,
+    rustc: PathBuf,
+}
+
+#[cfg(unix)]
+impl Steps {
+    /// A seeded copy of the minimal fixture whose kernel embeds the
+    /// proc macro's `HELLO` and `ENV_DEP`, and has a function that is
+    /// never called, for a warning. `None` when rustc is missing.
+    fn new(test_name: &str) -> Option<Self> {
+        if !rustc_available(test_name) {
+            return None;
+        }
+        let (tmp, dir) = setup();
         let log = tmp.path().join("rustc-spawns.log");
-        let rustc = rustc_spawn_logger(tmp.path(), &log);
-        let build = || {
-            let _ = fs::remove_file(&log);
-            let out = gluon_command(&fixture)
-                .args(["-j", jobs, "build"])
-                .env("RUSTC", &rustc)
-                .output()
-                .expect("spawn gluon build");
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            assert!(out.status.success(), "-j{jobs} build failed:\n{stderr}");
-            fs::read_to_string(&log).unwrap_or_default()
-        };
-        assert!(!build().is_empty(), "-j{jobs}: cold build spawned no rustc");
-        let second = build();
-        assert!(
-            second.is_empty(),
-            "-j{jobs}: no-op build spawned rustc:\n{second}"
+        let rustc = rustc_spawn_logger();
+        seed_sysroot_for(&dir, &rustc);
+        embed_in_kernel(&dir, "GLUON_TEST_HELLO", "HELLO");
+        embed_in_kernel(
+            &dir,
+            "GLUON_TEST_ENV",
+            &format!(r#"match option_env!("{ENV_DEP}") {{ Some(v) => v, None => "env-unset" }}"#),
         );
+        append(
+            &dir.join("crates/kernel/src/main.rs"),
+            "\nfn gluon_test_never_called() {}\n",
+        );
+        Some(Self {
+            _tmp: tmp,
+            dir,
+            log,
+            rustc,
+        })
+    }
+
+    /// Run `gluon <args>` with the rustc logger and `ENV_DEP` set to
+    /// `env` (unset for `None`). Returns the output and the compiles
+    /// it spawned.
+    fn run(&self, args: &[&str], env: Option<&str>) -> (std::process::Output, String) {
+        let _ = fs::remove_file(&self.log);
+        let mut cmd = gluon(&self.dir);
+        cmd.args(args)
+            .env("RUSTC", &self.rustc)
+            .env(RUSTC_LOG, &self.log);
+        match env {
+            Some(v) => cmd.env(ENV_DEP, v),
+            None => cmd.env_remove(ENV_DEP),
+        };
+        let out = cmd.output().expect("spawn gluon");
+        (out, fs::read_to_string(&self.log).unwrap_or_default())
+    }
+
+    /// [`Steps::run`] that must succeed; returns stderr and the
+    /// compiles it spawned.
+    fn ok(&self, step: &str, args: &[&str], env: Option<&str>) -> (String, String) {
+        let (out, spawned) = self.run(args, env);
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(
+            out.status.success(),
+            "{step}: gluon {args:?} failed:\n{stderr}"
+        );
+        (stderr, spawned)
+    }
+
+    /// `gluon build`; returns how many nodes it built.
+    fn built(&self, step: &str, env: Option<&str>) -> usize {
+        let (stderr, _) = self.ok(step, &["build"], env);
+        summary(&stderr).0
+    }
+
+    fn kernel(&self) -> Vec<u8> {
+        fs::read(kernel_bin(&self.dir)).expect("read kernel")
+    }
+
+    fn path(&self, rel: &str) -> PathBuf {
+        self.dir.join(rel)
     }
 }
 
-/// Warnings from a compile are printed again when a later build finds
-/// the crate fresh, as Cargo does.
+/// A build with nothing changed spawns no rustc and replays warnings,
+/// a swap file is not an input, `-v` names why a node reruns, and
+/// `gluon check` caches on its own without touching the build's cache.
+#[cfg(unix)]
 #[test]
 #[ignore]
-fn cached_build_replays_warnings() {
-    let Some(()) = require_rustc_or_skip("cached_build_replays_warnings") else {
+fn unchanged_inputs_rebuild_nothing() {
+    let Some(s) = Steps::new("unchanged_inputs_rebuild_nothing") else {
         return;
     };
-    let (_tmp, fixture) = setup_fixture();
-    let main_rs = fixture.join("crates/kernel/src/main.rs");
-    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
-    src.push_str("\nfn gluon_test_never_called() {}\n");
-    fs::write(&main_rs, src).expect("write main.rs");
 
-    let first = build_ok(&fixture, &[]);
+    let (first, spawned) = s.ok("cold build", &["-j1", "build"], None);
+    assert!(!spawned.is_empty(), "cold build spawned no rustc");
+    assert!(
+        summary(&first).1 > 0,
+        "cold build rebuilt the seeded sysroot:\n{first}"
+    );
     assert!(
         first.contains("gluon_test_never_called"),
         "cold build did not print the warning:\n{first}"
     );
-    let second = build_ok(&fixture, &[]);
-    assert_eq!(built_count(&second), 0, "no-op build rebuilt:\n{second}");
-    assert!(
-        second.contains("gluon_test_never_called"),
-        "cached build did not replay the warning:\n{second}"
-    );
-}
 
-/// `gluon -v build` names each rebuilt node and the input that made it
-/// stale.
-#[test]
-#[ignore]
-fn verbose_build_names_stale_reason() {
-    let Some(()) = require_rustc_or_skip("verbose_build_names_stale_reason") else {
-        return;
-    };
-    let (_tmp, fixture) = setup_fixture();
-    build_ok(&fixture, &[]);
-    let main_rs = fixture.join("crates/kernel/src/main.rs");
-    let mut src = fs::read_to_string(&main_rs).expect("read main.rs");
-    src.push_str("\n// edited\n");
-    fs::write(&main_rs, src).expect("write main.rs");
+    for jobs in ["1", "8"] {
+        let (stderr, spawned) = s.ok("no-op build", &["-j", jobs, "build"], None);
+        assert!(
+            spawned.is_empty(),
+            "-j{jobs}: no-op build spawned rustc:\n{spawned}"
+        );
+        assert_eq!(
+            summary(&stderr).0,
+            0,
+            "-j{jobs}: no-op build rebuilt:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("gluon_test_never_called"),
+            "-j{jobs}: cached build did not replay the warning:\n{stderr}"
+        );
+    }
 
-    let out = gluon_command(&fixture)
-        .args(["-v", "build"])
-        .output()
-        .expect("spawn gluon -v build");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "gluon -v build failed:\n{stderr}");
+    // An editor's swap file changes the directory mtime but no input.
+    let swap = s.path("crates/kernel/src/.main.rs.swp");
+    fs::write(&swap, b"swap").expect("create swap file");
+    fs::remove_file(&swap).expect("remove swap file");
+    assert_eq!(s.built("swap file", None), 0, "swap file caused a rebuild");
+
+    append(&s.path("crates/kernel/src/main.rs"), "\n// edited\n");
+    let (stderr, _) = s.ok("verbose", &["-v", "build"], None);
     let line = stderr
         .lines()
         .find(|l| l.contains("rebuilding crate kernel (x86_64-unknown-none, dev)"))
-        .unwrap_or_else(|| panic!("no stale reason for the kernel:\n{stderr}"));
+        .unwrap_or_else(|| panic!("verbose: no stale reason for the kernel:\n{stderr}"));
     assert!(
         line.contains("main.rs changed"),
-        "stale reason does not name the edited file: {line}"
+        "verbose: stale reason does not name the edited file: {line}"
     );
     assert!(
         !stderr.contains("rebuilding crate minimal_derive"),
-        "fresh proc macro reported as rebuilt:\n{stderr}"
+        "verbose: fresh proc macro reported as rebuilt:\n{stderr}"
+    );
+
+    let (stderr, _) = s.ok("check", &["check"], None);
+    assert!(
+        counts(&stderr, "checked").0 > 0,
+        "check checked nothing:\n{stderr}"
+    );
+    assert!(
+        s.path("build/tool/check").is_dir(),
+        "check: no build/tool/check/"
+    );
+    let (stderr, _) = s.ok("check again", &["check"], None);
+    assert_eq!(
+        counts(&stderr, "checked").0,
+        0,
+        "second check rechecked:\n{stderr}"
+    );
+    assert_eq!(
+        s.built("build after check", None),
+        0,
+        "check wiped the build cache"
+    );
+    assert!(
+        kernel_bin(&s.dir).is_file(),
+        "check removed the kernel binary"
+    );
+}
+
+/// Inputs rustc reports only partly, or not at all, still rebuild what
+/// reads them: a new module file, the linker script, the proc-macro
+/// dylib and a variable read through `option_env!`.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn edited_inputs_rebuild_their_readers() {
+    let Some(s) = Steps::new("edited_inputs_rebuild_their_readers") else {
+        return;
+    };
+    let one = Some("env-value-one");
+    s.built("cold build", one);
+    assert!(contains_bytes(&s.kernel(), b"hello"));
+    assert!(contains_bytes(&s.kernel(), b"env-value-one"));
+
+    // A new module is tracked through the depfile, and so are later
+    // edits to it alone.
+    append(&s.path("crates/kernel/src/main.rs"), "\nmod foo;\n");
+    let foo_rs = s.path("crates/kernel/src/foo.rs");
+    fs::write(&foo_rs, "pub const A: u32 = 1;\n").expect("write foo.rs");
+    assert!(s.built("new module", one) > 0, "new module did not rebuild");
+    fs::write(&foo_rs, "pub const A: u32 = 2;\n").expect("edit foo.rs");
+    assert!(
+        s.built("module edit", one) > 0,
+        "foo.rs edit did not rebuild"
+    );
+
+    // rustc does not list `-C link-arg=-T<path>` files in its depfile.
+    append(&s.path("crates/kernel/kernel.ld"), "\n/* edited */\n");
+    assert!(
+        s.built("linker script", one) > 0,
+        "linker script edit did not rebuild"
+    );
+
+    // Output paths are fixed, so the kernel's argv does not change when
+    // the proc-macro dylib is rebuilt; the dylib must be a tracked input.
+    let proc_macro = s.path("crates/proc_macro/src/lib.rs");
+    let src = fs::read_to_string(&proc_macro).expect("read proc macro");
+    fs::write(
+        &proc_macro,
+        src.replace("\\\"hello\\\"", "\\\"proc-macro-v2\\\""),
+    )
+    .expect("write proc macro");
+    s.built("proc macro", one);
+    assert!(
+        contains_bytes(&s.kernel(), b"proc-macro-v2"),
+        "proc macro: kernel binary does not reflect the edit"
+    );
+
+    // rustc records `option_env!` reads as `# env-dep:` depfile lines.
+    assert_eq!(s.built("env unchanged", one), 0, "unchanged env rebuilt");
+    s.built("env change", Some("env-value-two"));
+    assert!(
+        contains_bytes(&s.kernel(), b"env-value-two"),
+        "env change: kernel binary does not reflect the new value"
+    );
+    s.built("env unset", None);
+    assert!(
+        contains_bytes(&s.kernel(), b"env-unset"),
+        "env unset: kernel binary does not reflect the variable being unset"
+    );
+}
+
+/// A failed build keeps the records of the nodes that finished, outputs
+/// are kept per profile, and a checked library hands its dependents its
+/// `.rmeta`.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn failures_and_profile_switches_keep_finished_work() {
+    let Some(s) = Steps::new("failures_and_profile_switches_keep_finished_work") else {
+        return;
+    };
+    let main_rs = s.path("crates/kernel/src/main.rs");
+
+    // The config crate, proc macro and sysroot finish before the
+    // kernel fails. Once the kernel is fixed only it rebuilds. The
+    // failure names the crate, its target and the profile.
+    let good = fs::read_to_string(&main_rs).expect("read main.rs");
+    append(&main_rs, "\ncompile_error!(\"broken on purpose\");\n");
+    let (out, _) = s.run(&["build"], None);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "broken kernel built:\n{stderr}");
+    assert!(
+        stderr.contains("crate kernel (x86_64-unknown-none, dev)"),
+        "failed build: the error does not name the crate:\n{stderr}"
+    );
+    fs::write(&main_rs, good).expect("fix main.rs");
+    assert_eq!(
+        s.built("after failure", None),
+        1,
+        "nodes that finished before the failure rebuilt"
+    );
+
+    // Every unit, the config crate included, keeps one output per
+    // profile, and proc macros use the fixed host profile, so switching
+    // back to dev spawns no rustc.
+    add_release_profile(&s.dir);
+    s.ok("dev with a release profile", &["build"], None);
+    let (_, release) = s.ok("release", &["--profile", "release", "build"], None);
+    assert!(
+        !release.contains("--crate-name minimal_derive"),
+        "release build rebuilt the proc macro:\n{release}"
+    );
+    let (_, dev) = s.ok("back to dev", &["build"], None);
+    assert!(
+        dev.is_empty(),
+        "switching back to dev spawned rustc:\n{dev}"
+    );
+
+    add_library_using_library(&s.dir);
+    s.ok("library using library", &["check"], None);
+}
+
+/// Editing a custom target JSON spec must rebuild the sysroot and every
+/// crate for that target. rustc does not list the spec in its depfile.
+#[test]
+#[ignore]
+fn target_spec_edit_rebuilds() {
+    if !rustc_available("target_spec_edit_rebuilds") {
+        return;
+    }
+    let (_tmp, fixture) = setup();
+    let spec_src = support::fixture_dir("multi-profile").join("targets/x86_64-unknown-test.json");
+    let spec = fixture.join("targets/x86_64-unknown-test.json");
+    fs::create_dir_all(spec.parent().unwrap()).expect("mkdir targets");
+    fs::copy(&spec_src, &spec).expect("copy target spec");
+    let gluon_rs = fixture.join("gluon.rs");
+    let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
+    let script = script.replace(
+        r#"cfg.target("x86_64-unknown-none")"#,
+        r#"cfg.target_spec("x86_64-unknown-test", "targets/x86_64-unknown-test.json")"#,
+    );
+    fs::write(&gluon_rs, script).expect("write gluon.rs");
+    gluon_ok(&fixture, &["build"]);
+
+    append(&spec, "\n");
+
+    // The sysroot, config crate and kernel are built for the custom
+    // target, so all three must rebuild. The host proc macro does not
+    // read the spec.
+    let stderr = gluon_ok(&fixture, &["build"]);
+    assert!(
+        summary(&stderr).0 >= 3,
+        "target spec edit did not rebuild the sysroot, config crate and kernel:\n{stderr}"
     );
 }
 
@@ -1431,10 +908,12 @@ fn verbose_build_names_stale_reason() {
 #[test]
 #[ignore]
 fn legacy_cache_manifest_is_removed_once() {
-    let Some(()) = require_rustc_or_skip("legacy_cache_manifest_is_removed_once") else {
+    if !rustc_available("legacy_cache_manifest_is_removed_once") {
         return;
-    };
-    let (_tmp, fixture) = setup_fixture();
+    }
+    let (_tmp, fixture) = setup();
+    // The migration keeps `build/sysroot/`, so the seed survives it.
+    seed_sysroot(&fixture);
     let build = fixture.join("build");
     let old_dep = build.join("host/deps/libold-gluon-old.rlib");
     let old_cross = build.join("cross/x86_64-unknown-none/dev/deps/libold.rlib");
@@ -1446,7 +925,7 @@ fn legacy_cache_manifest_is_removed_once() {
     let manifest = build.join("cache-manifest.json");
     fs::write(&manifest, br#"{"version":2,"rustc":{},"composite":{}}"#).expect("write manifest");
 
-    let first = build_ok(&fixture, &[]);
+    let first = gluon_ok(&fixture, &["build"]);
     assert!(
         first.contains("cache-manifest.json"),
         "no migration note:\n{first}"
@@ -1457,10 +936,10 @@ fn legacy_cache_manifest_is_removed_once() {
     assert!(kept.exists(), "esp/ was removed");
     assert!(kernel_bin(&fixture).exists(), "kernel not built");
 
-    let second = build_ok(&fixture, &[]);
+    let second = gluon_ok(&fixture, &["build"]);
     assert!(
         !second.contains("cache-manifest.json"),
         "migration note repeated:\n{second}"
     );
-    assert_eq!(built_count(&second), 0, "second build rebuilt:\n{second}");
+    assert_eq!(summary(&second).0, 0, "second build rebuilt:\n{second}");
 }

@@ -650,8 +650,13 @@ not json at all
         .unwrap();
 
         let vendor = ws.join("vendor");
-        let err = run_cargo_metadata(&ws, &vendor, VendorFlags::default())
-            .expect_err("invalid manifest must fail");
+        // Other tests point `$CARGO` at a missing binary. `with_var`
+        // holds the lock they hold, so this run sees no `$CARGO` and
+        // falls back to `cargo` on `$PATH`.
+        let err = temp_env::with_var("CARGO", None::<&str>, || {
+            run_cargo_metadata(&ws, &vendor, VendorFlags::default())
+        })
+        .expect_err("invalid manifest must fail");
         let msg = err.to_string();
         assert!(msg.contains("`cargo metadata` failed"), "msg: {msg}");
         assert!(msg.contains("stderr:"), "msg: {msg}");

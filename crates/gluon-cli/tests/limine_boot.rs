@@ -13,12 +13,15 @@
 //! nix shell nixpkgs#qemu -c cargo test -p gluon-cli --test limine_boot -- --ignored
 //! ```
 
+mod support;
+
 use std::fs;
-use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
 use std::time::Duration;
+use support::{copy_dir_all, repo_root, seed_sysroot};
 
 /// Config syntax. Limine 8 renamed `limine.cfg` to `limine.conf` and
 /// changed its syntax.
@@ -71,31 +74,6 @@ const RELEASES: &[Release] = &[
 const EXAMPLE_LIMINE_LINE: &str = r#"cfg.limine("11.4.1").file("BOOTX64.EFI", "333f7a69379b1f47e019be215885cdc078b9edd6e9255cbe2f706d6c5ec0ef06");"#;
 const EXAMPLE_CONF_LINE: &str = r#".add_file("limine.conf", "limine.conf")"#;
 const EXAMPLE_SUCCESS_LINE: &str = ".success_exit_code(33);";
-
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repository root")
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let name = entry.file_name();
-        if ty.is_dir() && name == "build" {
-            continue;
-        }
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(name))?;
-        } else if ty.is_file() {
-            fs::copy(entry.path(), dst.join(name))?;
-        }
-    }
-    Ok(())
-}
 
 /// Why the test cannot run here, if anything is missing.
 fn missing_prerequisite() -> Option<String> {
@@ -189,6 +167,7 @@ fn limine_releases_boot_the_example_kernel() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let project = tmp.path().join("limine-kernel");
     copy_dir_all(&repo_root().join("examples/limine-kernel"), &project).unwrap();
+    seed_sysroot(&project);
     let template = fs::read_to_string(project.join("gluon.rs")).unwrap();
     assert!(
         template.contains(EXAMPLE_LIMINE_LINE)

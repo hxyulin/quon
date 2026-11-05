@@ -82,6 +82,9 @@ struct Project {
     model: gluon_core::model::BuildModel,
     resolved: gluon_model::ResolvedConfig,
     rustc_info: Arc<gluon_core::RustcInfo>,
+    /// Sysroots copied in before the first build, which counts them as
+    /// cached.
+    seeded: usize,
 }
 
 impl Project {
@@ -124,6 +127,12 @@ impl Project {
         assert!(status.success(), "cargo generate-lockfile failed");
 
         let rustc_info = Arc::new(gluon_core::RustcInfo::load_or_probe(&layout).expect("probe"));
+        let seeded = gluon_core::testing::seed_sysroots(
+            &root.join("build"),
+            &model,
+            rustc_info.rustc_arg.as_ref(),
+        )
+        .expect("seed sysroot");
         Self {
             _tmp: tmp,
             root,
@@ -131,6 +140,7 @@ impl Project {
             model,
             resolved,
             rustc_info,
+            seeded,
         }
     }
 
@@ -169,7 +179,10 @@ fn vendored_build_scripts_run_and_rerun_only_when_their_inputs_change() {
     // their probes to succeed, hello-derive needs its build-dep's cfg,
     // consumer needs DEP_PROBE_KEY and CARGO_CFG_TARGET_OS.
     let (built, cached) = p.build();
-    assert!(built > 0 && cached == 0, "built {built}, cached {cached}");
+    assert!(
+        built > 0 && cached == p.seeded,
+        "built {built}, cached {cached}"
+    );
 
     let build = p.root.join("build");
     let host_runs = build.join("host/build");
@@ -201,7 +214,7 @@ fn vendored_build_scripts_run_and_rerun_only_when_their_inputs_change() {
     assert_eq!(dylibs.len(), 1, "{dylibs:?}");
 
     // Nothing changed: nothing runs.
-    assert_eq!(p.build(), (0, built), "second build");
+    assert_eq!(p.build(), (0, built + p.seeded), "second build");
 
     // A rerun-if-changed input changes but the script prints the same
     // directives (it trims the file): only that run reruns.
@@ -266,6 +279,8 @@ fn vendor_and_build(
     )
     .expect("cargo vendor (network)");
     let rustc_info = Arc::new(gluon_core::RustcInfo::load_or_probe(&layout).expect("probe"));
+    gluon_core::testing::seed_sysroots(&root.join("build"), &model, rustc_info.rustc_arg.as_ref())
+        .expect("seed sysroot");
     let ctx = gluon_core::CompileCtx::new(layout, rustc_info);
     gluon_core::build_with_workers(&ctx, &model, &resolved, 4).expect("gluon build");
     Some(root)

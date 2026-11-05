@@ -1338,6 +1338,10 @@ mod tests {
         // --- CompileCtx ---
         let layout = BuildLayout::new(build_dir.clone(), "testproj");
         let ctx = CompileCtx::new(layout, Arc::new(info.clone()));
+        // These tests are about scheduling, not the sysroot, which
+        // `sysroot::tests` builds from scratch.
+        crate::testing::seed_sysroots(&build_dir, &model, info.rustc_arg.as_ref())
+            .expect("seed sysroot");
 
         (ctx, model, resolved)
     }

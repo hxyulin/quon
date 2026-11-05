@@ -21,7 +21,7 @@ use crate::compile::layout::BuildLayout;
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::UNIX_EPOCH;
@@ -84,12 +84,17 @@ impl RustcInfo {
     pub fn probe() -> Result<Self> {
         // Resolve via the shared helper so `load_or_probe` can compare
         // its cache against the *same* string this function will use.
-        let rustc_arg_os = resolve_rustc_arg();
+        Self::probe_with(&resolve_rustc_arg())
+    }
+
+    /// [`RustcInfo::probe`] for an explicit `rustc` (a path, or a name
+    /// looked up on `$PATH`) instead of `$RUSTC`.
+    pub fn probe_with(rustc: &OsStr) -> Result<Self> {
         // Lossy is fine: $RUSTC and "rustc" are UTF-8 on every realistic
         // host, and `run_rustc` already takes `&str`. If a user ever
         // points $RUSTC at a non-UTF-8 path, the spawn would have to be
         // reworked anyway.
-        let rustc_arg = rustc_arg_os.to_string_lossy().into_owned();
+        let rustc_arg = rustc.to_string_lossy().into_owned();
         let rustc_cmd = rustc_arg.as_str();
 
         // 1. `rustc -vV` — parse first-line version + key:value pairs.

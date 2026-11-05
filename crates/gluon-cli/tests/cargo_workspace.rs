@@ -3,102 +3,42 @@
 //! `cargo-build` and `cargo-registry` fixtures and every example under
 //! `examples/`.
 //!
-//! Each test copies its project into a temp dir and runs the real
-//! `gluon` binary there. They spawn rustc and build sysroots, so they
-//! are `#[ignore]`-gated like the other build tests in `integration.rs`.
+//! Each test copies its project into a temp dir, seeds its sysroot (see
+//! `support::seed_sysroot`) and runs the real `gluon` binary there.
+//! They spawn rustc, so they are `#[ignore]`-gated like the other build
+//! tests in `integration.rs`.
+
+mod support;
 
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("repository root")
-}
-
-/// Copy `rel` (relative to the repository root) into a fresh temp dir,
-/// skipping build outputs, and return the temp dir and the copy.
-fn setup(rel: &str) -> (tempfile::TempDir, PathBuf) {
-    let tmp = tempfile::tempdir().expect("create tempdir");
-    let dst = tmp.path().join("project");
-    copy_dir_all(&repo_root().join(rel), &dst).expect("copy project");
-    (tmp, dst)
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let name = entry.file_name();
-        if ty.is_dir() && (name == "build" || name == "esp") {
-            continue;
-        }
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(name))?;
-        } else if ty.is_file() {
-            fs::copy(entry.path(), dst.join(name))?;
-        }
-    }
-    Ok(())
-}
-
-fn require_rustc_or_skip(test_name: &str) -> Option<()> {
-    match gluon_core::RustcInfo::probe() {
-        Ok(info) if info.rust_src.is_some() => Some(()),
-        Ok(_) => {
-            eprintln!("{test_name}: skipped — rust-src component not installed");
-            None
-        }
-        Err(e) => {
-            eprintln!("{test_name}: skipped — rustc probe failed: {e}");
-            None
-        }
-    }
-}
+use support::{copy_dir_all, rustc_available, seed_sysroot, setup, summary};
 
 /// Run `gluon build` in `project`; panic on failure, return stderr.
 fn build_ok(project: &Path) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_gluon"))
-        .arg("build")
-        .current_dir(project)
-        .output()
-        .expect("spawn gluon build");
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    assert!(out.status.success(), "gluon build failed:\n{stderr}");
-    stderr
+    gluon_ok(project, &["build"], &[]).1
 }
 
-/// `(built, cached)` from the `(built N, cached M)` counts that end
-/// the `Finished` line.
-fn summary(stderr: &str) -> (usize, usize) {
-    let line = stderr
-        .lines()
-        .find_map(|l| l.split_once("(built ").map(|(_, rest)| rest))
-        .unwrap_or_else(|| panic!("no `(built N, cached M)` summary in:\n{stderr}"));
-    let (built, cached) = line.split_once(", cached ").expect("summary format");
-    (
-        built.trim().parse().unwrap(),
-        cached.trim_end_matches(')').trim().parse().unwrap(),
-    )
-}
-
+/// Builds, then caches everything. A feature change in one manifest
+/// then rebuilds that package's units and their dependents, and nothing
+/// else: the feature reaches the argv, and the lib's new metadata hash
+/// changes the bin's `--extern`.
 #[test]
 #[ignore]
 fn cargo_build_fixture_builds_then_caches() {
-    let Some(()) = require_rustc_or_skip("cargo_build_fixture_builds_then_caches") else {
+    if !rustc_available("cargo_build_fixture_builds_then_caches") {
         return;
-    };
+    }
     let (_tmp, project) = setup("tests/fixtures/cargo-build");
 
+    let seeded = seed_sysroot(&project);
     let first = build_ok(&project);
     let (built, cached) = summary(&first);
     assert!(built > 0, "{first}");
-    assert_eq!(cached, 0, "{first}");
+    assert_eq!(cached, seeded, "{first}");
     assert!(
         project
             .join("build/cross/x86_64-unknown-none/dev/final/kernel")
@@ -107,20 +47,7 @@ fn cargo_build_fixture_builds_then_caches() {
     );
 
     let second = build_ok(&project);
-    assert_eq!(summary(&second), (0, built), "{second}");
-}
-
-/// A feature change in one manifest rebuilds that package's units and
-/// their dependents, and nothing else: the feature reaches the argv,
-/// and the lib's new metadata hash changes the bin's `--extern`.
-#[test]
-#[ignore]
-fn manifest_feature_edit_rebuilds_dependents() {
-    let Some(()) = require_rustc_or_skip("manifest_feature_edit_rebuilds_dependents") else {
-        return;
-    };
-    let (_tmp, project) = setup("tests/fixtures/cargo-build");
-    build_ok(&project);
+    assert_eq!(summary(&second), (0, built + seeded), "{second}");
 
     let manifest = project.join("crates/kernel/Cargo.toml");
     let text = fs::read_to_string(&manifest).unwrap();
@@ -133,17 +60,34 @@ fn manifest_feature_edit_rebuilds_dependents() {
     assert_eq!(summary(&stderr).0, 2, "{stderr}");
 }
 
+/// `example` builds from a clean tree. One test per example, so they
+/// build in parallel.
+fn example_builds(example: &str) {
+    if !rustc_available(example) {
+        return;
+    }
+    let (_tmp, project) = setup(&format!("examples/{example}"));
+    let seeded = seed_sysroot(&project);
+    let stderr = build_ok(&project);
+    assert_eq!(summary(&stderr).1, seeded, "{example}: {stderr}");
+}
+
 #[test]
 #[ignore]
-fn examples_build() {
-    let Some(()) = require_rustc_or_skip("examples_build") else {
-        return;
-    };
-    for example in ["basic-kernel", "with-config", "uefi-with-bootloader"] {
-        let (_tmp, project) = setup(&format!("examples/{example}"));
-        let stderr = build_ok(&project);
-        assert_eq!(summary(&stderr).1, 0, "{example}: {stderr}");
-    }
+fn example_basic_kernel_builds() {
+    example_builds("basic-kernel");
+}
+
+#[test]
+#[ignore]
+fn example_with_config_builds() {
+    example_builds("with-config");
+}
+
+#[test]
+#[ignore]
+fn example_uefi_with_bootloader_builds() {
+    example_builds("uefi-with-bootloader");
 }
 
 // ---------------------------------------------------------------------
@@ -214,11 +158,11 @@ fn use_fixture_registry(project: &Path) {
 #[test]
 #[ignore]
 fn manifest_units_reads_registry_sources_like_a_build() {
-    let Some(()) = require_rustc_or_skip("manifest_units_reads_registry_sources_like_a_build")
-    else {
+    if !rustc_available("manifest_units_reads_registry_sources_like_a_build") {
         return;
-    };
-    let (_tmp, project) = setup("tests/fixtures/cargo-registry");
+    }
+    // `gluon manifest` builds nothing, so it needs no sysroot.
+    let (_tmp, project) = support::setup("tests/fixtures/cargo-registry");
     use_fixture_registry(&project);
     let (units, _) = gluon_ok(&project, &["manifest", "units"], &[]);
     assert!(units.contains("fakeflags"), "{units}");
@@ -234,17 +178,20 @@ fn manifest_units_reads_registry_sources_like_a_build() {
 #[test]
 #[ignore]
 fn registry_dependency_builds_from_cargo_sources_then_vendor_dir() {
-    let Some(()) = require_rustc_or_skip("registry_dependency_builds_from_cargo_sources") else {
+    if !rustc_available("registry_dependency_builds_from_cargo_sources") {
         return;
-    };
+    }
     let (_tmp, project) = setup("tests/fixtures/cargo-registry");
     use_fixture_registry(&project);
     let without_cargo = [("CARGO", OsStr::new(NO_CARGO))];
 
+    // Seed once Cargo can resolve the workspace: seeding loads the
+    // model, which runs `cargo fetch`.
+    let seeded = seed_sysroot(&project);
     let (_, first) = gluon_ok(&project, &["build"], &[]);
     let (built, cached) = summary(&first);
     assert!(built >= 2, "{first}");
-    assert_eq!(cached, 0, "{first}");
+    assert_eq!(cached, seeded, "{first}");
     // `--cap-lints allow` silences the registry package's warning.
     assert!(!first.contains("unused variable"), "{first}");
     let map = fs::read_to_string(project.join("build/cargo-sources.json")).unwrap();
@@ -252,7 +199,7 @@ fn registry_dependency_builds_from_cargo_sources_then_vendor_dir() {
 
     // The cached source map answers without Cargo.
     let (_, second) = gluon_ok(&project, &["build"], &without_cargo);
-    assert_eq!(summary(&second), (0, built), "{second}");
+    assert_eq!(summary(&second), (0, built + seeded), "{second}");
 
     // Vendor mode, with the directory `gluon vendor` would fill.
     copy_dir_all(
@@ -305,9 +252,9 @@ fn crates_io_reachable() -> bool {
 #[ignore]
 fn registry_dependency_from_crates_io_and_gluon_vendor() {
     let name = "registry_dependency_from_crates_io_and_gluon_vendor";
-    let Some(()) = require_rustc_or_skip(name) else {
+    if !rustc_available(name) {
         return;
-    };
+    }
     if !crates_io_reachable() {
         eprintln!("{name}: skipped — crates.io unreachable");
         return;
@@ -337,12 +284,15 @@ fn registry_dependency_from_crates_io_and_gluon_vendor() {
         return;
     }
 
+    // Seed once Cargo can resolve the workspace: seeding loads the
+    // model, which runs `cargo fetch`.
+    let seeded = seed_sysroot(&project);
     let (_, first) = gluon_ok(&project, &["build"], &[]);
     let (built, _) = summary(&first);
     let map = fs::read_to_string(project.join("build/cargo-sources.json")).unwrap();
     assert!(map.contains("registry/src"), "{map}");
     let (_, second) = gluon_ok(&project, &["build"], &without_cargo);
-    assert_eq!(summary(&second), (0, built), "{second}");
+    assert_eq!(summary(&second), (0, built + seeded), "{second}");
 
     let (stdout, _) = gluon_ok(&project, &["vendor"], &[]);
     assert!(
@@ -394,14 +344,15 @@ fn elf_entry(path: &Path) -> u64 {
 #[test]
 #[ignore]
 fn build_scripts_of_path_packages_run_and_rerun_on_their_inputs() {
-    let Some(()) = require_rustc_or_skip("build_scripts_of_path_packages") else {
+    if !rustc_available("build_scripts_of_path_packages") {
         return;
-    };
+    }
     let (_tmp, project) = setup("tests/fixtures/build-script-cfg");
 
+    let seeded = seed_sysroot(&project);
     let (_, first) = gluon_ok(&project, &["-v", "build"], &[]);
     let (built, cached) = summary(&first);
-    assert_eq!(cached, 0, "{first}");
+    assert_eq!(cached, seeded, "{first}");
     // Path packages show their scripts' warnings.
     assert!(
         first.contains("probe ran for x86_64-unknown-none"),
@@ -416,7 +367,7 @@ fn build_scripts_of_path_packages_run_and_rerun_on_their_inputs() {
     assert!((0x100000..0x200000).contains(&entry), "entry {entry:#x}");
 
     let (_, second) = gluon_ok(&project, &["-v", "build"], &[]);
-    assert_eq!(summary(&second), (0, built), "{second}");
+    assert_eq!(summary(&second), (0, built + seeded), "{second}");
     assert!(reran_scripts(&second).is_empty(), "{second}");
 
     fs::write(project.join("probe/probe.txt"), "changed\n").unwrap();
@@ -485,9 +436,9 @@ fn run_outputs(platform_dir: &Path, package: &str) -> Vec<String> {
 #[ignore]
 fn hadron_shaped_workspace_builds_proc_macros_and_zerocopy() {
     let name = "hadron_shaped_workspace_builds_proc_macros_and_zerocopy";
-    let Some(()) = require_rustc_or_skip(name) else {
+    if !rustc_available(name) {
         return;
-    };
+    }
     let (_tmp, project) = setup("tests/fixtures/cargo-hadron");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let cached = Command::new(&cargo)
@@ -502,9 +453,10 @@ fn hadron_shaped_workspace_builds_proc_macros_and_zerocopy() {
         return;
     }
 
+    let seeded = seed_sysroot(&project);
     let (_, first) = gluon_ok(&project, &["build"], &[]);
     let (built, cached) = summary(&first);
-    assert_eq!(cached, 0, "{first}");
+    assert_eq!(cached, seeded, "{first}");
     let build = project.join("build");
     assert!(
         build
@@ -532,7 +484,7 @@ fn hadron_shaped_workspace_builds_proc_macros_and_zerocopy() {
     assert!(files_named(&build.join("cross"), "libsyn-").is_empty());
 
     let (_, second) = gluon_ok(&project, &["build"], &[]);
-    assert_eq!(summary(&second), (0, built), "{second}");
+    assert_eq!(summary(&second), (0, built + seeded), "{second}");
 
     // After the build, `gluon configure` gives rust-analyzer the proc
     // macros' dylibs and each build script's cfgs and `OUT_DIR`.

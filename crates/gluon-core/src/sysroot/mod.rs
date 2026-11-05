@@ -39,13 +39,13 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The crates in every sysroot, in build order.
-const SYSROOT_CRATES: [&str; 3] = ["core", "compiler_builtins", "alloc"];
+pub(crate) const SYSROOT_CRATES: [&str; 3] = ["core", "compiler_builtins", "alloc"];
 
 /// Command hash of the sysroot node: everything that changes how the
 /// sysroot crates compile and is not a file input. The `v2` tag stands
 /// for the flags `build_sysroot_crate` passes; change it when they
 /// change, or the fast path keeps serving sysroots built the old way.
-fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] {
+pub(crate) fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] {
     let rust_src = ctx
         .rustc_info
         .rust_src
@@ -563,9 +563,10 @@ mod tests {
         ctx
     }
 
-    /// End-to-end sysroot build against the host toolchain. Gated with
-    /// `#[ignore]` because it needs the `rust-src` component and actually
-    /// spawns rustc three times — run with
+    /// End-to-end sysroot build against the host toolchain: build, hit
+    /// the cache, then compile a downstream crate against the result.
+    /// Other tests start from a seeded sysroot (`crate::testing`). Gated with `#[ignore]` because it needs the
+    /// `rust-src` component and actually spawns rustc — run with
     /// `cargo test -p gluon-core --release -- --ignored sysroot`.
     #[test]
     #[ignore]
@@ -613,51 +614,21 @@ mod tests {
         assert_eq!(sysroot_dir, sysroot_dir2);
         assert!(second_cached, "second build must hit the cache fast path");
         assert!(elapsed.as_millis() < 100, "fast path too slow: {elapsed:?}");
+
+        assert_downstream_crate_links(&ctx.rustc_info.rustc_path, &sysroot_dir, tmp.path());
     }
 
-    /// End-to-end test that actually consumes the built sysroot from a
-    /// downstream crate. This is the real acceptance criterion for
-    /// session A: "the sysroot is discoverable via `--sysroot` and
-    /// downstream no_std code can link against core/alloc from it".
-    ///
-    /// Gated with `#[ignore]` like the other e2e test. Skips (without
-    /// failing) if rust-src is unavailable or if the current nightly
-    /// rejects the minimal crate for reasons outside gluon's control.
-    #[test]
-    #[ignore]
-    fn e2e_downstream_crate_links_against_built_sysroot() {
-        let info = match RustcInfo::probe() {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("downstream-link e2e skipped: rustc probe failed: {e}");
-                return;
-            }
-        };
-        if info.rust_src.is_none() {
-            eprintln!("downstream-link e2e skipped: rust-src not installed");
-            return;
-        }
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let layout = BuildLayout::new(tmp.path(), "sysroot-downstream");
-        let target = make_target();
-        let rustc_path = info.rustc_path.clone();
-        let ctx = CompileCtx::new(layout, Arc::new(info));
-
-        let mut stderr_sink: Vec<u8> = Vec::new();
-        let sysroot_dir = match ensure_sysroot(&ctx, &target, &mut stderr_sink) {
-            Ok((d, _was_cached)) => d,
-            Err(e) => {
-                eprintln!("downstream-link e2e skipped: sysroot build failed: {e:?}");
-                return;
-            }
-        };
-
+    /// Compile a minimal `no_std` crate against `sysroot_dir`: the
+    /// acceptance criterion for the sysroot is that downstream code can
+    /// find `core` through `--sysroot`. Skips (without failing) if the
+    /// current nightly rejects the crate for reasons outside gluon's
+    /// control.
+    fn assert_downstream_crate_links(rustc_path: &Path, sysroot_dir: &Path, tmp: &Path) {
         // Minimal no_std crate. We emit metadata so we don't need a
         // linker on the host — the goal is only to prove that rustc can
         // discover `core` via `--sysroot=<dir>`, not to produce a
         // bootable binary.
-        let src_path = tmp.path().join("downstream.rs");
+        let src_path = tmp.join("downstream.rs");
         let src = r#"#![no_std]
 #![no_main]
 
@@ -677,8 +648,8 @@ pub extern "C" fn _start() -> ! {
         // doesn't need a cross linker installed — it proves only that
         // rustc can resolve `core` via `--sysroot=<dir>` and codegen an
         // object file, which is the acceptance criterion we care about.
-        let out_path = tmp.path().join("downstream.o");
-        let mut cmd = std::process::Command::new(&rustc_path);
+        let out_path = tmp.join("downstream.o");
+        let mut cmd = std::process::Command::new(rustc_path);
         cmd.env("RUSTC_BOOTSTRAP", "1")
             .arg("--edition=2024")
             .arg("--crate-type=bin")

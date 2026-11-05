@@ -25,6 +25,9 @@ pub mod run;
 pub mod scheduler;
 pub mod script_runner;
 pub mod sysroot;
+/// Helpers for Gluon's own tests; not a stable API.
+#[doc(hidden)]
+pub mod testing;
 pub mod unit;
 pub mod vendor;
 

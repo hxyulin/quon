@@ -10,8 +10,11 @@ cd gluon
 # The nightly toolchain + components are pinned in rust-toolchain.toml —
 # rustup will install them automatically on the first cargo invocation.
 
-# Run the full test suite
+# Run the test suite
 cargo test --workspace
+
+# Also run the end-to-end tests, which spawn rustc
+cargo test --workspace -- --include-ignored
 
 # Run fmt and clippy (CI enforces both)
 cargo fmt --all --check
@@ -32,6 +35,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 Follow [Conventional Commits](https://www.conventionalcommits.org/),
 for example `fix(compile): handle empty sysroot`. The scope is optional.
 The `commit-msg` hook checks the format.
+
+## Tests
+
+Tests that spawn rustc are `#[ignore]`d, so `cargo test --workspace`
+finishes in seconds. `-- --include-ignored` runs them too and needs the
+`rust-src` component. Most of them copy a prebuilt sysroot into their
+fixture instead of building `core`, `compiler_builtins` and `alloc`
+each time (see `crates/gluon-core/src/testing.rs`). The prebuilt
+sysroots live in `$TMPDIR/gluon-test-sysroots/`, about 120 MB per target
+and toolchain; delete the directory to reclaim the space.
 
 ## Pull requests
 

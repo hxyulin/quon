@@ -15,57 +15,17 @@
 //! `GLUON_TEST_QEMU=1` env var *and* `#[ignore]`) exercises the
 //! actual spawn path on a dev box.
 
+mod support;
+
 use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-use tempfile::TempDir;
+use support::{rustc_available, seed_sysroot, setup_fixture};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn workspace_fixture_dir(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("crates/gluon-cli has a two-level parent")
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
-fn setup_fixture(name: &str) -> (TempDir, PathBuf) {
-    let src = workspace_fixture_dir(name);
-    assert!(src.join("gluon.rs").is_file(), "fixture missing at {src:?}");
-    let tmp = tempfile::tempdir().expect("create tempdir");
-    let dst = tmp.path().join(name);
-    copy_dir_all(&src, &dst).expect("copy fixture into tempdir");
-    (tmp, dst)
-}
-
-/// Recursive copy that skips `build/` and `esp/` (gitignored artifact
-/// dirs — see `tests/integration.rs::copy_dir_all` for the rationale).
-fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let from = entry.path();
-        let name = entry.file_name();
-        if ty.is_dir() && (name == "build" || name == "esp") {
-            continue;
-        }
-        let to = dst.join(name);
-        if ty.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else if ty.is_file() {
-            fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
 
 fn gluon_command(fixture: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gluon"));
@@ -466,50 +426,10 @@ fn strip_qemu_block(fixture: &Path) {
 
 #[cfg(unix)]
 #[test]
-fn gluon_run_no_build_skips_build_and_spawns() {
-    // Two assertions, both load-bearing:
-    //   1. fake-qemu actually got spawned (exit 0 from the runner).
-    //   2. the build step was actually skipped — verified by the
-    //      absence of any compiled artifact under build/cross/, which
-    //      would otherwise have been produced by build_with_workers.
-    //
-    // The second assertion is what distinguishes "the flag is wired
-    // through" from "the flag is wired but the build runs anyway".
-    let (_tmp, fixture) = setup_fixture("minimal");
-    let fake_qemu = write_fake_qemu(&fixture);
-    rewrite_qemu_binary(&fixture, &fake_qemu);
-
-    let output = gluon_command(&fixture)
-        .args(["run", "--no-build"])
-        .output()
-        .expect("spawn gluon run --no-build");
-
-    assert!(
-        output.status.success(),
-        "gluon run --no-build failed: status={:?}, stderr=\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // The build step would have populated build/cross/.../final/
-    // with the kernel binary. With --no-build, that directory must
-    // not exist. (We tolerate the build/ root itself existing in
-    // case some other layer touches it; what we care about is that
-    // no compilation happened.)
-    let cross_dir = fixture.join("build").join("cross");
-    assert!(
-        !cross_dir.exists(),
-        "build/cross/ should not exist after --no-build, but found {cross_dir:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn gluon_run_no_build_passes_kernel_path_to_qemu() {
-    // Belt-and-braces: also assert the fake-qemu binary saw a
-    // -kernel argument referencing the would-be boot binary path.
-    // This catches the regression where --no-build skips the build
-    // *and* skips populating the QEMU argv.
+fn gluon_run_no_build_skips_build_and_passes_kernel_path() {
+    // `--no-build` must skip the build, so nothing is compiled under
+    // build/cross/, and still hand QEMU the would-be boot binary path:
+    // a regression could skip the build *and* the `-kernel` argument.
     let (_tmp, fixture) = setup_fixture("minimal");
     let fake_qemu = write_fake_qemu(&fixture);
     rewrite_qemu_binary(&fixture, &fake_qemu);
@@ -527,6 +447,12 @@ fn gluon_run_no_build_passes_kernel_path_to_qemu() {
         "gluon run --no-build failed: status={:?}, stderr=\n{}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cross_dir = fixture.join("build").join("cross");
+    assert!(
+        !cross_dir.exists(),
+        "build/cross/ should not exist after --no-build, but found {cross_dir:?}"
     );
 
     let argv = fs::read_to_string(&argv_file).expect("fake-qemu wrote argv");
@@ -550,26 +476,6 @@ fn gluon_run_no_build_passes_kernel_path_to_qemu() {
 // a two-target project (x86_64-unknown-uefi bootloader embedding an
 // x86_64-unknown-none kernel).
 // ---------------------------------------------------------------------------
-
-/// Probe rustc up-front; skip if unavailable or missing `rust-src`.
-/// The build-path tests use this because they need a real sysroot for
-/// both x86_64-unknown-none and x86_64-unknown-uefi.
-fn require_rustc_or_skip(test_name: &str) -> Option<()> {
-    match gluon_core::RustcInfo::probe() {
-        Ok(info) if info.rust_src.is_some() => Some(()),
-        Ok(_) => {
-            eprintln!(
-                "{test_name}: skipped — rustc found but `rust-src` component missing \
-                 (install with: rustup component add rust-src)"
-            );
-            None
-        }
-        Err(e) => {
-            eprintln!("{test_name}: skipped — rustc probe failed: {e}");
-            None
-        }
-    }
-}
 
 #[test]
 fn gluon_run_uefi_bootloader_kernel_dry_run_emits_auto_esp() {
@@ -651,11 +557,12 @@ fn gluon_build_uefi_bootloader_kernel_assembles_esp() {
     // `rust-src` for both targets. Run with:
     //   cargo test -p gluon-cli --test run_integration -- --ignored \
     //     gluon_build_uefi_bootloader_kernel_assembles_esp
-    let Some(()) = require_rustc_or_skip("gluon_build_uefi_bootloader_kernel_assembles_esp") else {
+    if !rustc_available("gluon_build_uefi_bootloader_kernel_assembles_esp") {
         return;
-    };
+    }
 
     let (_tmp, fixture) = setup_fixture("uefi-bootloader-kernel");
+    seed_sysroot(&fixture);
 
     let output = gluon_command(&fixture)
         .args(["build"])
@@ -733,12 +640,12 @@ fn gluon_run_uefi_bootloader_kernel_real_qemu_debugcon() {
         );
         return;
     }
-    let Some(()) = require_rustc_or_skip("gluon_run_uefi_bootloader_kernel_real_qemu_debugcon")
-    else {
+    if !rustc_available("gluon_run_uefi_bootloader_kernel_real_qemu_debugcon") {
         return;
-    };
+    }
 
     let (_tmp, fixture) = setup_fixture("uefi-bootloader-kernel");
+    seed_sysroot(&fixture);
     let debugcon_path = fixture.join("debugcon.out");
     // Best-effort: create an empty file the bootloader can append to.
     fs::write(&debugcon_path, b"").ok();
@@ -791,6 +698,7 @@ fn spawn_real_qemu_smoke() {
         return;
     }
     let (_tmp, fixture) = setup_fixture("minimal");
+    seed_sysroot(&fixture);
 
     let output = gluon_command(&fixture)
         .args(["run", "-T", "5"])
