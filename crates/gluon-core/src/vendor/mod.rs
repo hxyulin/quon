@@ -483,7 +483,8 @@ pub fn vendor_check(
     };
 
     let mut report = VendorCheckReport::default();
-    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+    let expected_fingerprint =
+        fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
     if lock.fingerprint != expected_fingerprint {
         report.fingerprint_mismatch = true;
     }
@@ -593,7 +594,8 @@ pub fn auto_register_vendored_deps(
     }
     let lock = maybe_lock.unwrap();
 
-    let expected_fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+    let expected_fingerprint =
+        fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
     if lock.fingerprint != expected_fingerprint {
         return Err(Error::Diagnostics(vec![
             Diagnostic::error(
@@ -716,10 +718,7 @@ mod tests {
 
         attach_artifact_paths(&mut packages, &artifacts);
 
-        assert_eq!(
-            packages[0].artifact_path,
-            Some("/tmp/libsyn-1.rlib".into())
-        );
+        assert_eq!(packages[0].artifact_path, Some("/tmp/libsyn-1.rlib".into()));
         assert_eq!(
             packages[1].artifact_path,
             Some("/tmp/libproc_macro2-2.dylib".into()),
@@ -1098,7 +1097,8 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+        let fingerprint =
+            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1143,7 +1143,8 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+        let fingerprint =
+            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1182,7 +1183,8 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+        let fingerprint =
+            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,
@@ -1222,7 +1224,8 @@ mod tests {
                 version: "2.0".into(),
             },
         )]);
-        let fingerprint = fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
+        let fingerprint =
+            fingerprint::fingerprint_external_deps(&model.external_deps, &model.targets);
         let lock = VendorLock {
             version: VendorLock::CURRENT_VERSION,
             fingerprint,

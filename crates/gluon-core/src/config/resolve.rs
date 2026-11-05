@@ -780,7 +780,7 @@ fn _crate_handle_marker(_: Handle<CrateDef>, _: Handle<TargetDef>) {}
 mod tests {
     use super::*;
     use gluon_config::Config;
-    use gluon_model::{intern, BootloaderKind, BuildModel, ConfigValue, CrateType, ImageFormat};
+    use gluon_model::{BootloaderKind, BuildModel, ConfigValue, CrateType, ImageFormat, intern};
 
     /// Build a `BuildModel` in-process via the gluon-config builder
     /// and the gluon-model intern pass. Replaces the Stage 1/2
@@ -794,11 +794,7 @@ mod tests {
         build(&mut cfg);
         let raw = cfg.into_raw();
         let (model, diags) = intern::intern(raw);
-        assert!(
-            diags.is_empty(),
-            "intern produced diagnostics: {:?}",
-            diags
-        );
+        assert!(diags.is_empty(), "intern produced diagnostics: {:?}", diags);
         model
     }
 
@@ -830,8 +826,7 @@ mod tests {
         // Load kconfig and merge options/presets directly into the
         // interned BuildModel, mirroring what `script_runner::finalize`
         // does.
-        let lowered = crate::kconfig::load_kconfig(&kconfig_path)
-            .expect("load kconfig");
+        let lowered = crate::kconfig::load_kconfig(&kconfig_path).expect("load kconfig");
         for (name, opt) in lowered.options {
             let _ = model.config_options.insert(name, opt);
         }
@@ -847,7 +842,10 @@ mod tests {
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t).opt_level(2).debug_info(true);
+            cfg.profile("default")
+                .target(t)
+                .opt_level(2)
+                .debug_info(true);
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.profile.opt_level, 2);
@@ -927,7 +925,8 @@ mod tests {
             let t = cfg.target_spec("x", "t.json");
             cfg.profile("default").target(t);
             cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
-            cfg.config_bool("DEBUG").default_value(ConfigValue::Bool(true));
+            cfg.config_bool("DEBUG")
+                .default_value(ConfigValue::Bool(true));
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.options.get("SIZE"), Some(&ResolvedValue::U32(4096)));
@@ -1129,8 +1128,10 @@ mod tests {
             cfg.project("t", "1");
             let t = cfg.target_spec("x", "t.json");
             cfg.profile("default").target(t);
-            cfg.config_str("A").default_value(ConfigValue::Str("${B}".into()));
-            cfg.config_str("B").default_value(ConfigValue::Str("${A}".into()));
+            cfg.config_str("A")
+                .default_value(ConfigValue::Str("${B}".into()));
+            cfg.config_str("B")
+                .default_value(ConfigValue::Str("${A}".into()));
         });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
@@ -1398,11 +1399,13 @@ mod tests {
             }
             {
                 let mut host = cfg.group("host-tools").target_host();
-                host.add("runner", "tools/runner").crate_type(CrateType::Bin);
+                host.add("runner", "tools/runner")
+                    .crate_type(CrateType::Bin);
             }
             {
                 let mut g2 = cfg.group("b").target(x);
-                g2.add("input_crate", "crates/inp").crate_type(CrateType::Bin);
+                g2.add("input_crate", "crates/inp")
+                    .crate_type(CrateType::Bin);
             }
             cfg.build_step("step")
                 .runner("runner")
@@ -1433,9 +1436,7 @@ mod tests {
             cfg.group("bootloader_group")
                 .target(t)
                 .add("boot", "crates/boot");
-            cfg.bootloader("uefi")
-                .entry_crate("boot")
-                .protocol("gop");
+            cfg.bootloader("uefi").entry_crate("boot").protocol("gop");
         });
         let bl = model
             .bootloader

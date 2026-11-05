@@ -124,11 +124,7 @@ pub fn ensure_esp(
         // even if the on-disk source path happened to coincide. ESP
         // entries are crate-sourced today; if other source kinds appear,
         // derive a per-source-kind tag here.
-        let aux = composite_aux_hash(&[
-            esp.name.as_bytes(),
-            e.dest_path.as_bytes(),
-            b"crate",
-        ]);
+        let aux = composite_aux_hash(&[esp.name.as_bytes(), e.dest_path.as_bytes(), b"crate"]);
         let inputs = vec![e.source_path.clone()];
 
         // Take the cache mutex only for the freshness query; release
@@ -280,8 +276,12 @@ mod tests {
             artifact_env: BTreeMap::new(),
             span: None,
         };
-        let (ch_a, _) = model.crates.insert("bootloader-a".into(), mk_crate("bootloader-a"));
-        let (ch_b, _) = model.crates.insert("bootloader-b".into(), mk_crate("bootloader-b"));
+        let (ch_a, _) = model
+            .crates
+            .insert("bootloader-a".into(), mk_crate("bootloader-a"));
+        let (ch_b, _) = model
+            .crates
+            .insert("bootloader-b".into(), mk_crate("bootloader-b"));
         let (eh, _) = model.esps.insert(
             "default".into(),
             EspDef {
@@ -452,7 +452,8 @@ mod tests {
         let cache = ctx.cache.lock().unwrap();
         let keys: Vec<&String> = cache.composite_keys().collect();
         assert!(
-            keys.iter().any(|k| k.as_str() == "esp:default:EFI/BOOT/BOOTX64.EFI"),
+            keys.iter()
+                .any(|k| k.as_str() == "esp:default:EFI/BOOT/BOOTX64.EFI"),
             "composite manifest must contain the per-entry ESP key; got {keys:?}"
         );
     }
@@ -530,8 +531,7 @@ mod tests {
         artifacts.insert(bl_h, source_path.clone());
 
         let mut out = Vec::<u8>::new();
-        let (esp_dir, _) =
-            ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
+        let (esp_dir, _) = ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
 
         let stamp = esp_dir.join(".esp-stamp.json");
         assert!(
@@ -556,8 +556,7 @@ mod tests {
         std::fs::write(&src_a, b"alpha-1").unwrap();
         std::fs::write(&src_b, b"beta-1").unwrap();
 
-        let (model, resolved, eh) =
-            make_model_with_esp_two_entries(tmp.path(), &src_a, &src_b);
+        let (model, resolved, eh) = make_model_with_esp_two_entries(tmp.path(), &src_a, &src_b);
         let h_a = model.crates.lookup("bootloader-a").unwrap();
         let h_b = model.crates.lookup("bootloader-b").unwrap();
         let mut artifacts = ArtifactMap::new();
@@ -583,7 +582,10 @@ mod tests {
 
         let (_, second_cached) =
             ensure_esp(&ctx, &model, &resolved, eh, &artifacts, &mut out).unwrap();
-        assert!(!second_cached, "esp must report not-cached when one entry changed");
+        assert!(
+            !second_cached,
+            "esp must report not-cached when one entry changed"
+        );
 
         let dest_a_bytes = std::fs::read(esp_dir.join("EFI/BOOT/A.EFI")).unwrap();
         assert_eq!(dest_a_bytes, b"alpha-2-with-more-bytes");

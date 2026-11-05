@@ -375,7 +375,9 @@ mod tests {
                     kind: VendorPackageKind::Lib,
                     source: "crates-io".into(),
                     checksum: Some("sha256:aaaa".into()),
-                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libbitflags-abcd.rlib")),
+                    artifact_path: Some(PathBuf::from(
+                        "/build/target/release/deps/libbitflags-abcd.rlib",
+                    )),
                 },
                 VendorLockPackage {
                     name: "bitflags".into(),
@@ -384,7 +386,9 @@ mod tests {
                     kind: VendorPackageKind::Lib,
                     source: "crates-io".into(),
                     checksum: Some("sha256:aaaa".into()),
-                    artifact_path: Some(PathBuf::from("/build/cross/kernel/deps/libbitflags-wxyz.rlib")),
+                    artifact_path: Some(PathBuf::from(
+                        "/build/cross/kernel/deps/libbitflags-wxyz.rlib",
+                    )),
                 },
                 VendorLockPackage {
                     name: "syn".into(),
@@ -393,7 +397,9 @@ mod tests {
                     kind: VendorPackageKind::ProcMacro,
                     source: "crates-io".into(),
                     checksum: Some("sha256:cccc".into()),
-                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libsyn-mnop.dylib")),
+                    artifact_path: Some(PathBuf::from(
+                        "/build/target/release/deps/libsyn-mnop.dylib",
+                    )),
                 },
                 VendorLockPackage {
                     name: "tokio".into(),
@@ -402,7 +408,9 @@ mod tests {
                     kind: VendorPackageKind::Lib,
                     source: "git+https://github.com/tokio-rs/tokio#abc1234".into(),
                     checksum: Some("sha256:bbbb".into()),
-                    artifact_path: Some(PathBuf::from("/build/target/release/deps/libtokio-efgh.rlib")),
+                    artifact_path: Some(PathBuf::from(
+                        "/build/target/release/deps/libtokio-efgh.rlib",
+                    )),
                 },
                 VendorLockPackage {
                     name: "local-helper".into(),
@@ -411,7 +419,9 @@ mod tests {
                     kind: VendorPackageKind::Lib,
                     source: "path+../helper".into(),
                     checksum: None,
-                    artifact_path: Some(PathBuf::from("/build/target/release/deps/liblocal_helper-ijkl.rlib")),
+                    artifact_path: Some(PathBuf::from(
+                        "/build/target/release/deps/liblocal_helper-ijkl.rlib",
+                    )),
                 },
             ],
         }

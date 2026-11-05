@@ -162,8 +162,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
-        let rustc = bin_dir.join(&exe_name("rustc"));
-        let sibling = bin_dir.join(&exe_name("rust-objcopy"));
+        let rustc = bin_dir.join(exe_name("rustc"));
+        let sibling = bin_dir.join(exe_name("rust-objcopy"));
         touch_executable(&rustc);
         touch_executable(&sibling);
 
@@ -176,21 +176,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let toolchain_dir = tmp.path().join("toolchain");
         fs::create_dir_all(&toolchain_dir).unwrap();
-        let rustc = toolchain_dir.join(&exe_name("rustc"));
+        let rustc = toolchain_dir.join(exe_name("rustc"));
         touch_executable(&rustc);
 
         let path_dir = tmp.path().join("path");
         fs::create_dir_all(&path_dir).unwrap();
-        let path_hit = path_dir.join(&exe_name("rust-objcopy"));
+        let path_hit = path_dir.join(exe_name("rust-objcopy"));
         touch_executable(&path_hit);
 
         // temp_env scopes the PATH override to this closure; the global
         // mutex inside the crate serialises tests that touch PATH.
-        let resolved = temp_env::with_var(
-            "PATH",
-            Some(path_dir.as_os_str()),
-            || probe_rust_objcopy(&rustc),
-        )
+        let resolved = temp_env::with_var("PATH", Some(path_dir.as_os_str()), || {
+            probe_rust_objcopy(&rustc)
+        })
         .expect("probe");
         assert_eq!(resolved, path_hit);
     }
@@ -198,15 +196,11 @@ mod tests {
     #[test]
     fn probe_errors_with_install_hint_when_nothing_resolves() {
         let tmp = tempfile::tempdir().unwrap();
-        let rustc = tmp.path().join(&exe_name("rustc"));
+        let rustc = tmp.path().join(exe_name("rustc"));
         touch_executable(&rustc);
 
-        let err = temp_env::with_var(
-            "PATH",
-            Some(""),
-            || probe_rust_objcopy(&rustc),
-        )
-        .expect_err("probe must fail");
+        let err = temp_env::with_var("PATH", Some(""), || probe_rust_objcopy(&rustc))
+            .expect_err("probe must fail");
         let msg = format!("{err}");
         assert!(
             msg.contains("rustup component add llvm-tools-preview"),
@@ -253,7 +247,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("p.rs");
         fs::write(&src, b"fn main() {}").unwrap();
-        let elf = tmp.path().join(&exe_name("p"));
+        let elf = tmp.path().join(exe_name("p"));
         let status = std::process::Command::new("rustc")
             .args(["--edition", "2024", "-o"])
             .arg(&elf)

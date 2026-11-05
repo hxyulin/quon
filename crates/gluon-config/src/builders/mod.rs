@@ -72,16 +72,30 @@ mod tests {
 
     #[test]
     fn is_duplicate_distinguishes_variants() {
-        let v: BuilderState<()> = BuilderState::Valid { state: (), name: "v".into(), span: None };
-        let d: BuilderState<()> = BuilderState::Duplicate { name: "d".into(), span: None };
+        let v: BuilderState<()> = BuilderState::Valid {
+            state: (),
+            name: "v".into(),
+            span: None,
+        };
+        let d: BuilderState<()> = BuilderState::Duplicate {
+            name: "d".into(),
+            span: None,
+        };
         assert!(!v.is_duplicate());
         assert!(d.is_duplicate());
     }
 
     #[test]
     fn name_returns_inner_name_in_both_states() {
-        let v: BuilderState<()> = BuilderState::Valid { state: (), name: "foo".into(), span: None };
-        let d: BuilderState<()> = BuilderState::Duplicate { name: "bar".into(), span: None };
+        let v: BuilderState<()> = BuilderState::Valid {
+            state: (),
+            name: "foo".into(),
+            span: None,
+        };
+        let d: BuilderState<()> = BuilderState::Duplicate {
+            name: "bar".into(),
+            span: None,
+        };
         assert_eq!(v.name(), "foo");
         assert_eq!(d.name(), "bar");
     }

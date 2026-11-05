@@ -173,7 +173,8 @@ pub fn build_qemu_command(
 /// stdio` insertion logic so users can override either with a bare
 /// `-display gtk` in their config or on the command line.
 fn user_has_flag(script_extras: &[String], cli_extras: &[OsString], flag: &str) -> bool {
-    script_extras.iter().any(|a| a == flag) || cli_extras.iter().any(|a| a.to_string_lossy() == flag)
+    script_extras.iter().any(|a| a == flag)
+        || cli_extras.iter().any(|a| a.to_string_lossy() == flag)
 }
 
 /// Suggestive test helper: a `ResolvedQemu` that the caller customises.
@@ -328,7 +329,10 @@ mod tests {
         )
         .unwrap();
         let a = args_to_strings(&inv.args);
-        let idx = a.iter().position(|s| s == "-display").expect("display flag");
+        let idx = a
+            .iter()
+            .position(|s| s == "-display")
+            .expect("display flag");
         assert_eq!(a[idx + 1], "cocoa");
     }
 
@@ -350,7 +354,10 @@ mod tests {
         )
         .unwrap();
         let a = args_to_strings(&inv.args);
-        let idx = a.iter().position(|s| s == "-display").expect("display flag");
+        let idx = a
+            .iter()
+            .position(|s| s == "-display")
+            .expect("display flag");
         assert_eq!(a[idx + 1], "none");
     }
 
@@ -565,5 +572,4 @@ mod tests {
             "managed -device must precede user extras: {a:?}"
         );
     }
-
 }

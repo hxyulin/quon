@@ -242,7 +242,10 @@ mod tests {
         assert_eq!(q.cores, Some(4));
         assert_eq!(q.serial, Some(SerialMode::Stdio));
         assert_eq!(q.boot_mode, Some(BootMode::Uefi));
-        assert_eq!(q.ovmf_code.as_deref(), Some(std::path::Path::new("/opt/ovmf/CODE.fd")));
+        assert_eq!(
+            q.ovmf_code.as_deref(),
+            Some(std::path::Path::new("/opt/ovmf/CODE.fd"))
+        );
         assert_eq!(q.esp, Some(EspSource::Dir(PathBuf::from("./build/esp"))));
         assert!(cfg.diagnostics.is_empty());
     }
@@ -264,7 +267,11 @@ mod tests {
             "second call's machine must NOT clobber the first"
         );
         assert_eq!(cfg.diagnostics.len(), 1);
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
     }
 
     #[test]
@@ -288,10 +295,11 @@ mod tests {
             Some(EspSource::Dir(p)) => assert_eq!(p, &PathBuf::from("a")),
             other => panic!("expected EspSource::Dir(\"a\"), got {other:?}"),
         }
-        assert!(cfg
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("esp_dir") && d.message.contains("esp_image")));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("esp_dir") && d.message.contains("esp_image"))
+        );
     }
 
     #[test]
@@ -302,7 +310,11 @@ mod tests {
             .extra_args(&["-no-reboot"]);
         assert_eq!(
             cfg.raw.qemu.as_ref().expect("qemu populated").extra_args,
-            vec!["-display".to_string(), "none".to_string(), "-no-reboot".to_string()],
+            vec![
+                "-display".to_string(),
+                "none".to_string(),
+                "-no-reboot".to_string()
+            ],
         );
         assert!(cfg.diagnostics.is_empty());
     }

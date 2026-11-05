@@ -276,7 +276,9 @@ fn build_sysroot_crate(
     // Emit `-C panic=<s>` before the extra-filename arg so the canonical
     // token order in args (and therefore the cache hash) stays stable.
     if let Some(s) = target.panic_strategy {
-        builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
+        builder
+            .raw_arg("-C")
+            .raw_arg(format!("panic={}", s.as_str()));
     }
 
     // compiler_builtins needs two cfgs to build standalone:
@@ -333,9 +335,9 @@ fn build_sysroot_crate(
         output_rlib,
         depfile_path,
         None,
-        Vec::new(), // sysroot crates have no out-of-band inputs
-        Vec::new(),                                  // aux_outputs
-        None::<PostCompileStep>,                     // post_compile_step
+        Vec::new(),              // sysroot crates have no out-of-band inputs
+        Vec::new(),              // aux_outputs
+        None::<PostCompileStep>, // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(
@@ -532,8 +534,8 @@ mod tests {
         // version_hash equivalent now lives inside the manifest's
         // binary `aux_hash` and isn't byte-comparable in the same way
         // the old stamp file was.
-        let manifest_bytes = std::fs::read_to_string(ctx.layout.cache_manifest())
-            .expect("read manifest");
+        let manifest_bytes =
+            std::fs::read_to_string(ctx.layout.cache_manifest()).expect("read manifest");
         assert!(
             manifest_bytes.contains(&format!("sysroot:{}", target.name)),
             "expected sysroot composite entry in manifest"

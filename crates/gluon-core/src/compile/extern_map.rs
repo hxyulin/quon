@@ -109,9 +109,7 @@ impl ArtifactMap {
     /// order. Used by the scheduler to populate
     /// [`crate::scheduler::BuildSummary::build_step_paths`] after the
     /// pool has joined.
-    pub fn build_steps_iter(
-        &self,
-    ) -> impl Iterator<Item = (Handle<BuildStepDef>, &Path)> + '_ {
+    pub fn build_steps_iter(&self) -> impl Iterator<Item = (Handle<BuildStepDef>, &Path)> + '_ {
         self.build_steps.iter().map(|(h, p)| (*h, p.as_path()))
     }
 }

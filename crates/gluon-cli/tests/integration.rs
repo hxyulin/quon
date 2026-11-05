@@ -764,8 +764,8 @@ fn multi_profile_fixture_model() {
         "multi-profile fixture missing gluon.rs at {fixture:?}"
     );
 
-    let model =
-        gluon_core::load_build_model(&fixture).expect("load_build_model for multi-profile should succeed");
+    let model = gluon_core::load_build_model(&fixture)
+        .expect("load_build_model for multi-profile should succeed");
 
     // -- Project & default_profile --
     let project = model.project.as_ref().expect("project should be set");

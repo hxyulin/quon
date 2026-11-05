@@ -65,17 +65,16 @@ fn kconfig_loader_round_trips_against_builder() {
     // Load both fixture models. Stage 2: load_build_model prefers .rs
     // over the legacy format — the kconfig fixture's load_kconfig() call
     // is wired through the .rs harness.
-    let kconfig_model =
-        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
-    let builder_model =
-        gluon_core::load_build_model(&builder_dir).expect("load builder fixture");
+    let kconfig_model = gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
+    let builder_model = gluon_core::load_build_model(&builder_dir).expect("load builder fixture");
 
     // Resolve both with the default profile and no overrides.
     let kconfig_resolved =
         gluon_core::resolve_config(&kconfig_model, "default", None, &kconfig_dir, None)
             .expect("resolve kconfig fixture");
-    let builder_resolved = gluon_core::resolve_config(&builder_model, "default", None, &builder_dir, None)
-        .expect("resolve builder fixture");
+    let builder_resolved =
+        gluon_core::resolve_config(&builder_model, "default", None, &builder_dir, None)
+            .expect("resolve builder fixture");
 
     // For every option declared in the builder equivalent, the kconfig
     // resolved value should match. The kconfig form may declare
@@ -110,8 +109,7 @@ fn kconfig_loader_resolves_boolean_expression_form() {
     // referenced symbols as an implicit AND of two requirements
     // (`LOG_ENABLED` AND `DEBUG`), wrongly disabling FANCY_FEATURE.
     let kconfig_dir = fixture_dir("kconfig-minimal");
-    let model =
-        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
+    let model = gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     let resolved =
         gluon_core::resolve_config(&model, "default", None, &kconfig_dir, None).expect("resolve");
     // Pin the intermediate values explicitly so that editing the
@@ -144,16 +142,14 @@ fn depends_on_expr_honours_or_semantics() {
     // names path, it would treat `A` and `B` as two separate
     // required symbols, see `B` is off, and force DEP to false.
     use gluon_config::Config;
-    use gluon_model::{intern, ConfigValue, Expr};
+    use gluon_model::{ConfigValue, Expr, intern};
 
     let mut cfg = Config::new();
     cfg.project("expr-parity", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
     cfg.profile("default").target(t);
-    cfg.config_bool("A")
-        .default_value(ConfigValue::Bool(true));
-    cfg.config_bool("B")
-        .default_value(ConfigValue::Bool(false));
+    cfg.config_bool("A").default_value(ConfigValue::Bool(true));
+    cfg.config_bool("B").default_value(ConfigValue::Bool(false));
     cfg.config_bool("DEP")
         .default_value(ConfigValue::Bool(true))
         .depends_on(Expr::Or(vec![
@@ -166,10 +162,8 @@ fn depends_on_expr_honours_or_semantics() {
     assert!(diags.is_empty(), "intern diags: {diags:?}");
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let resolved = gluon_core::resolve_config(
-        &model, "default", None, tmp.path(), None,
-    )
-    .expect("resolve");
+    let resolved =
+        gluon_core::resolve_config(&model, "default", None, tmp.path(), None).expect("resolve");
 
     assert_eq!(
         resolved.options.get("A"),
@@ -199,8 +193,7 @@ fn kconfig_source_directive_pulls_extras_into_model() {
     // pulls in via `source "./extras.kconfig"`. If the loader didn't
     // recurse into source directives this option would be missing.
     let kconfig_dir = fixture_dir("kconfig-minimal");
-    let model =
-        gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
+    let model = gluon_core::load_build_model(&kconfig_dir).expect("load kconfig fixture");
     assert!(
         model.config_options.lookup("FANCY_FEATURE").is_some(),
         "source directive failed to pull in FANCY_FEATURE from extras.kconfig"

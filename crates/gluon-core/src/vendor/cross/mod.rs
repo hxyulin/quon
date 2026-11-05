@@ -89,7 +89,9 @@ pub fn populate_cross_vendor_workspaces(
     if by_target.is_empty() {
         return Ok(());
     }
-    let flags = VendorFlags { offline: opts.offline };
+    let flags = VendorFlags {
+        offline: opts.offline,
+    };
     for target_handle in by_target.keys() {
         let target = model.targets.get(*target_handle).ok_or_else(|| {
             Error::Compile(format!(
@@ -176,29 +178,23 @@ pub fn build_cross_vendor_context(
         let vendor_dir = scratch.join("vendor");
         let json = cargo_cmd::run_cargo_metadata(&scratch, &vendor_dir, flags)?;
         let graph = metadata::parse_metadata(&json, *target_handle).map_err(|e| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "failed to parse cargo metadata for target '{}': {e}",
-                    target.name,
-                )),
-            ])
+            Error::Diagnostics(vec![Diagnostic::error(format!(
+                "failed to parse cargo metadata for target '{}': {e}",
+                target.name,
+            ))])
         })?;
         let builds = graph::build_vendor_nodes(&graph).map_err(|e| {
-            Error::Diagnostics(vec![
-                Diagnostic::error(format!(
-                    "failed to lower vendored graph for target '{}': {e}",
-                    target.name,
-                )),
-            ])
+            Error::Diagnostics(vec![Diagnostic::error(format!(
+                "failed to lower vendored graph for target '{}': {e}",
+                target.name,
+            ))])
         })?;
         for build in builds {
             ctx.add(build).map_err(|e| {
-                Error::Diagnostics(vec![
-                    Diagnostic::error(format!(
-                        "duplicate vendor build registration for target '{}': {e}",
-                        target.name,
-                    )),
-                ])
+                Error::Diagnostics(vec![Diagnostic::error(format!(
+                    "duplicate vendor build registration for target '{}': {e}",
+                    target.name,
+                ))])
             })?;
         }
     }
@@ -212,9 +208,7 @@ mod tests {
     use super::*;
     use crate::compile::layout::BuildLayout;
     use crate::error::Error;
-    use gluon_model::{
-        BuildModel, DepSource, ExternalDepDef, PanicStrategy, TargetDef,
-    };
+    use gluon_model::{BuildModel, DepSource, ExternalDepDef, PanicStrategy, TargetDef};
 
     fn empty_model() -> BuildModel {
         BuildModel::default()
@@ -272,7 +266,9 @@ mod tests {
             "host-dep".into(),
             ExternalDepDef {
                 name: "host-dep".into(),
-                source: DepSource::CratesIo { version: "1.0.0".into() },
+                source: DepSource::CratesIo {
+                    version: "1.0.0".into(),
+                },
                 features: Vec::new(),
                 default_features: true,
                 cfg_flags: Vec::new(),
@@ -286,7 +282,9 @@ mod tests {
             "cross-dep".into(),
             ExternalDepDef {
                 name: "cross-dep".into(),
-                source: DepSource::CratesIo { version: "2.0.0".into() },
+                source: DepSource::CratesIo {
+                    version: "2.0.0".into(),
+                },
                 features: Vec::new(),
                 default_features: true,
                 cfg_flags: Vec::new(),
@@ -366,7 +364,9 @@ mod tests {
             "x".into(),
             ExternalDepDef {
                 name: "x".into(),
-                source: DepSource::CratesIo { version: "1.0.0".into() },
+                source: DepSource::CratesIo {
+                    version: "1.0.0".into(),
+                },
                 features: Vec::new(),
                 default_features: true,
                 cfg_flags: Vec::new(),

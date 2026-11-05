@@ -1395,8 +1395,7 @@ mod tests {
 
     #[test]
     fn dep_resolution_serde_externally_tagged() {
-        let project_json =
-            serde_json::to_string(&DepResolution::Project(Handle::new(3))).unwrap();
+        let project_json = serde_json::to_string(&DepResolution::Project(Handle::new(3))).unwrap();
         assert_eq!(project_json, r#"{"kind":"project","handle":3}"#);
         let external_json =
             serde_json::to_string(&DepResolution::External(Handle::new(11))).unwrap();

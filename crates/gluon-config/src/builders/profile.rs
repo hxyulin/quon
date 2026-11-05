@@ -163,7 +163,11 @@ mod tests {
             "duplicate must push exactly one diagnostic"
         );
         assert!(cfg.diagnostics[0].message.contains("dev"));
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
     }
 
     #[test]
@@ -177,10 +181,22 @@ mod tests {
         let uefi = cfg.raw.profiles.lookup("dev-uefi").unwrap();
         let bios = cfg.raw.profiles.lookup("dev-bios").unwrap();
         let direct = cfg.raw.profiles.lookup("dev-direct").unwrap();
-        assert_eq!(cfg.raw.profiles.get(uefi).unwrap().qemu_boot_mode, Some(BootMode::Uefi));
-        assert_eq!(cfg.raw.profiles.get(bios).unwrap().qemu_boot_mode, Some(BootMode::Bios));
-        assert_eq!(cfg.raw.profiles.get(direct).unwrap().qemu_boot_mode, Some(BootMode::Direct));
-        assert!(cfg.diagnostics.is_empty(), "valid values must not push diagnostics");
+        assert_eq!(
+            cfg.raw.profiles.get(uefi).unwrap().qemu_boot_mode,
+            Some(BootMode::Uefi)
+        );
+        assert_eq!(
+            cfg.raw.profiles.get(bios).unwrap().qemu_boot_mode,
+            Some(BootMode::Bios)
+        );
+        assert_eq!(
+            cfg.raw.profiles.get(direct).unwrap().qemu_boot_mode,
+            Some(BootMode::Direct)
+        );
+        assert!(
+            cfg.diagnostics.is_empty(),
+            "valid values must not push diagnostics"
+        );
     }
 
     #[test]
@@ -190,7 +206,10 @@ mod tests {
 
         let h = cfg.raw.profiles.lookup("dev").unwrap();
         let p = cfg.raw.profiles.get(h).unwrap();
-        assert!(p.qemu_boot_mode.is_none(), "unknown value must leave field unset");
+        assert!(
+            p.qemu_boot_mode.is_none(),
+            "unknown value must leave field unset"
+        );
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("kexec"));
     }
@@ -222,10 +241,17 @@ mod tests {
         let mut cfg_b = Config::new(); // target arena is empty — index 0 is OOB
         cfg_b.profile("dev").target(stale);
 
-        assert_eq!(cfg_b.diagnostics.len(), 1, "stale handle must push exactly one diagnostic");
+        assert_eq!(
+            cfg_b.diagnostics.len(),
+            1,
+            "stale handle must push exactly one diagnostic"
+        );
         assert!(
-            cfg_b.diagnostics[0].message.contains("doesn't exist in this Config"),
-            "got: {}", cfg_b.diagnostics[0].message,
+            cfg_b.diagnostics[0]
+                .message
+                .contains("doesn't exist in this Config"),
+            "got: {}",
+            cfg_b.diagnostics[0].message,
         );
         // Profile's target should be unset (not silently set to a wrong name).
         let h = cfg_b.raw.profiles.lookup("dev").unwrap();

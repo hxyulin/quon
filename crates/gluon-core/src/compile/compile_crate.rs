@@ -252,32 +252,33 @@ pub fn compile(
     // objcopy crash mid-run) forces a recompile rather than silently
     // returning a stale cache hit. Other crate types pass the no-op
     // (empty aux + None) variant.
-    let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) =
-        if cc.crate_type == CrateType::RawBinary {
-            let elf_path = cc.debug_elf_path.clone().ok_or_else(|| {
+    let (aux_outputs, post_compile_step): (Vec<PathBuf>, Option<PostCompileStep>) = if cc.crate_type
+        == CrateType::RawBinary
+    {
+        let elf_path = cc.debug_elf_path.clone().ok_or_else(|| {
                 Error::Compile(format!(
                     "BUG: CrateArtifactShape did not populate debug_elf_path for RawBinary crate '{}' — \
                      this is an internal invariant violation in artifact_shape.rs",
                     cc.crate_name
                 ))
             })?;
-            let elf_for_aux = elf_path.clone();
-            let bin_path = cc.output_path.clone();
-            let rustc_path = ctx.rustc_info.rustc_path.clone();
-            let post: PostCompileStep = Box::new(move || {
-                // TODO(spec): memoise the probe on RustcInfo so it runs once per
-                // gluon invocation rather than once per RawBinary compile. Per
-                // docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md
-                // § rust-objcopy discovery. Cost today is microseconds per crate;
-                // the fix is to add `rust_objcopy_path: PathBuf` to RustcInfo and
-                // consume it here.
-                let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path)?;
-                crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
-            });
-            (vec![elf_for_aux], Some(post))
-        } else {
-            (Vec::new(), None)
-        };
+        let elf_for_aux = elf_path.clone();
+        let bin_path = cc.output_path.clone();
+        let rustc_path = ctx.rustc_info.rustc_path.clone();
+        let post: PostCompileStep = Box::new(move || {
+            // TODO(spec): memoise the probe on RustcInfo so it runs once per
+            // gluon invocation rather than once per RawBinary compile. Per
+            // docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md
+            // § rust-objcopy discovery. Cost today is microseconds per crate;
+            // the fix is to add `rust_objcopy_path: PathBuf` to RustcInfo and
+            // consume it here.
+            let objcopy = crate::compile::objcopy::probe_rust_objcopy(&rustc_path)?;
+            crate::compile::objcopy::run_objcopy_to_binary(&objcopy, &elf_path, &bin_path)
+        });
+        (vec![elf_for_aux], Some(post))
+    } else {
+        (Vec::new(), None)
+    };
 
     crate::compile::run_compile_and_cache(
         ctx,
@@ -1562,7 +1563,9 @@ mod tests {
         );
 
         // 3. `-o <something>.elf` is set.
-        let o_pos = args.iter().position(|a| a == "-o")
+        let o_pos = args
+            .iter()
+            .position(|a| a == "-o")
             .expect("RawBinary must emit -o <name>.elf");
         let o_path = &args[o_pos + 1];
         assert!(

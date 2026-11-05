@@ -211,24 +211,28 @@ pub fn execute_build_step(
             Some(c) => format!("exit code {c}"),
             None => "killed by signal".to_string(),
         };
-        return Err(Error::Diagnostics(vec![Diagnostic::error(format!(
-            "build_step('{}') runner '{}' failed ({exit_desc})\n\
+        return Err(Error::Diagnostics(vec![
+            Diagnostic::error(format!(
+                "build_step('{}') runner '{}' failed ({exit_desc})\n\
              stderr:\n{stderr_text}",
-            step.name,
-            runner_path.display()
-        ))
-        .with_optional_span(step.span.clone())]));
+                step.name,
+                runner_path.display()
+            ))
+            .with_optional_span(step.span.clone()),
+        ]));
     }
 
     if !output_path.exists() {
-        return Err(Error::Diagnostics(vec![Diagnostic::error(format!(
-            "build_step('{}') runner '{}' exited 0 but did not write the declared \
+        return Err(Error::Diagnostics(vec![
+            Diagnostic::error(format!(
+                "build_step('{}') runner '{}' exited 0 but did not write the declared \
              output file at GLUON_OUTPUT_PATH={}",
-            step.name,
-            runner_path.display(),
-            abs_output.display(),
-        ))
-        .with_optional_span(step.span.clone())]));
+                step.name,
+                runner_path.display(),
+                abs_output.display(),
+            ))
+            .with_optional_span(step.span.clone()),
+        ]));
     }
 
     // --- Mark-built ---
@@ -335,7 +339,12 @@ mod tests {
 
     fn fixture_model_and_resolved(
         runner_path_in_artifacts: PathBuf,
-    ) -> (BuildModel, ResolvedConfig, Handle<BuildStepDef>, ArtifactMap) {
+    ) -> (
+        BuildModel,
+        ResolvedConfig,
+        Handle<BuildStepDef>,
+        ArtifactMap,
+    ) {
         let mut model = BuildModel::default();
         let (th, _) = model.targets.insert(
             "x86_64-unknown-linux-gnu".into(),
@@ -463,12 +472,22 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let (out_path, was_cached) =
-            execute_build_step(&ctx, &model, &resolved, bs_h, &artifacts, &mut stdout, &mut stderr)
-                .expect("runner must succeed");
+        let (out_path, was_cached) = execute_build_step(
+            &ctx,
+            &model,
+            &resolved,
+            bs_h,
+            &artifacts,
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect("runner must succeed");
 
         assert!(!was_cached, "cold run must not be cached");
-        assert!(out_path.exists(), "runner must have written GLUON_OUTPUT_PATH");
+        assert!(
+            out_path.exists(),
+            "runner must have written GLUON_OUTPUT_PATH"
+        );
         let body = std::fs::read_to_string(&out_path).unwrap();
         assert_eq!(body, "hello", "runner payload must reach output file");
     }
@@ -487,15 +506,33 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        execute_build_step(&ctx, &model, &resolved, bs_h, &artifacts, &mut stdout, &mut stderr)
-            .unwrap();
+        execute_build_step(
+            &ctx,
+            &model,
+            &resolved,
+            bs_h,
+            &artifacts,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
         // Persist cache before the second call so freshness can be observed.
         ctx.cache.lock().unwrap().save().unwrap();
 
-        let (_out, was_cached) =
-            execute_build_step(&ctx, &model, &resolved, bs_h, &artifacts, &mut stdout, &mut stderr)
-                .unwrap();
-        assert!(was_cached, "second invocation with unchanged inputs must be a cache hit");
+        let (_out, was_cached) = execute_build_step(
+            &ctx,
+            &model,
+            &resolved,
+            bs_h,
+            &artifacts,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert!(
+            was_cached,
+            "second invocation with unchanged inputs must be a cache hit"
+        );
     }
 
     #[cfg(unix)]
@@ -503,11 +540,7 @@ mod tests {
     fn runner_failure_surfaces_stderr_diagnostic() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runner.sh");
-        std::fs::write(
-            &path,
-            "#!/bin/sh\necho 'bad' >&2\nexit 17\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "#!/bin/sh\necho 'bad' >&2\nexit 17\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
@@ -522,13 +555,21 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let err = execute_build_step(&ctx, &model, &resolved, bs_h, &artifacts, &mut stdout, &mut stderr)
-            .expect_err("non-zero exit must error");
+        let err = execute_build_step(
+            &ctx,
+            &model,
+            &resolved,
+            bs_h,
+            &artifacts,
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect_err("non-zero exit must error");
         match err {
             Error::Diagnostics(v) => {
                 assert!(
-                    v.iter().any(|d| d.message.contains("exit code 17")
-                        && d.message.contains("bad")),
+                    v.iter()
+                        .any(|d| d.message.contains("exit code 17") && d.message.contains("bad")),
                     "expected exit-code + stderr in diagnostic, got: {v:?}"
                 );
             }
@@ -556,12 +597,21 @@ mod tests {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let err = execute_build_step(&ctx, &model, &resolved, bs_h, &artifacts, &mut stdout, &mut stderr)
-            .expect_err("missing output must error");
+        let err = execute_build_step(
+            &ctx,
+            &model,
+            &resolved,
+            bs_h,
+            &artifacts,
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect_err("missing output must error");
         match err {
             Error::Diagnostics(v) => {
                 assert!(
-                    v.iter().any(|d| d.message.contains("did not write the declared output")),
+                    v.iter()
+                        .any(|d| d.message.contains("did not write the declared output")),
                     "expected missing-output diagnostic, got: {v:?}"
                 );
             }

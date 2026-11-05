@@ -50,7 +50,9 @@ fn stage_fixture_to_tmp(src: &Path, dst: &Path) {
 #[ignore]
 fn multi_file_gluon_rs_registers_each_subsystem_group() {
     if gluon_core::RustcInfo::probe().is_err() {
-        eprintln!("multi_file_gluon_rs_registers_each_subsystem_group: skipped — rustc probe failed");
+        eprintln!(
+            "multi_file_gluon_rs_registers_each_subsystem_group: skipped — rustc probe failed"
+        );
         return;
     }
 

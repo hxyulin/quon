@@ -232,7 +232,8 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
         if line.is_empty() || !line.starts_with('{') {
             continue;
         }
-        let Ok(value): std::result::Result<serde_json::Value, _> = serde_json::from_str(line) else {
+        let Ok(value): std::result::Result<serde_json::Value, _> = serde_json::from_str(line)
+        else {
             continue;
         };
         if value.get("reason").and_then(|v| v.as_str()) != Some("compiler-artifact") {
@@ -266,9 +267,7 @@ pub fn parse_cargo_build_artifacts(stdout: &str) -> BTreeMap<String, PathBuf> {
             // extensions because Windows is.
             let lower = p.to_ascii_lowercase();
             let proc_macro_ext = is_proc_macro
-                && (lower.ends_with(".dylib")
-                    || lower.ends_with(".so")
-                    || lower.ends_with(".dll"));
+                && (lower.ends_with(".dylib") || lower.ends_with(".so") || lower.ends_with(".dll"));
             let lib_ext = is_lib && lower.ends_with(".rlib");
             (proc_macro_ext || lib_ext).then(|| PathBuf::from(p))
         });
@@ -421,7 +420,9 @@ mod tests {
         // Note the underscore — cargo normalises the package's hyphen.
         assert_eq!(
             map.get("proc_macro2"),
-            Some(&PathBuf::from("/tmp/build/release/deps/libproc_macro2-xyz.dylib")),
+            Some(&PathBuf::from(
+                "/tmp/build/release/deps/libproc_macro2-xyz.dylib"
+            )),
         );
     }
 
@@ -431,8 +432,14 @@ mod tests {
         let dll_line = r#"{"reason":"compiler-artifact","target":{"name":"bar","kind":["proc-macro"]},"filenames":["C:\\x\\bar-1.dll"]}"#;
         let map = parse_cargo_build_artifacts(&format!("{so_line}\n{dll_line}\n"));
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("foo").map(|p| p.to_string_lossy().into_owned()), Some("/x/libfoo-1.so".into()));
-        assert_eq!(map.get("bar").map(|p| p.to_string_lossy().into_owned()), Some(r"C:\x\bar-1.dll".into()));
+        assert_eq!(
+            map.get("foo").map(|p| p.to_string_lossy().into_owned()),
+            Some("/x/libfoo-1.so".into())
+        );
+        assert_eq!(
+            map.get("bar").map(|p| p.to_string_lossy().into_owned()),
+            Some(r"C:\x\bar-1.dll".into())
+        );
     }
 
     #[test]
@@ -575,7 +582,11 @@ not json at all
         std::fs::create_dir_all(&ws).unwrap();
         // Deliberately malformed: missing `[package]` section produces
         // a precise, stable cargo diagnostic on stderr.
-        std::fs::write(ws.join("Cargo.toml"), b"this is not valid toml syntax !!!\n").unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            b"this is not valid toml syntax !!!\n",
+        )
+        .unwrap();
 
         let vendor = ws.join("vendor");
         let err = run_cargo_metadata(&ws, &vendor, VendorFlags::default())

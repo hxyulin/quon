@@ -6,7 +6,7 @@
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
-use crate::build_model::{default_true, BootMode, BootloaderKind, CrateType};
+use crate::build_model::{BootMode, BootloaderKind, CrateType, default_true};
 use crate::handle::Named;
 use crate::kconfig::ConfigValue;
 use crate::source::SourceSpan;
@@ -120,7 +120,9 @@ impl Default for RawGroupDef {
 }
 
 impl Named for RawGroupDef {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Raw form of [`crate::build_model::CrateDef`]: `target` and `group`
@@ -153,7 +155,9 @@ pub struct RawCrateDef {
 }
 
 impl Named for RawCrateDef {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Raw form of [`crate::build_model::BootloaderDef`]. `kind` already
@@ -186,7 +190,9 @@ pub struct RawEspDef {
 }
 
 impl Named for RawEspDef {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Raw form of [`crate::build_model::EspEntry`].
@@ -211,7 +217,9 @@ pub struct RawBuildStepDef {
 }
 
 impl Named for RawBuildStepDef {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// Raw form of [`crate::build_model::BuildStepInput`]. The `Crate`
@@ -363,15 +371,21 @@ mod tests {
         };
         s.inputs.insert(
             "ELF".into(),
-            RawBuildStepInput::Crate { crate_name: "kernel".into() },
+            RawBuildStepInput::Crate {
+                crate_name: "kernel".into(),
+            },
         );
         s.inputs.insert(
             "FOO".into(),
-            RawBuildStepInput::File { path: "tools/foo".into() },
+            RawBuildStepInput::File {
+                path: "tools/foo".into(),
+            },
         );
         s.inputs.insert(
             "BAR".into(),
-            RawBuildStepInput::Literal { value: "yes".into() },
+            RawBuildStepInput::Literal {
+                value: "yes".into(),
+            },
         );
         let json = serde_json::to_string(&s).unwrap();
         let de: RawBuildStepDef = serde_json::from_str(&json).unwrap();
@@ -420,7 +434,10 @@ mod tests {
         };
         c.deps.insert(
             "log".into(),
-            RawDepDef { crate_name: "log".into(), ..Default::default() },
+            RawDepDef {
+                crate_name: "log".into(),
+                ..Default::default()
+            },
         );
         let json = serde_json::to_string(&c).unwrap();
         let de: RawCrateDef = serde_json::from_str(&json).unwrap();

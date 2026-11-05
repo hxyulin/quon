@@ -1,12 +1,9 @@
-use crate::build_model::{
-    ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef,
-    TargetDef,
-};
+use crate::build_model::{ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef, TargetDef};
 use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
-    RawBootloaderDef, RawBuildStepDef, RawCrateDef, RawEspDef, RawGroupDef,
-    RawPipelineDef, RawProfileDef,
+    RawBootloaderDef, RawBuildStepDef, RawCrateDef, RawEspDef, RawGroupDef, RawPipelineDef,
+    RawProfileDef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -85,13 +82,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        raw.kconfig_includes.push(PathBuf::from("./options.kconfig"));
+        raw.kconfig_includes
+            .push(PathBuf::from("./options.kconfig"));
 
         let json = serde_json::to_string(&raw).expect("serde");
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert_eq!(de.project.as_ref().unwrap().name, "demo");
         let h = de.profiles.lookup("dev").expect("dev profile");
-        assert_eq!(de.profiles.get(h).unwrap().target.as_deref(), Some("x86_64"));
+        assert_eq!(
+            de.profiles.get(h).unwrap().target.as_deref(),
+            Some("x86_64")
+        );
         assert_eq!(de.kconfig_includes.len(), 1);
     }
 

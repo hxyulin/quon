@@ -76,7 +76,9 @@ mod tests {
     #[test]
     fn bootloader_chain_sets_typed_fields() {
         let mut cfg = Config::new();
-        cfg.bootloader("uefi").entry_crate("loader").config_file("boot.cfg");
+        cfg.bootloader("uefi")
+            .entry_crate("loader")
+            .config_file("boot.cfg");
         let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
         assert_eq!(bl.kind, BootloaderKind::Uefi);
         assert_eq!(bl.entry_crate.as_deref(), Some("loader"));
@@ -98,13 +100,19 @@ mod tests {
         );
         assert_eq!(bl.entry_crate.as_deref(), Some("loader_a"));
         assert_eq!(cfg.diagnostics.len(), 1);
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
     }
 
     #[test]
     fn bootloader_extras_are_recorded() {
         let mut cfg = Config::new();
-        cfg.bootloader("custom").extra("flavor", "limine").extra("strict", "true");
+        cfg.bootloader("custom")
+            .extra("flavor", "limine")
+            .extra("strict", "true");
         let bl = cfg.raw.bootloader.as_ref().expect("bootloader populated");
         assert_eq!(bl.extras.get("flavor").map(String::as_str), Some("limine"));
         assert_eq!(bl.extras.get("strict").map(String::as_str), Some("true"));

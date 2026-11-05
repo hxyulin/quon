@@ -15,7 +15,7 @@ pub mod source;
 
 pub use build_model::*;
 pub use handle::{Arena, Handle};
-pub use intern::{intern, InternDiagnostic};
+pub use intern::{InternDiagnostic, intern};
 pub use kconfig::*;
 pub use raw::RawBuildModel;
 pub use raw_defs::{

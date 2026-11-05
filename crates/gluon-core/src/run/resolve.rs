@@ -556,10 +556,7 @@ mod tests {
             name: "disk-image".into(),
         };
         let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
-        assert_eq!(
-            p,
-            PathBuf::from("/build/build-steps/disk-image/disk.img")
-        );
+        assert_eq!(p, PathBuf::from("/build/build-steps/disk-image/disk.img"));
     }
 
     #[test]

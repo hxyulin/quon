@@ -74,7 +74,11 @@ mod tests {
     fn esp_add_rejects_absolute_dest_path() {
         let mut cfg = Config::new();
         cfg.esp("default").add("bl", "/EFI/BOOT/BOOTX64.EFI");
-        assert!(cfg.diagnostics.iter().any(|d| d.message.contains("relative to the ESP root")));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("relative to the ESP root"))
+        );
         let h = cfg.raw.esps.lookup("default").unwrap();
         let e = cfg.raw.esps.get(h).unwrap();
         assert!(e.entries.is_empty(), "rejected entry must NOT be inserted");
@@ -89,7 +93,11 @@ mod tests {
         assert!(cfg.diagnostics[0].message.contains("default"));
         let h = cfg.raw.esps.lookup("default").unwrap();
         let e = cfg.raw.esps.get(h).unwrap();
-        assert_eq!(e.entries.len(), 1, "first esp's entry preserved; second's add no-op");
+        assert_eq!(
+            e.entries.len(),
+            1,
+            "first esp's entry preserved; second's add no-op"
+        );
         assert_eq!(e.entries[0].source_crate, "bl");
     }
 }

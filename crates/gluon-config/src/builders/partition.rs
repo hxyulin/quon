@@ -4,10 +4,10 @@
 //! to return ownership of the parent [`ImageBuilder`] so you can keep chaining
 //! at the disk level.
 
-use crate::builders::image::ImageBuilder;
 use crate::builders::BuilderState;
+use crate::builders::image::ImageBuilder;
 use crate::config::Config;
-use gluon_model::{ImageDef, ImageEntry, ImageSource, Handle, PartitionDef};
+use gluon_model::{Handle, ImageDef, ImageEntry, ImageSource, PartitionDef};
 
 /// Chainable builder for a single [`PartitionDef`] on an image.
 ///
@@ -86,9 +86,16 @@ impl<'cfg> PartitionBuilder<'cfg> {
         let state = if self.state.is_duplicate() {
             BuilderState::Duplicate { name, span: None }
         } else {
-            BuilderState::Valid { state: self.image_handle, name, span: None }
+            BuilderState::Valid {
+                state: self.image_handle,
+                name,
+                span: None,
+            }
         };
 
-        ImageBuilder { cfg: self.cfg, state }
+        ImageBuilder {
+            cfg: self.cfg,
+            state,
+        }
     }
 }

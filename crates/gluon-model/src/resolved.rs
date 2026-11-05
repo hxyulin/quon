@@ -152,9 +152,9 @@ mod tests {
             target: Handle::new(0),
             opt_level: 0, // child overrides
             debug_info: true,
-            lto: None,               // child inherits
+            lto: None, // child inherits
             boot_binary: None,
-            qemu_memory: None,       // child inherits
+            qemu_memory: None, // child inherits
             qemu_cores: None,
             qemu_extra_args: vec![], // empty inherits
             qemu_boot_mode: None,

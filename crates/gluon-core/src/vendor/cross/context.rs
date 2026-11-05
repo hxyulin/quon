@@ -159,7 +159,10 @@ mod tests {
 
     fn build(name: &str, ver: &str, target: TargetSpec, kind: CrateKind) -> VendorCrateBuild {
         VendorCrateBuild {
-            crate_id: CrateId { name: name.into(), version: ver.into() },
+            crate_id: CrateId {
+                name: name.into(),
+                version: ver.into(),
+            },
             cargo_target_name: name.replace('-', "_"),
             target,
             kind,
@@ -184,10 +187,20 @@ mod tests {
     fn add_assigns_sequential_ids_and_supports_lookup() {
         let mut ctx = VendorBuildContext::new();
         let id_a = ctx
-            .add(build("a", "1.0.0", TargetSpec::Cross(target_handle(0)), CrateKind::Lib))
+            .add(build(
+                "a",
+                "1.0.0",
+                TargetSpec::Cross(target_handle(0)),
+                CrateKind::Lib,
+            ))
             .expect("first add ok");
         let id_b = ctx
-            .add(build("b", "1.0.0", TargetSpec::Cross(target_handle(0)), CrateKind::Lib))
+            .add(build(
+                "b",
+                "1.0.0",
+                TargetSpec::Cross(target_handle(0)),
+                CrateKind::Lib,
+            ))
             .expect("second add ok");
         assert_eq!(id_a.index(), 0);
         assert_eq!(id_b.index(), 1);
@@ -246,7 +259,12 @@ mod tests {
             ))
             .expect("cross ok");
         let host = ctx
-            .add(build("bitflags", "2.11.0", TargetSpec::Host, CrateKind::Lib))
+            .add(build(
+                "bitflags",
+                "2.11.0",
+                TargetSpec::Host,
+                CrateKind::Lib,
+            ))
             .expect("host ok");
         assert_ne!(cross, host);
         assert_eq!(

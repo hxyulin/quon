@@ -343,7 +343,10 @@ mod tests {
         fs::write(&b, b"// b v2 - edited").unwrap();
         let fp2 = transitive_fingerprint(&depfile).expect("fp2");
 
-        assert_ne!(fp1, fp2, "edit to a listed file must change the fingerprint");
+        assert_ne!(
+            fp1, fp2,
+            "edit to a listed file must change the fingerprint"
+        );
     }
 
     #[test]

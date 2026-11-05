@@ -38,10 +38,7 @@ fn workspace_fixture_dir(name: &str) -> PathBuf {
 
 fn setup_fixture(name: &str) -> (TempDir, PathBuf) {
     let src = workspace_fixture_dir(name);
-    assert!(
-        src.join("gluon.rs").is_file(),
-        "fixture missing at {src:?}"
-    );
+    assert!(src.join("gluon.rs").is_file(), "fixture missing at {src:?}");
     let tmp = tempfile::tempdir().expect("create tempdir");
     let dst = tmp.path().join(name);
     copy_dir_all(&src, &dst).expect("copy fixture into tempdir");

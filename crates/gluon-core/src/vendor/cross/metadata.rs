@@ -68,9 +68,7 @@ pub enum ParseError {
     #[error("cargo metadata JSON failed to deserialize: {0}")]
     Deserialize(#[from] serde_json::Error),
 
-    #[error(
-        "package {pkg_id} is referenced by resolve.nodes but is missing from packages[]"
-    )]
+    #[error("package {pkg_id} is referenced by resolve.nodes but is missing from packages[]")]
     MissingPackage { pkg_id: String },
 
     #[error(
@@ -286,10 +284,11 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
                 if !is_dep_active_for_target(dep) {
                     continue;
                 }
-                let pkg = by_id
-                    .get(dep.pkg.as_str())
-                    .copied()
-                    .ok_or_else(|| ParseError::MissingPackage { pkg_id: dep.pkg.clone() })?;
+                let pkg = by_id.get(dep.pkg.as_str()).copied().ok_or_else(|| {
+                    ParseError::MissingPackage {
+                        pkg_id: dep.pkg.clone(),
+                    }
+                })?;
                 roots.push(CrateId {
                     name: pkg.name.clone(),
                     version: pkg.version.clone(),
@@ -298,10 +297,13 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
             continue;
         }
 
-        let pkg = by_id
-            .get(node.id.as_str())
-            .copied()
-            .ok_or_else(|| ParseError::MissingPackage { pkg_id: node.id.clone() })?;
+        let pkg =
+            by_id
+                .get(node.id.as_str())
+                .copied()
+                .ok_or_else(|| ParseError::MissingPackage {
+                    pkg_id: node.id.clone(),
+                })?;
 
         // Skip the stub even if it slipped through workspace_members
         // detection (defensive — different cargo versions order
@@ -335,10 +337,11 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
             .iter()
             .filter(|d| is_dep_active_for_target(d))
             .map(|d| {
-                let dep_pkg = by_id
-                    .get(d.pkg.as_str())
-                    .copied()
-                    .ok_or_else(|| ParseError::MissingPackage { pkg_id: d.pkg.clone() })?;
+                let dep_pkg = by_id.get(d.pkg.as_str()).copied().ok_or_else(|| {
+                    ParseError::MissingPackage {
+                        pkg_id: d.pkg.clone(),
+                    }
+                })?;
                 Ok(ResolvedDep {
                     extern_name: d.name.clone(),
                     crate_id: CrateId {
@@ -362,7 +365,10 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
                 version: pkg.version.clone(),
                 manifest_dir,
                 lib_path: lib_target.src_path.clone(),
-                edition: lib_target.edition.clone().unwrap_or_else(|| pkg.edition.clone()),
+                edition: lib_target
+                    .edition
+                    .clone()
+                    .unwrap_or_else(|| pkg.edition.clone()),
                 kind,
                 features,
                 deps,
@@ -374,7 +380,11 @@ pub fn parse_metadata(json: &str, target: Handle<TargetDef>) -> Result<ResolvedG
     roots.sort();
     roots.dedup();
 
-    Ok(ResolvedGraph { target, crates, roots })
+    Ok(ResolvedGraph {
+        target,
+        crates,
+        roots,
+    })
 }
 
 // -------------------- helpers --------------------
@@ -533,10 +543,19 @@ mod tests {
         let g = parse_metadata(MINIMAL_JSON, target_handle()).expect("parse ok");
         assert_eq!(g.target, target_handle());
         assert_eq!(g.crates.len(), 1, "stub must be filtered out");
-        assert_eq!(g.roots, vec![CrateId { name: "bitflags".into(), version: "2.11.0".into() }]);
+        assert_eq!(
+            g.roots,
+            vec![CrateId {
+                name: "bitflags".into(),
+                version: "2.11.0".into()
+            }]
+        );
         let bf = g
             .crates
-            .get(&CrateId { name: "bitflags".into(), version: "2.11.0".into() })
+            .get(&CrateId {
+                name: "bitflags".into(),
+                version: "2.11.0".into(),
+            })
             .expect("bitflags present");
         assert_eq!(bf.cargo_target_name, "bitflags");
         assert_eq!(bf.kind, CrateKind::Lib);
@@ -544,7 +563,10 @@ mod tests {
         assert!(bf.deps.is_empty());
         assert!(!bf.has_build_script);
         assert_eq!(bf.manifest_dir, PathBuf::from("/vendor/bitflags-2.11.0"));
-        assert_eq!(bf.lib_path, PathBuf::from("/vendor/bitflags-2.11.0/src/lib.rs"));
+        assert_eq!(
+            bf.lib_path,
+            PathBuf::from("/vendor/bitflags-2.11.0/src/lib.rs")
+        );
     }
 
     /// Graph with one transitive (bitflags + a fake leaf dep) and a
@@ -657,11 +679,20 @@ mod tests {
     fn transitive_graph_keeps_dep_edges_and_normalises_proc_macro_name() {
         let g = parse_metadata(TRANSITIVE_JSON, target_handle()).expect("parse ok");
         assert_eq!(g.crates.len(), 3);
-        assert_eq!(g.roots, vec![CrateId { name: "bitflags".into(), version: "2.11.0".into() }]);
+        assert_eq!(
+            g.roots,
+            vec![CrateId {
+                name: "bitflags".into(),
+                version: "2.11.0".into()
+            }]
+        );
 
         let pm = g
             .crates
-            .get(&CrateId { name: "proc-macro2".into(), version: "1.0.0".into() })
+            .get(&CrateId {
+                name: "proc-macro2".into(),
+                version: "1.0.0".into(),
+            })
             .expect("proc-macro2 present");
         assert_eq!(pm.kind, CrateKind::ProcMacro);
         // Cargo target name already had no hyphens here, but it would
@@ -670,7 +701,10 @@ mod tests {
 
         let bf = g
             .crates
-            .get(&CrateId { name: "bitflags".into(), version: "2.11.0".into() })
+            .get(&CrateId {
+                name: "bitflags".into(),
+                version: "2.11.0".into(),
+            })
             .expect("bitflags present");
         assert_eq!(bf.deps.len(), 2);
         // Sorted by extern_name: "leaf" before "pm".
@@ -684,7 +718,10 @@ mod tests {
         // edition (2018) must be used.
         let leaf = g
             .crates
-            .get(&CrateId { name: "leaf".into(), version: "0.1.0".into() })
+            .get(&CrateId {
+                name: "leaf".into(),
+                version: "0.1.0".into(),
+            })
             .expect("leaf present");
         assert_eq!(leaf.edition, "2018");
     }
@@ -733,7 +770,10 @@ mod tests {
         let g = parse_metadata(json, target_handle()).expect("parse ok");
         let hb = g
             .crates
-            .get(&CrateId { name: "has-build".into(), version: "1.0.0".into() })
+            .get(&CrateId {
+                name: "has-build".into(),
+                version: "1.0.0".into(),
+            })
             .expect("has-build present");
         assert!(hb.has_build_script);
         assert_eq!(hb.kind, CrateKind::Lib);
@@ -778,8 +818,18 @@ mod tests {
         }
         "#;
         let g = parse_metadata(json, target_handle()).expect("parse ok");
-        let a = g.crates.get(&CrateId { name: "a".into(), version: "1.0.0".into() }).unwrap();
-        assert!(a.deps.is_empty(), "dev edge must be filtered, got: {:?}", a.deps);
+        let a = g
+            .crates
+            .get(&CrateId {
+                name: "a".into(),
+                version: "1.0.0".into(),
+            })
+            .unwrap();
+        assert!(
+            a.deps.is_empty(),
+            "dev edge must be filtered, got: {:?}",
+            a.deps
+        );
     }
 
     #[test]
@@ -821,7 +871,13 @@ mod tests {
         }
         "#;
         let g = parse_metadata(json, target_handle()).expect("parse ok");
-        let a = g.crates.get(&CrateId { name: "a".into(), version: "1.0.0".into() }).unwrap();
+        let a = g
+            .crates
+            .get(&CrateId {
+                name: "a".into(),
+                version: "1.0.0".into(),
+            })
+            .unwrap();
         assert!(a.deps.is_empty(), "cfg(unix) edge must be filtered");
     }
 
@@ -876,7 +932,10 @@ mod tests {
         }
         "#;
         let err = parse_metadata(json, target_handle()).expect_err("must error");
-        assert!(matches!(err, ParseError::AmbiguousLibKind { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ParseError::AmbiguousLibKind { .. }),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -915,6 +974,9 @@ mod tests {
         }
         "#;
         let err = parse_metadata(json, target_handle()).expect_err("must error");
-        assert!(matches!(err, ParseError::NoLibTarget { .. }), "got: {err:?}");
+        assert!(
+            matches!(err, ParseError::NoLibTarget { .. }),
+            "got: {err:?}"
+        );
     }
 }

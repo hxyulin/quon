@@ -273,7 +273,9 @@ pub fn ensure_config_crate(
 
     // Panic strategy — must match the sysroot and downstream crates.
     if let Some(s) = target.panic_strategy {
-        builder.raw_arg("-C").raw_arg(format!("panic={}", s.as_str()));
+        builder
+            .raw_arg("-C")
+            .raw_arg(format!("panic={}", s.as_str()));
     }
 
     // extra-filename LAST so the canonical token order (and therefore the
@@ -300,9 +302,9 @@ pub fn ensure_config_crate(
         output_path,
         depfile_path,
         Some(&out_dir),
-        Vec::new(), // config crate has no out-of-band inputs
-        Vec::new(),                                  // aux_outputs
-        None::<PostCompileStep>,                     // post_compile_step
+        Vec::new(),              // config crate has no out-of-band inputs
+        Vec::new(),              // aux_outputs
+        None::<PostCompileStep>, // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(

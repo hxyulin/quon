@@ -464,15 +464,15 @@ pub fn build_dag(
         let v_node = dag.insert_node(DagNode::VendorCrate(id));
 
         for edge in &build.deps {
-            let dep_id = vendor_ctx.lookup(edge.target, &edge.extern_name).ok_or_else(
-                || {
+            let dep_id = vendor_ctx
+                .lookup(edge.target, &edge.extern_name)
+                .ok_or_else(|| {
                     Error::Compile(format!(
                         "build_dag: vendor build {id} ({}) references unresolved dep \
                          ({:?}, {}) — vendor graph lowering produced an inconsistent edge",
                         build.crate_id, edge.target, edge.extern_name
                     ))
-                },
-            )?;
+                })?;
             let dep_node = dag.insert_node(DagNode::VendorCrate(dep_id));
             dag.add_edge(dep_node, v_node);
         }
@@ -631,7 +631,10 @@ pub fn build_dag(
 
         // Crate inputs → BuildStep edges.
         for input in step.inputs.values() {
-            if let BuildStepInput::Crate { handle: input_handle } = input {
+            if let BuildStepInput::Crate {
+                handle: input_handle,
+            } = input
+            {
                 if resolved_handles.contains(input_handle) {
                     let input_id = dag.insert_node(DagNode::Crate(*input_handle));
                     dag.add_edge(input_id, bs_id);
@@ -1631,7 +1634,8 @@ mod tests {
         );
 
         // Must not return Err.
-        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("unknown artifact_dep must not abort");
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new())
+            .expect("unknown artifact_dep must not abort");
         // Consumer's in-degree: Sysroot + ConfigCrate only (no artifact edge).
         let consumer_id = *dag.node_index.get(&DagNode::Crate(consumer_h)).unwrap();
         assert_eq!(*dag.in_degree.get(&consumer_id).unwrap(), 2);
@@ -2250,7 +2254,10 @@ mod tests {
         deps: Vec<VendorDepEdge>,
     ) -> VendorCrateBuild {
         VendorCrateBuild {
-            crate_id: CrateId { name: name.into(), version: ver.into() },
+            crate_id: CrateId {
+                name: name.into(),
+                version: ver.into(),
+            },
             cargo_target_name: name.replace('-', "_"),
             target,
             kind,
@@ -2346,7 +2353,10 @@ mod tests {
                 CrateKind::Lib,
                 vec![VendorDepEdge {
                     extern_name: "dep_crate".into(),
-                    crate_id: CrateId { name: "dep-crate".into(), version: "1.0.0".into() },
+                    crate_id: CrateId {
+                        name: "dep-crate".into(),
+                        version: "1.0.0".into(),
+                    },
                     target: TargetSpec::Cross(th),
                 }],
             ))
@@ -2356,7 +2366,10 @@ mod tests {
         let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
 
         let dep_id = *dag.node_index.get(&DagNode::VendorCrate(dep_vid)).unwrap();
-        let consumer_id = *dag.node_index.get(&DagNode::VendorCrate(consumer_vid)).unwrap();
+        let consumer_id = *dag
+            .node_index
+            .get(&DagNode::VendorCrate(consumer_vid))
+            .unwrap();
         let dep_outs = dag.edges_out.get(&dep_id).expect("dep has outs");
         assert!(
             dep_outs.contains(&consumer_id),
@@ -2382,7 +2395,10 @@ mod tests {
             CrateKind::Lib,
             vec![VendorDepEdge {
                 extern_name: "ghost".into(),
-                crate_id: CrateId { name: "ghost".into(), version: "1.0.0".into() },
+                crate_id: CrateId {
+                    name: "ghost".into(),
+                    version: "1.0.0".into(),
+                },
                 target: TargetSpec::Cross(th),
             }],
         ))
@@ -2422,7 +2438,9 @@ mod tests {
             "bitflags".into(),
             ExternalDepDef {
                 name: "bitflags".into(),
-                source: DepSource::CratesIo { version: "2.11.0".into() },
+                source: DepSource::CratesIo {
+                    version: "2.11.0".into(),
+                },
                 features: vec![],
                 default_features: true,
                 cfg_flags: vec![],
@@ -2465,7 +2483,11 @@ mod tests {
 
         let resolved = make_resolved(
             th,
-            vec![ResolvedCrateRef { handle: user_h, target: th, host: false }],
+            vec![ResolvedCrateRef {
+                handle: user_h,
+                target: th,
+                host: false,
+            }],
         );
         let dag = build_dag(&resolved, &model, &vctx).expect("dag built");
 
@@ -2493,7 +2515,9 @@ mod tests {
             "serde".into(),
             ExternalDepDef {
                 name: "serde".into(),
-                source: DepSource::CratesIo { version: "1.0.0".into() },
+                source: DepSource::CratesIo {
+                    version: "1.0.0".into(),
+                },
                 features: vec![],
                 default_features: true,
                 cfg_flags: vec![],
@@ -2534,11 +2558,14 @@ mod tests {
 
         let resolved = make_resolved(
             th,
-            vec![ResolvedCrateRef { handle: user_h, target: th, host: false }],
+            vec![ResolvedCrateRef {
+                handle: user_h,
+                target: th,
+                host: false,
+            }],
         );
         // Empty vendor context — V1 path has no vendor entries.
-        let dag =
-            build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
+        let dag = build_dag(&resolved, &model, &VendorBuildContext::new()).expect("dag built");
 
         // No vendor node should have been created — the only nodes are
         // Sysroot, ConfigCrate, and the user crate.
@@ -2546,6 +2573,10 @@ mod tests {
         // In-degree for the user crate: sysroot + config = 2 (no
         // vendor edge added).
         assert_eq!(*dag.in_degree.get(&user_id).unwrap(), 2);
-        assert_eq!(dag.len(), 3, "no vendor node should be inserted on lookup miss");
+        assert_eq!(
+            dag.len(),
+            3,
+            "no vendor node should be inserted on lookup miss"
+        );
     }
 }

@@ -29,11 +29,19 @@ pub struct InternDiagnostic {
 
 impl InternDiagnostic {
     pub fn error(message: impl Into<String>) -> Self {
-        Self { message: message.into(), span: None }
+        Self {
+            message: message.into(),
+            span: None,
+        }
     }
-    pub fn with_span(mut self, span: SourceSpan) -> Self { self.span = Some(span); self }
+    pub fn with_span(mut self, span: SourceSpan) -> Self {
+        self.span = Some(span);
+        self
+    }
     pub fn with_optional_span(mut self, span: Option<SourceSpan>) -> Self {
-        if let Some(s) = span { self.span = Some(s); }
+        if let Some(s) = span {
+            self.span = Some(s);
+        }
         self
     }
 }
@@ -64,14 +72,30 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         &mut model.crates,
         &mut diags,
     );
-    intern_profiles(&raw.profiles, &model.targets, &model.crates, &mut model.profiles, &mut diags);
+    intern_profiles(
+        &raw.profiles,
+        &model.targets,
+        &model.crates,
+        &mut model.profiles,
+        &mut diags,
+    );
     model.bootloader = raw
         .bootloader
         .as_ref()
         .map(|b| intern_bootloader(b, &model.crates, &mut diags));
     intern_esps(&raw.esps, &model.crates, &mut model.esps, &mut diags);
-    intern_build_steps(&raw.build_steps, &model.crates, &mut model.build_steps, &mut diags);
-    intern_pipelines(&raw.pipelines, &model.groups, &mut model.pipelines, &mut diags);
+    intern_build_steps(
+        &raw.build_steps,
+        &model.crates,
+        &mut model.build_steps,
+        &mut diags,
+    );
+    intern_pipelines(
+        &raw.pipelines,
+        &model.groups,
+        &mut model.pipelines,
+        &mut diags,
+    );
 
     (model, diags)
 }
@@ -142,10 +166,13 @@ fn intern_crates(
     // that didn't make it into `out`.
     for (_, c) in raw.iter() {
         let Some(group) = groups.lookup(&c.group) else {
-            diags.push(InternDiagnostic::error(format!(
-                "crate '{}' references unknown group '{}'",
-                c.name, c.group
-            )).with_optional_span(c.span.clone()));
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "crate '{}' references unknown group '{}'",
+                    c.name, c.group
+                ))
+                .with_optional_span(c.span.clone()),
+            );
             continue;
         };
         let target = if c.target.is_empty() || c.target == "host" {
@@ -154,10 +181,13 @@ fn intern_crates(
             match targets.lookup(&c.target) {
                 Some(h) => TargetSpec::Cross(h),
                 None => {
-                    diags.push(InternDiagnostic::error(format!(
-                        "crate '{}' references unknown target '{}'",
-                        c.name, c.target
-                    )).with_optional_span(c.span.clone()));
+                    diags.push(
+                        InternDiagnostic::error(format!(
+                            "crate '{}' references unknown target '{}'",
+                            c.name, c.target
+                        ))
+                        .with_optional_span(c.span.clone()),
+                    );
                     TargetSpec::Host
                 }
             }
@@ -170,7 +200,7 @@ fn intern_crates(
                 edition: c.edition.clone(),
                 crate_type: c.crate_type,
                 target,
-                deps: BTreeMap::new(),       // filled in pass 2
+                deps: BTreeMap::new(), // filled in pass 2
                 dev_deps: BTreeMap::new(),
                 features: c.features.clone(),
                 root: c.root.clone(),
@@ -187,11 +217,32 @@ fn intern_crates(
         );
     }
     // Pass 2: resolve deps now that all crates exist in `out`.
-    let snapshot: Vec<(String, RawCrateDef)> = raw.iter().map(|(_, c)| (c.name.clone(), c.clone())).collect();
+    let snapshot: Vec<(String, RawCrateDef)> = raw
+        .iter()
+        .map(|(_, c)| (c.name.clone(), c.clone()))
+        .collect();
     for (name, c) in snapshot {
-        let Some(h) = out.lookup(&name) else { continue; };
-        let deps = resolve_dep_map(&c.deps, &c.name, "deps", out, external_deps, diags, c.span.clone());
-        let dev_deps = resolve_dep_map(&c.dev_deps, &c.name, "dev-deps", out, external_deps, diags, c.span.clone());
+        let Some(h) = out.lookup(&name) else {
+            continue;
+        };
+        let deps = resolve_dep_map(
+            &c.deps,
+            &c.name,
+            "deps",
+            out,
+            external_deps,
+            diags,
+            c.span.clone(),
+        );
+        let dev_deps = resolve_dep_map(
+            &c.dev_deps,
+            &c.name,
+            "dev-deps",
+            out,
+            external_deps,
+            diags,
+            c.span.clone(),
+        );
         if let Some(slot) = out.get_mut(h) {
             slot.deps = deps;
             slot.dev_deps = dev_deps;
@@ -215,10 +266,13 @@ fn resolve_dep_map(
             None => match external_deps.lookup(&d.crate_name) {
                 Some(h) => DepResolution::External(h),
                 None => {
-                    diags.push(InternDiagnostic::error(format!(
-                        "dep '{}' in crate '{}' ({}) references unknown crate '{}'",
-                        extern_name, crate_name, kind, d.crate_name
-                    )).with_optional_span(d.span.clone().or_else(|| span.clone())));
+                    diags.push(
+                        InternDiagnostic::error(format!(
+                            "dep '{}' in crate '{}' ({}) references unknown crate '{}'",
+                            extern_name, crate_name, kind, d.crate_name
+                        ))
+                        .with_optional_span(d.span.clone().or_else(|| span.clone())),
+                    );
                     // Skip this dep — downstream errors surface elsewhere.
                     continue;
                 }
@@ -251,20 +305,26 @@ fn intern_profiles(
         let target_handle = p.target.as_deref().and_then(|name| {
             let h = targets.lookup(name);
             if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "profile '{}' references unknown target '{}'",
-                    p.name, name
-                )).with_optional_span(p.span.clone()));
+                diags.push(
+                    InternDiagnostic::error(format!(
+                        "profile '{}' references unknown target '{}'",
+                        p.name, name
+                    ))
+                    .with_optional_span(p.span.clone()),
+                );
             }
             h
         });
         let boot_binary_handle = p.boot_binary.as_deref().and_then(|name| {
             let h = crates.lookup(name);
             if h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "profile '{}' references unknown boot binary crate '{}'",
-                    p.name, name
-                )).with_optional_span(p.span.clone()));
+                diags.push(
+                    InternDiagnostic::error(format!(
+                        "profile '{}' references unknown boot binary crate '{}'",
+                        p.name, name
+                    ))
+                    .with_optional_span(p.span.clone()),
+                );
             }
             h
         });
@@ -272,7 +332,7 @@ fn intern_profiles(
             p.name.clone(),
             ProfileDef {
                 name: p.name.clone(),
-                inherits: None,                  // populated in pass 2
+                inherits: None, // populated in pass 2
                 target: target_handle,
                 opt_level: p.opt_level,
                 debug_info: p.debug_info,
@@ -290,17 +350,22 @@ fn intern_profiles(
         );
     }
     // Pass 2: resolve `inherits`.
-    let snapshot: Vec<(String, Option<String>, Option<SourceSpan>)> =
-        raw.iter().map(|(_, p)| (p.name.clone(), p.inherits.clone(), p.span.clone())).collect();
+    let snapshot: Vec<(String, Option<String>, Option<SourceSpan>)> = raw
+        .iter()
+        .map(|(_, p)| (p.name.clone(), p.inherits.clone(), p.span.clone()))
+        .collect();
     for (name, inherits, span) in snapshot {
         let h = out.lookup(&name).expect("inserted in pass 1");
         if let Some(parent_name) = inherits {
             let parent_h = out.lookup(&parent_name);
             if parent_h.is_none() {
-                diags.push(InternDiagnostic::error(format!(
-                    "profile '{}' inherits from unknown profile '{}'",
-                    name, parent_name
-                )).with_optional_span(span));
+                diags.push(
+                    InternDiagnostic::error(format!(
+                        "profile '{}' inherits from unknown profile '{}'",
+                        name, parent_name
+                    ))
+                    .with_optional_span(span),
+                );
             }
             if let Some(slot) = out.get_mut(h) {
                 slot.inherits = parent_h;
@@ -317,9 +382,13 @@ fn intern_bootloader(
     let entry_crate_handle = raw.entry_crate.as_deref().and_then(|name| {
         let h = crates.lookup(name);
         if h.is_none() {
-            diags.push(InternDiagnostic::error(format!(
-                "bootloader.entry_crate references unknown crate '{}'", name
-            )).with_optional_span(raw.span.clone()));
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "bootloader.entry_crate references unknown crate '{}'",
+                    name
+                ))
+                .with_optional_span(raw.span.clone()),
+            );
         }
         h
     });
@@ -367,7 +436,11 @@ fn intern_esps(
             .collect();
         let _ = out.insert(
             e.name.clone(),
-            EspDef { name: e.name.clone(), entries, span: e.span.clone() },
+            EspDef {
+                name: e.name.clone(),
+                entries,
+                span: e.span.clone(),
+            },
         );
     }
 }
@@ -445,30 +518,42 @@ fn intern_pipelines(
     diags: &mut Vec<InternDiagnostic>,
 ) {
     for (_, p) in raw.iter() {
-        let stages = p.stages.iter().map(|s| {
-            // Drop dangling group references instead of carrying an
-            // unresolved entry forward — mirrors the `intern_esps` /
-            // `intern_build_steps` filter-on-intern pattern so DAG
-            // builders never need to recheck resolution.
-            let inputs: Vec<Handle<GroupDef>> = s.inputs.iter().filter_map(|input| {
-                let Some(h) = groups.lookup(input) else {
-                    diags.push(InternDiagnostic::error(format!(
-                        "pipeline '{}' stage '{}' references unknown group '{}'",
-                        p.name, s.name, input
-                    )));
-                    return None;
-                };
-                Some(h)
-            }).collect();
-            PipelineStep {
-                name: s.name.clone(),
-                inputs,
-                rule: s.rule.clone(),
-            }
-        }).collect();
+        let stages = p
+            .stages
+            .iter()
+            .map(|s| {
+                // Drop dangling group references instead of carrying an
+                // unresolved entry forward — mirrors the `intern_esps` /
+                // `intern_build_steps` filter-on-intern pattern so DAG
+                // builders never need to recheck resolution.
+                let inputs: Vec<Handle<GroupDef>> = s
+                    .inputs
+                    .iter()
+                    .filter_map(|input| {
+                        let Some(h) = groups.lookup(input) else {
+                            diags.push(InternDiagnostic::error(format!(
+                                "pipeline '{}' stage '{}' references unknown group '{}'",
+                                p.name, s.name, input
+                            )));
+                            return None;
+                        };
+                        Some(h)
+                    })
+                    .collect();
+                PipelineStep {
+                    name: s.name.clone(),
+                    inputs,
+                    rule: s.rule.clone(),
+                }
+            })
+            .collect();
         let _ = out.insert(
             p.name.clone(),
-            PipelineDef { name: p.name.clone(), stages, span: p.span.clone() },
+            PipelineDef {
+                name: p.name.clone(),
+                stages,
+                span: p.span.clone(),
+            },
         );
     }
 }
@@ -539,7 +624,9 @@ mod tests {
         );
         let (_, diags) = intern(raw);
         assert!(
-            diags.iter().any(|d| d.message.contains("unknown target 'nonexistent'")),
+            diags
+                .iter()
+                .any(|d| d.message.contains("unknown target 'nonexistent'")),
             "expected dangling-target diagnostic, got: {diags:?}"
         );
     }

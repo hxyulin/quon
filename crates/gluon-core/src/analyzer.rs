@@ -337,8 +337,8 @@ pub fn generate_rust_project_json_with_script(
 mod tests {
     use super::*;
     use gluon_model::{
-        BuildModel, CrateDef, CrateType, DepDef, GroupDef, PanicStrategy, ProjectDef, ResolvedConfig,
-        ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
+        BuildModel, CrateDef, CrateType, DepDef, GroupDef, PanicStrategy, ProjectDef,
+        ResolvedConfig, ResolvedCrateRef, ResolvedProfile, TargetDef, TargetSpec,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -923,7 +923,9 @@ mod tests {
 
         // Index 0 is the config crate; index 1 is `kernel`; index 2 is `loader`.
         let loader = &json["crates"][2];
-        let env = loader["env"].as_object().expect("env must be a JSON object");
+        let env = loader["env"]
+            .as_object()
+            .expect("env must be a JSON object");
         let kernel_path = env
             .get("KERNEL_PATH")
             .and_then(Value::as_str)
@@ -1024,9 +1026,8 @@ mod tests {
         let info = Arc::new(fake_rustc_info(Some(PathBuf::from("/rust-src"))));
 
         let v1 = generate_rust_project_json(&model, &resolved, &layout(), &info);
-        let v2 = generate_rust_project_json_with_script(
-            &model, &resolved, &layout(), &info, None, None,
-        );
+        let v2 =
+            generate_rust_project_json_with_script(&model, &resolved, &layout(), &info, None, None);
         assert_eq!(
             v1, v2,
             "with_script(None, None) must produce output identical to the no-script variant"

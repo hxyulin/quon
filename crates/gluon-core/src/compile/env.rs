@@ -77,9 +77,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gluon_model::{
-        BuildModel, CrateDef, CrateType, GroupDef, Handle, TargetSpec,
-    };
+    use gluon_model::{BuildModel, CrateDef, CrateType, GroupDef, Handle, TargetSpec};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -175,7 +173,11 @@ mod tests {
         .unwrap();
 
         let keys: Vec<&str> = resolved.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["A_VAR", "Z_VAR"], "iteration order must be BTreeMap-stable");
+        assert_eq!(
+            keys,
+            vec!["A_VAR", "Z_VAR"],
+            "iteration order must be BTreeMap-stable"
+        );
         assert_eq!(resolved.get("A_VAR").unwrap(), "/non/existent/bravo.rlib");
         assert_eq!(resolved.get("Z_VAR").unwrap(), "/non/existent/alpha.rlib");
     }
@@ -186,7 +188,10 @@ mod tests {
         let g = ensure_group(&mut model);
         let consumer = crate_def_with_env(g, &[("KEY", "ghost")]);
         let err = resolve_crate_env(&consumer, &model, |_| None);
-        assert!(err.is_err(), "missing crate name must error, not silently drop");
+        assert!(
+            err.is_err(),
+            "missing crate name must error, not silently drop"
+        );
     }
 
     #[test]

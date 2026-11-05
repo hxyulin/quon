@@ -519,7 +519,10 @@ mod tests {
 
         // Manifest should still exist; sysroot:* entries retained,
         // others removed.
-        assert!(manifest.exists(), "manifest deleted under keep_sysroot=true");
+        assert!(
+            manifest.exists(),
+            "manifest deleted under keep_sysroot=true"
+        );
         let cache2 = Cache::load(&manifest).0;
         let composite_keys: Vec<_> = cache2.composite_keys().collect();
         assert!(composite_keys.iter().any(|k| **k == *"sysroot:x86_64"));

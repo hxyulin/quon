@@ -175,11 +175,16 @@ mod tests {
     #[test]
     fn dependency_git_with_rev() {
         let mut cfg = Config::new();
-        cfg.dependency("foo").git("https://example.com/foo.git").rev("abcdef");
+        cfg.dependency("foo")
+            .git("https://example.com/foo.git")
+            .rev("abcdef");
         let h = cfg.raw.external_deps.lookup("foo").unwrap();
         let d = cfg.raw.external_deps.get(h).unwrap();
         match &d.source {
-            DepSource::Git { url, reference: GitRef::Rev(r) } => {
+            DepSource::Git {
+                url,
+                reference: GitRef::Rev(r),
+            } => {
                 assert_eq!(url, "https://example.com/foo.git");
                 assert_eq!(r, "abcdef");
             }
@@ -192,10 +197,10 @@ mod tests {
     fn dependency_rev_without_git_diagnostic() {
         let mut cfg = Config::new();
         cfg.dependency("foo").rev("abcdef");
-        assert!(cfg
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains(".rev/.tag/.branch requires a .git(...) call first")));
+        assert!(cfg.diagnostics.iter().any(|d| {
+            d.message
+                .contains(".rev/.tag/.branch requires a .git(...) call first")
+        }));
     }
 
     #[test]
@@ -256,8 +261,10 @@ mod tests {
         let mut cfg_b = Config::new();
         cfg_b.dependency("bitflags").version("2.11").target(stale);
         assert_eq!(cfg_b.diagnostics.len(), 1);
-        assert!(cfg_b.diagnostics[0]
-            .message
-            .contains("doesn't exist in this Config"));
+        assert!(
+            cfg_b.diagnostics[0]
+                .message
+                .contains("doesn't exist in this Config")
+        );
     }
 }

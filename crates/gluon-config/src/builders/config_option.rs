@@ -226,7 +226,9 @@ mod tests {
     #[test]
     fn config_bool_chain() {
         let mut cfg = Config::new();
-        cfg.config_bool("CONFIG_FOO").default(ConfigValue::Bool(true)).help("helpful");
+        cfg.config_bool("CONFIG_FOO")
+            .default(ConfigValue::Bool(true))
+            .help("helpful");
         let opt = opt(&cfg, "CONFIG_FOO");
         assert_eq!(opt.ty, ConfigType::Bool);
         match opt.default {
@@ -240,7 +242,9 @@ mod tests {
     #[test]
     fn config_u32_with_range() {
         let mut cfg = Config::new();
-        cfg.config_u32("CONFIG_SIZE").default(ConfigValue::U32(4096)).range(0, 65536);
+        cfg.config_u32("CONFIG_SIZE")
+            .default(ConfigValue::U32(4096))
+            .range(0, 65536);
         let opt = opt(&cfg, "CONFIG_SIZE");
         assert_eq!(opt.ty, ConfigType::U32);
         assert_eq!(opt.range, Some((0, 65536)));
@@ -266,7 +270,11 @@ mod tests {
         cfg.config_bool("CONFIG_FOO").help("first");
         cfg.config_bool("CONFIG_FOO").help("second");
         let opt = opt(&cfg, "CONFIG_FOO");
-        assert_eq!(opt.help.as_deref(), Some("first"), "first definition preserved");
+        assert_eq!(
+            opt.help.as_deref(),
+            Some("first"),
+            "first definition preserved"
+        );
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("CONFIG_FOO"));
     }
@@ -277,9 +285,9 @@ mod tests {
         cfg.config_bool("CONFIG_FOO").default(ConfigValue::U32(42));
         // Engine wording: "config option '{name}': expected bool value, got u32"
         assert!(
-            cfg.diagnostics.iter().any(|d| {
-                d.message.contains("CONFIG_FOO") && d.message.contains("bool")
-            }),
+            cfg.diagnostics
+                .iter()
+                .any(|d| { d.message.contains("CONFIG_FOO") && d.message.contains("bool") }),
             "expected type-mismatch diagnostic, got: {:?}",
             cfg.diagnostics,
         );
@@ -325,7 +333,8 @@ mod tests {
     fn default_value_is_alias_for_default() {
         use gluon_model::ConfigValue;
         let mut cfg = Config::new();
-        cfg.config_bool("CONFIG_FOO").default_value(ConfigValue::Bool(true));
+        cfg.config_bool("CONFIG_FOO")
+            .default_value(ConfigValue::Bool(true));
         let opt = opt(&cfg, "CONFIG_FOO");
         match opt.default {
             ConfigValue::Bool(true) => {}
@@ -338,7 +347,8 @@ mod tests {
     fn depends_on_records_ident_expr() {
         use gluon_model::Expr;
         let mut cfg = Config::new();
-        cfg.config_u32("LOG_LEVEL").depends_on(Expr::Ident("LOG_ENABLED".into()));
+        cfg.config_u32("LOG_LEVEL")
+            .depends_on(Expr::Ident("LOG_ENABLED".into()));
         let opt = opt(&cfg, "LOG_LEVEL");
         match opt.depends_on_expr.as_ref() {
             Some(Expr::Ident(s)) if s == "LOG_ENABLED" => {}
@@ -398,9 +408,11 @@ mod tests {
     fn range_on_non_numeric_type_pushes_diagnostic() {
         let mut cfg = Config::new();
         cfg.config_bool("CONFIG_FOO").range(0, 100);
-        assert!(cfg.diagnostics.iter().any(|d| {
-            d.message.contains("range") && d.message.contains("CONFIG_FOO")
-        }));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| { d.message.contains("range") && d.message.contains("CONFIG_FOO") })
+        );
         let opt = opt(&cfg, "CONFIG_FOO");
         assert!(opt.range.is_none(), "range must NOT be set on Bool option");
     }
@@ -409,10 +421,15 @@ mod tests {
     fn choices_on_non_choice_type_pushes_diagnostic() {
         let mut cfg = Config::new();
         cfg.config_str("CONFIG_NAME").choices(&["a", "b"]);
-        assert!(cfg.diagnostics.iter().any(|d| {
-            d.message.contains("choices") && d.message.contains("CONFIG_NAME")
-        }));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| { d.message.contains("choices") && d.message.contains("CONFIG_NAME") })
+        );
         let opt = opt(&cfg, "CONFIG_NAME");
-        assert!(opt.choices.is_none(), "choices must NOT be set on Str option");
+        assert!(
+            opt.choices.is_none(),
+            "choices must NOT be set on Str option"
+        );
     }
 }

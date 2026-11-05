@@ -123,7 +123,11 @@ mod tests {
         for k in ["/z.bin", "/a.bin", "/m.bin"] {
             inputs.insert(
                 PathBuf::from(k),
-                FileFingerprint { mtime_ns: 0, size: 0, sha256: None },
+                FileFingerprint {
+                    mtime_ns: 0,
+                    size: 0,
+                    sha256: None,
+                },
             );
         }
         let e = CompositeEntry {

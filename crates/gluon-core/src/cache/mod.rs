@@ -10,10 +10,10 @@ pub mod hash;
 pub mod lock;
 pub mod manifest;
 
+pub use composite::{CompositeEntry, CompositeQuery, CompositeRecord, composite_aux_hash};
 pub use depinfo::parse_depfile;
 pub use hash::{hash_argv, sha256_bytes, sha256_file};
 pub use lock::CacheLock;
-pub use composite::{CompositeEntry, CompositeQuery, CompositeRecord, composite_aux_hash};
 pub use manifest::{CacheManifest, FileFingerprint, RustcEntry};
 
 use crate::error::{Error, Result};
@@ -439,7 +439,9 @@ impl Cache {
     pub(crate) fn retain_sysroot_only(&mut self) {
         let before = self.manifest.rustc.len() + self.manifest.composite.len();
         self.manifest.rustc.retain(|k, _| k.starts_with("sysroot:"));
-        self.manifest.composite.retain(|k, _| k.starts_with("sysroot:"));
+        self.manifest
+            .composite
+            .retain(|k, _| k.starts_with("sysroot:"));
         let after = self.manifest.rustc.len() + self.manifest.composite.len();
         if after != before {
             self.dirty = true;
@@ -957,13 +959,7 @@ mod tests {
 
         // The cache should have refreshed the recorded mtime in place so
         // the next call hits the fast path without re-hashing.
-        let stored = cache
-            .manifest
-            .composite
-            .get("k")
-            .expect("entry")
-            .inputs[&a]
-            .mtime_ns;
+        let stored = cache.manifest.composite.get("k").expect("entry").inputs[&a].mtime_ns;
         let expected = new_mtime
             .duration_since(UNIX_EPOCH)
             .expect("since epoch")

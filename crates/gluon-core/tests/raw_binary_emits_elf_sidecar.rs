@@ -56,14 +56,14 @@ fn raw_binary_emits_elf_sidecar_with_debug_info() {
 
     // Load + resolve.
     let model = gluon_core::load_build_model(&project).expect("load_build_model");
-    let resolved = gluon_core::resolve_config(&model, "dev", None, &project, None)
-        .expect("resolve_config");
+    let resolved =
+        gluon_core::resolve_config(&model, "dev", None, &project, None).expect("resolve_config");
 
     // Build context: layout under `<project>/build`, freshly probed
     // RustcInfo, empty cache.
     let layout = gluon_core::compile::BuildLayout::new(project.join("build"), "raw-binary-minimal");
-    let rustc_info = gluon_core::compile::RustcInfo::load_or_probe(&layout)
-        .expect("RustcInfo probe");
+    let rustc_info =
+        gluon_core::compile::RustcInfo::load_or_probe(&layout).expect("RustcInfo probe");
     let cache = gluon_core::cache::Cache::load(layout.cache_manifest()).0;
     let ctx = gluon_core::CompileCtx::new(layout, Arc::new(rustc_info), cache);
 

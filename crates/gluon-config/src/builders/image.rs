@@ -1,12 +1,12 @@
 //! Chainable builder for [`ImageDef`] entries.
 
-use crate::builders::partition::PartitionBuilder;
 use crate::builders::BuilderState;
+use crate::builders::partition::PartitionBuilder;
 use crate::config::Config;
 use crate::error::ConfigError;
 use gluon_model::{
-    Handle, ImageDef, ImageEntry, ImageFormat, ImageSource, PartitionDef, PartitionTable, RawSource,
-    RawWrite,
+    Handle, ImageDef, ImageEntry, ImageFormat, ImageSource, PartitionDef, PartitionTable,
+    RawSource, RawWrite,
 };
 
 /// Chainable builder returned by [`Config::image`].
@@ -102,7 +102,9 @@ impl<'cfg> ImageBuilder<'cfg> {
     pub fn raw_write_crate(mut self, lba: u64, crate_name: &str, max_sectors: Option<u64>) -> Self {
         let rw = RawWrite {
             lba,
-            source: RawSource::Crate { name: crate_name.into() },
+            source: RawSource::Crate {
+                name: crate_name.into(),
+            },
             max_sectors,
             span: None,
         };
@@ -152,7 +154,10 @@ impl<'cfg> ImageBuilder<'cfg> {
     pub fn partition(self, name: &str, start_lba: u64, fs_type: &str) -> PartitionBuilder<'cfg> {
         // If already a duplicate, propagate without touching the model.
         if self.state.is_duplicate() {
-            let state = BuilderState::Duplicate { name: name.into(), span: None };
+            let state = BuilderState::Duplicate {
+                name: name.into(),
+                span: None,
+            };
             // Placeholder handle — never resolved during a successful path:
             // `PartitionBuilder::modify` short-circuits on `is_duplicate`, and
             // `end()` reads via `arena.get(...).map(name).unwrap_or_default()`,
@@ -194,7 +199,10 @@ impl<'cfg> ImageBuilder<'cfg> {
                     "image(\"{}\").partition: internal error — image handle is stale",
                     self.state.name()
                 )));
-                let state = BuilderState::Duplicate { name: name.into(), span: None };
+                let state = BuilderState::Duplicate {
+                    name: name.into(),
+                    span: None,
+                };
                 return PartitionBuilder {
                     cfg: self.cfg,
                     image_handle: handle,
@@ -204,8 +212,17 @@ impl<'cfg> ImageBuilder<'cfg> {
             }
         };
 
-        let state = BuilderState::Valid { state: (), name: name.into(), span: None };
-        PartitionBuilder { cfg: self.cfg, image_handle: handle, partition_index, state }
+        let state = BuilderState::Valid {
+            state: (),
+            name: name.into(),
+            span: None,
+        };
+        PartitionBuilder {
+            cfg: self.cfg,
+            image_handle: handle,
+            partition_index,
+            state,
+        }
     }
 }
 
@@ -255,14 +272,14 @@ mod tests {
             .partition_table(PartitionTable::Mbr)
             .raw_write_crate(0, "boot_sector", Some(1))
             .partition("esp", 2048, "fat32")
-                .partition_type(0xEF)
-                .bootable()
-                .add("bootloader", "EFI/BOOT/BOOTX64.EFI")
-                .end()
+            .partition_type(0xEF)
+            .bootable()
+            .add("bootloader", "EFI/BOOT/BOOTX64.EFI")
+            .end()
             .partition("root", 32_768, "fat32")
-                .end_lba(2_097_151)
-                .partition_type(0x0C)
-                .end()
+            .end_lba(2_097_151)
+            .partition_type(0x0C)
+            .end()
             .size_mb(1024);
 
         let h = cfg.raw.images.lookup("hybrid").unwrap();
@@ -278,7 +295,10 @@ mod tests {
         assert_eq!(img.partitions[0].partition_type, 0xEF);
         assert!(img.partitions[0].bootable);
         assert_eq!(img.partitions[0].entries.len(), 1);
-        assert_eq!(img.partitions[0].entries[0].dest_path, "EFI/BOOT/BOOTX64.EFI");
+        assert_eq!(
+            img.partitions[0].entries[0].dest_path,
+            "EFI/BOOT/BOOTX64.EFI"
+        );
         assert_eq!(img.partitions[1].name, "root");
         assert_eq!(img.partitions[1].end_lba, Some(2_097_151));
         assert!(cfg.diagnostics.is_empty());
@@ -291,9 +311,7 @@ mod tests {
         // partition. Validation at image-build time catches the inconsistency.
         // This builder mirrors that behaviour.
         let mut cfg = Config::new();
-        cfg.image("flat")
-            .partition("oops", 0, "fat32")
-                .end();
+        cfg.image("flat").partition("oops", 0, "fat32").end();
 
         let h = cfg.raw.images.lookup("flat").unwrap();
         let img = cfg.raw.images.get(h).unwrap();

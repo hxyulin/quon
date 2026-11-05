@@ -450,20 +450,26 @@ fn dispatch_vendor_crate(
     // arm runs. A miss is a scheduler bug, not a user mistake.
     let mut extern_artifacts: BTreeMap<String, PathBuf> = BTreeMap::new();
     for edge in &build.deps {
-        let dep_id = vendor_ctx.lookup(edge.target, &edge.extern_name).ok_or_else(|| {
-            Error::Compile(format!(
-                "scheduler: vendor build {id} ({}) dep edge `{}` did not resolve in \
+        let dep_id = vendor_ctx
+            .lookup(edge.target, &edge.extern_name)
+            .ok_or_else(|| {
+                Error::Compile(format!(
+                    "scheduler: vendor build {id} ({}) dep edge `{}` did not resolve in \
                  vendor_ctx (lowering bug — DAG was built but lookup now fails)",
-                build.crate_id.name, edge.extern_name,
-            ))
-        })?;
-        let dep_path = snapshot.vendor_artifacts.get(&dep_id).cloned().ok_or_else(|| {
-            Error::Compile(format!(
-                "scheduler: vendor build {id} ({}) ran before its dep {dep_id} ({}) \
+                    build.crate_id.name, edge.extern_name,
+                ))
+            })?;
+        let dep_path = snapshot
+            .vendor_artifacts
+            .get(&dep_id)
+            .cloned()
+            .ok_or_else(|| {
+                Error::Compile(format!(
+                    "scheduler: vendor build {id} ({}) ran before its dep {dep_id} ({}) \
                  completed; DAG edge missing?",
-                build.crate_id.name, edge.crate_id.name,
-            ))
-        })?;
+                    build.crate_id.name, edge.crate_id.name,
+                ))
+            })?;
         extern_artifacts.insert(edge.extern_name.clone(), dep_path);
     }
 
@@ -493,13 +499,17 @@ fn dispatch_vendor_crate(
                         build.crate_id.name, target_handle,
                     ))
                 })?;
-                let sysroot = snapshot.sysroots.get(&target_handle).cloned().ok_or_else(|| {
-                    Error::Compile(format!(
-                        "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
+                let sysroot = snapshot
+                    .sysroots
+                    .get(&target_handle)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Error::Compile(format!(
+                            "scheduler: vendor build {id} ({}) ran before its Sysroot({:?}) \
                          dependency completed; DAG edge missing?",
-                        build.crate_id.name, target_handle,
-                    ))
-                })?;
+                            build.crate_id.name, target_handle,
+                        ))
+                    })?;
                 let sysroot_lib = ctx.layout.sysroot_lib_dir(target);
                 let out_dir = ctx.layout.cross_vendor_dep_dir(
                     target,
@@ -566,8 +576,8 @@ fn dispatch_vendor_crate(
         depfile_path,
         Some(&out_dir),
         extra_sources,
-        Vec::new(),                                  // aux_outputs
-        None::<PostCompileStep>,                     // post_compile_step
+        Vec::new(),              // aux_outputs
+        None::<PostCompileStep>, // post_compile_step
         Box::new(move |output, rendered| {
             Error::Diagnostics(vec![
                 Diagnostic::error(format!(
@@ -616,9 +626,8 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             // ------------------------------------------------------------------
             DagNode::Sysroot(target) => {
                 let snapshot = lock_or_poison(self.state, "state")?.clone();
-                let output = dispatch_sysroot(
-                    self.ctx, self.model, &snapshot, target, stdout, stderr,
-                )?;
+                let output =
+                    dispatch_sysroot(self.ctx, self.model, &snapshot, target, stdout, stderr)?;
                 let was_cached = lock_or_poison(self.state, "state")?
                     .merge(output)
                     .expect("Sysroot output is cacheable");
@@ -653,7 +662,12 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             DagNode::Crate(crate_handle) => {
                 let snapshot = lock_or_poison(self.state, "state")?.clone();
                 let output = dispatch_crate(
-                    self.ctx, self.model, self.resolved, &snapshot, crate_handle, stderr,
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    &snapshot,
+                    crate_handle,
+                    stderr,
                 )?;
                 let was_cached = lock_or_poison(self.state, "state")?
                     .merge(output)
@@ -672,7 +686,12 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             DagNode::Esp(esp_handle) => {
                 let snapshot = lock_or_poison(self.state, "state")?.clone();
                 let output = dispatch_esp(
-                    self.ctx, self.model, self.resolved, &snapshot, esp_handle, stdout,
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    &snapshot,
+                    esp_handle,
+                    stdout,
                 )?;
                 let was_cached = lock_or_poison(self.state, "state")?
                     .merge(output)
@@ -688,7 +707,12 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             DagNode::Image(image_handle) => {
                 let snapshot = lock_or_poison(self.state, "state")?.clone();
                 let output = dispatch_image(
-                    self.ctx, self.model, self.resolved, &snapshot, image_handle, stdout,
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    &snapshot,
+                    image_handle,
+                    stdout,
                 )?;
                 let was_cached = lock_or_poison(self.state, "state")?
                     .merge(output)
@@ -725,7 +749,13 @@ impl<'a> JobDispatcher for PipelineDispatcher<'a> {
             DagNode::BuildStep(handle) => {
                 let snapshot = lock_or_poison(self.state, "state")?.clone();
                 let output = dispatch_build_step(
-                    self.ctx, self.model, self.resolved, &snapshot, handle, stdout, stderr,
+                    self.ctx,
+                    self.model,
+                    self.resolved,
+                    &snapshot,
+                    handle,
+                    stdout,
+                    stderr,
                 )?;
                 let was_cached = lock_or_poison(self.state, "state")?
                     .merge(output)
@@ -939,7 +969,10 @@ mod tests {
         use crate::vendor::cross::graph::VendorCrateBuild;
         use crate::vendor::cross::metadata::{CrateId, CrateKind};
         VendorCrateBuild {
-            crate_id: CrateId { name: name.into(), version: ver.into() },
+            crate_id: CrateId {
+                name: name.into(),
+                version: ver.into(),
+            },
             cargo_target_name: name.replace('-', "_"),
             target,
             kind: CrateKind::Lib,
@@ -961,12 +994,23 @@ mod tests {
         let target = resolved.profile.target;
         let mut vendor_ctx = VendorBuildContext::new();
         let id = vendor_ctx
-            .add(vendor_lib("bitflags", "2.11.0", TargetSpec::Cross(target), vec![]))
+            .add(vendor_lib(
+                "bitflags",
+                "2.11.0",
+                TargetSpec::Cross(target),
+                vec![],
+            ))
             .expect("add ok");
         let snapshot = ArtifactsSnapshot::default(); // empty — no sysroot
         let mut stderr = Vec::<u8>::new();
         let err = dispatch_vendor_crate(
-            &ctx, &model, &resolved, &vendor_ctx, &snapshot, id, &mut stderr,
+            &ctx,
+            &model,
+            &resolved,
+            &vendor_ctx,
+            &snapshot,
+            id,
+            &mut stderr,
         )
         .expect_err("must error");
         match err {
@@ -1000,7 +1044,10 @@ mod tests {
                 TargetSpec::Host,
                 vec![VendorDepEdge {
                     extern_name: "dep".into(),
-                    crate_id: CrateId { name: "dep".into(), version: "1.0.0".into() },
+                    crate_id: CrateId {
+                        name: "dep".into(),
+                        version: "1.0.0".into(),
+                    },
                     target: TargetSpec::Host,
                 }],
             ))
@@ -1008,7 +1055,13 @@ mod tests {
         let snapshot = ArtifactsSnapshot::default(); // empty — dep not built
         let mut stderr = Vec::<u8>::new();
         let err = dispatch_vendor_crate(
-            &ctx, &model, &resolved, &vendor_ctx, &snapshot, parent_id, &mut stderr,
+            &ctx,
+            &model,
+            &resolved,
+            &vendor_ctx,
+            &snapshot,
+            parent_id,
+            &mut stderr,
         )
         .expect_err("must error");
         match err {
@@ -1121,7 +1174,16 @@ mod tests {
         let mut stderr = Vec::<u8>::new();
 
         // Should fail because rust-src is not present (fake rustc info has None).
-        let result = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut stdout, &mut stderr);
+        let result = execute_pipeline(
+            &ctx,
+            &model,
+            &resolved,
+            &VendorBuildContext::new(),
+            &rules,
+            1,
+            &mut stdout,
+            &mut stderr,
+        );
 
         // The pipeline must propagate an error — not panic.
         assert!(
@@ -1182,8 +1244,17 @@ mod tests {
         {
             let mut out = Vec::<u8>::new();
             let mut err = Vec::<u8>::new();
-            execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out, &mut err)
-                .expect("first run should succeed");
+            execute_pipeline(
+                &ctx,
+                &model,
+                &resolved,
+                &VendorBuildContext::new(),
+                &rules,
+                1,
+                &mut out,
+                &mut err,
+            )
+            .expect("first run should succeed");
         }
         ctx.cache
             .lock()
@@ -1196,8 +1267,17 @@ mod tests {
         {
             let mut out = Vec::<u8>::new();
             let mut err = Vec::<u8>::new();
-            execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out, &mut err)
-                .expect("second run should succeed");
+            execute_pipeline(
+                &ctx,
+                &model,
+                &resolved,
+                &VendorBuildContext::new(),
+                &rules,
+                1,
+                &mut out,
+                &mut err,
+            )
+            .expect("second run should succeed");
         }
         let elapsed = start.elapsed();
         assert!(
@@ -1233,13 +1313,19 @@ mod tests {
 
         let mut out1 = Vec::<u8>::new();
         let mut err1 = Vec::<u8>::new();
-        let s1 = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out1, &mut err1)
-            .expect("first run");
+        let s1 = execute_pipeline(
+            &ctx,
+            &model,
+            &resolved,
+            &VendorBuildContext::new(),
+            &rules,
+            1,
+            &mut out1,
+            &mut err1,
+        )
+        .expect("first run");
 
-        let target = model
-            .targets
-            .get(resolved.profile.target)
-            .expect("target");
+        let target = model.targets.get(resolved.profile.target).expect("target");
         let bin = ctx
             .layout
             .cross_final_dir(target, &resolved.profile)
@@ -1249,8 +1335,17 @@ mod tests {
         // Second run — same fixture, same scheduler; cache should hit.
         let mut out2 = Vec::<u8>::new();
         let mut err2 = Vec::<u8>::new();
-        let s2 = execute_pipeline(&ctx, &model, &resolved, &VendorBuildContext::new(), &rules, 1, &mut out2, &mut err2)
-            .expect("second run");
+        let s2 = execute_pipeline(
+            &ctx,
+            &model,
+            &resolved,
+            &VendorBuildContext::new(),
+            &rules,
+            1,
+            &mut out2,
+            &mut err2,
+        )
+        .expect("second run");
         let bin2 = std::fs::read(&bin).expect("read second-run binary");
 
         assert_eq!(s1.esp_dirs, s2.esp_dirs, "esp_dirs differ across runs");

@@ -208,9 +208,7 @@ impl RuleRegistry {
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::compile::{ArtifactMap, BuildLayout};
-    use gluon_model::{
-        BuildModel, Handle, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef,
-    };
+    use gluon_model::{BuildModel, Handle, ProjectDef, ResolvedConfig, ResolvedProfile, TargetDef};
     use std::path::PathBuf;
 
     pub fn make_target(name: &str) -> TargetDef {

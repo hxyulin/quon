@@ -206,12 +206,13 @@ pub fn build_vendor_rustc_command(
     // A missing entry is a scheduler bug — surface it loudly rather
     // than silently dropping the edge.
     for edge in &build.deps {
-        let path = input.extern_artifacts.get(&edge.extern_name).ok_or_else(|| {
-            VendorCommandError::UnresolvedDepEdge {
+        let path = input
+            .extern_artifacts
+            .get(&edge.extern_name)
+            .ok_or_else(|| VendorCommandError::UnresolvedDepEdge {
                 crate_name: crate_name.clone(),
                 extern_name: edge.extern_name.clone(),
-            }
-        })?;
+            })?;
         b.extern_crate(&edge.extern_name, path);
     }
 
@@ -269,7 +270,10 @@ mod tests {
 
     fn build_lib(name: &str, target: TargetSpec, deps: Vec<VendorDepEdge>) -> VendorCrateBuild {
         VendorCrateBuild {
-            crate_id: CrateId { name: name.into(), version: "1.0.0".into() },
+            crate_id: CrateId {
+                name: name.into(),
+                version: "1.0.0".into(),
+            },
             cargo_target_name: name.replace('-', "_"),
             target,
             kind: CrateKind::Lib,
@@ -283,7 +287,10 @@ mod tests {
 
     fn build_proc_macro(name: &str) -> VendorCrateBuild {
         VendorCrateBuild {
-            crate_id: CrateId { name: name.into(), version: "1.0.0".into() },
+            crate_id: CrateId {
+                name: name.into(),
+                version: "1.0.0".into(),
+            },
             cargo_target_name: name.replace('-', "_"),
             target: TargetSpec::Host,
             kind: CrateKind::ProcMacro,
@@ -336,7 +343,10 @@ mod tests {
             args.iter().any(|a| a == "--sysroot"),
             "missing --sysroot: {args:?}"
         );
-        assert!(args.iter().any(|a| a == "lib"), "missing --crate-type lib: {args:?}");
+        assert!(
+            args.iter().any(|a| a == "lib"),
+            "missing --crate-type lib: {args:?}"
+        );
         assert_eq!(
             out_path,
             PathBuf::from("/build/cross/x86_64-test/dev/vendor-deps/bitflags/libbitflags.rlib"),
@@ -388,7 +398,8 @@ mod tests {
         // basename family is right.
         let fname = out_path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            fname.starts_with("libsyn.") && (fname.ends_with(".so") || fname.ends_with(".dylib") || fname.ends_with(".dll")),
+            fname.starts_with("libsyn.")
+                && (fname.ends_with(".so") || fname.ends_with(".dylib") || fname.ends_with(".dll")),
             "proc-macro output filename unexpected: {fname}"
         );
     }
@@ -398,12 +409,18 @@ mod tests {
         let deps = vec![
             VendorDepEdge {
                 extern_name: "leaf".into(),
-                crate_id: CrateId { name: "leaf".into(), version: "0.1.0".into() },
+                crate_id: CrateId {
+                    name: "leaf".into(),
+                    version: "0.1.0".into(),
+                },
                 target: cross_target(),
             },
             VendorDepEdge {
                 extern_name: "pm".into(),
-                crate_id: CrateId { name: "proc-macro2".into(), version: "1.0.0".into() },
+                crate_id: CrateId {
+                    name: "proc-macro2".into(),
+                    version: "1.0.0".into(),
+                },
                 target: TargetSpec::Host,
             },
         ];
@@ -523,7 +540,10 @@ mod tests {
             debug_info: true,
         };
         let err = build_vendor_rustc_command(&input).expect_err("must error");
-        assert!(matches!(err, VendorCommandError::MissingTargetTriple { .. }));
+        assert!(matches!(
+            err,
+            VendorCommandError::MissingTargetTriple { .. }
+        ));
     }
 
     #[test]
@@ -551,7 +571,10 @@ mod tests {
     fn missing_extern_artifact_for_dep_errors() {
         let deps = vec![VendorDepEdge {
             extern_name: "missing".into(),
-            crate_id: CrateId { name: "missing".into(), version: "1.0.0".into() },
+            crate_id: CrateId {
+                name: "missing".into(),
+                version: "1.0.0".into(),
+            },
             target: cross_target(),
         }];
         let b = build_lib("bitflags", cross_target(), deps);
@@ -572,7 +595,10 @@ mod tests {
         };
         let err = build_vendor_rustc_command(&input).expect_err("must error");
         match err {
-            VendorCommandError::UnresolvedDepEdge { crate_name, extern_name } => {
+            VendorCommandError::UnresolvedDepEdge {
+                crate_name,
+                extern_name,
+            } => {
                 assert_eq!(crate_name, "bitflags");
                 assert_eq!(extern_name, "missing");
             }

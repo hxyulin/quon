@@ -207,8 +207,7 @@ pub fn run(
                 map
             }
         };
-        let disk_path =
-            resolve_disk_source(&disk_source, model, &image_paths, &build_step_paths)?;
+        let disk_path = resolve_disk_source(&disk_source, model, &image_paths, &build_step_paths)?;
         resolved_qemu.disk = Some(disk_path);
     }
 

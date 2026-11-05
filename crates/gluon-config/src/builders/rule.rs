@@ -118,7 +118,11 @@ mod tests {
         }
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("dup"));
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
     }
 
     #[test]

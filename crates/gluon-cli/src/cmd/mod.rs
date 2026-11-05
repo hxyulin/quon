@@ -219,8 +219,7 @@ pub fn build_layout_context_at_with_opts(
 ) -> Result<LayoutContext> {
     let project_root = find_project_root(cwd)
         .context("could not find a gluon.rs in the current directory or any parent")?;
-    let mut model = load_build_model(&project_root)
-        .context("failed to load build model")?;
+    let mut model = load_build_model(&project_root).context("failed to load build model")?;
 
     // --- Vendor auto-registration ---
     //

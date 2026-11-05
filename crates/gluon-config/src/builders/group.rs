@@ -1,7 +1,7 @@
 //! Chainable builder for `GroupDef` entries.
 
-use crate::builders::crate_::CrateBuilder;
 use crate::builders::BuilderState;
+use crate::builders::crate_::CrateBuilder;
 use crate::config::Config;
 use crate::error::ConfigError;
 use gluon_model::{CrateType, Handle, RawCrateDef, RawGroupDef, TargetDef};
@@ -87,8 +87,14 @@ impl<'cfg> GroupBuilder<'cfg> {
     pub fn add(&mut self, crate_name: &str, path: &str) -> CrateBuilder<'_> {
         // Propagate Duplicate state on the parent group.
         if self.state.is_duplicate() {
-            let state = BuilderState::Duplicate { name: crate_name.into(), span: None };
-            return CrateBuilder { cfg: &mut *self.cfg, state };
+            let state = BuilderState::Duplicate {
+                name: crate_name.into(),
+                span: None,
+            };
+            return CrateBuilder {
+                cfg: &mut *self.cfg,
+                state,
+            };
         }
 
         // Resolve group-level defaults for the new RawCrateDef.
@@ -97,7 +103,11 @@ impl<'cfg> GroupBuilder<'cfg> {
                 if let Some(g) = self.cfg.raw.groups.get(*handle) {
                     (g.default_edition.clone(), g.target.clone(), g.name.clone())
                 } else {
-                    ("2024".to_string(), "host".to_string(), self.state.name().to_string())
+                    (
+                        "2024".to_string(),
+                        "host".to_string(),
+                        self.state.name().to_string(),
+                    )
                 }
             } else {
                 unreachable!("is_duplicate() already handled above")
@@ -125,26 +135,41 @@ impl<'cfg> GroupBuilder<'cfg> {
             span: None,
         };
 
-        let (crate_handle, inserted) =
-            self.cfg.raw.crates.insert(crate_name.into(), new_crate);
+        let (crate_handle, inserted) = self.cfg.raw.crates.insert(crate_name.into(), new_crate);
         if !inserted {
             self.cfg.diagnostics.push(ConfigError::new(format!(
                 "crate \"{crate_name}\" is defined more than once"
             )));
-            let state = BuilderState::Duplicate { name: crate_name.into(), span: None };
-            return CrateBuilder { cfg: &mut *self.cfg, state };
+            let state = BuilderState::Duplicate {
+                name: crate_name.into(),
+                span: None,
+            };
+            return CrateBuilder {
+                cfg: &mut *self.cfg,
+                state,
+            };
         }
 
         // Record the crate under its group for later resolution.
-        if let BuilderState::Valid { state: group_handle, .. } = &self.state {
+        if let BuilderState::Valid {
+            state: group_handle,
+            ..
+        } = &self.state
+        {
             if let Some(g) = self.cfg.raw.groups.get_mut(*group_handle) {
                 g.crates.push(crate_name.to_string());
             }
         }
 
-        let state =
-            BuilderState::Valid { state: crate_handle, name: crate_name.into(), span: None };
-        CrateBuilder { cfg: &mut *self.cfg, state }
+        let state = BuilderState::Valid {
+            state: crate_handle,
+            name: crate_name.into(),
+            span: None,
+        };
+        CrateBuilder {
+            cfg: &mut *self.cfg,
+            state,
+        }
     }
 }
 
@@ -197,15 +222,25 @@ mod tests {
         assert_eq!(cfg.raw.groups.get(g).unwrap().default_edition, "2021");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("k"));
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
     }
 
     #[test]
     fn duplicate_crate_via_add_short_circuits() {
         let mut cfg = Config::new();
         let t = cfg.target("x");
-        cfg.group("a").target(t).add("foo", "crates/foo").crate_type(CrateType::Bin);
-        cfg.group("b").target(t).add("foo", "crates/other").crate_type(CrateType::Lib);
+        cfg.group("a")
+            .target(t)
+            .add("foo", "crates/foo")
+            .crate_type(CrateType::Bin);
+        cfg.group("b")
+            .target(t)
+            .add("foo", "crates/other")
+            .crate_type(CrateType::Lib);
         let h = cfg.raw.crates.lookup("foo").unwrap();
         let k = cfg.raw.crates.get(h).unwrap();
         assert_eq!(k.path, "crates/foo");
@@ -249,6 +284,10 @@ mod tests {
         let mut cfg_b = Config::new();
         cfg_b.group("kernel").target(stale);
         assert_eq!(cfg_b.diagnostics.len(), 1);
-        assert!(cfg_b.diagnostics[0].message.contains("doesn't exist in this Config"));
+        assert!(
+            cfg_b.diagnostics[0]
+                .message
+                .contains("doesn't exist in this Config")
+        );
     }
 }

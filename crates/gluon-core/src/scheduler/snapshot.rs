@@ -89,31 +89,59 @@ impl ArtifactsSnapshot {
     /// `Rule` (uncounted in MVP-M).
     pub(crate) fn merge(&mut self, output: NodeOutput) -> Option<bool> {
         match output {
-            NodeOutput::Sysroot { target, path, was_cached } => {
+            NodeOutput::Sysroot {
+                target,
+                path,
+                was_cached,
+            } => {
                 self.sysroots.insert(target, path);
                 Some(was_cached)
             }
-            NodeOutput::ConfigCrate { target, rlib_path, was_cached } => {
+            NodeOutput::ConfigCrate {
+                target,
+                rlib_path,
+                was_cached,
+            } => {
                 self.artifacts.set_config_crate(target, rlib_path);
                 Some(was_cached)
             }
-            NodeOutput::Crate { handle, out_path, was_cached } => {
+            NodeOutput::Crate {
+                handle,
+                out_path,
+                was_cached,
+            } => {
                 self.artifacts.insert(handle, out_path);
                 Some(was_cached)
             }
-            NodeOutput::Esp { handle, path, was_cached } => {
+            NodeOutput::Esp {
+                handle,
+                path,
+                was_cached,
+            } => {
                 self.esps.insert(handle, path);
                 Some(was_cached)
             }
-            NodeOutput::Image { handle, path, was_cached } => {
+            NodeOutput::Image {
+                handle,
+                path,
+                was_cached,
+            } => {
                 self.images.insert(handle, path);
                 Some(was_cached)
             }
-            NodeOutput::BuildStep { handle, out_path, was_cached } => {
+            NodeOutput::BuildStep {
+                handle,
+                out_path,
+                was_cached,
+            } => {
                 self.artifacts.set_build_step(handle, out_path);
                 Some(was_cached)
             }
-            NodeOutput::VendorCrate { id, out_path, was_cached } => {
+            NodeOutput::VendorCrate {
+                id,
+                out_path,
+                was_cached,
+            } => {
                 self.vendor_artifacts.insert(id, out_path);
                 Some(was_cached)
             }
@@ -180,7 +208,10 @@ mod tests {
         let mut ctx = VendorBuildContext::new();
         let id = ctx
             .add(VendorCrateBuild {
-                crate_id: CrateId { name: "bitflags".into(), version: "2.11.0".into() },
+                crate_id: CrateId {
+                    name: "bitflags".into(),
+                    version: "2.11.0".into(),
+                },
                 cargo_target_name: "bitflags".into(),
                 target: TargetSpec::Host,
                 kind: CrateKind::Lib,

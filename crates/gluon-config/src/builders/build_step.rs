@@ -47,8 +47,12 @@ impl<'cfg> BuildStepBuilder<'cfg> {
             return self;
         }
         let key = env_var.to_string();
-        let val = RawBuildStepInput::Crate { crate_name: crate_name.into() };
-        self.modify(|b| { b.inputs.insert(key, val); });
+        let val = RawBuildStepInput::Crate {
+            crate_name: crate_name.into(),
+        };
+        self.modify(|b| {
+            b.inputs.insert(key, val);
+        });
         self
     }
 
@@ -63,7 +67,9 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         }
         let key = env_var.to_string();
         let val = RawBuildStepInput::File { path: path.into() };
-        self.modify(|b| { b.inputs.insert(key, val); });
+        self.modify(|b| {
+            b.inputs.insert(key, val);
+        });
         self
     }
 
@@ -77,8 +83,12 @@ impl<'cfg> BuildStepBuilder<'cfg> {
             return self;
         }
         let key = env_var.to_string();
-        let val = RawBuildStepInput::Literal { value: value.into() };
-        self.modify(|b| { b.inputs.insert(key, val); });
+        let val = RawBuildStepInput::Literal {
+            value: value.into(),
+        };
+        self.modify(|b| {
+            b.inputs.insert(key, val);
+        });
         self
     }
 
@@ -109,7 +119,9 @@ impl<'cfg> BuildStepBuilder<'cfg> {
         }
         let k = name.to_string();
         let v = value.to_string();
-        self.modify(|b| { b.env.insert(k, v); });
+        self.modify(|b| {
+            b.env.insert(k, v);
+        });
         self
     }
 
@@ -204,7 +216,11 @@ mod tests {
         cfg.build_step("dup").runner("b").output("p.bin");
         assert_eq!(cfg.diagnostics.len(), 1);
         assert!(cfg.diagnostics[0].message.contains("dup"));
-        assert!(cfg.diagnostics[0].message.contains("defined more than once"));
+        assert!(
+            cfg.diagnostics[0]
+                .message
+                .contains("defined more than once")
+        );
         let h = cfg.raw.build_steps.lookup("dup").unwrap();
         assert_eq!(cfg.raw.build_steps.get(h).unwrap().runner, "a");
     }
@@ -229,7 +245,11 @@ mod tests {
     fn build_step_output_with_path_separator_pushes_diagnostic() {
         let mut cfg = Config::new();
         cfg.build_step("bs").runner("r").output("sub/dir/o.bin");
-        assert!(cfg.diagnostics.iter().any(|d| d.message.contains("path separators")));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("path separators"))
+        );
     }
 
     #[test]
@@ -239,9 +259,11 @@ mod tests {
             .runner("r")
             .input_crate("", "k")
             .output("o.bin");
-        assert!(cfg.diagnostics.iter().any(|d|
-            d.message.contains("input") && d.message.contains("must not be empty")
-        ));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("input") && d.message.contains("must not be empty"))
+        );
     }
 
     #[test]
@@ -251,17 +273,21 @@ mod tests {
             .runner("r")
             .env("", "value")
             .output("o.bin");
-        assert!(cfg.diagnostics.iter().any(|d|
-            d.message.contains("env") && d.message.contains("must not be empty")
-        ));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("env") && d.message.contains("must not be empty"))
+        );
     }
 
     #[test]
     fn build_step_empty_output_pushes_diagnostic() {
         let mut cfg = Config::new();
         cfg.build_step("bs").runner("r").output("");
-        assert!(cfg.diagnostics.iter().any(|d|
-            d.message.contains("output") && d.message.contains("must not be empty")
-        ));
+        assert!(
+            cfg.diagnostics
+                .iter()
+                .any(|d| d.message.contains("output") && d.message.contains("must not be empty"))
+        );
     }
 }

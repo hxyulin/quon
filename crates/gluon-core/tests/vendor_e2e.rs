@@ -159,7 +159,9 @@ fn path_only_fixture_vendors_and_auto_registers() {
 #[ignore]
 fn path_only_fixture_detects_stale_lock_after_model_edit() {
     if gluon_core::RustcInfo::probe().is_err() {
-        eprintln!("path_only_fixture_detects_stale_lock_after_model_edit: skipped — rustc probe failed");
+        eprintln!(
+            "path_only_fixture_detects_stale_lock_after_model_edit: skipped — rustc probe failed"
+        );
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -326,12 +328,19 @@ fn cross_fixture_populates_per_target_workspace_and_builds_context() {
     let project = stage_cross_fixture(tmp.path());
 
     let model = gluon_core::load_build_model(&project).expect("load_build_model");
-    assert_eq!(model.external_deps.len(), 1, "fixture declares one cross dep");
+    assert_eq!(
+        model.external_deps.len(),
+        1,
+        "fixture declares one cross dep"
+    );
 
     // Resolve the bitflags handle + its cross target handle from the
     // model itself, so the test stays robust if we rename the target
     // in the fixture later.
-    let bf_handle = model.external_deps.lookup("bitflags").expect("bitflags dep");
+    let bf_handle = model
+        .external_deps
+        .lookup("bitflags")
+        .expect("bitflags dep");
     let bf_def = model.external_deps.get(bf_handle).unwrap();
     let cross_target_handle = match bf_def.target {
         TargetSpec::Cross(h) => h,
@@ -346,9 +355,19 @@ fn cross_fixture_populates_per_target_workspace_and_builds_context() {
         .expect("populate_cross_vendor_workspaces");
 
     let scratch = layout.vendor_workspace_for_target(&target.name);
-    assert!(scratch.exists(), "scratch dir not created: {}", scratch.display());
-    assert!(scratch.join("Cargo.toml").exists(), "scratch missing Cargo.toml");
-    assert!(scratch.join("Cargo.lock").exists(), "scratch missing Cargo.lock");
+    assert!(
+        scratch.exists(),
+        "scratch dir not created: {}",
+        scratch.display()
+    );
+    assert!(
+        scratch.join("Cargo.toml").exists(),
+        "scratch missing Cargo.toml"
+    );
+    assert!(
+        scratch.join("Cargo.lock").exists(),
+        "scratch missing Cargo.lock"
+    );
 
     // cargo vendor populates <scratch>/vendor/. Modern cargo drops the
     // version suffix when a crate has only one version in the graph, so
@@ -362,7 +381,11 @@ fn cross_fixture_populates_per_target_workspace_and_builds_context() {
             let n = e.file_name().to_string_lossy().into_owned();
             n == "bitflags" || n.starts_with("bitflags-")
         });
-    assert!(has_bitflags, "no bitflags dir under {}", scratch_vendor.display());
+    assert!(
+        has_bitflags,
+        "no bitflags dir under {}",
+        scratch_vendor.display()
+    );
 
     // The host pipeline must NOT have created a project-root vendor/
     // dir — the cross fixture has zero host-tagged deps.
@@ -372,8 +395,8 @@ fn cross_fixture_populates_per_target_workspace_and_builds_context() {
     );
 
     // ---- Phase 2: build the VendorBuildContext from the scratch.
-    let ctx =
-        vendor::cross::build_cross_vendor_context(&model, &layout).expect("build_cross_vendor_context");
+    let ctx = vendor::cross::build_cross_vendor_context(&model, &layout)
+        .expect("build_cross_vendor_context");
 
     assert!(
         !ctx.is_empty(),

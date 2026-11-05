@@ -71,14 +71,20 @@ mod tests {
         cfg.preset("a").set("X", ConfigValue::Bool(true));
         cfg.preset("a").set("Y", ConfigValue::Bool(false));
         let p = cfg.raw.presets.get("a").unwrap();
-        assert_eq!(p.overrides.len(), 1, "second preset's set must NOT mutate first");
+        assert_eq!(
+            p.overrides.len(),
+            1,
+            "second preset's set must NOT mutate first"
+        );
         assert_eq!(cfg.diagnostics.len(), 1);
     }
 
     #[test]
     fn preset_inherits_sets_parent() {
         let mut cfg = Config::new();
-        cfg.preset("child").inherits("parent").set("X", ConfigValue::Bool(true));
+        cfg.preset("child")
+            .inherits("parent")
+            .set("X", ConfigValue::Bool(true));
         let p = cfg.raw.presets.get("child").unwrap();
         assert_eq!(p.inherits.as_deref(), Some("parent"));
         assert!(cfg.diagnostics.is_empty());

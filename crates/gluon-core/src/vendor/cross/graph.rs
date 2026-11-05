@@ -102,7 +102,10 @@ fn format_build_script_error(offenders: &[BuildScriptOffender]) -> String {
             .map(|c| format!("{c}"))
             .collect::<Vec<_>>()
             .join(" → ");
-        out.push_str(&format!("  - {} (pulled in via: {})\n", off.crate_id, chain));
+        out.push_str(&format!(
+            "  - {} (pulled in via: {})\n",
+            off.crate_id, chain
+        ));
     }
     out
 }
@@ -228,7 +231,9 @@ fn bfs_path(graph: &ResolvedGraph, root: &CrateId, target: &CrateId) -> Option<V
             chain.reverse();
             return Some(chain);
         }
-        let Some(cn) = graph.crates.get(&cur) else { continue };
+        let Some(cn) = graph.crates.get(&cur) else {
+            continue;
+        };
         for dep in &cn.deps {
             if !parent.contains_key(&dep.crate_id) && graph.crates.contains_key(&dep.crate_id) {
                 parent.insert(dep.crate_id.clone(), Some(cur.clone()));
@@ -252,7 +257,10 @@ mod tests {
     }
 
     fn cid(name: &str, ver: &str) -> CrateId {
-        CrateId { name: name.into(), version: ver.into() }
+        CrateId {
+            name: name.into(),
+            version: ver.into(),
+        }
     }
 
     /// Builder for a `ResolvedCrate` with sensible defaults — keeps the
@@ -282,7 +290,10 @@ mod tests {
     #[test]
     fn lib_root_with_no_deps_pins_to_cross_target() {
         let mut crates = BTreeMap::new();
-        crates.insert(cid("bitflags", "2.11.0"), rc("bitflags", "2.11.0", CrateKind::Lib, vec![]));
+        crates.insert(
+            cid("bitflags", "2.11.0"),
+            rc("bitflags", "2.11.0", CrateKind::Lib, vec![]),
+        );
         let graph = ResolvedGraph {
             target: target_handle(),
             crates,
@@ -305,7 +316,12 @@ mod tests {
         );
         crates.insert(
             cid("derive_user", "1.0.0"),
-            rc("derive_user", "1.0.0", CrateKind::Lib, vec![dep("syn", "2.0.0")]),
+            rc(
+                "derive_user",
+                "1.0.0",
+                CrateKind::Lib,
+                vec![dep("syn", "2.0.0")],
+            ),
         );
         let graph = ResolvedGraph {
             target: target_handle(),
@@ -317,7 +333,10 @@ mod tests {
         let syn = nodes.iter().find(|n| n.crate_id.name == "syn").unwrap();
         assert_eq!(syn.target, TargetSpec::Host, "proc-macro must be host");
 
-        let consumer = nodes.iter().find(|n| n.crate_id.name == "derive_user").unwrap();
+        let consumer = nodes
+            .iter()
+            .find(|n| n.crate_id.name == "derive_user")
+            .unwrap();
         assert_eq!(
             consumer.target,
             TargetSpec::Cross(target_handle()),
@@ -348,7 +367,12 @@ mod tests {
         );
         crates.insert(
             cid("syn", "2.0.0"),
-            rc("syn", "2.0.0", CrateKind::ProcMacro, vec![dep("quote", "1.0.0")]),
+            rc(
+                "syn",
+                "2.0.0",
+                CrateKind::ProcMacro,
+                vec![dep("quote", "1.0.0")],
+            ),
         );
         crates.insert(
             cid("user", "1.0.0"),
@@ -362,7 +386,11 @@ mod tests {
 
         let nodes = build_vendor_nodes(&graph).expect("ok");
         let syn = nodes.iter().find(|n| n.crate_id.name == "syn").unwrap();
-        let quote_edge = syn.deps.iter().find(|e| e.crate_id.name == "quote").unwrap();
+        let quote_edge = syn
+            .deps
+            .iter()
+            .find(|e| e.crate_id.name == "quote")
+            .unwrap();
         // The edge from syn → quote inherits syn's target (host),
         // because quote is a Lib (not a proc-macro).
         assert_eq!(quote_edge.target, TargetSpec::Host);
@@ -413,7 +441,11 @@ mod tests {
         let GraphError::BuildScripts(offenders) = err;
         assert_eq!(
             offenders[0].consumer_chain,
-            vec![cid("root", "1.0.0"), cid("mid", "1.0.0"), cid("bad", "1.0.0")],
+            vec![
+                cid("root", "1.0.0"),
+                cid("mid", "1.0.0"),
+                cid("bad", "1.0.0")
+            ],
         );
     }
 
@@ -495,6 +527,9 @@ mod tests {
         };
 
         let nodes = build_vendor_nodes(&graph).expect("ok");
-        assert_eq!(nodes[0].features, vec!["alloc".to_string(), "std".to_string()]);
+        assert_eq!(
+            nodes[0].features,
+            vec!["alloc".to_string(), "std".to_string()]
+        );
     }
 }

@@ -9,7 +9,10 @@ pub struct ConfigError {
 
 impl ConfigError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), span: None }
+        Self {
+            message: message.into(),
+            span: None,
+        }
     }
 }
 
