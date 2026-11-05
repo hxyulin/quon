@@ -29,11 +29,12 @@ fn load(args: &ManifestArgs) -> Result<PackageSet> {
         Some(dir) => dir.clone(),
         None => std::env::current_dir().context("failed to read current directory")?,
     };
-    let vendor = args
-        .vendor_dir
-        .clone()
-        .unwrap_or_else(|| root.join("vendor"));
-    let sources = RegistrySources::vendor_dir(&root, &vendor)?;
+    // Builds read Cargo's registry cache unless gluon.rs names a vendor
+    // directory; this command does the same unless `--vendor-dir` does.
+    let sources = match &args.vendor_dir {
+        Some(dir) => RegistrySources::vendor_dir(&root, dir)?,
+        None => RegistrySources::registry_cache(&root, None)?,
+    };
     let set = load_workspace(&root, &sources)?;
     for w in &set.warnings {
         eprintln!("{w}");

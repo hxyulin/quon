@@ -107,8 +107,7 @@ pub enum Command {
     /// `qemu().boot_mode(...)` → direct. Extra arguments after `--`
     /// are passed through to QEMU verbatim.
     Run(RunArgs),
-    /// Inspect the Cargo workspace as Gluon reads it. Debug output only;
-    /// builds do not use it yet.
+    /// Inspect the Cargo workspace as Gluon reads it. Debug output only.
     #[command(subcommand)]
     Manifest(ManifestCommand),
     /// Dispatch to an external `gluon-<name>` binary on `$PATH`.
@@ -267,8 +266,9 @@ pub struct ManifestArgs {
     /// directory).
     #[arg(long, value_name = "DIR")]
     pub workspace: Option<PathBuf>,
-    /// Directory holding vendored registry sources (default:
-    /// `<workspace>/vendor`).
+    /// Directory holding vendored registry sources. Without it, registry
+    /// sources come from Cargo's registry cache, as in a build that names
+    /// no vendor directory.
     #[arg(long, value_name = "DIR")]
     pub vendor_dir: Option<PathBuf>,
 }

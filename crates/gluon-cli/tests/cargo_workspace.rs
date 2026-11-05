@@ -193,6 +193,36 @@ fn append(path: &Path, text: &str) {
     fs::write(path, s).unwrap();
 }
 
+/// Point Cargo at the fixture's `registry/` directory source in place of
+/// crates.io, through a `.cargo/config.toml` in the project.
+fn use_fixture_registry(project: &Path) {
+    fs::create_dir_all(project.join(".cargo")).unwrap();
+    fs::write(
+        project.join(".cargo/config.toml"),
+        format!(
+            "[source.crates-io]\nreplace-with = \"fixture\"\n\
+             [source.fixture]\ndirectory = '{}'\n",
+            project.join("registry").display()
+        ),
+    )
+    .unwrap();
+}
+
+/// `gluon manifest` reads registry sources where a build does: from
+/// Cargo's registry cache when no vendor directory is named.
+#[test]
+#[ignore]
+fn manifest_units_reads_registry_sources_like_a_build() {
+    let Some(()) = require_rustc_or_skip("manifest_units_reads_registry_sources_like_a_build")
+    else {
+        return;
+    };
+    let (_tmp, project) = setup("tests/fixtures/cargo-registry");
+    use_fixture_registry(&project);
+    let (units, _) = gluon_ok(&project, &["manifest", "units"], &[]);
+    assert!(units.contains("fakeflags"), "{units}");
+}
+
 /// Offline: a `.cargo/config.toml` in the project replaces crates.io
 /// with the fixture's `registry/` directory source, so `cargo fetch` and
 /// `cargo metadata` work without the network. (A Cargo home config
@@ -207,16 +237,7 @@ fn registry_dependency_builds_from_cargo_sources_then_vendor_dir() {
         return;
     };
     let (_tmp, project) = setup("tests/fixtures/cargo-registry");
-    fs::create_dir_all(project.join(".cargo")).unwrap();
-    fs::write(
-        project.join(".cargo/config.toml"),
-        format!(
-            "[source.crates-io]\nreplace-with = \"fixture\"\n\
-             [source.fixture]\ndirectory = '{}'\n",
-            project.join("registry").display()
-        ),
-    )
-    .unwrap();
+    use_fixture_registry(&project);
     let without_cargo = [("CARGO", OsStr::new(NO_CARGO))];
 
     let (_, first) = gluon_ok(&project, &["build"], &[]);
