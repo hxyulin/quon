@@ -592,6 +592,53 @@ fn gluon_clippy_cold() {
     );
 }
 
+/// `gluon clean` removes `build/tool/`, where clippy keeps its outputs
+/// and records, so the next `gluon clippy` lints every crate again.
+/// `--keep-sysroot` removes it too.
+#[test]
+#[ignore]
+fn gluon_clippy_after_clean_lints_every_crate() {
+    let Some(()) = require_rustc_or_skip("gluon_clippy_after_clean_lints_every_crate") else {
+        return;
+    };
+    if !clippy_driver_available() {
+        eprintln!("gluon_clippy_after_clean_lints_every_crate: skipped — clippy-driver not found");
+        return;
+    }
+    let (_tmp, fixture) = setup_fixture();
+    let tool = fixture.join("build").join("tool");
+    let run = |args: &[&str]| {
+        let output = gluon_command(&fixture)
+            .args(args)
+            .output()
+            .expect("spawn gluon");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "gluon {args:?} failed: status={:?}, stderr=\n{stderr}",
+            output.status
+        );
+        stderr
+    };
+
+    run(&["clippy"]);
+    assert!(tool.is_dir(), "gluon clippy writes build/tool/");
+    run(&["clean", "--keep-sysroot"]);
+    assert!(
+        !tool.exists(),
+        "clean --keep-sysroot must remove build/tool/"
+    );
+
+    run(&["clippy"]);
+    run(&["clean"]);
+    assert!(!tool.exists(), "clean must remove build/tool/");
+    let stderr = run(&["clippy"]);
+    assert!(
+        stderr.contains("cached 0"),
+        "clippy after clean must lint every crate, got: {stderr}"
+    );
+}
+
 /// `gluon clippy` lints the project's own proc macros. They are built
 /// with plain rustc so dependents can load the real dylib, which must
 /// not take them out of the lint pass.
