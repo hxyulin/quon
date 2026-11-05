@@ -29,18 +29,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Commit messages
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-<type>(<scope>): <short description>
-```
-
-- **Types:** `feat`, `fix`, `refactor`, `test`, `docs`, `build`, `chore`
-- **Scope:** optional but encouraged (`compile`, `engine`, `cli`, ...)
-- Imperative mood, lowercase, no trailing period, max ~72 chars
-- No `Co-Authored-By` or other footers
-- Default to subject-only; use 1-2 bullet points in the body only when
-  the subject line is not self-explanatory
+Follow [Conventional Commits](https://www.conventionalcommits.org/),
+for example `fix(compile): handle empty sysroot`. The scope is optional.
+The `commit-msg` hook checks the format.
 
 ## Pull requests
 
