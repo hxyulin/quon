@@ -1,7 +1,9 @@
 # Generating gluon.rs with gluon init
 
-`gluon init` writes a `gluon.rs` for a Cargo workspace you already have.
-Run it in the directory that holds the workspace `Cargo.toml`:
+`gluon init` writes a `gluon.rs` for a Cargo project you already have.
+Run it in the directory that holds the root `Cargo.toml`: the workspace
+root, or a package with no `[workspace]` table, which Gluon treats as a
+workspace of one, as Cargo does.
 
 ```sh
 gluon init                                  # build config only
@@ -9,10 +11,34 @@ gluon init --bootloader limine --limine 11.4.1
 gluon init --dry-run                        # print instead of writing
 ```
 
-It does not create a kernel in an empty directory, and it never prompts.
-It refuses to replace an existing `gluon.rs` unless you pass `--force`.
+It does not create a project in an empty directory, and it never
+prompts. It refuses to replace an existing `gluon.rs` unless you pass
+`--force`.
 
-## What it reads
+## Host projects
+
+When no target is named anywhere (no `--target`, no `build.target`, no
+`targets` in `rust-toolchain.toml`) and nothing looks like a kernel,
+`gluon init` writes a host build. A member with a bin target looks
+like a kernel when a `*.ld` file sits next to its `Cargo.toml` or its
+bin source has `#![no_main]` or `#![no_std]`. `--kernel` and
+`--bootloader` also ask for the kernel layout.
+
+The host build has a `dev` profile with `.target_host()`, one
+`packages` group with every non-proc-macro member, and `host_tests()`
+for the same members:
+
+```sh
+gluon build              # build every member for the host
+gluon run -- <args>      # build and run the bin
+gluon test               # unit tests, tests/ and doctests
+```
+
+`run_binary` names the only bin target. With several, it is a
+`// TODO:`. Gluon needs a nightly toolchain even for a host build, so
+pin one in `rust-toolchain.toml` if the project builds on stable.
+
+## What it reads for a kernel
 
 | Setting | Source |
 |---|---|

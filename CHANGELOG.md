@@ -35,6 +35,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runner, such as one a config option turns on.
 - **`CrateType::Test`**, a libtest executable built with `--test`.
 
+### Added (Cargo projects)
+
+- **A package without `[workspace]` loads as a workspace of one**, as
+  under Cargo. A package inside another workspace's directory is an
+  error that names the workspace root, unless that workspace excludes
+  it.
+- **`gluon init` writes a host build** when no target is named and no
+  member looks like a kernel (no `*.ld` beside it, no `#![no_main]` or
+  `#![no_std]` bin): a `.target_host()` profile, one host group and
+  `host_tests()` for every member.
+
+### Fixed
+
+- **A rustup toolchain switch is picked up.** The cached rustc info
+  was keyed on `$RUSTC` and the binary's mtime only, so adding a
+  `rust-toolchain.toml` or changing the rustup default kept the old
+  compiler. Gluon now checks `rustc --print sysroot` against the cache
+  unless `$RUSTC` is an absolute path.
+
 ### Added (host profiles)
 
 - **`profile.target_host()`** makes a profile build for the host. It

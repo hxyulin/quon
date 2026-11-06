@@ -36,7 +36,8 @@ pub fn run_at(root: &Path, args: &InitArgs) -> Result<()> {
     }
     std::fs::write(&out, &text).with_context(|| format!("failed to write {}", out.display()))?;
     let todos = text.matches("// TODO:").count();
-    eprintln!("Wrote {}", out.display());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    eprintln!("Wrote {}", out.strip_prefix(&cwd).unwrap_or(&out).display());
     if todos > 0 {
         eprintln!("{todos} `// TODO:` comments name what gluon init could not infer");
     }
@@ -171,14 +172,16 @@ pub struct Boot {
 pub struct Plan {
     pub name: String,
     pub version: String,
-    /// The target every group builds for.
-    pub target: Target,
+    /// The target every group builds for, or `None` to build for the
+    /// host.
+    pub target: Option<Target>,
     /// Where `target` came from, for the comment over it.
     pub target_source: &'static str,
     /// Other targets the toolchain files or flags name.
     pub other_targets: Vec<Target>,
     pub kernel: Result<Kernel, NoKernel>,
-    /// Workspace members other than the kernel and proc macros.
+    /// Workspace members other than proc macros and, for a cross
+    /// build, the kernel.
     pub libraries: Vec<String>,
     /// Rustflags from `.cargo/config.toml` that Gluon does not read.
     pub rustflags: Vec<String>,
@@ -228,16 +231,26 @@ pub fn infer(root: &Path, opts: &Options) -> Result<Plan> {
             targets.push(t);
         }
     }
+    // With no target named anywhere and nothing that asks for a kernel,
+    // the workspace is an ordinary Rust project: build it for the host.
+    let host = candidates.is_empty()
+        && bootloader == Bootloader::None
+        && opts.kernel.is_none()
+        && !looks_bare_metal(&set);
     let primary = pick_primary(&targets, bootloader, !opts.targets.is_empty());
     let (target, other_targets) = match primary {
         Some(i) => {
             let t = targets.remove(i);
-            (t, targets)
+            (Some(t), targets)
         }
-        None => (Target::parse("x86_64-unknown-none"), Vec::new()),
+        None if host => (None, Vec::new()),
+        None => (Some(Target::parse("x86_64-unknown-none")), Vec::new()),
     };
 
-    let mut rustflags = config_rustflags(cargo_config.as_ref(), &target.name);
+    let mut rustflags = match &target {
+        Some(t) => config_rustflags(cargo_config.as_ref(), &t.name),
+        None => Vec::new(),
+    };
     let flag_script = take_linker_script_flag(&mut rustflags);
 
     let kernel = pick_kernel(&set, opts.kernel.as_deref(), flag_script)?;
@@ -246,7 +259,7 @@ pub fn infer(root: &Path, opts: &Options) -> Result<Plan> {
         .iter()
         .map(|&i| &set.packages[i])
         .filter(|p| !p.is_proc_macro())
-        .filter(|p| kernel.as_ref().map_or(true, |k| p.name() != k.package))
+        .filter(|p| host || kernel.as_ref().map_or(true, |k| p.name() != k.package))
         .map(|p| p.name().to_string())
         .collect();
 
@@ -264,6 +277,7 @@ pub fn infer(root: &Path, opts: &Options) -> Result<Plan> {
                     describe_no_kernel(why)
                 );
             }
+            let target = target.as_ref().expect("a boot setup builds for a target");
             let Some(efi_file) = efi_boot_file(target.arch()) else {
                 bail!(
                     "no UEFI boot file name is known for the `{}` architecture of {}",
@@ -301,6 +315,27 @@ pub fn infer(root: &Path, opts: &Options) -> Result<Plan> {
         rustflags,
         boot,
     })
+}
+
+/// Whether a member with a bin target looks like a kernel: a `*.ld`
+/// file next to its manifest, or a `#![no_main]` or `#![no_std]` bin.
+/// Without one, a workspace with no target is built for the host.
+fn looks_bare_metal(set: &PackageSet) -> bool {
+    set.members
+        .iter()
+        .map(|&i| &set.packages[i])
+        .filter(|p| !p.bins.is_empty())
+        .any(|p| {
+            let has_ld = std::fs::read_dir(p.manifest_dir()).is_ok_and(|dir| {
+                dir.flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "ld"))
+            });
+            has_ld
+                || p.bins.iter().any(|b| {
+                    let text = std::fs::read_to_string(&b.path).unwrap_or_default();
+                    text.contains("#![no_main]") || text.contains("#![no_std]")
+                })
+        })
 }
 
 /// Index of the target the groups build for. Explicit `--target` flags
@@ -636,8 +671,10 @@ fn ident(name: &str) -> String {
 
 /// Render the plan as a `gluon.rs`.
 pub fn render(plan: &Plan) -> String {
+    let Some(t) = &plan.target else {
+        return render_host(plan);
+    };
     let mut o = String::new();
-    let t = &plan.target;
     // The groups' target is named after its architecture; the targets
     // that only appear in comments keep the full name.
     let tv = ident(t.arch());
@@ -840,6 +877,77 @@ pub fn render(plan: &Plan) -> String {
     o
 }
 
+/// Render a plan that builds for the host: every member in one host
+/// group, with its unit tests, `tests/` and doctests under `gluon test`.
+fn render_host(plan: &Plan) -> String {
+    let mut o = String::new();
+    let run_line = match &plan.kernel {
+        Ok(k) => format!("//     gluon run       build and run {}\n", k.bin),
+        Err(_) => String::new(),
+    };
+    let _ = write!(
+        o,
+        "// Gluon build for {name}, written by `gluon init`.\n\
+         //\n\
+         //     gluon build     build every crate\n\
+         {run_line}\
+         //     gluon test      run the unit tests, the tests in tests/ and the doctests\n\
+         //\n\
+         // No target was found, so this builds for the host. To build for another\n\
+         // target, run `gluon init --force --target <triple>`.\n\
+         \n\
+         use gluon_config::{{Config, Result}};\n\n",
+        name = plan.name
+    );
+    let quoted: Vec<_> = plan.libraries.iter().map(|n| format!("{n:?}")).collect();
+    let _ = writeln!(
+        o,
+        "/// Workspace packages.\nconst PACKAGES: &[&str] = &[{}];\n",
+        quoted.join(", ")
+    );
+    o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
+    let _ = writeln!(o, "    cfg.project({:?}, {:?});", plan.name, plan.version);
+    o.push_str("    cfg.cargo_workspace(\".\");\n\n");
+
+    match &plan.kernel {
+        Ok(_) => {}
+        Err(NoKernel::NoBins) => {}
+        Err(why @ NoKernel::SeveralBins(_)) => {
+            let _ = writeln!(
+                o,
+                "    // TODO: {}. Name the bin target `gluon run`\n\
+                 \x20   // runs:\n\
+                 \x20   //     .run_binary(\"<bin>\")",
+                capitalize(&describe_no_kernel(why))
+            );
+        }
+    }
+    o.push_str(
+        "    cfg.profile(\"dev\")\n        .target_host()\n        .opt_level(0)\n        .debug_info(true)",
+    );
+    if let Ok(k) = &plan.kernel {
+        let _ = write!(o, "\n        .run_binary({:?})", k.bin);
+    }
+    o.push_str(";\n\n");
+
+    if !plan.libraries.is_empty() {
+        o.push_str(
+            "    let mut packages = cfg.group(\"packages\").target_host();\n\
+             \x20   for name in PACKAGES {\n\
+             \x20       packages.package(name);\n\
+             \x20   }\n\
+             \x20   drop(packages);\n\n\
+             \x20   let mut tests = cfg.host_tests();\n\
+             \x20   for name in PACKAGES {\n\
+             \x20       tests = tests.package(name);\n\
+             \x20   }\n\
+             \x20   drop(tests);\n\n",
+        );
+    }
+    o.push_str("    Ok(())\n}\n");
+    o
+}
+
 fn render_esp(o: &mut String, boot: &Boot, bin: &str) {
     let efi = &boot.efi_file;
     match boot.bootloader {
@@ -1031,7 +1139,7 @@ mod tests {
         )]);
         let plan = infer(ws.path(), &opts()).unwrap();
         assert_eq!(plan.version, "0.3.0");
-        assert_eq!(plan.target, Target::parse("x86_64-unknown-none"));
+        assert_eq!(plan.target, Some(Target::parse("x86_64-unknown-none")));
         assert_eq!(plan.target_source, "rust-toolchain.toml");
         let k = plan.kernel.as_ref().unwrap();
         assert_eq!((k.package.as_str(), k.bin.as_str()), ("kernel", "kernel"));
@@ -1058,9 +1166,9 @@ mod tests {
         ]);
         let plan = infer(ws.path(), &opts()).unwrap();
         assert_eq!(plan.target_source, ".cargo/config.toml");
-        assert_eq!(plan.target.name, "x86_64-myos");
+        assert_eq!(plan.target.as_ref().unwrap().name, "x86_64-myos");
         assert_eq!(
-            plan.target.spec.as_deref(),
+            plan.target.as_ref().unwrap().spec.as_deref(),
             Some("targets/x86_64-myos.json")
         );
         assert!(plan.other_targets.is_empty());
@@ -1081,7 +1189,7 @@ mod tests {
         };
         let plan = infer(ws.path(), &o).unwrap();
         assert_eq!(plan.target_source, "--target");
-        assert_eq!(plan.target.name, "x86_64-unknown-uefi");
+        assert_eq!(plan.target.as_ref().unwrap().name, "x86_64-unknown-uefi");
         assert_eq!(plan.other_targets, [Target::parse("aarch64-unknown-none")]);
     }
 
@@ -1091,7 +1199,7 @@ mod tests {
             "[toolchain]\ntargets = [\"x86_64-unknown-uefi\", \"x86_64-unknown-none\"]\n";
         let ws = kernel_workspace(&[("rust-toolchain.toml", toolchain)]);
         let plan = infer(ws.path(), &opts()).unwrap();
-        assert_eq!(plan.target.name, "x86_64-unknown-none");
+        assert_eq!(plan.target.as_ref().unwrap().name, "x86_64-unknown-none");
         assert_eq!(plan.other_targets, [Target::parse("x86_64-unknown-uefi")]);
 
         let o = Options {
@@ -1099,7 +1207,7 @@ mod tests {
             ..opts()
         };
         let plan = infer(ws.path(), &o).unwrap();
-        assert_eq!(plan.target.name, "x86_64-unknown-uefi");
+        assert_eq!(plan.target.as_ref().unwrap().name, "x86_64-unknown-uefi");
         let boot = plan.boot.as_ref().unwrap();
         assert_eq!(boot.efi_file, "BOOTX64.EFI");
         assert!(
@@ -1172,7 +1280,7 @@ mod tests {
         let ws = workspace(&[
             ("Cargo.toml", ROOT),
             ("crates/kernel/Cargo.toml", KERNEL),
-            ("crates/kernel/src/main.rs", "fn main() {}\n"),
+            ("crates/kernel/src/main.rs", "#![no_main]\n"),
         ]);
         let plan = infer(ws.path(), &opts()).unwrap();
         assert_eq!(
@@ -1363,6 +1471,56 @@ mod tests {
             o.lines().all(|l| l.len() <= 80 && l.starts_with("    // ")),
             "{o}"
         );
+    }
+
+    const APP: &str = "[package]\nname = \"app\"\nversion = \"0.2.0\"\nedition = \"2024\"\n";
+
+    #[test]
+    fn a_project_without_a_target_builds_for_the_host() {
+        let ws = workspace(&[("Cargo.toml", APP), ("src/main.rs", "fn main() {}\n")]);
+        let plan = infer(ws.path(), &opts()).unwrap();
+        assert_eq!(plan.target, None);
+        assert_eq!(plan.version, "0.2.0");
+        assert_eq!(plan.libraries, ["app"]);
+        let text = render(&plan);
+        assert!(text.contains("        .target_host()"), "{text}");
+        assert!(text.contains("        .run_binary(\"app\");"), "{text}");
+        assert!(
+            text.contains("const PACKAGES: &[&str] = &[\"app\"];"),
+            "{text}"
+        );
+        assert!(text.contains("tests = tests.package(name);"), "{text}");
+        assert!(!text.contains("TODO"), "{text}");
+        assert!(!text.contains("qemu"), "{text}");
+    }
+
+    #[test]
+    fn a_host_workspace_with_several_bins_leaves_run_binary_to_a_todo() {
+        let ws = workspace(&[
+            ("Cargo.toml", ROOT),
+            ("crates/a/Cargo.toml", &APP.replace("app", "a")),
+            ("crates/a/src/main.rs", "fn main() {}\n"),
+            ("crates/b/Cargo.toml", &APP.replace("app", "b")),
+            ("crates/b/src/main.rs", "fn main() {}\n"),
+            ("crates/util/Cargo.toml", LIB),
+            ("crates/util/src/lib.rs", ""),
+        ]);
+        let plan = infer(ws.path(), &opts()).unwrap();
+        assert_eq!(plan.target, None);
+        assert_eq!(plan.libraries, ["a", "b", "util"]);
+        let text = render(&plan);
+        assert!(text.contains("//     .run_binary(\"<bin>\")"), "{text}");
+        assert!(!text.contains("//     gluon run "), "{text}");
+    }
+
+    #[test]
+    fn a_no_main_bin_keeps_the_kernel_layout() {
+        let ws = workspace(&[
+            ("Cargo.toml", APP),
+            ("src/main.rs", "#![no_std]\n#![no_main]\n"),
+        ]);
+        let plan = infer(ws.path(), &opts()).unwrap();
+        assert_eq!(plan.target, Some(Target::parse("x86_64-unknown-none")));
     }
 
     #[test]
