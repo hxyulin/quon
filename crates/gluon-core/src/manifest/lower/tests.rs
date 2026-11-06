@@ -1445,6 +1445,40 @@ fn host_tests_need_a_workspace() {
     );
 }
 
+/// The build script's `util` and the host tests' `util` have the same
+/// features and deps here, so only the domain tells them apart. They
+/// must still get different hashes, or the scheduler builds both into
+/// one file in parallel.
+#[test]
+fn host_test_copies_never_share_an_output_with_the_build() {
+    let a = manifest(
+        "a",
+        "build = \"build.rs\"\n\
+         [dependencies]\nutil = { path = \"../util\" }\n\
+         [build-dependencies]\nutil = { path = \"../util\" }\n",
+    );
+    let files = [
+        ("Cargo.toml", WS.to_string()),
+        ("a/Cargo.toml", a),
+        ("a/build.rs", "fn main() {}".into()),
+        ("a/src/lib.rs", String::new()),
+        ("util/Cargo.toml", manifest("util", "")),
+        ("util/src/lib.rs", String::new()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+    let ws = workspace(&files);
+    let raw = raw_model(|cfg, t| {
+        cfg.cargo_workspace(".");
+        cfg.group("k").target(t).package("a");
+        cfg.host_tests().package("a");
+    });
+    let units = units_at(raw, ws.path());
+    let build = unit_named(&units, "util@host");
+    let test = unit_named(&units, "util@host-test");
+    assert_eq!(build.features, test.features);
+    assert_ne!(build.metadata, test.metadata);
+}
+
 /// With a boot binary, a profile builds what the target's crates reach,
 /// and the host tests too, which nothing reaches.
 #[test]

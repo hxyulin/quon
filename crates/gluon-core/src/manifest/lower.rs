@@ -776,6 +776,7 @@ fn lower_unit(
             build_script,
             is_test: matches!(u.kind, UnitKind::Test(_)),
             test_only: u.test_only,
+            host_test: u.domain == Domain::HostTest,
         }),
         ..Default::default()
     };

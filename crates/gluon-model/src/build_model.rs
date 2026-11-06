@@ -480,6 +480,13 @@ pub struct CargoUnitDef {
     /// differ for the tests. `gluon build` and `gluon run` skip it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub test_only: bool,
+    /// The unit is the host tests' copy of a package: the package
+    /// itself or one of its dependencies, resolved with the tests' own
+    /// features. It goes into the unit metadata hash, so it never
+    /// shares an output file with the build's host copy of the same
+    /// package, even when their features and deps match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_test: bool,
 }
 
 impl CrateDef {

@@ -912,6 +912,7 @@ pub fn lower(
     assign_host_profile(&mut units);
     let config_metadata = config_crate_hashes(&units, model, resolved)?;
     assign_metadata(&mut units, model, resolved, &config_metadata)?;
+    check_unique_outputs(&units)?;
 
     let mut graph = UnitGraph {
         units,
@@ -1246,7 +1247,17 @@ fn assign_metadata(
             }
             stack.pop();
             let unit = &units[u];
-            let platform = metadata::platform_identity(unit.platform, model, resolved)?;
+            let mut platform = metadata::platform_identity(unit.platform, model, resolved)?;
+            // The host tests resolve their own copy of each host package,
+            // and the scheduler builds both copies in one pass. When the
+            // copies' features and deps match, nothing else in the hash
+            // tells them apart, so both would write one file in
+            // parallel. A build-script unit is the exception: one script
+            // binary serves every owner, and each owner's run gets its
+            // own directory from the owner's hash.
+            if !unit.is_build_script && host_test_copy(model, unit) {
+                platform.push_str("\0host-test");
+            }
             let cfg = match (unit.config_crate, unit.platform) {
                 (true, Platform::Cross(t)) => config.get(&t).copied(),
                 _ => None,
@@ -1263,6 +1274,50 @@ fn assign_metadata(
         }
     }
     Ok(())
+}
+
+/// Fail when two units would write the same output file. The scheduler
+/// builds units in parallel, so a shared path is a race: one unit's
+/// output replaces the other's while its dependents read it, and each
+/// build marks the other's dependents stale. It means two units the
+/// metadata hash cannot tell apart, which is a lowering bug.
+///
+/// An output path is the unit's platform and profile directory, plus
+/// its crate name and metadata hash, so equal tuples mean equal paths.
+fn check_unique_outputs(units: &[BuildUnit]) -> Result<()> {
+    let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+    for u in units {
+        let key = format!(
+            "{:?}/{:?}/{}/{}/{}",
+            u.platform,
+            u.profile,
+            u.is_build_script,
+            u.crate_name,
+            u.metadata.hex()
+        );
+        if let Some(other) = seen.insert(key, &u.name) {
+            return Err(Error::Compile(format!(
+                "units '{other}' and '{}' would write the same output file \
+                 (crate '{}', hash {}); this is a Gluon bug",
+                u.name,
+                u.crate_name,
+                u.metadata.short()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `unit` is lowered from the host tests' copy of a package.
+fn host_test_copy(model: &BuildModel, unit: &BuildUnit) -> bool {
+    match unit.origin {
+        UnitOrigin::Crate(h) => model
+            .crates
+            .get(h)
+            .and_then(|c| c.cargo.as_ref())
+            .is_some_and(|c| c.host_test),
+        UnitOrigin::Vendor(_) => false,
+    }
 }
 
 /// Resolve a declared crate's external dep: the vendor unit when the
