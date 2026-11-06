@@ -18,7 +18,7 @@
 //!             │
 //!             ▼
 //!   ┌─────────────────────┐
-//!   │ run_script_binary   │  spawn the binary, capture stdout
+//!   │ run_script_binary   │  spawn the binary, answer its questions, capture stdout
 //!   └─────────┬───────────┘
 //!             │
 //!             ▼  RawBuildModel JSON
@@ -144,7 +144,7 @@ pub fn compile_and_run_raw(
     // A failed save only means the next run rehashes; it must not fail
     // a build that has everything it needs.
     let _ = hashes.save();
-    let stdout = run_script_binary(&bin)?;
+    let stdout = run_script_binary(&bin, project_root)?;
 
     serde_json::from_slice(&stdout).map_err(|e| {
         Error::Config(format!(
@@ -160,24 +160,101 @@ pub fn ensure_config_lib(rustc_info: &RustcInfo) -> Result<rlib::ConfigLib> {
     rlib::ensure_quon_config_rlib(rustc_info)
 }
 
-/// Spawn the compiled script binary and capture its stdout. Stderr is
-/// captured too — but only surfaced if the process exits non-zero. A
-/// successful run discards stderr (the script shouldn't be writing
-/// there in normal operation).
-fn run_script_binary(bin: &Path) -> Result<Vec<u8>> {
-    use std::process::Command;
-    let output = Command::new(bin).output().map_err(|e| Error::Io {
+/// Spawn the compiled script binary, answer the questions it asks
+/// (see [`quon_model::script_protocol`]), and return the rest of its
+/// stdout: the model. Stderr is captured too, but only surfaced if the
+/// process exits non-zero. A successful run discards stderr (the
+/// script shouldn't be writing there in normal operation).
+fn run_script_binary(bin: &Path, project_root: &Path) -> Result<Vec<u8>> {
+    use quon_model::script_protocol::REQUEST_PREFIX;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::process::{Command, Stdio};
+
+    let io_error = |source| Error::Io {
         path: bin.to_path_buf(),
-        source: e,
-    })?;
-    if !output.status.success() {
+        source,
+    };
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(io_error)?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
+    // quon blocks on stdout while the script runs. A script that fills
+    // the stderr pipe meanwhile would block too, so stderr drains on a
+    // thread of its own.
+    let stderr = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let mut model = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if stdout.read_until(b'\n', &mut line).map_err(io_error)? == 0 {
+            break;
+        }
+        match line.strip_prefix(REQUEST_PREFIX.as_bytes()) {
+            Some(request) => {
+                let mut reply = serde_json::to_vec(&answer(request, project_root))
+                    .expect("a reply always serializes");
+                reply.push(b'\n');
+                // A script that exits without reading its answer closes
+                // the pipe; its exit status, checked below, says why.
+                let _ = stdin.write_all(&reply).and_then(|()| stdin.flush());
+            }
+            None => model.extend_from_slice(&line),
+        }
+    }
+    drop(stdin);
+    let status = child.wait().map_err(io_error)?;
+    let stderr = stderr.join().unwrap_or_default();
+    if !status.success() {
         return Err(Error::Config(format!(
-            "quon.rs exited with status {}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr),
+            "quon.rs exited with status {status}\nstderr:\n{}",
+            String::from_utf8_lossy(&stderr),
         )));
     }
-    Ok(output.stdout)
+    Ok(model)
+}
+
+/// The reply to one question from `quon.rs`. Every failure becomes an
+/// error reply, which the script records and reports with its other
+/// config errors.
+fn answer(request: &[u8], project_root: &Path) -> quon_model::script_protocol::ScriptReply {
+    use quon_model::script_protocol::{ScriptReply, ScriptRequest};
+    match serde_json::from_slice::<ScriptRequest>(request) {
+        Ok(ScriptRequest::Members { dir }) => {
+            match crate::manifest::script_members(&project_root.join(&dir)) {
+                Ok(members) => ScriptReply::Members(members),
+                // The script reports the reply as one of its own errors,
+                // which carry the `error:` level already.
+                Err(Error::Diagnostics(diags)) => ScriptReply::Error(
+                    diags
+                        .iter()
+                        .map(|d| {
+                            let mut text = match &d.span {
+                                Some(span) => format!("{span}: {}", d.message),
+                                None => d.message.clone(),
+                            };
+                            for note in &d.notes {
+                                text.push_str(&format!("\n    note: {note}"));
+                            }
+                            text
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                Err(e) => ScriptReply::Error(e.to_string()),
+            }
+        }
+        Err(e) => ScriptReply::Error(format!("quon does not understand the question: {e}")),
+    }
 }
 
 /// Final-stage transform: pick the run entry `selection` names
@@ -311,6 +388,34 @@ pub fn config(q: &mut Quon) -> Result<()> {
         assert!(
             model.profiles.lookup("dev").is_some(),
             "profile 'dev' should exist after intern"
+        );
+    }
+
+    #[test]
+    fn a_question_quon_cannot_answer_gets_an_error_reply() {
+        use quon_model::script_protocol::ScriptReply;
+        let tmp = tempfile::tempdir().unwrap();
+        let reply = answer(br#"{"members":{"dir":"nowhere"}}"#, tmp.path());
+        assert!(
+            matches!(&reply, ScriptReply::Error(e) if e.contains("nowhere")),
+            "{reply:?}"
+        );
+        // A loader diagnostic arrives without its `error:` level, which the
+        // script's own error report adds.
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\"]\n",
+        )
+        .unwrap();
+        let reply = answer(br#"{"members":{"dir":"."}}"#, tmp.path());
+        assert!(
+            matches!(&reply, ScriptReply::Error(e) if !e.starts_with("error")),
+            "{reply:?}"
+        );
+        let reply = answer(b"{\"weather\":{}}", tmp.path());
+        assert!(
+            matches!(&reply, ScriptReply::Error(e) if e.contains("does not understand")),
+            "{reply:?}"
         );
     }
 

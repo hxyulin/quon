@@ -58,7 +58,7 @@ pub use tests::{BootTest, HostTests};
 
 pub use quon_model::{
     Binding, BootMode, ConfigValue, CrateType, DisplayMode, ImageFormat, OptLevel, PartitionTable,
-    RawBuildModel, SerialMode as Serial, TristateVal,
+    RawBuildModel, SerialMode as Serial, TristateVal, WorkspaceMember,
 };
 /// For plugin settings that are arrays or objects:
 /// `.setting("probe", quon_config::serde_json::json!({"speed": 4000}))`.
@@ -71,6 +71,6 @@ pub mod prelude {
         Artifact, Binding, BootMode, BootTest, BuildStep, Command, Cond, ConfigValue, Crate,
         CrateType, Declare, Dep, Dependency, DisplayMode, Download, Edition, Esp, Image,
         ImageFormat, Lto, OptLevel, Package, Partition, PartitionTable, Plugin, Preset, Profile,
-        Qemu, Quon, Result, Runner, Serial, Target, TristateVal,
+        Qemu, Quon, Result, Runner, Serial, Target, TristateVal, WorkspaceMember,
     };
 }

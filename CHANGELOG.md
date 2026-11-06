@@ -26,6 +26,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Profile::qemu_boot_mode` are removed. See
   [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
 
+### Added (workspace members in `quon.rs`)
+
+- **`q.cargo_workspace(dir).members()`** returns the workspace's member
+  packages with their path and `[dependencies]`, so `quon.rs` can
+  declare an entry per package instead of listing them. Quon reads the
+  manifests while the script runs, so a new package shows up on the
+  next command without recompiling `quon.rs`.
+
 ### Added (several run entries)
 
 - **`q.run` can be called once per binary.** Each entry takes a

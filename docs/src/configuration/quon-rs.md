@@ -96,6 +96,37 @@ rebuilds every crate. A variable Quon sets for a crate itself, such as
 two values is an error. Programs that `quon run` and `quon test` start
 do not get it.
 
+### Declarations from workspace members
+
+`q.cargo_workspace(dir).members()` returns the workspace's member
+packages, sorted by name, so `quon.rs` can declare an item per package
+instead of listing every one:
+
+```rust
+const BSPS: &[(&str, &str)] = &[("board-a-bsp", "cortex-m7"), ("board-b-bsp", "cortex-m4")];
+
+for member in q.cargo_workspace(".").members() {
+    if let Some(&(_, cpu)) = BSPS.iter().find(|&&(bsp, _)| member.depends_on(bsp)) {
+        let firmware = q.add(Package::new(&member.name).rustc_flag(format!("-Ctarget-cpu={cpu}")));
+        q.run(&firmware).name(&member.name);
+    }
+}
+```
+
+Each `WorkspaceMember` has the package's `name`, its `path` relative to
+the workspace root with `/` between components (`.` for a package at
+the root), and its `dependencies`: the package names in
+`[dependencies]`, after renames. Build and dev dependencies are left
+out. `depends_on(name)` checks that set.
+
+Quon reads the manifests while the script runs: the script asks the
+quon process that started it, which answers from the same loader that
+builds. Quon runs the script on every command, so a new or edited
+`Cargo.toml` shows up on the next command without recompiling
+`quon.rs`. A workspace Quon cannot read is a config error naming the
+call. Outside Quon, as in a unit test of the script with `Quon::new()`,
+`members()` returns an empty list and records an error.
+
 A `Target` is a plain value, not an item: `Target::builtin(triple)`,
 `Target::spec(name, path)` or `Target::host()`. Quon registers it the
 first time a declaration uses it.

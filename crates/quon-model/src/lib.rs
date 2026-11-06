@@ -11,6 +11,7 @@ pub mod kconfig;
 pub mod raw;
 pub mod raw_defs;
 pub mod resolved;
+pub mod script_protocol;
 pub mod source;
 
 pub use build_model::*;
@@ -24,4 +25,5 @@ pub use raw_defs::{
     RawPipelineDef, RawPipelineStep, RawProfileDef, RawRunDef, RawRunnerDef,
 };
 pub use resolved::*;
+pub use script_protocol::WorkspaceMember;
 pub use source::SourceSpan;

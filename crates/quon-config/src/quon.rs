@@ -10,12 +10,13 @@ use crate::profile::{Profile, ProfileRef};
 use crate::runner::Runner;
 use crate::target::{HOST, Target, TargetKind};
 use crate::tests::{BootTest, HostTests};
+use quon_model::script_protocol::{REQUEST_PREFIX, ScriptReply, ScriptRequest};
 use quon_model::{
     ConfigOptionDef, DownloadDef, ExternalDepDef, ImageDef, ImageEntry, ImageSource, PartitionDef,
     PresetDef, ProjectDef, RawBootTestDef, RawBuildModel, RawBuildStepDef, RawBuildStepInput,
     RawCargoWorkspace, RawCrateDef, RawDepDef, RawEspDef, RawEspEntry, RawEspSource, RawGroupDef,
     RawManifestRoot, RawProfileDef, RawRunDef, RawRunnerDef, RawSource, RawWrite, RunnerKind,
-    TargetDef, TargetSpec,
+    TargetDef, TargetSpec, WorkspaceMember,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -103,6 +104,9 @@ pub struct Quon {
     /// since both are looked up by name as build inputs.
     names: BTreeSet<(&'static str, String)>,
     errors: Vec<ConfigError>,
+    /// Whether a quon process answers questions on stdin, as it does
+    /// for the `main` it generates around `quon.rs`.
+    connected: bool,
 }
 
 /// What `quon run` starts, from [`Quon::run`].
@@ -141,22 +145,96 @@ impl Run {
 
 /// The Cargo workspace, from [`Quon::cargo_workspace`].
 #[derive(Debug)]
-pub struct CargoWorkspace(RawCargoWorkspace);
+pub struct CargoWorkspace {
+    raw: RawCargoWorkspace,
+    connected: bool,
+    /// From [`members`](Self::members); [`Quon::finish`] reports them.
+    errors: Vec<ConfigError>,
+}
 
 impl CargoWorkspace {
+    /// The workspace's members, sorted by name, so `quon.rs` can
+    /// declare an item per package instead of listing them:
+    ///
+    /// ```no_run
+    /// # use quon_config::prelude::*;
+    /// # let mut q = Quon::new();
+    /// for member in q.cargo_workspace(".").members() {
+    ///     if member.path.starts_with("drivers/") {
+    ///         q.add(Package::new(&member.name));
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// quon reads the manifests while the script runs and reruns the
+    /// script on every command, so a new or edited `Cargo.toml` shows
+    /// up on the next command without recompiling `quon.rs`. Outside
+    /// quon, as in a unit test with [`Quon::new`], there is nobody to
+    /// ask: the list is empty and Quon reports an error.
+    pub fn members(&mut self) -> Vec<WorkspaceMember> {
+        let dir = self.raw.dir.clone();
+        let fail = |errors: &mut Vec<ConfigError>, reason: &str| {
+            errors.push(ConfigError::new(format!(
+                "cargo_workspace(\"{dir}\").members(): {reason}"
+            )));
+            Vec::new()
+        };
+        if !self.connected {
+            return fail(&mut self.errors, "needs quon to run quon.rs");
+        }
+        match ask(&ScriptRequest::Members { dir: dir.clone() }) {
+            Ok(ScriptReply::Members(members)) => members,
+            Ok(ScriptReply::Error(reason)) | Err(reason) => fail(&mut self.errors, &reason),
+        }
+    }
+
     /// Read registry sources from `dir`, filled by `quon vendor`,
     /// instead of Cargo's registry cache. A build then runs no Cargo
     /// command, and fails if `Cargo.lock` changed since `quon vendor`.
     pub fn vendored(&mut self, dir: impl Into<String>) -> &mut Self {
-        self.0.vendored = Some(dir.into());
+        self.raw.vendored = Some(dir.into());
         self
     }
+}
+
+/// Ask the quon process that started the script, and wait for its
+/// answer. See [`quon_model::script_protocol`].
+fn ask(request: &ScriptRequest) -> std::result::Result<ScriptReply, String> {
+    use std::io::{BufRead, Write};
+    let json = serde_json::to_string(request).map_err(|e| e.to_string())?;
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{REQUEST_PREFIX}{json}")
+        .and_then(|()| stdout.flush())
+        .map_err(|e| format!("asking quon: {e}"))?;
+    drop(stdout);
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| format!("reading quon's answer: {e}"))?;
+    if line.is_empty() {
+        return Err("quon closed stdin without answering".into());
+    }
+    serde_json::from_str(&line).map_err(|e| format!("quon's answer is not valid JSON: {e}"))
 }
 
 impl Quon {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A `Quon` whose questions, such as
+    /// [`CargoWorkspace::members`], the quon process on the other end
+    /// of stdin and stdout answers. Only the `main` Quon generates
+    /// around `quon.rs` may use it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn connected() -> Self {
+        Self {
+            connected: true,
+            ..Self::default()
+        }
     }
 
     /// Declare `item` and return its handle.
@@ -207,13 +285,17 @@ impl Quon {
         if let Some(prev) = &self.workspace {
             self.errors.push(ConfigError::new(format!(
                 "cargo_workspace is declared more than once (\"{}\" and \"{dir}\")",
-                prev.0.dir
+                prev.raw.dir
             )));
         }
-        self.workspace.insert(CargoWorkspace(RawCargoWorkspace {
-            dir,
-            vendored: None,
-        }))
+        self.workspace.insert(CargoWorkspace {
+            raw: RawCargoWorkspace {
+                dir,
+                vendored: None,
+            },
+            connected: self.connected,
+            errors: Vec::new(),
+        })
     }
 
     /// Set `key` to `value` in the environment of every rustc run and
@@ -445,6 +527,9 @@ impl Quon {
             raw: RawBuildModel::default(),
             errors: std::mem::take(&mut self.errors),
         };
+        if let Some(ws) = &mut self.workspace {
+            l.errors.append(&mut ws.errors);
+        }
 
         let default_target = self.default_target.clone().unwrap_or_else(Target::host);
         for t in self.default_target.iter().chain(&self.targets) {
@@ -537,7 +622,7 @@ impl Quon {
             p.default_profile = Some(self.default_profile.unwrap_or_else(|| "dev".into()));
             p
         });
-        l.raw.cargo_workspace = self.workspace.map(|w| w.0);
+        l.raw.cargo_workspace = self.workspace.map(|w| w.raw);
         l.raw.host_tests = self.host_tests.packages;
         l.raw.host_test_features = self.host_tests.features;
         l.raw.host_test_env = self.host_tests.env;
@@ -1453,6 +1538,21 @@ mod tests {
                 "q.env: DEFMT_LOG is set twice (\"info\" and \"debug\")",
                 "q.env: \"A=B\" is not a variable name (it must be non-empty, without '=' or NUL)"
             ]
+        );
+    }
+
+    #[test]
+    fn members_without_a_quon_process_to_ask_is_an_empty_list_and_an_error() {
+        let mut q = Quon::new();
+        assert!(q.cargo_workspace(".").members().is_empty());
+        let (_, errors) = q.finish();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0]
+                .message
+                .starts_with("cargo_workspace(\".\").members(): needs quon"),
+            "{}",
+            errors[0].message
         );
     }
 

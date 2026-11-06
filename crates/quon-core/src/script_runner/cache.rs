@@ -115,7 +115,7 @@ fn wrapper_source(script_path: &Path) -> Result<String> {
          mod script;\n\
          \n\
          fn main() -> quon_config::Result<()> {{\n    \
-             let mut q = quon_config::Quon::new();\n    \
+             let mut q = quon_config::Quon::connected();\n    \
              script::config(&mut q)?;\n    \
              q.emit()\n\
          }}\n"

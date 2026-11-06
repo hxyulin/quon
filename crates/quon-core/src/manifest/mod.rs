@@ -148,3 +148,107 @@ pub fn dump_packages(set: &PackageSet) -> String {
     }
     out
 }
+
+/// The members of the Cargo workspace at `root`, for
+/// `CargoWorkspace::members` in `quon.rs`, sorted by name.
+///
+/// Registry sources are not looked up: the answer names only member
+/// packages and their dependencies' package names, and the loader
+/// records an unmapped registry edge instead of failing. A stale
+/// `vendor/` or a missing `Cargo.lock` therefore cannot stop the script.
+pub fn script_members(root: &Path) -> crate::error::Result<Vec<quon_model::WorkspaceMember>> {
+    let sources = sources::RegistrySources::new(Default::default(), "");
+    let set = workspace::load_workspace(root, &sources)?;
+    let members = set.members.iter().map(|&i| {
+        let package = &set.packages[i];
+        let dir = package.manifest_dir();
+        // Members live under the root, which the loader canonicalized,
+        // as it did their manifest paths.
+        let relative = dir.strip_prefix(&set.root).unwrap_or(dir);
+        let mut path = relative
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if path.is_empty() {
+            path = ".".into();
+        }
+        let dependencies = package
+            .deps
+            .iter()
+            .filter(|d| d.kind == workspace::DepKind::Normal)
+            .map(|d| d.package.clone())
+            .collect();
+        quon_model::WorkspaceMember::new(package.name().to_owned(), path, dependencies)
+    });
+    // `set.members` is already sorted by name, but the order is part
+    // of what quon.rs sees, so it should not rest on the loader's.
+    let mut members: Vec<_> = members.collect();
+    members.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(members)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(root: &Path, path: &str, text: &str) {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn package(name: &str, deps: &str) -> String {
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n{deps}")
+    }
+
+    #[test]
+    fn script_members_lists_members_by_name_with_relative_paths_and_normal_dependencies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "Cargo.toml",
+            &format!(
+                "[workspace]\nmembers = [\"crates/*\"]\n\n\
+                 [workspace.dependencies]\nhal = {{ path = \"crates/hal-impl\", package = \"hal-impl\" }}\n\n{}",
+                package("app", "")
+            ),
+        );
+        write(root, "src/main.rs", "fn main() {}\n");
+        write(root, "crates/hal-impl/Cargo.toml", &package("hal-impl", ""));
+        write(root, "crates/hal-impl/src/lib.rs", "");
+        write(
+            root,
+            "crates/zeta/Cargo.toml",
+            &package(
+                "zeta",
+                "[dependencies]\nhal.workspace = true\n\n\
+                 [dev-dependencies]\nhelper = { path = \"../helper\" }\n",
+            ),
+        );
+        write(root, "crates/zeta/src/lib.rs", "");
+        write(root, "crates/helper/Cargo.toml", &package("helper", ""));
+        write(root, "crates/helper/src/lib.rs", "");
+
+        let members = script_members(root).unwrap();
+        let summary: Vec<_> = members
+            .iter()
+            .map(|m| {
+                let deps: Vec<_> = m.dependencies.iter().map(String::as_str).collect();
+                (m.name.as_str(), m.path.as_str(), deps)
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("app", ".", vec![]),
+                ("hal-impl", "crates/hal-impl", vec![]),
+                ("helper", "crates/helper", vec![]),
+                // The renamed `hal` is listed by its package name, and the
+                // dev-dependency is left out.
+                ("zeta", "crates/zeta", vec!["hal-impl"]),
+            ]
+        );
+    }
+}
