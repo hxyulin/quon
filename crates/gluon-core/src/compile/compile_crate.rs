@@ -340,7 +340,13 @@ mod tests {
             }
             let (host, target) = match model.crates.get(h).map(|c| c.target) {
                 Some(TargetSpec::Cross(t)) => (false, t),
-                _ => (true, resolved.profile.target),
+                _ => (
+                    true,
+                    resolved
+                        .profile
+                        .cross_target()
+                        .unwrap_or(Handle::new(u32::MAX)),
+                ),
             };
             resolved.crates.push(ResolvedCrateRef {
                 handle: h,
@@ -487,7 +493,7 @@ mod tests {
     fn make_profile(target: Handle<TargetDef>) -> ResolvedProfile {
         ResolvedProfile {
             name: "debug".into(),
-            target,
+            target: TargetSpec::Cross(target),
             opt_level: 0,
             debug_info: false,
             lto: None,

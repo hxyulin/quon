@@ -513,7 +513,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: target_handle,
+                target: TargetSpec::Cross(target_handle),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

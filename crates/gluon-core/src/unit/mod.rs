@@ -1168,7 +1168,7 @@ fn config_crate_hashes(
         })
         .collect();
     let mut targets = linked.clone();
-    targets.insert(resolved.profile.target);
+    targets.extend(resolved.profile.cross_target());
     let source = match crate::generated::config_crate::render_source(resolved) {
         Ok(s) => s,
         Err(_) if linked.is_empty() => return Ok(BTreeMap::new()),
@@ -1472,7 +1472,7 @@ mod tests {
                 },
                 profile: ResolvedProfile {
                     name: "dev".into(),
-                    target,
+                    target: TargetSpec::Cross(target),
                     opt_level: 0,
                     debug_info: true,
                     lto: None,

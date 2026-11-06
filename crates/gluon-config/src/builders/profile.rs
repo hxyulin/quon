@@ -46,6 +46,14 @@ impl<'cfg> ProfileBuilder<'cfg> {
         self
     }
 
+    /// Build for the host instead of a declared target: a profile for a
+    /// host tool. It builds no sysroot and no config crate, and with no
+    /// `.runner(..)` named, `gluon run` runs the run binary directly.
+    pub fn target_host(mut self) -> Self {
+        self.modify(|p| p.target = Some("host".into()));
+        self
+    }
+
     /// Set the optimisation level (`-C opt-level=<level>`).
     pub fn opt_level(mut self, level: u8) -> Self {
         self.modify(|p| p.opt_level = Some(level));

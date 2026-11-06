@@ -257,7 +257,7 @@ mod tests {
     fn empty_profile() -> ResolvedProfile {
         ResolvedProfile {
             name: "dev".into(),
-            target: Handle::new(0),
+            target: gluon_model::TargetSpec::Cross(Handle::new(0)),
             opt_level: 0,
             debug_info: false,
             lto: None,

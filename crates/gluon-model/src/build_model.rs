@@ -274,10 +274,11 @@ pub struct ProfileDef {
     /// Resolved parent profile. `None` when the profile does not inherit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherits: Option<Handle<ProfileDef>>,
-    /// Resolved target. `None` when the profile inherits its target from
-    /// a parent (resolution walks the chain).
+    /// Resolved target: a declared target, or the host for
+    /// `.target_host()`. `None` when the profile inherits its target
+    /// from a parent (resolution walks the chain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<Handle<TargetDef>>,
+    pub target: Option<TargetSpec>,
     pub opt_level: Option<u8>,
     pub debug_info: Option<bool>,
     pub lto: Option<String>,

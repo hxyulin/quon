@@ -23,7 +23,9 @@ cfg.profile("test").inherits("dev");
 
 A profile inherits its runner through `inherits`. A profile with no
 runner can still build, but `gluon run` and the integration tests fail
-with `profile '<name>' has no runner`.
+with `profile '<name>' has no runner`. The exception is a
+[host profile](../configuration/projects-targets-profiles.md#host-profiles),
+which runs its binaries directly when it names no runner.
 
 ## Kinds
 

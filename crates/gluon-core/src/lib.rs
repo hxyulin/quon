@@ -657,7 +657,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: th,
+                target: gluon_model::TargetSpec::Cross(th),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,
@@ -727,7 +727,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: th,
+                target: gluon_model::TargetSpec::Cross(th),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

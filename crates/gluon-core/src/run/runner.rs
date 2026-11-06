@@ -11,10 +11,11 @@
 //! - a QEMU runner boots it, with the boot mode, ESP, OVMF and disk
 //!   handling in `entry` and [`super::qemu_cmd`];
 //! - a command runner runs its argv with `{binary}` replaced by the
-//!   binary's path.
+//!   binary's path;
+//! - a host profile with no runner named runs the binary directly.
 
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, CommandRunnerDef, QemuDef, ResolvedConfig, RunnerKind};
+use gluon_model::{BuildModel, CommandRunnerDef, QemuDef, ResolvedConfig, RunnerKind, TargetSpec};
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
@@ -43,12 +44,15 @@ pub enum Runner<'m> {
         name: &'m str,
         def: &'m CommandRunnerDef,
     },
+    /// Run the binary itself: the default for a host profile.
+    Host,
 }
 
 impl<'m> Runner<'m> {
     pub fn name(&self) -> &'m str {
         match self {
             Runner::Qemu { name, .. } | Runner::Command { name, .. } => name,
+            Runner::Host => "host",
         }
     }
 
@@ -56,7 +60,7 @@ impl<'m> Runner<'m> {
     pub fn qemu(&self) -> Option<&'m QemuDef> {
         match self {
             Runner::Qemu { def, .. } => Some(def),
-            Runner::Command { .. } => None,
+            Runner::Command { .. } | Runner::Host => None,
         }
     }
 
@@ -68,21 +72,29 @@ impl<'m> Runner<'m> {
                 kind: "command",
                 option,
             }),
+            Runner::Host if asked => Err(Error::QemuOnlyOption {
+                runner: "host".to_string(),
+                kind: "host",
+                option,
+            }),
             _ => Ok(()),
         }
     }
 }
 
 /// The runner the resolved profile names, directly or through
-/// `inherits`.
+/// `inherits`. A host profile that names none runs its binaries
+/// directly.
 pub fn profile_runner<'m>(model: &'m BuildModel, resolved: &ResolvedConfig) -> Result<Runner<'m>> {
     let profile = &resolved.profile;
-    let def = profile
-        .runner
-        .and_then(|h| model.runners.get(h))
-        .ok_or_else(|| Error::NoRunner {
-            profile: profile.name.clone(),
-        })?;
+    let Some(def) = profile.runner.and_then(|h| model.runners.get(h)) else {
+        return match profile.target {
+            TargetSpec::Host => Ok(Runner::Host),
+            TargetSpec::Cross(_) => Err(Error::NoRunner {
+                profile: profile.name.clone(),
+            }),
+        };
+    };
     Ok(match &def.kind {
         RunnerKind::Qemu(q) => Runner::Qemu {
             name: &def.name,

@@ -128,18 +128,17 @@ impl<'a> Substituter<'a> {
             "project_root" => Ok(self.ctx.resolved.project_root.display().to_string()),
             "profile" => Ok(self.ctx.resolved.profile.name.clone()),
             "target" => {
-                let target: &TargetDef = self
-                    .ctx
-                    .model
-                    .targets
-                    .get(self.ctx.resolved.profile.target)
-                    .ok_or_else(|| {
-                        Error::Compile(format!(
-                            "rule '{}': internal error — target handle {:?} not found in \
-                                 build model (this is a bug in gluon, not in your configuration)",
-                            self.rule.name, self.ctx.resolved.profile.target
-                        ))
-                    })?;
+                let Some(t) = self.ctx.resolved.profile.cross_target() else {
+                    // A host profile: the triple rustc builds for.
+                    return Ok("host".to_string());
+                };
+                let target: &TargetDef = self.ctx.model.targets.get(t).ok_or_else(|| {
+                    Error::Compile(format!(
+                        "rule '{}': internal error — target handle {t:?} not found in \
+                         build model (this is a bug in gluon, not in your configuration)",
+                        self.rule.name
+                    ))
+                })?;
                 Ok(target.name.clone())
             }
             unknown => Err(Error::Compile(format!(

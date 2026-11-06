@@ -756,7 +756,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: target_handle,
+                target: TargetSpec::Cross(target_handle),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,
@@ -837,7 +837,7 @@ mod tests {
         let id = vendor_ctx
             .add(vendor_lib(
                 "bitflags",
-                TargetSpec::Cross(resolved.profile.target),
+                TargetSpec::Cross(resolved.profile.cross_target().unwrap()),
                 vec![],
             ))
             .expect("add ok");
@@ -885,7 +885,7 @@ mod tests {
     fn node_label_names_crate_target_and_profile() {
         use gluon_model::{CrateDef, CrateType, GroupDef};
         let (mut model, mut resolved) = make_minimal_model_and_resolved();
-        let target = resolved.profile.target;
+        let target = resolved.profile.cross_target().unwrap();
         let (group, _) = model.groups.insert(
             "kernel".into(),
             GroupDef {
@@ -1113,7 +1113,10 @@ mod tests {
         )
         .expect("first run");
 
-        let target = model.targets.get(resolved.profile.target).expect("target");
+        let target = model
+            .targets
+            .get(resolved.profile.cross_target().unwrap())
+            .expect("target");
         let bin = ctx
             .layout
             .cross_final_dir(target, &resolved.profile)
@@ -1191,7 +1194,7 @@ mod tests {
         // Verify the binary was produced.
         let target = model
             .targets
-            .get(resolved.profile.target)
+            .get(resolved.profile.cross_target().unwrap())
             .expect("target must exist");
         let final_dir = ctx.layout.cross_final_dir(target, &resolved.profile);
         let bin = final_dir.join("hello");
@@ -1315,7 +1318,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: target_handle,
+                target: TargetSpec::Cross(target_handle),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

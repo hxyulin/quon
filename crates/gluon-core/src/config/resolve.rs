@@ -60,7 +60,7 @@ pub fn resolve(
     // 3. Resolve effective target.
     let effective_target = match target_override {
         Some(name) => match model.targets.lookup(name) {
-            Some(h) => Some(h),
+            Some(h) => Some(TargetSpec::Cross(h)),
             None => {
                 diags.push(Diagnostic::error(format!(
                     "--target override '{name}' does not match any target defined in the build model"
@@ -326,6 +326,14 @@ pub fn resolve(
     //     scheduler compiles them for the build machine. All other crates
     //     are cross and receive their group's resolved target handle.
     let reachable = run_binary.map(|root| reachable_crates(model, root, effective_target));
+    // Host crates carry a target handle the scheduler never reads (see
+    // `ResolvedCrateRef::target`). A cross profile fills it with its
+    // target; a host profile may declare no target at all, so it gets a
+    // handle that resolves to nothing.
+    let placeholder = match effective_target {
+        TargetSpec::Cross(t) => t,
+        TargetSpec::Host => Handle::new(u32::MAX),
+    };
     let mut resolved_crates: Vec<ResolvedCrateRef> = Vec::new();
     for (crate_handle, krate) in model.crates.iter() {
         // Filter to reachable crates when run_binary is set.
@@ -342,13 +350,9 @@ pub fn resolve(
         // scheduler keys off `host: bool`. We use `effective_target` as a
         // safe placeholder so the field is always populated with a valid
         // arena handle.
-        let target = if is_host {
-            effective_target
-        } else {
-            match krate.target {
-                TargetSpec::Cross(h) => h,
-                TargetSpec::Host => effective_target,
-            }
+        let target = match krate.target {
+            TargetSpec::Cross(h) if !is_host => h,
+            _ => placeholder,
         };
         resolved_crates.push(ResolvedCrateRef {
             handle: crate_handle,
@@ -484,20 +488,21 @@ fn flatten_profile(
 fn reachable_crates(
     model: &BuildModel,
     root: Handle<CrateDef>,
-    target: Handle<TargetDef>,
+    target: TargetSpec,
 ) -> BTreeSet<Handle<CrateDef>> {
     let mut visited = BTreeSet::new();
     let mut queue = VecDeque::new();
     visited.insert(root);
     queue.push_back(root);
 
-    // Target seed: every crate built for the profile's target.
+    // Target seed: every crate built for the profile's target. A host
+    // profile has none; its run binary's closure is the build.
     for (h, krate) in model.crates.iter() {
         let cross = model
             .groups
             .get(krate.group)
             .is_some_and(|g| !matches!(g.target, TargetSpec::Host));
-        if cross && krate.target == TargetSpec::Cross(target) && visited.insert(h) {
+        if cross && target != TargetSpec::Host && krate.target == target && visited.insert(h) {
             queue.push_back(h);
         }
     }
@@ -893,7 +898,10 @@ mod tests {
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.profile.opt_level, 2);
         assert!(cfg.profile.debug_info);
-        assert_eq!(cfg.profile.target, model.targets.lookup("x").unwrap());
+        assert_eq!(
+            cfg.profile.target,
+            TargetSpec::Cross(model.targets.lookup("x").unwrap())
+        );
         assert_eq!(cfg.build_dir, Path::new("/tmp/proj/build"));
     }
 
@@ -911,7 +919,32 @@ mod tests {
             "should inherit opt_level from base"
         );
         assert!(cfg.profile.debug_info, "child sets debug_info");
-        assert_eq!(cfg.profile.target, model.targets.lookup("x").unwrap());
+        assert_eq!(
+            cfg.profile.target,
+            TargetSpec::Cross(model.targets.lookup("x").unwrap())
+        );
+    }
+
+    /// A host profile needs no declared target, and its host crates
+    /// resolve as host crates.
+    #[test]
+    fn resolve_host_profile() {
+        let model = build_model(|cfg| {
+            cfg.project("t", "1");
+            cfg.group("tools")
+                .target_host()
+                .add("tool", "tool")
+                .crate_type(gluon_model::CrateType::Bin);
+            cfg.profile("dev").target_host().run_binary("tool");
+            cfg.profile("child").inherits("dev");
+        });
+        for name in ["dev", "child"] {
+            let cfg = resolve(&model, name, None, Path::new("/tmp"), None).expect("resolve");
+            assert_eq!(cfg.profile.target, TargetSpec::Host);
+            assert_eq!(cfg.profile.cross_target(), None);
+            assert_eq!(cfg.crates.len(), 1);
+            assert!(cfg.crates[0].host);
+        }
     }
 
     #[test]
@@ -923,7 +956,10 @@ mod tests {
             cfg.profile("default").target(a);
         });
         let cfg = resolve(&model, "default", Some("b"), Path::new("/tmp"), None).expect("resolve");
-        assert_eq!(cfg.profile.target, model.targets.lookup("b").unwrap());
+        assert_eq!(
+            cfg.profile.target,
+            TargetSpec::Cross(model.targets.lookup("b").unwrap())
+        );
     }
 
     #[test]

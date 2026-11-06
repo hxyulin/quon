@@ -7,7 +7,7 @@
 //! Everything downstream of resolution works with these types, never with
 //! the raw build model directly.
 
-use crate::build_model::{BootMode, CrateDef, ProjectDef, TargetDef};
+use crate::build_model::{BootMode, CrateDef, ProjectDef, TargetDef, TargetSpec};
 use crate::handle::Handle;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -29,7 +29,8 @@ pub enum ResolvedValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedProfile {
     pub name: String,
-    pub target: Handle<TargetDef>,
+    /// The profile's target, or the host for `.target_host()`.
+    pub target: TargetSpec,
     pub opt_level: u8,
     pub debug_info: bool,
     pub lto: Option<String>,
@@ -65,8 +66,9 @@ pub struct ResolvedCrateRef {
     pub handle: Handle<CrateDef>,
     /// Always equals the crate's own `target_handle` after resolution; carried
     /// here so the scheduler can avoid the indirection. For host crates this
-    /// is a placeholder (the resolved target of the active profile) and the
-    /// `host` flag should be consulted instead.
+    /// is a placeholder that nothing reads: the active profile's target, or,
+    /// for a host profile, a handle that resolves to nothing. Consult the
+    /// `host` flag instead.
     pub target: Handle<TargetDef>,
     /// True when this crate's group targets the literal `"host"` triple.
     /// Host crates are built for the build machine and are not subject to
@@ -91,6 +93,14 @@ impl ResolvedProfile {
     /// profiles (e.g. a future `gluon profile show <name>` or LSP
     /// hover that needs to flatten an inherited chain without
     /// re-running resolve). Drop this method if no caller materialises.
+    /// The declared target, or `None` for a host profile.
+    pub fn cross_target(&self) -> Option<Handle<TargetDef>> {
+        match self.target {
+            TargetSpec::Cross(t) => Some(t),
+            TargetSpec::Host => None,
+        }
+    }
+
     pub fn merge_inherited(&mut self, parent: &Self) {
         if self.lto.is_none() {
             self.lto = parent.lto.clone();
@@ -144,7 +154,7 @@ mod tests {
     fn merge_inherited_fills_none_slots_only() {
         let parent = ResolvedProfile {
             name: "parent".into(),
-            target: Handle::new(0),
+            target: TargetSpec::Cross(Handle::new(0)),
             opt_level: 2,
             debug_info: false,
             lto: Some("fat".into()),
@@ -158,7 +168,7 @@ mod tests {
         };
         let mut child = ResolvedProfile {
             name: "child".into(),
-            target: Handle::new(0),
+            target: TargetSpec::Cross(Handle::new(0)),
             opt_level: 0, // child overrides
             debug_info: true,
             lto: None, // child inherits

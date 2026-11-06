@@ -205,7 +205,7 @@ pub(crate) mod test_support {
     pub fn make_profile(target: Handle<TargetDef>) -> ResolvedProfile {
         ResolvedProfile {
             name: "debug".into(),
-            target,
+            target: gluon_model::TargetSpec::Cross(target),
             opt_level: 0,
             debug_info: false,
             lto: None,

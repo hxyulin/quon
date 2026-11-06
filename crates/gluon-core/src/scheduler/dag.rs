@@ -234,7 +234,10 @@ pub fn build_dag(resolved: &ResolvedConfig, model: &BuildModel, units: &UnitGrap
             dag.insert_node(DagNode::ConfigCrate(t));
         }
     };
-    insert_target(&mut dag, resolved.profile.target, true);
+    // A host profile has no sysroot or config crate of its own.
+    if let Some(t) = resolved.profile.cross_target() {
+        insert_target(&mut dag, t, true);
+    }
     for (_, unit) in units.iter() {
         if let (true, Platform::Cross(t)) = (unit.sysroot, unit.platform) {
             insert_target(&mut dag, t, unit.config_crate);
@@ -512,7 +515,7 @@ mod tests {
         pub fn make_profile(target: Handle<TargetDef>) -> ResolvedProfile {
             ResolvedProfile {
                 name: "debug".into(),
-                target,
+                target: TargetSpec::Cross(target),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

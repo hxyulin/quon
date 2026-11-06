@@ -362,7 +362,7 @@ mod tests {
     fn profile() -> ResolvedProfile {
         ResolvedProfile {
             name: "debug".into(),
-            target: Handle::new(0),
+            target: gluon_model::TargetSpec::Cross(Handle::new(0)),
             opt_level: 0,
             debug_info: true,
             lto: None,

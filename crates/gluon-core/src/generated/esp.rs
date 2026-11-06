@@ -72,12 +72,13 @@ pub fn ensure_esp(
     // (e.g. bootloader = x86_64-unknown-uefi, kernel = x86_64-unknown-none).
     // Keying by profile.target keeps the output path stable.
     let profile = &resolved.profile;
-    let target = model.targets.get(profile.target).ok_or_else(|| {
-        Error::Compile(format!(
-            "scheduler: profile '{}' has target handle {:?} not in model.targets",
-            profile.name, profile.target
-        ))
-    })?;
+    let Some(target) = profile.cross_target().and_then(|t| model.targets.get(t)) else {
+        return Err(Error::Compile(format!(
+            "esp '{}': profile '{}' builds for the host, and an ESP is assembled for the \
+             profile's target; build it with a profile that names one",
+            esp.name, profile.name
+        )));
+    };
     let esp_dir = ctx.layout.esp_dir(target, profile, &esp.name);
 
     // Resolve every entry to its built artifact. Intern has already
@@ -339,7 +340,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: th,
+                target: TargetSpec::Cross(th),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,
@@ -429,7 +430,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: th,
+                target: TargetSpec::Cross(th),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

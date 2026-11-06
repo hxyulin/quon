@@ -334,7 +334,10 @@ fn intern_profiles(
     // Two passes: insert all profiles, then resolve `inherits` handles.
     for (_, p) in raw.iter() {
         let target_handle = p.target.as_deref().and_then(|name| {
-            let h = targets.lookup(name);
+            if name == "host" {
+                return Some(TargetSpec::Host);
+            }
+            let h = targets.lookup(name).map(TargetSpec::Cross);
             if h.is_none() {
                 diags.push(
                     InternDiagnostic::error(format!(

@@ -184,7 +184,7 @@ pub fn prepare_tests(
                 }
             }
         }
-        Runner::Command { .. } => None,
+        Runner::Command { .. } | Runner::Host => None,
     };
 
     let run_opts = RunOptions {

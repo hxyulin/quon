@@ -416,7 +416,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target: th,
+                target: TargetSpec::Cross(th),
                 opt_level: 0,
                 debug_info: false,
                 lto: None,

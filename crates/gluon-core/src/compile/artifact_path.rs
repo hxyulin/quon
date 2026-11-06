@@ -177,7 +177,7 @@ mod tests {
             },
             profile: ResolvedProfile {
                 name: "dev".into(),
-                target,
+                target: TargetSpec::Cross(target),
                 opt_level: 0,
                 debug_info: true,
                 lto: None,

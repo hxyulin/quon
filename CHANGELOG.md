@@ -25,6 +25,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runner, such as one a config option turns on.
 - **`CrateType::Test`**, a libtest executable built with `--test`.
 
+### Added (host profiles)
+
+- **`profile.target_host()`** makes a profile build for the host. It
+  needs no declared target and builds no sysroot or config crate. With
+  no runner named, `gluon run` runs the binary directly, passing the
+  arguments after `--`. `ResolvedProfile::target` is now a
+  `TargetSpec`; `cross_target()` gives the handle of a cross profile.
+
 ### Changed (runners)
 
 - **Runners replace `cfg.qemu(...)`.** `cfg.runner(name)` declares how

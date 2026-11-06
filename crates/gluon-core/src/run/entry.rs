@@ -18,7 +18,9 @@ use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use crate::scheduler::{BuildSummary, Reporter};
 use crate::{build_with_reporter, model::BootMode};
-use gluon_model::{BuildModel, CrateDef, EspSource, Handle, QemuDef, ResolvedConfig, TargetDef};
+use gluon_model::{
+    BuildModel, CrateDef, EspSource, Handle, QemuDef, ResolvedConfig, TargetDef, TargetSpec,
+};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -163,15 +165,26 @@ pub(super) fn final_binary(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    krate: Handle<CrateDef>,
+    handle: Handle<CrateDef>,
 ) -> Result<PathBuf> {
     let profile = &resolved.profile;
-    let krate = model.crates.get(krate).ok_or_else(|| {
+    let krate = model.crates.get(handle).ok_or_else(|| {
         Error::Config(format!(
             "internal: crate handle for profile '{}' does not resolve in the model",
             profile.name
         ))
     })?;
+    if resolved.profile.target == TargetSpec::Host {
+        // Host executables carry their metadata hash in the file name,
+        // so the path comes from the unit lowering the build uses.
+        let outputs = crate::crate_outputs(ctx, model, resolved)?;
+        return outputs.get(&handle).cloned().ok_or_else(|| {
+            Error::Config(format!(
+                "profile '{}': crate '{}' is not built by this profile",
+                profile.name, krate.name
+            ))
+        });
+    }
     let target = profile_target(model, resolved)?;
     let suffix = crate::compile::compile_utils::exe_suffix_for_target(&target.spec);
     Ok(ctx.layout.cross_final_dir(target, profile).join(format!(
@@ -184,10 +197,18 @@ pub(super) fn profile_target<'m>(
     model: &'m BuildModel,
     resolved: &ResolvedConfig,
 ) -> Result<&'m TargetDef> {
-    model.targets.get(resolved.profile.target).ok_or_else(|| {
+    let profile = &resolved.profile;
+    let t = profile.cross_target().ok_or_else(|| {
+        Error::Config(format!(
+            "profile '{}' builds for the host, and booting under QEMU needs a target; \
+             use a profile with `.target(..)`",
+            profile.name
+        ))
+    })?;
+    model.targets.get(t).ok_or_else(|| {
         Error::Config(format!(
             "internal: profile '{}' target handle does not resolve",
-            resolved.profile.name
+            profile.name
         ))
     })
 }
@@ -228,6 +249,13 @@ pub(super) fn invocation(
         Runner::Command { name, def } => {
             command_invocation(name, def, kernel, &opts.extra_args, opts.timeout_override)
         }
+        Runner::Host => Ok(Invocation {
+            binary: kernel.to_string_lossy().into_owned(),
+            args: opts.extra_args.clone(),
+            timeout: opts.timeout_override,
+            runner: "host".into(),
+            success_exit_code: None,
+        }),
     }
 }
 
