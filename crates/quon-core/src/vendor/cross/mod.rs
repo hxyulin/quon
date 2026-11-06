@@ -176,9 +176,10 @@ pub fn build_cross_vendor_context(
         }
         let vendor_dir = scratch.join("vendor");
         let json = cargo_cmd::run_cargo_metadata(&scratch, &vendor_dir, flags)?;
-        let platform = platform::probe(
+        let platform = platform::probe_with_flags(
             rustc_info,
             &ProbeTarget::for_target(target, project_root),
+            &target.rustc_flags,
             Some(&layout.target_cfg_cache()),
         )?;
         // Build-dependency edges are matched against the host, where
@@ -269,6 +270,7 @@ mod tests {
                 builtin: true,
                 build_std: false,
                 panic_strategy: Some(PanicStrategy::Abort),
+                rustc_flags: Vec::new(),
                 span: None,
             },
         );
@@ -305,6 +307,7 @@ mod tests {
                 builtin: true,
                 build_std: false,
                 panic_strategy: None,
+                rustc_flags: Vec::new(),
                 span: None,
             },
         );

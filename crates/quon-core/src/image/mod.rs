@@ -935,6 +935,7 @@ mod tests {
                 builtin: true,
                 build_std: false,
                 panic_strategy: Some(PanicStrategy::Abort),
+                rustc_flags: Vec::new(),
                 span: None,
             },
         );

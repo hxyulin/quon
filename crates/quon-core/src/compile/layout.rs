@@ -139,12 +139,20 @@ impl BuildLayout {
     }
 
     /// The directory rustc expects sysroot libs in
-    /// (`<sysroot>/lib/rustlib/<target>/lib`).
+    /// (`<sysroot>/lib/rustlib/<target>/lib`). rustc names a builtin
+    /// target there by its triple, which a [`TargetDef::name`] given
+    /// with `Target::named` differs from; the sysroot itself stays
+    /// keyed by the name.
     pub fn sysroot_lib_dir(&self, target: &TargetDef) -> PathBuf {
+        let rustc_name = if target.builtin {
+            &target.spec
+        } else {
+            &target.name
+        };
         self.sysroot_dir(target)
             .join("lib")
             .join("rustlib")
-            .join(&target.name)
+            .join(rustc_name)
             .join("lib")
     }
 
@@ -356,6 +364,7 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         }
     }
@@ -432,7 +441,7 @@ mod tests {
         );
         assert_eq!(
             l.sysroot_lib_dir(&t),
-            PathBuf::from("/tmp/fake/sysroot/x86_64-test/lib/rustlib/x86_64-test/lib")
+            PathBuf::from("/tmp/fake/sysroot/x86_64-test/lib/rustlib/x86_64-unknown-none/lib")
         );
     }
 
@@ -597,6 +606,7 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         };
         let t2 = TargetDef {
@@ -605,8 +615,16 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         };
         assert_ne!(l.sysroot_dir(&t1), l.sysroot_dir(&t2));
+        // rustc looks a builtin target's libraries up by its triple.
+        assert!(
+            l.sysroot_lib_dir(&t1)
+                .ends_with("x86_64-a/lib/rustlib/x86_64-unknown-none/lib"),
+            "{}",
+            l.sysroot_lib_dir(&t1).display()
+        );
     }
 }

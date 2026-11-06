@@ -497,6 +497,7 @@ mod tests {
             builtin,
             build_std: false,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         }
     }
@@ -517,6 +518,7 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: Some(strategy),
+            rustc_flags: Vec::new(),
             span: None,
         }
     }

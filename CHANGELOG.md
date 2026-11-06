@@ -26,6 +26,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Profile::qemu_boot_mode` are removed. See
   [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
 
+### Added (target flags)
+
+- **`Target::rustc_flag(flag)`** passes a flag to every crate built for
+  the target, dependencies and a built sysroot included, as Cargo's
+  `[target.<triple>] rustflags` does. Build scripts see it in
+  `CARGO_ENCODED_RUSTFLAGS`, and the cfg probe runs with it.
+- **`Target::named(name)`** names a builtin triple apart, so one triple
+  can be several targets, such as one per CPU, each with its own flags,
+  features and artifacts.
+
 ### Added (workspace members in `quon.rs`)
 
 - **`q.cargo_workspace(dir).members()`** returns the workspace's member

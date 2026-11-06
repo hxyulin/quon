@@ -376,6 +376,12 @@ fn build_command(
             .raw_arg("-C")
             .raw_arg(format!("panic={}", s.as_str()));
     }
+    // The target's own flags reach every crate built for it, as Cargo's
+    // `[target.<triple>] rustflags` do; the crate's flags come after,
+    // so a crate can still override one.
+    for flag in target.map(|t| t.rustc_flags.as_slice()).unwrap_or_default() {
+        builder.raw_arg(flag.as_str());
+    }
 
     for flag in &unit.settings.rustc_flags {
         builder.raw_arg(flag.as_str());

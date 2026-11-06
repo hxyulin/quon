@@ -297,6 +297,7 @@ fn dispatch_run_build_script(
             if let Some(s) = target.panic_strategy {
                 target_rustflags.push(format!("-Cpanic={}", s.as_str()));
             }
+            target_rustflags.extend(target.rustc_flags.iter().cloned());
             spec_file = crate::compile::rustc::target_spec_file(&target.spec, target.builtin);
             quon_sysroot = view
                 .sysroot(t)
@@ -803,6 +804,7 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: Some(PanicStrategy::Abort),
+            rustc_flags: Vec::new(),
             span: None,
         };
         let (target_handle, _) = model.targets.insert("x86_64-unknown-none".into(), target);
@@ -1324,6 +1326,7 @@ mod tests {
             builtin: true,
             build_std: false,
             panic_strategy: Some(PanicStrategy::Abort),
+            rustc_flags: Vec::new(),
             span: None,
         };
         let (target_handle, _) = model

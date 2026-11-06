@@ -192,6 +192,7 @@ pub(crate) mod test_support {
             builtin: true,
             build_std: false,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         }
     }

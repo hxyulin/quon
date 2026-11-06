@@ -17,6 +17,27 @@
 /// # let _ = (kernel, firmware, custom, host);
 /// ```
 ///
+/// ### Flags for every crate
+///
+/// [`Target::rustc_flag`] passes a flag to every crate built for the
+/// target, dependencies included, as Cargo's
+/// `[target.<triple>] rustflags` does. [`Target::named`] gives a
+/// builtin triple a name of its own, so one triple can be several
+/// targets with different flags. Each named target resolves features,
+/// builds and stores its crates separately:
+///
+/// ```
+/// use quon_config::Target;
+///
+/// let m7 = Target::builtin("thumbv7em-none-eabihf")
+///     .named("cortex-m7")
+///     .rustc_flag("-Ctarget-cpu=cortex-m7");
+/// let m4 = Target::builtin("thumbv7em-none-eabihf")
+///     .named("cortex-m4")
+///     .rustc_flag("-Ctarget-cpu=cortex-m4");
+/// # let _ = (m7, m4);
+/// ```
+///
 /// ### Sysroot
 ///
 /// A builtin target links the toolchain's prebuilt `core`,
@@ -28,6 +49,9 @@
 pub struct Target {
     pub(crate) kind: TargetKind,
     pub(crate) build_std: bool,
+    /// From [`Target::named`].
+    pub(crate) name: Option<String>,
+    pub(crate) rustc_flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,6 +93,8 @@ impl Target {
         Self {
             kind,
             build_std: false,
+            name: None,
+            rustc_flags: Vec::new(),
         }
     }
 
@@ -84,9 +110,42 @@ impl Target {
         self
     }
 
-    /// The target's name: the triple, the spec's name, or `host`.
+    /// Name the target `name` instead of after its triple, as
+    /// `quon build -t <name>` and the build directory
+    /// (`build/cross/<name>/`) call it. Two targets with one triple
+    /// and different [`rustc_flag`](Self::rustc_flag)s need different
+    /// names: a name is defined once, and crates of different targets
+    /// never share an artifact. Rustc still gets the triple, and
+    /// `[target.<triple>]` manifest keys still match it.
+    #[must_use]
+    pub fn named(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Pass `flag` to rustc for every crate built for this target, such
+    /// as `-Ctarget-cpu=cortex-m7`: workspace crates, dependencies, and
+    /// a sysroot Quon builds. Build scripts see it in
+    /// `CARGO_ENCODED_RUSTFLAGS`, and Quon's `rustc --print cfg` probe
+    /// gets it too, since a flag can change the target's cfgs. A
+    /// prebuilt sysroot was compiled without it, as with Cargo. Call it
+    /// once per flag.
+    ///
+    /// [`Package::rustc_flag`](crate::Package::rustc_flag) reaches only
+    /// the package's own crate.
+    #[must_use]
+    pub fn rustc_flag(mut self, flag: impl Into<String>) -> Self {
+        self.rustc_flags.push(flag.into());
+        self
+    }
+
+    /// The target's name: its [`named`](Self::named) name, else the
+    /// triple, the spec's name, or `host`.
     #[must_use]
     pub fn name(&self) -> &str {
+        if let Some(name) = &self.name {
+            return name;
+        }
         match &self.kind {
             TargetKind::Host => HOST,
             TargetKind::Builtin(triple) => triple,

@@ -63,6 +63,48 @@ A package or crate without `.target(..)` builds for
 `q.default_target`, else for the host. A `Dependency` without
 `.target(..)` builds for the host.
 
+### Flags for every crate of a target
+
+`.rustc_flag(flag)` on a `Target` passes `flag` to rustc for every
+crate built for that target, its dependencies included, as Cargo's
+`[target.<triple>] rustflags` does. `.named(name)` gives a builtin
+triple a name of its own, so one triple can be two targets with
+different flags:
+
+```rust,ignore
+let m7 = Target::builtin("thumbv7em-none-eabihf")
+    .named("cortex-m7")
+    .rustc_flag("-Ctarget-cpu=cortex-m7");
+let m4 = Target::builtin("thumbv7em-none-eabihf")
+    .named("cortex-m4")
+    .rustc_flag("-Ctarget-cpu=cortex-m4");
+let board_a = q.add(Package::new("board-a").target(&m7));
+let board_b = q.add(Package::new("board-b").target(&m4));
+```
+
+- The flags reach workspace crates, dependencies, a sysroot Quon
+  builds (`.build_std()` or a custom spec), and the generated config
+  crate. A prebuilt sysroot was compiled without them, as with Cargo.
+- Build scripts see them in `CARGO_ENCODED_RUSTFLAGS`.
+- Quon's `rustc --print cfg` probe runs with them, because a flag can
+  change the target's cfgs: `-Ctarget-cpu=cortex-m7` adds
+  `target_feature="fp64"`, which a `[target.'cfg(..)'.dependencies]`
+  key can test.
+- A package's own `.rustc_flag(..)` reaches only its own crate, and
+  comes after the target's flags.
+- A target's name is what `quon build -t <name>` takes and where its
+  outputs go (`build/cross/<name>/`). Each named target resolves
+  features and builds its crates apart, so crates of two targets never
+  share an artifact. rustc still gets the triple, and
+  `[target.<triple>]` keys still match it.
+- A name is defined once: two targets with one name and different
+  triples, `build_std` or flags are an error. `Target::host()` takes
+  neither a name nor flags, since host crates include every target's
+  build scripts and proc macros.
+
+Changing a target's flags rebuilds its crates and, when Quon builds
+it, its sysroot.
+
 ## Profiles
 
 A profile says how crates are compiled, like a Cargo profile. Select

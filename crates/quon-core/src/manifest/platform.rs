@@ -140,7 +140,19 @@ pub fn probe(
     target: &ProbeTarget,
     cache_path: Option<&Path>,
 ) -> Result<TargetPlatform> {
-    let key = cache_key(rustc, target)?;
+    probe_with_flags(rustc, target, &[], cache_path)
+}
+
+/// [`probe`] with the target's rustc flags, such as `-Ctarget-cpu`,
+/// which can add or remove `target_feature` cfgs. The flags are part of
+/// the cache key.
+pub fn probe_with_flags(
+    rustc: &RustcInfo,
+    target: &ProbeTarget,
+    flags: &[String],
+    cache_path: Option<&Path>,
+) -> Result<TargetPlatform> {
+    let key = cache_key(rustc, target, flags)?;
     let mut cache = cache_path.map(load_cache).unwrap_or_default();
     if let Some(entry) = cache.entries.get(&key)
         && let Ok(p) = TargetPlatform::from_cfg_lines(&entry.name, entry.lines.iter().map(|s| &**s))
@@ -148,7 +160,7 @@ pub fn probe(
         return Ok(p);
     }
 
-    let lines = run_print_cfg(rustc, target)?;
+    let lines = run_print_cfg(rustc, target, flags)?;
     let name = platform_name(rustc, target);
     let platform = TargetPlatform::from_cfg_lines(&name, lines.iter().map(|s| &**s))?;
 
@@ -182,7 +194,7 @@ fn platform_name(rustc: &RustcInfo, target: &ProbeTarget) -> String {
     }
 }
 
-fn cache_key(rustc: &RustcInfo, target: &ProbeTarget) -> Result<String> {
+fn cache_key(rustc: &RustcInfo, target: &ProbeTarget, flags: &[String]) -> Result<String> {
     let mut h = Sha256::new();
     h.update(b"quon.target-cfg.v1\0");
     for part in [
@@ -213,6 +225,12 @@ fn cache_key(rustc: &RustcInfo, target: &ProbeTarget) -> Result<String> {
             h.update(Sha256::digest(&bytes));
         }
     }
+    // Without flags the key is the one it was before flags existed, so
+    // existing cache entries stay valid.
+    for flag in flags {
+        h.update(b"\0flag\0");
+        h.update(flag.as_bytes());
+    }
     Ok(hex(&h.finalize()))
 }
 
@@ -220,9 +238,10 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn run_print_cfg(rustc: &RustcInfo, target: &ProbeTarget) -> Result<Vec<String>> {
+fn run_print_cfg(rustc: &RustcInfo, target: &ProbeTarget, flags: &[String]) -> Result<Vec<String>> {
     let mut cmd = Command::new(&rustc.rustc_path);
     cmd.args(["--print", "cfg"]);
+    cmd.args(flags);
     // Same `--target` shape as `RustcCommandBuilder::target`, so the
     // probe sees exactly what the compile sees.
     match target {
@@ -317,6 +336,37 @@ mod tests {
         assert_eq!(platform_name(&info, &ProbeTarget::Host), info.host_triple);
     }
 
+    /// `-Ctarget-cpu=cortex-m7` adds `target_feature="fp64"` on
+    /// thumbv7em, which a `[target.'cfg(..)']` key can test, so the
+    /// probe must run with the target's flags and cache per flag set.
+    #[test]
+    fn target_flags_reach_the_probe_and_its_cache_key() {
+        let Ok(info) = RustcInfo::probe() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("target-cfg.json");
+        let target = ProbeTarget::Builtin("thumbv7em-none-eabihf".into());
+        let fp64 = "cfg(target_feature = \"fp64\")";
+        let with_cpu = |cpu: &str| {
+            probe_with_flags(
+                &info,
+                &target,
+                &[format!("-Ctarget-cpu={cpu}")],
+                Some(&cache),
+            )
+            .expect("probe with flags")
+        };
+        let plain = probe(&info, &target, Some(&cache)).expect("probe");
+        let m7 = with_cpu("cortex-m7");
+        // Probed after cortex-m7, so a key that ignored the flag's value
+        // would serve cortex-m7's cfgs.
+        let m4 = with_cpu("cortex-m4");
+        assert!(!plain.matches_key(fp64).unwrap());
+        assert!(m7.matches_key(fp64).unwrap());
+        assert!(!m4.matches_key(fp64).unwrap());
+    }
+
     #[test]
     fn probe_builtin_and_host_with_cache() {
         let Ok(info) = RustcInfo::probe() else {
@@ -369,9 +419,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let spec = tmp.path().join("t.json");
         std::fs::write(&spec, "{}").unwrap();
-        let a = cache_key(&info, &ProbeTarget::Spec(spec.clone())).unwrap();
+        let a = cache_key(&info, &ProbeTarget::Spec(spec.clone()), &[]).unwrap();
         std::fs::write(&spec, "{ }").unwrap();
-        let b = cache_key(&info, &ProbeTarget::Spec(spec)).unwrap();
+        let b = cache_key(&info, &ProbeTarget::Spec(spec), &[]).unwrap();
         assert_ne!(a, b);
     }
 }

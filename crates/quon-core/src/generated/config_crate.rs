@@ -299,6 +299,9 @@ pub fn ensure_config_crate(
             .raw_arg("-C")
             .raw_arg(format!("panic={}", s.as_str()));
     }
+    for flag in &target.rustc_flags {
+        builder.raw_arg(flag.as_str());
+    }
 
     // metadata and extra-filename LAST, as for every unit, so the token
     // order (and therefore the cache key hash) stays stable.

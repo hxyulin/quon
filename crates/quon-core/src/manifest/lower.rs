@@ -234,7 +234,10 @@ fn probe_platforms(
             continue;
         };
         let probe = ProbeTarget::for_target(t, project_root);
-        platforms.insert(domain, platform::probe(rustc, &probe, cfg_cache)?);
+        platforms.insert(
+            domain,
+            platform::probe_with_flags(rustc, &probe, &t.rustc_flags, cfg_cache)?,
+        );
     }
     Ok(platforms)
 }

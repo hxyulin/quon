@@ -63,15 +63,15 @@ pub(crate) fn sysroot_command(ctx: &CompileCtx, target: &TargetDef) -> [u8; 32] 
         .map(|p| p.as_os_str().as_encoded_bytes())
         .unwrap_or_default();
     let panic = target.panic_strategy.map(|p| p.as_str()).unwrap_or("");
-    hash_parts(
-        "quon.sysroot.v2",
-        &[
-            target.spec.as_bytes(),
-            &[u8::from(target.builtin)],
-            panic.as_bytes(),
-            rust_src,
-        ],
-    )
+    let builtin = [u8::from(target.builtin)];
+    let mut parts: Vec<&[u8]> = vec![target.spec.as_bytes(), &builtin, panic.as_bytes(), rust_src];
+    // Only a target with flags hashes them, so sysroots of targets
+    // without any keep the key they had before target flags existed.
+    if !target.rustc_flags.is_empty() {
+        parts.push(b"rustc_flags");
+        parts.extend(target.rustc_flags.iter().map(|f| f.as_bytes()));
+    }
+    hash_parts("quon.sysroot.v2", &parts)
 }
 
 /// Ensure a usable custom sysroot exists for `target` and return its
@@ -349,6 +349,11 @@ fn build_sysroot_crate(
             .raw_arg("-C")
             .raw_arg(format!("panic={}", s.as_str()));
     }
+    // The target's flags reach its sysroot too, as `-Zbuild-std` with
+    // `[target.<triple>] rustflags` does.
+    for flag in &target.rustc_flags {
+        builder.raw_arg(flag.as_str());
+    }
 
     // compiler_builtins needs two cfgs to build standalone:
     //   * `feature="compiler-builtins"` activates the crate's
@@ -460,6 +465,7 @@ mod tests {
             // These tests are about the sysroot Quon builds.
             build_std: true,
             panic_strategy: None,
+            rustc_flags: Vec::new(),
             span: None,
         }
     }
@@ -580,6 +586,29 @@ mod tests {
         assert!(
             !matches!(result, Ok((_, true))),
             "sysroot built for another panic strategy was served from cache"
+        );
+    }
+
+    #[test]
+    fn target_flags_change_invalidates_sysroot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = BuildLayout::new(tmp.path(), "flags-change");
+        let mut target = make_target();
+        target.rustc_flags = vec!["-Ctarget-cpu=cortex-m4".into()];
+        let real_path = which_binary("cat").unwrap_or_else(|| PathBuf::from("/bin/sh"));
+        let info = fake_rustc_info(real_path.clone(), None);
+        write_fake_rlibs(&layout, &target);
+        let ctx = record_sysroot_for_test(layout, info, &target);
+        let mut stderr_sink = Vec::new();
+        let (_, cached) = ensure_sysroot(&ctx, &target, &mut stderr_sink).expect("fast path");
+        assert!(cached, "unchanged target must hit the record");
+
+        let mut retuned = target.clone();
+        retuned.rustc_flags = vec!["-Ctarget-cpu=cortex-m7".into()];
+        let result = ensure_sysroot(&ctx, &retuned, &mut stderr_sink);
+        assert!(
+            !matches!(result, Ok((_, true))),
+            "sysroot built with other target flags was served from cache"
         );
     }
 

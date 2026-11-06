@@ -762,6 +762,16 @@ impl Lowering {
                             .into(),
                     );
                 }
+                // Host crates include build scripts and proc macros,
+                // which every target shares, so a host flag or name
+                // would reach far more than the host target.
+                if t.name.is_some() || !t.rustc_flags.is_empty() {
+                    self.error(
+                        "Target::host() cannot use named() or rustc_flag(): it builds \
+                         every target's build scripts and proc macros"
+                            .into(),
+                    );
+                }
                 return HOST.into();
             }
             TargetKind::Builtin(triple) => (triple.clone(), true),
@@ -771,28 +781,43 @@ impl Lowering {
         // tells builtin targets apart.
         let build_std = builtin && t.build_std;
         let name = t.name().to_string();
+        if name == HOST {
+            self.error(format!(
+                "target name \"{HOST}\" is reserved for Target::host()"
+            ));
+        }
         let def = TargetDef {
             name: name.clone(),
             spec: spec.clone(),
             builtin,
             build_std,
             panic_strategy: None,
+            rustc_flags: t.rustc_flags.clone(),
             span: None,
         };
         let (h, inserted) = self.raw.targets.insert(name.clone(), def);
         if !inserted
             && let Some(prev) = self.raw.targets.get(h)
-            && (prev.spec != spec || prev.builtin != builtin || prev.build_std != build_std)
+            && (prev.spec != spec
+                || prev.builtin != builtin
+                || prev.build_std != build_std
+                || prev.rustc_flags != t.rustc_flags)
         {
-            let describe = |spec: &str, builtin: bool, build_std: bool| match (builtin, build_std) {
-                (true, true) => format!("builtin target \"{spec}\" with build_std()"),
-                (true, false) => format!("builtin target \"{spec}\""),
-                (false, _) => format!("custom spec \"{spec}\""),
+            let describe = |spec: &str, builtin: bool, build_std: bool, flags: &[String]| {
+                let mut text = match (builtin, build_std) {
+                    (true, true) => format!("builtin target \"{spec}\" with build_std()"),
+                    (true, false) => format!("builtin target \"{spec}\""),
+                    (false, _) => format!("custom spec \"{spec}\""),
+                };
+                if !flags.is_empty() {
+                    text.push_str(&format!(" with rustc flags {flags:?}"));
+                }
+                text
             };
             let message = format!(
                 "target \"{name}\" is defined twice: as {} and as {}",
-                describe(&prev.spec, prev.builtin, prev.build_std),
-                describe(&spec, builtin, build_std)
+                describe(&prev.spec, prev.builtin, prev.build_std, &prev.rustc_flags),
+                describe(&spec, builtin, build_std, &t.rustc_flags)
             );
             self.error(message);
         }
@@ -1460,6 +1485,60 @@ mod tests {
         });
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("target \"x\" is defined twice"));
+    }
+
+    #[test]
+    fn named_targets_share_a_triple_carry_their_own_flags_and_a_name_is_defined_once() {
+        let m7 = Target::builtin("thumbv7em-none-eabihf")
+            .named("cortex-m7")
+            .rustc_flag("-Ctarget-cpu=cortex-m7");
+        let m4 = Target::builtin("thumbv7em-none-eabihf")
+            .named("cortex-m4")
+            .rustc_flag("-Ctarget-cpu=cortex-m4");
+        let (raw, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&m7));
+            q.add(Crate::lib("b", "b").target(&m4));
+            q.default_target(&m7);
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        let targets: Vec<_> = raw
+            .targets
+            .iter()
+            .map(|(_, t)| (t.name.as_str(), t.spec.as_str(), t.rustc_flags.clone()))
+            .collect();
+        assert_eq!(
+            targets,
+            [
+                (
+                    "cortex-m7",
+                    "thumbv7em-none-eabihf",
+                    vec!["-Ctarget-cpu=cortex-m7".to_owned()]
+                ),
+                (
+                    "cortex-m4",
+                    "thumbv7em-none-eabihf",
+                    vec!["-Ctarget-cpu=cortex-m4".to_owned()]
+                ),
+            ]
+        );
+
+        let (_, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&m7));
+            q.add(Crate::lib("b", "b").target(&m4.clone().named("cortex-m7")));
+        });
+        assert_eq!(
+            errors,
+            ["target \"cortex-m7\" is defined twice: as builtin target \
+                 \"thumbv7em-none-eabihf\" with rustc flags [\"-Ctarget-cpu=cortex-m7\"] \
+                 and as builtin target \"thumbv7em-none-eabihf\" with rustc flags \
+                 [\"-Ctarget-cpu=cortex-m4\"]"]
+        );
+
+        let (_, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&Target::host().rustc_flag("-Copt-level=3")));
+        });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("Target::host() cannot use named() or rustc_flag()"));
     }
 
     #[test]

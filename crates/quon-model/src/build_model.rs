@@ -292,6 +292,13 @@ pub struct TargetDef {
     /// crates for a target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panic_strategy: Option<PanicStrategy>,
+    /// Flags passed to every rustc invocation that builds a crate for
+    /// this target, after the panic strategy: workspace crates,
+    /// dependencies, a sysroot Quon builds, and the `rustc --print cfg`
+    /// probe. Build scripts see them in `CARGO_ENCODED_RUSTFLAGS`, as
+    /// with Cargo's `[target.<triple>] rustflags`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rustc_flags: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
 }
