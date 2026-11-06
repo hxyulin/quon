@@ -1,39 +1,39 @@
 # Runners
 
 A runner says how Quon starts a built binary. `quon run` starts the
-profile's run binary with it, and `quon test` runs the integration
+binary `q.run` names with it, and `quon test` runs the integration
 tests and boot tests with it. Host tests always run on the host.
 
-Declare a runner by name, then point a profile at it:
+Declare a runner with `q.add`, which returns a `Runner` handle, and
+name it in the run entry:
 
 ```rust,ignore
-cfg.runner("qemu")
-    .qemu("qemu-system-x86_64")
-    .machine("q35")
-    .serial_stdio();
-
-cfg.profile("dev")
-    .target(x86_64)
-    .run_binary("kernel")
-    .runner("qemu");
+let qemu = q.add(Qemu::new("qemu-system-x86_64").machine("q35").serial(Serial::Stdio));
+q.run(&kernel).runner(&qemu);
 
 // Inherits the `qemu` runner from `dev`.
-cfg.profile("test").inherits("dev");
+let dev = q.profile("dev");
+q.add(Profile::new("test").inherits(&dev));
 ```
 
-A profile inherits its runner through `inherits`. A profile with no
-runner can still build, but `quon run` and the integration tests fail
-with `profile '<name>' has no runner`. The exception is a
+Every profile uses the run entry's runner unless it, or a profile it
+inherits from, names another with `Profile::runner(&r)`. A profile with
+no runner can still build, but `quon run` and the integration tests
+fail with `profile '<name>' has no runner`. The exception is a
 [host profile](../configuration/projects-targets-profiles.md#host-profiles),
 which runs its binaries directly when it names no runner.
+
+Runners have no name in `quon.rs`. Quon names them after their kind
+(`qemu`, `qemu-2`, `command`, or the plugin's name), and those names
+appear only in messages.
 
 ## Kinds
 
 | Kind | Declared with | What it does |
 |------|---------------|--------------|
-| QEMU | `.qemu(program)` | Boots the binary under QEMU. See [QEMU Orchestration](./qemu.md). |
-| Command | `.command(&[...])` | Runs the argv, with each `{binary}` replaced by the binary's path. |
-| Plugin | `.plugin(name)` | Asks the runner plugin `name` for the command. See [Runner plugins](#runner-plugins). |
+| QEMU | `Qemu::new(program)` | Boots the binary under QEMU. See [QEMU Orchestration](./qemu.md). |
+| Command | `Command::new([..])` | Runs the argv, with each `{binary}` replaced by the binary's path. |
+| Plugin | `Plugin::new(name)` | Asks the runner plugin `name` for the command. See [Runner plugins](#runner-plugins). |
 
 ## Command runners
 
@@ -41,10 +41,10 @@ A command runner covers anything that is not QEMU: flashing a board,
 another emulator, or a script of your own.
 
 ```rust,ignore
-cfg.runner("board")
-    .command(&["probe-rs", "run", "--chip", "nRF52840_xxAA", "{binary}"]);
+let board = q.add(Command::new(["probe-rs", "run", "--chip", "nRF52840_xxAA", "{binary}"]));
 
-cfg.profile("hw").inherits("dev").runner("board");
+let dev = q.profile("dev");
+q.add(Profile::new("hw").inherits(&dev).runner(&board));
 ```
 
 `quon -p hw run -- --speed 4000` builds the profile and runs
@@ -55,9 +55,7 @@ The run passes when the command exits with status 0. A command that
 reports success another way can name its own status:
 
 ```rust,ignore
-cfg.runner("board")
-    .command(&["./scripts/run-on-board.sh", "{binary}"])
-    .success_exit_code(33);
+let board = q.add(Command::new(["./scripts/run-on-board.sh", "{binary}"]).success_exit_code(33));
 ```
 
 With `.success_exit_code(n)` set, every other status, 0 included, is a
@@ -65,30 +63,31 @@ failure.
 
 `--gdb`, `--uefi`, `--direct` and `--bios` need a runner plugin, such
 as QEMU, and fail on a profile that uses a command runner. `--timeout`
-and the profile's `test_timeout` apply to every runner.
+applies to every runner.
 
 ## Runner plugins
 
 A runner plugin turns a built binary and its settings into the command
 Quon starts. Quon keeps the build, the per-test ESP copies, timeouts
 and spawning. QEMU is a runner plugin built into the `quon` binary:
-`.qemu(program)` declares a runner served by the `qemu` plugin, with
+`Qemu::new(program)` declares a runner served by the `qemu` plugin, with
 the QEMU builder's values as its settings.
 
 Any other plugin is an executable named `quon-runner-<name>` on
-`$PATH`. Declare a runner that uses one with `.plugin(name)` and set
+`$PATH`. Declare a runner that uses one with `Plugin::new(name)` and set
 its settings with `.setting(key, value)`. The value is a string, a
 number or a bool, or any JSON value built with
 `quon_config::serde_json::json!`.
 
 ```rust,ignore
-cfg.runner("board")
-    .plugin("probe-rs")
-    .setting("chip", "nRF52840_xxAA")
-    .setting("speed", 4000);
+let board = q.add(Plugin::new("probe-rs").setting("chip", "nRF52840_xxAA").setting("speed", 4000));
 
-cfg.profile("hw").inherits("dev").runner("board");
+let dev = q.profile("dev");
+q.add(Profile::new("hw").inherits(&dev).runner(&board));
 ```
+
+To offer a typed builder for a plugin's settings, implement `Declare`;
+see [Your own declarations](../configuration/quon-rs.md#your-own-declarations).
 
 `quon -p hw run` then starts `quon-runner-probe-rs` twice:
 

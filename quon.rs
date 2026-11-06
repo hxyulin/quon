@@ -1,4 +1,4 @@
-// Quon build for Quon itself: a host tool, so the profile builds for
+// Quon build for Quon itself: a host tool, so the profiles build for
 // the host and `quon run` runs the binary directly.
 //
 //     quon build              build the quon binary
@@ -10,7 +10,7 @@
 // `cargo nextest run --workspace --run-ignored all`, since `quon test`
 // passes nothing but the filter to libtest.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
 /// Workspace packages whose tests `quon test` runs.
 const PACKAGES: &[&str] = &[
@@ -22,23 +22,17 @@ const PACKAGES: &[&str] = &[
     "quon",
 ];
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("quon", "0.1.1");
-    cfg.cargo_workspace(".");
-    cfg.group("tools").target_host().package("quon");
-    cfg.profile("dev")
-        .target_host()
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("quon");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("quon", "0.1.1");
+    q.cargo_workspace(".");
+    let quon = q.add(Package::new("quon"));
+    q.run(&quon);
 
     // The tests build quon.rs scripts, which link a quon-config library
     // that Quon builds into $QUON_HOME. Keep them out of ~/.quon, as
     // .cargo/config.toml does under cargo.
-    let mut tests = cfg.host_tests().env_path("QUON_HOME", "build/quon-home");
-    for name in PACKAGES {
-        tests = tests.package(name);
-    }
-    drop(tests);
+    q.host_tests()
+        .packages(PACKAGES)
+        .env_path("QUON_HOME", "build/quon-home");
     Ok(())
 }

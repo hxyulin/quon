@@ -1,4 +1,4 @@
-# Kernel with Config Options
+# Kernel with config options
 
 Quon includes a Kconfig-style configuration system that generates a Rust crate
 of typed constants. This lets you define build-time options -- feature toggles,
@@ -8,48 +8,33 @@ with full type safety.
 ## quon.rs
 
 ```rust
-use quon_config::{Config, CrateType, ConfigValue, Expr, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("configurable_kernel", "0.1.0");
-
-    let target = cfg.target("x86_64-unknown-none");
-
-    cfg.profile("default")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true);
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("configurable_kernel", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
     // Typed configuration options
-    cfg.config_bool("LOG_ENABLED")
-        .default_value(ConfigValue::Bool(true))
-        .help("Enable runtime logging subsystem");
+    let log = q.add(
+        opt::bool("LOG_ENABLED")
+            .default(true)
+            .help("Enable runtime logging subsystem"),
+    );
+    let level = q.add(
+        opt::u32("LOG_LEVEL")
+            .default(3)
+            .range(0..=5)
+            .depends_on(&log)
+            .help("Verbosity: 0 = off, 5 = trace"),
+    );
+    let debug = q.add(opt::bool("DEBUG").help("Enable kernel debug assertions"));
 
-    cfg.config_u32("LOG_LEVEL")
-        .default_value(ConfigValue::U32(3))
-        .range(0, 5)
-        .depends_on(Expr::Ident("LOG_ENABLED".into()))
-        .help("Verbosity: 0 = off, 5 = trace");
+    // Presets bundle option values
+    q.add(Preset::new("verbose").set(&level, 5).set(&debug, true));
+    q.add(Preset::new("quiet").set(&log, false));
 
-    cfg.config_bool("DEBUG")
-        .default_value(ConfigValue::Bool(false))
-        .help("Enable kernel debug assertions");
-
-    // Presets bundle config overrides
-    cfg.preset("verbose")
-        .set("LOG_LEVEL", ConfigValue::U32(5))
-        .set("DEBUG", ConfigValue::Bool(true));
-
-    cfg.preset("quiet")
-        .set("LOG_ENABLED", ConfigValue::Bool(false));
-
-    cfg.group("kernel")
-        .target(target)
-        .edition("2021")
-        .config(true)    // Link with the generated config crate
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs");
+    // A `Crate` links the generated config crate.
+    q.add(Crate::bin("kernel", "crates/kernel"));
 
     Ok(())
 }
@@ -100,19 +85,22 @@ Environment variables take precedence over `.quon-config`.
 
 ### Via preset (in a profile)
 
-Presets bundle multiple overrides into a named set. Apply them in a profile:
+Presets bundle multiple overrides into a named set. Apply one in a
+profile, with the `PresetRef` that `q.add(Preset::new(..))` returned:
 
-```rust
-cfg.profile("verbose-dev")
-    .inherits("default")
-    .preset("verbose");
+```rust,ignore
+let verbose = q.add(Preset::new("verbose").set(&level, 5).set(&debug, true));
+let dev = q.profile("dev");
+q.add(Profile::new("verbose-dev").inherits(&dev).preset(&verbose));
 ```
+
+`quon build -p verbose-dev` then builds with the preset's values.
 
 ### Precedence order
 
 From lowest to highest priority:
 
-1. `default_value()` in `quon.rs`
+1. `.default(value)` in `quon.rs`
 2. Preset applied by the active profile
 3. `.quon-config` file
 4. `--config-file` flag (overrides the `.quon-config` path)
@@ -123,8 +111,8 @@ From lowest to highest priority:
 If you prefer the traditional Kconfig format, replace inline declarations with
 a `.kconfig` file:
 
-```rust
-cfg.include_kconfig("./options.kconfig")?;
+```rust,ignore
+q.include_kconfig("options.kconfig");
 ```
 
 ```kconfig
@@ -145,4 +133,5 @@ your project better -- inline declarations for small projects, Kconfig files
 for larger ones with many options.
 
 `examples/with-config/` in the Quon repository is a runnable version of
-this project, with the kernel declared in a Cargo workspace.
+this project, with the kernel declared in a Cargo workspace. A
+`Package` links the config crate only with `.link_config()`.

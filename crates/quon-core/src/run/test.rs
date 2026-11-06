@@ -35,7 +35,7 @@ pub struct TestOptions {
     /// Same meaning as in [`RunOptions`].
     pub boot_mode_override: Option<BootMode>,
     /// Per-test timeout. Falls back to the profile's `test_timeout`,
-    /// then the runner's (`qemu().test_timeout(...)`), then 60 seconds.
+    /// then the runner's (`QemuDef::test_timeout`), then 60 seconds.
     pub timeout_override: Option<Duration>,
     /// Extra runner arguments for every test.
     pub extra_args: Vec<std::ffi::OsString>,
@@ -215,10 +215,10 @@ fn boot_esp(model: &BuildModel, boot: Handle<CrateDef>) -> Result<(Handle<EspDef
         (Some((h, e)), None) => Ok((h, e.clone())),
         (None, _) => Err(Error::Config(format!(
             "quon test boots each test from a copy of the ESP that holds the run binary \
-             '{boot_name}', but no esp(...) block adds it"
+             '{boot_name}', but no `Esp` adds it"
         ))),
         (Some(_), Some(_)) => Err(Error::Config(format!(
-            "more than one esp(...) block adds the run binary '{boot_name}'; quon test \
+            "more than one `Esp` adds the run binary '{boot_name}'; quon test \
              cannot tell which one to boot tests from"
         ))),
     }

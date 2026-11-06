@@ -1,4 +1,4 @@
-# Building and Running
+# Building and running
 
 This page covers the core CLI commands for compiling, running, and maintaining
 your Quon project.
@@ -22,10 +22,11 @@ Build output goes to the `build/` directory at your project root.
 quon run
 ```
 
-Builds the project (if needed) and starts the profile's run binary with the
-profile's [runner](../running/runners.md), such as a QEMU runner declared
-with `cfg.runner("qemu").qemu(...)`. The profile must name a runner with
-`.runner(...)`.
+Builds the project (if needed) and starts the binary that `q.run`
+names, with the [runner](../running/runners.md) that
+`q.run(..).runner(..)` names, such as a QEMU runner declared with
+`q.add(Qemu::new(..))`. Without a runner, `quon run` runs a host binary
+directly.
 
 To pass extra arguments directly to QEMU, place them after `--`:
 
@@ -94,7 +95,7 @@ These flags apply to most commands:
 
 | Flag | Description |
 |------|-------------|
-| `-p <profile>` | Select a build profile (e.g., `-p release`). Defaults to the profile set by `.default_profile()` on `project()`, else the first profile in alphabetical order. |
+| `-p <profile>` | Select a build profile (e.g., `-p release`). Defaults to the profile `q.default_profile` names, else `dev`. |
 | `-r` | Select the `release` profile. Shorthand for `-p release`. |
 | `-t <triple>` | Override the target triple for this invocation. |
 | `-j <N>` | Set the number of parallel jobs (e.g., `-j 4`). |
@@ -113,11 +114,10 @@ quon build -t aarch64-unknown-none
 
 ## Setting a default profile
 
-Rather than passing `-p` every time, you can set a default in your `quon.rs`:
+Without `-p` or `-r`, Quon builds with `dev`. To pick another profile,
+name it in your `quon.rs`:
 
-```rust
-cfg.project("my-kernel", "0.1.0")
-    .default_profile("dev");
+```rust,ignore
+let debug = q.add(Profile::new("debug").opt_level(1).debug_info(true));
+q.default_profile(&debug);
 ```
-
-This is used whenever neither `-p` nor `-r` is given.

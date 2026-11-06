@@ -18,8 +18,8 @@ express.
 
 **Does it replace Cargo.toml?** No. Quon reads dependencies, features,
 editions, lints and build scripts from the manifests on every build.
-`quon.rs` only says what Cargo cannot: targets, profiles, groups,
-runners and post-build steps. `quon init` writes one for an existing
+`quon.rs` only says what Cargo cannot: targets, linker scripts,
+profiles, runners and post-build steps. `quon init` writes one for an existing
 project, and `cargo build` keeps working beside it.
 
 **Who is it for?** Projects whose build goes past `cargo build`:

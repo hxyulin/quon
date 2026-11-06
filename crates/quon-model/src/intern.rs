@@ -369,7 +369,7 @@ fn intern_profiles(
                 diags.push(
                     InternDiagnostic::error(format!(
                         "profile '{}' references unknown runner '{name}'; declare it with \
-                         `cfg.runner(\"{name}\")`",
+                         `q.add(Qemu::new(..))`, `Command::new(..)` or `Plugin::new(..)`",
                         p.name
                     ))
                     .with_optional_span(p.span.clone()),
@@ -444,8 +444,7 @@ fn intern_bootloader(
     });
     BootloaderDef {
         kind: raw.kind.clone(),
-        // ^ already typed; quon-config builders parse the user-supplied
-        // `&str` via BootloaderKind::from_str at write time.
+        // ^ already typed in the raw model.
         protocol: raw.protocol.clone(),
         entry_crate: entry_crate_handle,
         config_file: raw.config_file.clone(),
@@ -463,8 +462,8 @@ fn intern_runners(
         let Some(kind) = r.kind.clone() else {
             diags.push(
                 InternDiagnostic::error(format!(
-                    "runner(\"{}\") has no kind; add `.qemu(\"<program>\")`, \
-                     `.command([...])` or `.plugin(\"<name>\")`",
+                    "runner '{}' has no kind; declare it with `Qemu::new(..)`, \
+                     `Command::new(..)` or `Plugin::new(..)`",
                     r.name
                 ))
                 .with_optional_span(r.span.clone()),
@@ -492,7 +491,7 @@ fn intern_boot_tests(
         let Some(name) = &t.profile else {
             diags.push(
                 InternDiagnostic::error(format!(
-                    "boot_test(\"{}\") names no profile; add `.profile(\"<name>\")`",
+                    "boot test '{}' names no profile; declare it with `BootTest::new(name, &profile)`",
                     t.name
                 ))
                 .with_optional_span(t.span.clone()),
@@ -502,7 +501,7 @@ fn intern_boot_tests(
         let Some(profile) = profiles.lookup(name) else {
             diags.push(
                 InternDiagnostic::error(format!(
-                    "boot_test(\"{}\").profile: profile '{name}' does not exist",
+                    "boot test '{}': profile '{name}' does not exist",
                     t.name
                 ))
                 .with_optional_span(t.span.clone()),
@@ -554,8 +553,9 @@ fn intern_esps(
                         let Some(h) = downloads.lookup(name) else {
                             diags.push(
                                 InternDiagnostic::error(format!(
-                                    "esp(\"{}\").add_download: download '{}' is not declared \
-                                     (declare it with cfg.download(...) or cfg.limine(...))",
+                                    "Esp::new(\"{}\"): download '{}' is not declared \
+                                     (declare it with q.add(Download::new(..)) or \
+                                     q.add(Download::limine(..)))",
                                     e.name, name
                                 ))
                                 .with_optional_span(e.span.clone()),
@@ -864,8 +864,8 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "boot_test(\"unknown\").profile: profile 'nope' does not exist",
-                "boot_test(\"none\") names no profile; add `.profile(\"<name>\")`",
+                "boot test 'unknown': profile 'nope' does not exist",
+                "boot test 'none' names no profile; declare it with `BootTest::new(name, &profile)`",
             ]
         );
         let t = model
@@ -914,9 +914,10 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "runner(\"empty\") has no kind; add `.qemu(\"<program>\")`, `.command([...])` or `.plugin(\"<name>\")`",
+                "runner 'empty' has no kind; declare it with `Qemu::new(..)`, \
+                 `Command::new(..)` or `Plugin::new(..)`",
                 "profile 'other' references unknown runner 'missing'; declare it with \
-                 `cfg.runner(\"missing\")`",
+                 `q.add(Qemu::new(..))`, `Command::new(..)` or `Plugin::new(..)`",
             ]
         );
         let dev = model

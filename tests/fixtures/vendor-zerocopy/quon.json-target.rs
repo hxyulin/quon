@@ -5,29 +5,26 @@
 // (proc-macro2 and quote have build scripts) are host units.
 // Network-gated: `cargo vendor` fetches from crates.io.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("vendor-zerocopy", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("vendor-zerocopy", "0.1.0");
 
     // The test writes this spec from `rustc --print target-spec-json`.
-    let kernel = cfg.target_spec("x86_64-quon-test", "targets/x86_64-quon-test.json");
+    let kernel = Target::spec("x86_64-quon-test", "targets/x86_64-quon-test.json");
+    q.default_target(&kernel);
 
-    cfg.profile("dev")
-        .target(kernel)
-        .opt_level(0)
-        .debug_info(true);
+    let zerocopy = q.add(
+        Dependency::crates_io("zerocopy", "0.8")
+            .features(["derive"])
+            .target(&kernel),
+    );
 
-    cfg.dependency("zerocopy")
-        .version("0.8")
-        .features(&["derive"])
-        .target(kernel);
-
-    cfg.group("kernel")
-        .target(kernel)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .dep("zerocopy", "zerocopy");
+    q.add(
+        Crate::lib("kernel", "crates/kernel")
+            .edition(Edition::E2021)
+            .dep(&zerocopy),
+    );
 
     Ok(())
 }

@@ -45,18 +45,14 @@ fn init_writes_a_quon_rs_that_builds_the_limine_example() {
     assert!(ok, "quon init failed:\n{stderr}");
     let text = fs::read_to_string(dir.join("quon.rs")).expect("read generated quon.rs");
     for line in [
-        r#"cfg.project("limine-kernel", "0.1.0").default_profile("dev");"#,
-        r#"cfg.profile("release")"#,
-        r#".inherits("dev")"#,
-        r#"let x86_64 = cfg.target("x86_64-unknown-none");"#,
-        r#".run_binary("kernel")"#,
-        r#".runner("qemu");"#,
-        r#"cfg.runner("qemu")"#,
+        r#"q.project("limine-kernel", "0.1.0");"#,
+        r#"q.default_target(&Target::builtin("x86_64-unknown-none"));"#,
         r#".linker_script("crates/kernel/kernel.ld")"#,
-        r#".rustc_flag("-Crelocation-model=static");"#,
-        r#".add_file("limine.conf", "limine.conf")"#,
-        r#".add("kernel", "boot/kernel");"#,
-        r#".boot_mode("uefi");"#,
+        r#".rustc_flag("-Crelocation-model=static"),"#,
+        r#".add("limine.conf", "limine.conf")"#,
+        r#".add(&kernel, "boot/kernel"),"#,
+        r#".boot(BootMode::Uefi),"#,
+        r#"q.run(&kernel).runner(&qemu);"#,
     ] {
         assert!(text.contains(line), "missing `{line}` in:\n{text}");
     }

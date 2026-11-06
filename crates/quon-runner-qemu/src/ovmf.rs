@@ -124,7 +124,7 @@ fn real_env(name: &str) -> Option<String> {
 /// [`Error::OvmfNotFound`] whose message lists every fallback it
 /// tried.
 pub fn resolve_ovmf(qemu: &QemuDef, ctx: &OvmfResolveCtx<'_>) -> Result<ResolvedOvmf> {
-    // ---- stage 1: explicit paths from `.ovmf_code()`/`.ovmf_vars()`
+    // ---- stage 1: explicit paths from `Qemu::ovmf(code, vars)`
     let explicit_code = qemu.ovmf_code.clone();
     let explicit_vars = qemu.ovmf_vars.clone();
 
@@ -256,7 +256,7 @@ fn render_attempts(
         "\nInstall OVMF (apt install ovmf / pacman -S edk2-ovmf, or a QEMU that ships\n\
          share/qemu/edk2-x86_64-code.fd such as Nix's or Homebrew's),\n\
          or set OVMF_CODE and OVMF_VARS, or declare explicit paths in quon.rs via\n\
-         cfg.runner(\"qemu\").qemu(..).ovmf_code(\"...\").ovmf_vars(\"...\").",
+         Qemu::new(..).ovmf(\"<code>\", \"<vars>\").",
     );
     out
 }

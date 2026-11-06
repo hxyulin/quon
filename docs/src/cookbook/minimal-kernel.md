@@ -1,4 +1,4 @@
-# Minimal Kernel
+# Minimal kernel
 
 A walkthrough of the simplest useful Quon project: a single bare-metal binary
 compiled for `x86_64-unknown-none` and launched in QEMU.
@@ -6,39 +6,32 @@ compiled for `x86_64-unknown-none` and launched in QEMU.
 ## quon.rs
 
 ```rust
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
+pub fn config(q: &mut Quon) -> Result<()> {
     // Every project starts with a name and version.
-    cfg.project("my-kernel", "0.1.0");
+    q.project("my-kernel", "0.1.0");
 
-    // Declare the target triple for the kernel.
-    let target = cfg.target("x86_64-unknown-none");
+    // Crates that name no target build for this one.
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    // A profile controls optimization, debug info, and which target to use.
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
+    // A binary crate, rooted at crates/kernel/src/main.rs.
+    let kernel = q.add(
+        Crate::bin("kernel", "crates/kernel").linker_script("crates/kernel/kernel.ld"),
+    );
 
-    // A group collects crates sharing a target and edition.
-    cfg.group("kernel")
-        .target(target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs")
-            .linker_script("crates/kernel/kernel.ld");
+    // QEMU, for `quon run`.
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(128)
+            .cores(1)
+            .serial(Serial::Stdio),
+    );
 
-    // Optional: configure QEMU for `quon run`.
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(128)
-        .cores(1)
-        .serial_stdio();
+    // `quon run` boots the kernel under QEMU. The built-in `dev` and
+    // `release` profiles build for the kernel's target.
+    q.run(&kernel).runner(&qemu);
 
     Ok(())
 }
@@ -73,16 +66,17 @@ quon configure      # Generate rust-project.json for your editor
    `compiler_builtins`) for `x86_64-unknown-none`. This only happens on the
    first build or when the sysroot is invalidated.
 2. **Crate compilation** -- The `kernel` crate is compiled as a binary with
-   the specified linker script, edition, and optimization level.
+   the linker script, the default edition (2024) and the `dev` profile's
+   optimization level.
 3. **Output** -- The resulting binary lands in
    `build/cross/x86_64-unknown-none/dev/deps/`.
 
 ## What happens during `quon run`
 
-After a successful build, Quon launches QEMU with the configuration from the
-`qemu` runner, which the profile names with `.runner("qemu")`. The `run_binary("kernel")` setting in the profile tells Quon
-which crate's output to pass to QEMU as the kernel image. Serial output is
-forwarded to your terminal via `.serial_stdio()`.
+After a successful build, Quon launches QEMU with the settings of the
+`Qemu` runner. `q.run(&kernel)` tells Quon which crate's output to pass
+to QEMU as the kernel image, and `.runner(&qemu)` names the runner.
+`.serial(Serial::Stdio)` forwards serial output to your terminal.
 
 ## Next steps
 
@@ -92,4 +86,4 @@ forwarded to your terminal via `.serial_stdio()`.
 
 `examples/basic-kernel/` in the Quon repository is a runnable version of
 this project. It declares the kernel in a Cargo workspace and builds it
-with `cfg.cargo_workspace(".")` and `group.package("kernel")`.
+with `q.cargo_workspace(".")` and `Package::new("kernel")`.

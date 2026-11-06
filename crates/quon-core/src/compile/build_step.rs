@@ -46,7 +46,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// Reserved env-var name used to communicate the output path. Must
-/// match the constant in `quon_config::builders::build_step`.
+/// match the constant in `quon-config/src/quon.rs`.
 const RESERVED_OUTPUT_ENV: &str = "QUON_OUTPUT_PATH";
 
 /// Run a build step. Returns the output path and a `was_cached` flag

@@ -1,8 +1,8 @@
 use super::*;
 use crate::compile::{ArtifactMap, BuildLayout, CompileCtx, CompileUnitInput, DriverKind};
 use crate::manifest::platform::TargetPlatform;
-use quon_config::Config;
-use quon_model::{BuildModel, Handle, ResolvedConfig, TargetDef};
+use quon_config::{Package, Quon, Target};
+use quon_model::{BuildModel, ResolvedConfig};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -31,26 +31,27 @@ fn platforms() -> BTreeMap<Domain, TargetPlatform> {
     ])
 }
 
-/// A raw model for `root` with one target, `x86_64-unknown-none`.
-fn raw_model(build: impl FnOnce(&mut Config, Handle<TargetDef>)) -> RawBuildModel {
-    let mut cfg = Config::new();
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t);
-    build(&mut cfg, t);
-    assert!(cfg.diagnostics().is_empty(), "{:?}", cfg.diagnostics());
-    cfg.into_raw()
+/// A raw model for `root` with one target, `x86_64-unknown-none`,
+/// which is also the default target.
+fn raw_model(build: impl FnOnce(&mut Quon, &Target)) -> RawBuildModel {
+    let mut q = Quon::new();
+    q.project("demo", "0.1.0");
+    let t = Target::builtin("x86_64-unknown-none");
+    q.default_target(&t);
+    build(&mut q, &t);
+    q.into_raw().expect("quon errors")
 }
 
 /// The fixture's own quon.rs, in-process.
 fn fixture_raw() -> RawBuildModel {
-    raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("kernel")
-            .target(t)
-            .config(true)
-            .package("kernel")
-            .linker_script("crates/kernel/kernel.ld");
+    raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(
+            Package::new("kernel")
+                .target(t)
+                .link_config()
+                .linker_script("crates/kernel/kernel.ld"),
+        );
     })
 }
 
@@ -196,8 +197,8 @@ fn expansion_is_deterministic() {
 
 #[test]
 fn model_without_workspace_is_untouched() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.group("k").target(t).add("kernel", "crates/kernel");
+    let mut raw = raw_model(|q, t| {
+        q.add(quon_config::Crate::lib("kernel", "crates/kernel").target(t));
     });
     let before = serde_json::to_string(&raw).unwrap();
     // A directory without Cargo.toml: nothing may be read.
@@ -208,14 +209,15 @@ fn model_without_workspace_is_untouched() {
 
 #[test]
 fn root_features_and_raw_binary_apply() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("kernel")
-            .target(t)
-            .package("kernel")
-            .no_default_features()
-            .features(&["unused"])
-            .crate_type(CrateType::RawBinary);
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(
+            Package::new("kernel")
+                .target(t)
+                .no_default_features()
+                .features(["unused"])
+                .raw_binary(),
+        );
     });
     expand_at(&mut raw, &fixture()).unwrap();
     let h = raw.crates.lookup("kernel").unwrap();
@@ -244,9 +246,9 @@ fn workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
 const WS: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"a\"]\n";
 
 fn root_a() -> RawBuildModel {
-    raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).package("a");
+    raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t));
     })
 }
 
@@ -299,9 +301,9 @@ fn vendored_workspace(checksum: &str) -> tempfile::TempDir {
 }
 
 fn root_a_vendored() -> RawBuildModel {
-    raw_model(|cfg, t| {
-        cfg.cargo_workspace(".").vendored("vendor");
-        cfg.group("k").target(t).package("a");
+    raw_model(|q, t| {
+        q.cargo_workspace(".").vendored("vendor");
+        q.add(Package::new("a").target(t));
     })
 }
 
@@ -459,14 +461,11 @@ fn scripted_workspace() -> tempfile::TempDir {
 /// The script's build-dep is reachable from the run binary through
 /// the script alone, so it is in the build.
 fn scripted_raw() -> RawBuildModel {
-    let mut cfg = Config::new();
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).run_binary("a");
-    cfg.cargo_workspace(".");
-    cfg.group("k").target(t).package("a");
-    assert!(cfg.diagnostics().is_empty(), "{:?}", cfg.diagnostics());
-    cfg.into_raw()
+    raw_model(|q, t| {
+        q.cargo_workspace(".");
+        let a = q.add(Package::new("a").target(t));
+        q.run(&a);
+    })
 }
 
 #[test]
@@ -585,12 +584,9 @@ fn root_crate_type_needs_a_bin_target() {
         ),
         ("a/src/lib.rs", ""),
     ]);
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k")
-            .target(t)
-            .package("a")
-            .crate_type(CrateType::RawBinary);
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t).raw_binary());
     });
     let err = expand_err(&mut raw, ws.path());
     assert!(
@@ -623,21 +619,18 @@ fn root_tests_become_test_crates() {
         ("a/tests/a.rs", ""),
         ("a/tests/hosted.rs", ""),
     ]);
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k")
-            .target(t)
-            .package("a")
-            .linker_script("a/link.ld");
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t).linker_script("a/link.ld"));
     });
     let warnings = expand_at(&mut raw, ws.path()).expect("expand");
     assert_eq!(
         dump(&raw),
         "\
-a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
-a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
-a@test [k] x86_64-unknown-none Bin a/tests/a.rs 2021 f=[] d=[a->a@lib] rustc=a
-boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib] rustc=boot
+a@lib [a] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
+a [a] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
+a@test [a] x86_64-unknown-none Bin a/tests/a.rs 2021 f=[] d=[a->a@lib] rustc=a
+boot [a] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib] rustc=boot
 "
     );
     let krate = |name: &str| {
@@ -673,9 +666,9 @@ fn build_skips_test_crates() {
         ("a/src/main.rs", ""),
         ("a/tests/boot.rs", ""),
     ]);
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).package("a");
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t));
     });
     expand_at(&mut raw, ws.path()).expect("expand");
     let (model, diags) = quon_model::intern(raw);
@@ -748,9 +741,9 @@ fn dev_dependency_is_linked_by_tests_only() {
     assert_eq!(
         dump(&raw),
         "\
-a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
-a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
-boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit] rustc=boot
+a@lib [a] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
+a [a] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
+boot [a] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit] rustc=boot
 kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
 "
     );
@@ -787,10 +780,10 @@ fn dev_dependency_feature_copies_the_shared_dependency() {
     assert_eq!(
         dump(&raw),
         "\
-a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
-a@test-pass [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util@test-pass] rustc=a
-a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
-boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@test-pass,kit->kit,util->util@test-pass] rustc=boot
+a@lib [a] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
+a@test-pass [a] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util@test-pass] rustc=a
+a [a] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
+boot [a] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@test-pass,kit->kit,util->util@test-pass] rustc=boot
 kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[util->util@test-pass] rustc=kit
 util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
 util@test-pass [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=[extra] d=[] rustc=util
@@ -852,7 +845,7 @@ fn proc_macro_dev_dependency_builds_for_the_host() {
     );
     assert!(
         out.contains(
-            "boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,mac->mac]"
+            "boot [a] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,mac->mac]"
         ),
         "{out}"
     );
@@ -1011,9 +1004,9 @@ fn unsupported_lib_crate_type_is_rejected() {
 
 #[test]
 fn unknown_package_is_rejected() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).package("nope");
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("nope").target(t));
     });
     let err = expand_err(&mut raw, &fixture());
     assert!(
@@ -1024,30 +1017,49 @@ fn unknown_package_is_rejected() {
 
 #[test]
 fn package_without_workspace_is_rejected() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.group("k").target(t).package("kernel");
+    // `Quon` reports a package without a workspace itself, so the
+    // workspace is removed from the raw model to reach the check in
+    // manifest expansion.
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("kernel").target(t));
     });
+    raw.cargo_workspace = None;
     let err = expand_err(&mut raw, &fixture());
     assert!(
-        err.contains("`package(\"kernel\")` needs a Cargo workspace"),
+        err.contains("`Package::new(\"kernel\")` needs a Cargo workspace"),
         "{err}"
     );
 }
 
 #[test]
 fn declared_crate_overlapping_the_workspace_is_rejected() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        let mut g = cfg.group("k").target(t);
-        g.package("kernel");
-        g.add("loader", "crates/loader").dep("util", "util");
-        g.add("again", "./crates/util/");
-        g.add("util-helpers", "elsewhere");
+    use quon_config::Crate;
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("kernel").target(t));
+        q.add(Crate::lib("loader", "crates/loader").target(t));
+        q.add(Crate::lib("again", "./crates/util/").target(t));
+        q.add(Crate::lib("util-helpers", "elsewhere").target(t));
     });
+    // `util` is a workspace package, which `Quon` has no handle for, so
+    // the dependency on it is added to the raw model.
+    let loader = raw.crates.lookup("loader").unwrap();
+    raw.crates.get_mut(loader).unwrap().deps.insert(
+        "util".into(),
+        quon_model::RawDepDef {
+            crate_name: "util".into(),
+            features: Vec::new(),
+            version: None,
+            optional: false,
+            default_features: true,
+            span: None,
+        },
+    );
     let err = expand_err(&mut raw, &fixture());
     assert!(
         err.contains(
-            "crate 'loader' (declared with `group.add`) depends on 'util' (as `util`), which \
+            "crate 'loader' (declared with `Crate`) depends on 'util' (as `util`), which \
              comes from the Cargo workspace"
         ),
         "{err}"
@@ -1058,7 +1070,7 @@ fn declared_crate_overlapping_the_workspace_is_rejected() {
     );
     assert!(
         err.contains(
-            "crate 'util-helpers' is declared with `group.add`, and package `util-helpers` in \
+            "crate 'util-helpers' is declared with `Crate`, and package `util-helpers` in \
              the Cargo workspace has a unit of the same name"
         ),
         "{err}"
@@ -1067,13 +1079,13 @@ fn declared_crate_overlapping_the_workspace_is_rejected() {
 
 #[test]
 fn no_sysroot_root_with_dependencies_is_rejected() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).no_sysroot().package("kernel");
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("kernel").target(t).no_sysroot());
     });
     let err = expand_err(&mut raw, &fixture());
     assert!(
-        err.contains("package `kernel` is in `no_sysroot` group 'k' but has dependencies"),
+        err.contains("package `kernel` is built with `no_sysroot` but has dependencies"),
         "{err}"
     );
 }
@@ -1253,13 +1265,14 @@ fn clippy_lints_reach_clippy_driver_only() {
 
 #[test]
 fn cfg_flags_are_declared_to_check_cfg() {
-    let mut raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("kernel")
-            .target(t)
-            .package("kernel")
-            .cfg_flag("kernel_debug")
-            .cfg_flag("mode=\"fast\"");
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(
+            Package::new("kernel")
+                .target(t)
+                .cfg("kernel_debug")
+                .cfg("mode=\"fast\""),
+        );
     });
     expand_at(&mut raw, &fixture()).unwrap();
     let (model, _) = quon_model::intern(raw);
@@ -1316,10 +1329,10 @@ fn host_test_workspace() -> tempfile::TempDir {
 }
 
 fn root_a_with_host_tests() -> RawBuildModel {
-    raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).package("a");
-        cfg.host_tests().package("a");
+    raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t));
+        q.host_tests().package("a");
     })
 }
 
@@ -1346,9 +1359,9 @@ a@host-test [cargo:host-test] host Bin a/src/main.rs 2021 f=[] d=[a->a@host-test
 a@test [cargo:host-test] host Test a/src/lib.rs 2021 f=[] d=[kit->kit@host-test,util->util@host-test] rustc=a
 a@bin-test [cargo:host-test] host Test a/src/main.rs 2021 f=[] d=[a->a@host-test@lib,kit->kit@host-test,util->util@host-test] rustc=a
 api [cargo:host-test] host Test a/tests/api.rs 2021 f=[] d=[a->a@host-test@lib,kit->kit@host-test,util->util@host-test] rustc=api
-a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
-a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
-boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit,util->util] rustc=boot
+a@lib [a] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
+a [a] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
+boot [a] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit,util->util] rustc=boot
 kit@host-test [cargo:host-test] host Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
 kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
 util@host [cargo:host] host Lib util/src/lib.rs 2021 f=[extra] d=[] rustc=util
@@ -1419,9 +1432,9 @@ util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=
 #[test]
 fn host_tests_need_no_group() {
     let ws = host_test_workspace();
-    let mut raw = raw_model(|cfg, _| {
-        cfg.cargo_workspace(".");
-        cfg.host_tests().package("util");
+    let mut raw = raw_model(|q, _| {
+        q.cargo_workspace(".");
+        q.host_tests().package("util");
     });
     expand_at(&mut raw, ws.path()).expect("expand");
     assert_eq!(
@@ -1443,9 +1456,9 @@ fn host_tests_reject_unknown_and_proc_macro_packages() {
         ("m/Cargo.toml", &manifest("m", "[lib]\nproc-macro = true\n")),
         ("m/src/lib.rs", ""),
     ]);
-    let mut raw = raw_model(|cfg, _| {
-        cfg.cargo_workspace(".");
-        cfg.host_tests().package("m").package("nope");
+    let mut raw = raw_model(|q, _| {
+        q.cargo_workspace(".");
+        q.host_tests().package("m").package("nope");
     });
     let err = expand_err(&mut raw, ws.path());
     assert!(
@@ -1457,8 +1470,8 @@ fn host_tests_reject_unknown_and_proc_macro_packages() {
 
 #[test]
 fn host_tests_need_a_workspace() {
-    let mut raw = raw_model(|cfg, _| {
-        cfg.host_tests().package("a");
+    let mut raw = raw_model(|q, _| {
+        q.host_tests().package("a");
     });
     let err = expand_err(&mut raw, Path::new("/nonexistent"));
     assert!(
@@ -1489,10 +1502,10 @@ fn host_test_copies_never_share_an_output_with_the_build() {
     ];
     let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
     let ws = workspace(&files);
-    let raw = raw_model(|cfg, t| {
-        cfg.cargo_workspace(".");
-        cfg.group("k").target(t).package("a");
-        cfg.host_tests().package("a");
+    let raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("a").target(t));
+        q.host_tests().package("a");
     });
     let units = units_at(raw, ws.path());
     let build = unit_named(&units, "util@host");
@@ -1561,14 +1574,12 @@ fn host_test_lib_tests_name_their_doctest_lib() {
 #[test]
 fn host_tests_build_under_a_run_binary() {
     let ws = host_test_workspace();
-    let mut cfg = Config::new();
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).run_binary("a");
-    cfg.cargo_workspace(".");
-    cfg.group("k").target(t).package("a");
-    cfg.host_tests().package("a");
-    let mut raw = cfg.into_raw();
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        let a = q.add(Package::new("a").target(t));
+        q.run(&a);
+        q.host_tests().package("a");
+    });
     expand_at(&mut raw, ws.path()).expect("expand");
     let (model, diags) = quon_model::intern(raw);
     assert!(diags.is_empty(), "{diags:?}");

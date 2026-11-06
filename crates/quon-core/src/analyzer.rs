@@ -11,7 +11,7 @@
 //!
 //! Every unit except compiled build scripts becomes one entry: declared
 //! and manifest crates, registry and vendored packages, and
-//! `cfg.dependency()` crates. A package built for host and target
+//! `Dependency` crates. A package built for host and target
 //! appears twice, with different `cfg` and `target`. Paths come from
 //! the unit table, so they agree with the command builder.
 //!
@@ -186,7 +186,7 @@ fn unit_entry(input: &AnalyzerInput<'_>, id: UnitId, index_of: &BTreeMap<UnitId,
     // The directory rust-analyzer treats as the crate's own: the crate
     // directory for declared and manifest crates (under
     // `$CARGO_HOME/registry/src` or a vendor directory for registry
-    // packages), the package directory for `cfg.dependency()` crates.
+    // packages), the package directory for `Dependency` crates.
     let crate_dir: PathBuf = match (unit.origin, krate) {
         (_, Some(k)) => resolved.project_root.join(&k.path),
         (UnitOrigin::Vendor(v), None) => vendor_ctx

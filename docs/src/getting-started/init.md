@@ -24,9 +24,8 @@ like a kernel when a `*.ld` file sits next to its `Cargo.toml` or its
 bin source has `#![no_main]` or `#![no_std]`. `--kernel` and
 `--bootloader` also ask for the kernel layout.
 
-The host build has a `dev` profile with `.target_host()`, one
-`packages` group with every non-proc-macro member, and `host_tests()`
-for the same members:
+The host build declares every non-proc-macro member as a `Package`
+for the host, and lists the same members in `q.host_tests()`:
 
 ```sh
 quon build              # build every member for the host
@@ -34,14 +33,14 @@ quon run -- <args>      # build and run the bin
 quon test               # unit tests, tests/ and doctests
 ```
 
-`run_binary` names the only bin target. With several, it is a
+`q.run` names the only bin target. With several, it is a
 `// TODO:`.
 
-`quon init` writes two profiles, as Cargo has: `dev`, the default, and
-`release`, which inherits from `dev` and sets `opt_level(3)` and
-`debug_info(false)`. `quon build -r` builds with `release`. rustc
-turns debug assertions and overflow checks off above opt-level 0, so
-`release` matches Cargo's release profile there too.
+The project has the two profiles every Quon project has, as Cargo
+does: `dev`, the default, and `release`, which inherits from `dev` at
+opt-level 3 without debug info. `quon build -r` builds with `release`.
+rustc turns debug assertions and overflow checks off above opt-level
+0, so `release` matches Cargo's release profile there too.
 
 ## What it reads for a kernel
 
@@ -51,11 +50,11 @@ turns debug assertions and overflow checks off above opt-level 0, so
 | Project version | `workspace.package.version`, else the root package's `version`, else `0.1.0` |
 | Target | `--target`, else `build.target` in `.cargo/config.toml`, else `targets` in `rust-toolchain.toml` |
 | Kernel package | `--kernel`, else the only workspace member with a bin target (`[[bin]]` or `src/main.rs`) |
-| `run_binary` | The kernel package's bin target |
+| `q.run` | The kernel package's bin target |
 | Linker script | A `-Clink-arg=-T<path>` rustflag in `.cargo/config.toml`, else the only `*.ld` file next to the kernel's `Cargo.toml` |
 | Kernel path on the ESP | The `path: boot():/...` line in `limine.conf` (or `KERNEL_PATH=` in `limine.cfg`), else `boot/kernel` |
 
-Every other non-proc-macro member goes into a `libraries` group, so
+Every other non-proc-macro member is declared as a `Package` too, so
 `quon build` and `quon clippy` cover the whole workspace. Lints,
 editions and target-specific dependencies stay in the Cargo manifests,
 where Quon reads them on every build.
@@ -80,7 +79,7 @@ fill in. The file builds before you edit it:
   when the project root has none.
 
 With `--bootloader limine` and the target `x86_64-unknown-none`, the
-kernel group also gets `-Crelocation-model=static`. That target links a
+kernel package also gets `-Crelocation-model=static`. That target links a
 position-independent executable by default, and Limine loads one only
 with a `PT_DYNAMIC` segment.
 
@@ -97,15 +96,16 @@ with a `PT_DYNAMIC` segment.
 
 ## Pinning Limine
 
-`--limine 11.4.1` writes the `cfg.limine` line with an empty SHA-256:
+`--limine 11.4.1` writes the `Download::limine` line with an empty SHA-256:
 
-```rust
-cfg.limine("11.4.1").file("BOOTX64.EFI", "");
+```rust,ignore
+let limine = q.add(Download::limine("11.4.1", "BOOTX64.EFI", ""));
 ```
 
 The first `quon build` fetches the file, fails, and prints its hash.
 Check where the file came from, then paste the hash into `quon.rs`.
 See [Limine Kernel](../cookbook/limine.md#pinning-limine).
 
-Without `--limine`, the `cfg.limine` and `add_download` lines are
+Without `--limine`, the `Download::limine` line and the ESP entry that
+uses it are
 commented out, so the build runs without network access.

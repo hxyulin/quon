@@ -29,7 +29,7 @@ pub enum ResolvedValue {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedProfile {
     pub name: String,
-    /// The profile's target, or the host for `.target_host()`.
+    /// The profile's target, or the host for `Target::host()`.
     pub target: TargetSpec,
     pub opt_level: u8,
     pub debug_info: bool,

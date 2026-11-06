@@ -1,10 +1,10 @@
 //! Merge the runner's [`QemuDef`] settings and their [`Overrides`]
 //! into a fully-defaulted [`ResolvedQemu`].
 //!
-//! The `quon.rs` schema lets users set `qemu(...)` knobs at the
-//! project level *and* override a subset of them per profile
-//! (`profile.qemu_memory(...)`, `.qemu_cores(...)`, `.qemu_extra_args(...)`,
-//! `.qemu_boot_mode(...)`). Quon passes the profile's values, and a
+//! A `quon.rs` sets the knobs on its `Qemu` runner, and the model's
+//! profiles can override a subset of them (`qemu_memory`,
+//! `qemu_cores`, `qemu_extra_args`, `qemu_boot_mode`; `quon_config`
+//! sets none of these). Quon passes the profile's values, and a
 //! boot mode flag from the command line, as the request's overrides.
 //! Resolving merges the two into a single flat record with every field
 //! populated.
@@ -52,7 +52,7 @@ pub struct ResolvedQemu {
     /// Display policy. `None` means "user said nothing" — the runner
     /// keeps its implicit `-display none` default to stay headless for
     /// CI / test flows. A `Some(...)` value reflects an explicit
-    /// `qemu().display(...)` call from the user's quon.rs.
+    /// `Qemu::display(..)` call from the user's quon.rs.
     pub display: Option<DisplayMode>,
     pub extra_args: Vec<String>,
     pub boot_mode: BootMode,
@@ -202,8 +202,8 @@ pub fn resolve_disk_source(disk: &DiskSource, artifacts: &[Artifact]) -> Result<
     match disk {
         DiskSource::Image { path } => Ok(path.clone()),
         DiskSource::ImageRef { name } => {
-            // The unified artifact namespace lets `disk_ref(name)`
-            // resolve to either an `image()` block or a `build_step()`
+            // The unified artifact namespace lets `Qemu::disk(&a)`
+            // resolve to either an `Image` or a `BuildStep`
             // output. Validate has rejected name collisions, so at
             // most one resolves. We try image first (the historical
             // case) and fall back to build step.

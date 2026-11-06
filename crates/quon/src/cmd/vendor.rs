@@ -1,7 +1,7 @@
 //! `quon vendor` subcommand: a thin CLI wrapper over
 //! [`quon_core::manifest::sources::vendor`] for the Cargo workspace,
 //! and over [`quon_core::vendor::vendor_sync`] and
-//! [`quon_core::vendor::vendor_check`] for `cfg.dependency()`
+//! [`quon_core::vendor::vendor_check`] for `Dependency`
 //! declarations.
 //!
 //! This file is responsible for:
@@ -16,7 +16,7 @@
 //!   into a non-zero process exit code via
 //!   [`std::process::exit`].
 //!
-//! The `cfg.dependency()` pipeline uses the lighter-weight
+//! The `Dependency` pipeline uses the lighter-weight
 //! [`super::LayoutContext`] (no rustc probe) with
 //! [`super::LayoutContextOpts::skip_vendor_autoreg`] set, because
 //! registering against a stale `quon.lock` would abort before this
@@ -76,14 +76,14 @@ fn vendor_workspace(project_root: &Path, ws: &RawCargoWorkspace, args: &VendorAr
     if ws.vendored.is_none() {
         println!(
             "To build from {dir}/, add this to quon.rs:\n\n    \
-             cfg.cargo_workspace({:?}).vendored({dir:?});",
+             q.cargo_workspace({:?}).vendored({dir:?});",
             ws.dir
         );
     }
     Ok(())
 }
 
-/// `quon vendor` for `cfg.dependency()` declarations.
+/// `quon vendor` for `Dependency` declarations.
 ///
 /// `check_mode` mirrors `quon vendor --check`: verify-only, no
 /// disk mutation. `force` bypasses the fingerprint fast path.

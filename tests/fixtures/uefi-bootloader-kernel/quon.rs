@@ -4,15 +4,14 @@
 // the other fixtures cover:
 //
 //   - Two targets in one project (`x86_64-unknown-uefi` for the
-//     bootloader, `x86_64-unknown-none` for the kernel).
-//   - Two build groups, each pinning its own target.
+//     bootloader, `x86_64-unknown-none` for the kernel), each crate
+//     naming its own.
 //   - `artifact_env` injection: the bootloader crate receives
 //     `KERNEL_PATH` at rustc invocation time and uses `include_bytes!`
 //     to embed the compiled kernel ELF.
-//   - Build ordering across groups: the kernel must compile first
-//     (enforced by the auto-populated `artifact_deps` edge that
-//     `.artifact_env(...)` adds).
-//   - Auto-assembled ESP: `esp("default")` declares which artifact
+//   - Build ordering across targets: the kernel must compile first
+//     (enforced by the `artifact_deps` edge that `artifact_env` adds).
+//   - Auto-assembled ESP: `Esp::new("default")` declares which artifact
 //     lands where inside a FAT directory; the `EspBuild` scheduler
 //     node populates it from the built bootloader binary.
 //   - `quon run --uefi` auto-wires the assembled ESP into QEMU's
@@ -26,62 +25,52 @@
 // OS. Runtime verification is via a single byte written to QEMU's
 // debugcon port — see crates/bootloader/src/main.rs.
 
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("uefi-bootloader-kernel", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("uefi-bootloader-kernel", "0.1.0");
 
-    let target_none = cfg.target("x86_64-unknown-none");
-    let target_uefi = cfg.target("x86_64-unknown-uefi");
+    let target_none = Target::builtin("x86_64-unknown-none");
+    let target_uefi = Target::builtin("x86_64-unknown-uefi");
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target_uefi)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("bootloader");
+    // The bootloader `include_bytes!`-es the kernel's output.
+    let kernel = q.add(
+        Crate::bin("kernel", "crates/kernel")
+            .target(&target_none)
+            .edition(Edition::E2021)
+            .linker_script("crates/kernel/kernel.ld"),
+    );
 
-    // Kernel is compiled for a bare-metal target with a custom linker
-    // script. The bootloader will `include_bytes!` its output.
-    cfg.group("kernel")
-        .target(target_none)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld");
+    let bootloader = q.add(
+        Crate::bin("bootloader", "crates/bootloader")
+            .target(&target_uefi)
+            .edition(Edition::E2021)
+            .artifact_env("KERNEL_PATH", &kernel),
+    );
 
-    // Bootloader is a UEFI application. `artifact_env("KERNEL_PATH",
-    // "kernel")` injects the absolute path of the kernel's build output
-    // into rustc's environment at spawn time, and auto-adds an
-    // `artifact_deps` edge so the DAG compiles the kernel first.
-    cfg.group("uefi")
-        .target(target_uefi)
-        .edition("2021")
-        .add("bootloader", "crates/bootloader")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs")
-        .artifact_env("KERNEL_PATH", "kernel");
+    // The build copies the compiled bootloader to EFI/BOOT/BOOTX64.EFI,
+    // and `quon run --uefi` mounts this directory as the ESP via QEMU's
+    // VVFAT driver.
+    q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 
-    // Auto-populated ESP directory. The build pipeline will copy the
-    // compiled bootloader to EFI/BOOT/BOOTX64.EFI after it compiles,
-    // and `quon run --uefi` will mount this directory as the ESP via
-    // QEMU's VVFAT driver.
-    cfg.esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
-
-    // QEMU config. OVMF paths are intentionally omitted — the runner
-    // probes OVMF_CODE / OVMF_VARS env vars at spawn time so the fixture
-    // stays hermetic. Tests that actually spawn QEMU (gated on
+    // OVMF paths are intentionally omitted — the runner probes
+    // OVMF_CODE / OVMF_VARS env vars at spawn time so the fixture stays
+    // hermetic. Tests that actually spawn QEMU (gated on
     // QUON_TEST_QEMU=1) inject the OVMF paths themselves.
     //
-    // Note: no `.esp_dir(...)` — Step 5's auto-wire logic picks up the
-    // single `esp("default")` declaration above.
-    cfg.runner("qemu").qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(256)
-        .cores(1)
-        .serial_stdio()
-        .boot_mode("uefi");
+    // No `.esp_dir(...)`: QEMU picks up the single ESP declared above.
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(256)
+            .cores(1)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi),
+    );
+
+    // Profiles build for the bootloader's target, since `quon run`
+    // starts it.
+    q.run(&bootloader).runner(&qemu);
 
     Ok(())
 }

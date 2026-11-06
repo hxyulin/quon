@@ -85,12 +85,12 @@ use std::sync::mpsc;
 /// `DagNode::Esp` nodes in this build. It is keyed by
 /// [`quon_model::Handle<EspDef>`] and consumed by `run::entry` to
 /// auto-wire the ESP into QEMU's `-drive fat:rw:` flag. The map is
-/// empty for builds that do not declare any `esp(...)` blocks.
+/// empty for builds that do not declare any `Esp`.
 ///
 /// `image_paths` is the parallel surface for `DagNode::Image` nodes:
 /// keyed by [`quon_model::Handle<ImageDef>`], it carries the
-/// `<build>/images/<name>.img` paths produced by `image()` blocks.
-/// Consumed by `run::entry` for a QEMU runner's `.disk(image_ref(...))` and by
+/// `<build>/images/<name>.img` paths produced by `Image` declarations.
+/// Consumed by `run::entry` for a QEMU runner's `Qemu::disk(&image)` and by
 /// the `${image:name}` rule-substitution path.
 ///
 /// (`Copy` was dropped when `esp_dirs` was added — call sites clone
@@ -109,7 +109,7 @@ pub struct BuildSummary {
     pub image_paths:
         std::collections::BTreeMap<quon_model::Handle<quon_model::ImageDef>, std::path::PathBuf>,
     /// Build-step output paths keyed by [`quon_model::BuildStepDef`]
-    /// handle. Consumed by `run::entry` so a QEMU runner's `.disk_ref("name")`
+    /// handle. Consumed by `run::entry` so a QEMU runner's `Qemu::disk(&step)`
     /// can boot directly from a build step's output without needing an
     /// intermediate `image()` wrapper.
     pub build_step_paths: std::collections::BTreeMap<

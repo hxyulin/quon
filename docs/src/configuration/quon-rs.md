@@ -5,180 +5,220 @@ The single configuration file for every Quon project.
 A `quon.rs` is a regular Rust source file that imports the
 [`quon-config`] crate and defines one function:
 
-```rust
-pub fn config(cfg: &mut quon_config::Config) -> quon_config::Result<()>
+```rust,ignore
+use quon_config::prelude::*;
+
+pub fn config(q: &mut Quon) -> Result<()>
 ```
 
 The file has no `main`. Quon generates a `main` that creates the
-`Config`, calls `config`, and prints the model as JSON. If `config`
-returns an error, Quon reports it and stops. Quon compiles the script
-when it changes (about 1 s) and caches the binary; later runs take
-about 50 ms.
+`Quon`, calls `config`, and prints the model as JSON. If `config`
+returns an error, or a declaration reported one, Quon prints every
+error and stops. Quon compiles the script when it changes (about 1 s)
+and caches the binary; later runs take about 50 ms.
 
 ## Minimal example
 
 ```rust
-pub fn config(cfg: &mut quon_config::Config) -> quon_config::Result<()> {
-    cfg.project("my-kernel", "0.1.0");
+use quon_config::prelude::*;
 
-    let target = cfg.target("x86_64-unknown-none");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-kernel", "0.1.0");
+    q.cargo_workspace(".");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-
-    cfg.group("kernel")
-        .target(target)
-        .edition("2024")
-        .add("kernel", "crates/kernel")
-            .crate_type(quon_config::CrateType::Bin)
-            .root("src/main.rs");
-
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(128)
-        .cores(1)
-        .serial_stdio();
-
+    let kernel = q.add(Package::new("kernel").linker_script("crates/kernel/kernel.ld"));
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(128)
+            .cores(1)
+            .serial(Serial::Stdio),
+    );
+    q.run(&kernel).runner(&qemu);
     Ok(())
 }
 ```
 
+The `dev` and `release` profiles exist without being declared, and
+build for the kernel's target. See
+[Projects, Targets, and Profiles](./projects-targets-profiles.md).
+
+## Two kinds of method
+
+`q.add(item)` declares a named item and returns a handle to it. The
+item is an owned value built with chained methods, such as
+`Package::new("kernel").linker_script(..)`. Packages, crates, profiles,
+runners, ESPs, images, downloads, build steps, config options, presets
+and boot tests are all declared this way.
+
+| Item | Handle `q.add` returns |
+|---|---|
+| `Package`, `Crate`, `Dependency`, `Download`, `Esp`, `Image`, `BuildStep` | `Artifact` |
+| `Qemu`, `Command`, `Plugin` | `Runner` |
+| `Profile` | `ProfileRef` |
+| `opt::bool(..)`, `opt::u32(..)` and the other option functions | `OptRef<K>` |
+| `Preset` | `PresetRef` |
+| `BootTest` | `()` |
+
+Other declarations take a handle by reference, so they can only refer
+to something that was declared:
+
+```rust,ignore
+let kernel = q.add(Package::new("kernel").target(&none));
+let boot = q.add(Package::new("bootloader").target(&uefi).artifact_env("KERNEL_PATH", &kernel));
+q.add(Esp::new("boot").add(&boot, "EFI/BOOT/BOOTX64.EFI"));
+```
+
+The other methods on `Quon` set what a project has one of:
+
+| Method | Sets |
+|---|---|
+| `q.project(name, version)` | The project's name and version |
+| `q.cargo_workspace(dir)` | The Cargo workspace packages come from |
+| `q.default_target(&target)` | The target crates build for when they name none |
+| `q.default_profile(&profile)` | The profile used without `-p` or `-r` (`dev` if unset) |
+| `q.run(&artifact)` | What `quon run` starts, and with `.runner(&runner)` how |
+| `q.host_tests()` | The packages whose tests `quon test` runs on the host |
+| `q.include_kconfig(path)` | A `.kconfig` file to read options and presets from |
+| `q.profile(name)` | A `ProfileRef` to a profile by name, such as the built-in `dev` |
+
+`q.cargo_workspace` and `q.run` are errors when called twice. A second
+`q.project` replaces the first.
+
+A `Target` is a plain value, not an item: `Target::builtin(triple)`,
+`Target::spec(name, path)` or `Target::host()`. Quon registers it the
+first time a declaration uses it.
+
+## Your own declarations
+
+`q.add` takes any type that implements the `Declare` trait. A crate,
+or a module of your `quon.rs`, can implement it to offer its own typed
+declaration, built from the ones Quon provides:
+
+```rust
+use quon_config::prelude::*;
+
+/// A probe-rs runner for one chip.
+struct ProbeRs { chip: String }
+
+impl Declare for ProbeRs {
+    type Handle = Runner;
+    fn declare(self, q: &mut Quon) -> Runner {
+        q.add(Plugin::new("probe-rs").setting("chip", self.chip))
+    }
+}
+
+pub fn config(q: &mut Quon) -> Result<()> {
+    let board = q.add(ProbeRs { chip: "nRF52840_xxAA".into() });
+    # let _ = board;
+    Ok(())
+}
+```
+
+A `declare` that checks its input reports a problem with
+`q.error(message)`. The script still runs to the end, so Quon reports
+every error at once.
+
 ## Splitting config across files
 
-Beyond a couple of subsystems, a single `quon.rs` becomes hard to
-navigate. You can split the script across multiple files using Rust's
-`mod` declarations with the `#[path]` attribute — no new quon API,
-no macro layer.
+A `quon.rs` that describes several subsystems can be split into
+several files with Rust's `mod` declarations and the `#[path]`
+attribute. Quon adds no API for this.
 
 ### Layout
 
 ```text
 my-kernel/
-├── quon.rs                  # root: project, targets, profiles, qemu
+├── quon.rs                  # root: project, targets, run entry
 ├── bootloader/
-│   ├── quon.rs              # bootloader subsystem registration
+│   ├── quon.rs              # the bootloader's declarations
 │   └── ...source...
-├── kernel/
-│   ├── quon.rs              # kernel subsystem registration
-│   └── ...source...
-└── shared/
-    ├── quon.rs              # shared crates registration
+└── kernel/
+    ├── quon.rs              # the kernel's declarations
     └── ...source...
 ```
 
 ### Root `quon.rs`
 
-```rust
-use quon_config::{Config, Result};
+```rust,ignore
+use quon_config::prelude::*;
 
 #[path = "bootloader/quon.rs"]
 mod bootloader;
 #[path = "kernel/quon.rs"]
 mod kernel;
-#[path = "shared/quon.rs"]
-mod shared;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("my-kernel", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-kernel", "0.1.0");
+    q.cargo_workspace(".");
 
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(target).opt_level(0).debug_info(true).runner("qemu");
-    cfg.runner("qemu").qemu("qemu-system-x86_64").machine("q35").memory(128);
+    let kernel = kernel::register(q);
+    let boot = bootloader::register(q, &kernel);
 
-    shared::register(cfg)?;
-    bootloader::register(cfg)?;
-    kernel::register(cfg)?;
-
+    let qemu = q.add(Qemu::new("qemu-system-x86_64").machine("q35").boot(BootMode::Uefi));
+    q.run(&boot).runner(&qemu);
     Ok(())
 }
 ```
 
 ### A subsystem file
 
-```rust
+```rust,ignore
 // bootloader/quon.rs
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn register(cfg: &mut Config) -> Result<()> {
-    let target = cfg.target("x86_64-unknown-none");
-
-    cfg.group("bootloader")
-        .target(target)
-        .edition("2024")
-        .add("bios-boot-sector", "bootloader/bios-boot-sector")
-            .crate_type(CrateType::RawBinary)
-            .root("src/main.rs")
-            .linker_script("bootloader/bios-boot-sector/link.ld");
-
-    cfg.image("bios.img").raw_write_crate("bios-boot-sector", 0);
-    Ok(())
+pub fn register(q: &mut Quon, kernel: &Artifact) -> Artifact {
+    let boot = q.add(
+        Package::new("bootloader")
+            .target(&Target::builtin("x86_64-unknown-uefi"))
+            .artifact_env("KERNEL_PATH", kernel),
+    );
+    q.add(Esp::new("boot").add(&boot, "EFI/BOOT/BOOTX64.EFI"));
+    boot
 }
 ```
 
 ### Conventions
 
-- Each subsystem exposes `pub fn register(cfg: &mut Config) -> Result<()>`.
-  Convention only — not enforced by a trait or macro.
-- Cross-subsystem references work by name, not by passing handles.
-  `cfg.target("x86_64-unknown-none")` is idempotent: the second call from
-  any subsystem returns the same handle as the first.
-- `#[path = "..."]` is required because subsystem files don't sit at the
-  default `<modname>.rs` location.
+- Each subsystem exposes a `register` function that takes `&mut Quon`
+  and returns the handles other files need. This is a convention, not
+  a trait.
+- Files refer to each other's items by passing handles. A function
+  that needs the kernel takes `&Artifact`.
+- Each file can build its own `Target` value. Two values with the same
+  name and definition are the same target. One name with two
+  definitions, such as a builtin and a spec, is an error.
+- `#[path = "..."]` is required because subsystem files don't sit at
+  the default `<modname>.rs` location.
 
-### Where each kind of declaration lives
-
-| Concern              | Lives where                          |
-| -------------------- | ------------------------------------ |
-| `cfg.project(...)`   | Root only (project-wide).            |
-| `cfg.target(...)`    | Root, OR re-lookup in a subsystem.   |
-| `cfg.target_spec()`  | Root (the path is project-relative). |
-| `cfg.dependency(...)`| Root (shared across subsystems).     |
-| `cfg.profile(...)`   | Root (project-wide concept).         |
-| `cfg.image(...)`     | Root or subsystem (boot images often subsystem-owned). |
-| `cfg.runner(...)`    | Root only.                           |
-| `cfg.group(...)`     | Per-subsystem (the natural unit).    |
-| `cfg.build_step(...)`| Per-subsystem when local; root when cross-cutting. |
-
-These are recommended placements, not the only legal ones — the
-`Config` API permits the same builder calls in any module, subject to
-quon's normal duplicate-name rules (each `group` / `image` / `profile` /
-`dependency` / `build_step` once per name; `qemu` and `bootloader` are
-singletons; `project` is last-call-wins; `target` and `target_spec` are
-idempotent on identical re-declarations).
+Each named item is declared once per name. Crates and build steps
+share one namespace, since both are build inputs. Runners have no
+name to repeat.
 
 ### Cache behaviour
 
-The script-runner hashes every file the script transitively touches
-(via the rustc-emitted depfile), so editing `bootloader/quon.rs`
-invalidates the compiled script binary the same way editing the root
-`quon.rs` would. You don't need to do anything to opt in.
+The script runner hashes every file the script uses, from the depfile
+rustc writes, so editing `bootloader/quon.rs` rebuilds the compiled
+script the same way editing the root `quon.rs` does.
 
 ## Why Rust?
 
-The Rhai DSL was carrying the cost of fighting a dynamic-typed scripting
-language inside a statically-typed host. Going Rust eliminates the
-engine, intern, and validate runtime layers — the type system catches
-most of what they enforced — and editor support strictly improves:
-rust-analyzer provides completions, hover, goto-def, and inline type
-errors against `quon.rs` for free.
+The Rhai DSL fought a dynamically typed scripting language inside a
+statically typed host. With Rust, the type system catches most of
+what the engine, intern and validate layers enforced at run time.
+rust-analyzer provides completions, hover, go-to-definition and inline
+type errors in `quon.rs`.
 
 The trade-offs:
 
 - **First-time compile cost.** About 1 s per script change, plus a
   one-time build of the quon-config library for each rustc.
-- **Conditional logic in the script is real Rust.** `if`, `for`,
-  arbitrary functions are available — more rope than Rhai. Use it
-  judiciously; a build script that needs a binary search is probably
-  doing too much.
-- **Source spans for runtime errors are coarser.** Rhai had per-token
-  spans; Rust gives us `Location::caller()` for the call site of a
-  builder method, which is enough for "duplicate target name" but not
-  for "invalid value passed inside a deeply nested expression".
+- **Conditional logic in the script is real Rust.** `if`, `for` and
+  functions are available. A build script that needs a binary search
+  is probably doing too much.
+- **Errors carry no source position.** They name the item at fault, as
+  in `profile 'p' is declared more than once`.
 
 ## The quon-config library and `~/.quon`
 
@@ -221,36 +261,30 @@ The compiled script itself stays in the project, under
 ## Editor support
 
 Run `quon configure` in the project root to generate a
-`rust-project.json`. rust-analyzer will pick it up and start indexing
-your kernel sources alongside `quon.rs` itself — every builder method
-gets autocomplete, hover, and live diagnostics. The file declares
-`quon.rs` as a library crate, because it has no `main`, and points
-rust-analyzer at the quon-config sources the library was built from.
+`rust-project.json`. rust-analyzer picks it up and indexes your kernel
+sources and `quon.rs`, with completions, hover and diagnostics for
+every builder method. The file declares `quon.rs` as a library crate,
+because it has no `main`, and points rust-analyzer at the quon-config
+sources the library was built from.
 
 ## Migrating from `fn main`
 
-Earlier versions had `quon.rs` define `main`, create the `Config` and
-call `cfg.emit()`. Rewrite
+Earlier versions had `quon.rs` define `main`, create the config value
+and call `emit()` on it. Replace `main` with a `config` function that
+takes `&mut Quon`:
 
-```rust
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-    // ...
-    cfg.emit()
-}
-```
+```rust,ignore
+use quon_config::prelude::*;
 
-as
-
-```rust
-pub fn config(cfg: &mut Config) -> Result<()> {
+pub fn config(q: &mut Quon) -> Result<()> {
     // ...
     Ok(())
 }
 ```
 
-and pass `cfg` instead of `&mut cfg` to helper functions. A script
-that still defines `main` fails to compile, and the error says how to
-migrate.
+Pass `q` instead of `&mut q` to helper functions. A script that still
+defines `main` fails to compile, and the error says how to migrate.
+To move from the `Config` API to `Quon`, see
+[From Config to Quon](../migration/config-to-quon.md).
 
 [`quon-config`]: https://docs.rs/quon-config

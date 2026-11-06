@@ -7,7 +7,7 @@
 //!   `.kconfig` file loaded via `load_kconfig()`. Also exercises menus,
 //!   the `source` directive, and a boolean expression in `depends_on`.
 //! - `tests/fixtures/kconfig-builder-equiv/` — declares the same options
-//!   through the inline `config_*` builders, omitting the
+//!   through the inline `opt::*` declarations, omitting the
 //!   features the legacy builder cannot express (`||`/`!`).
 //!
 //! For the AND-of-symbols subset both forms can express, every option's
@@ -22,7 +22,7 @@
 //! `quon.rs` and therefore requires rustc — they are `#[ignore]`-gated
 //! with a probe-or-skip guard. The inline builder test
 //! (`depends_on_expr_honours_or_semantics`) constructs the model in-
-//! process via `Config` and stays ungated. The CLI integration tests in
+//! process via `Quon` and stays ungated. The CLI integration tests in
 //! `quon/tests/integration.rs` are reserved for behavior that
 //! actually shells out to the binary; this test would be misleading
 //! there because nothing about the CLI is being exercised.
@@ -160,23 +160,18 @@ fn depends_on_expr_honours_or_semantics() {
     // routing this through the legacy flat `Vec<String>` AND-of-
     // names path, it would treat `A` and `B` as two separate
     // required symbols, see `B` is off, and force DEP to false.
-    use quon_config::Config;
-    use quon_model::{ConfigValue, Expr, intern};
+    use quon_config::prelude::*;
+    use quon_model::intern;
 
-    let mut cfg = Config::new();
-    cfg.project("expr-parity", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("default").target(t);
-    cfg.config_bool("A").default_value(ConfigValue::Bool(true));
-    cfg.config_bool("B").default_value(ConfigValue::Bool(false));
-    cfg.config_bool("DEP")
-        .default_value(ConfigValue::Bool(true))
-        .depends_on(Expr::Or(vec![
-            Expr::Ident("A".into()),
-            Expr::Ident("B".into()),
-        ]));
+    let mut q = Quon::new();
+    q.project("expr-parity", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
+    q.add(Profile::new("default"));
+    let a = q.add(opt::bool("A").default(true));
+    let b = q.add(opt::bool("B").default(false));
+    q.add(opt::bool("DEP").default(true).depends_on(&a | &b));
 
-    let raw = cfg.into_raw();
+    let raw = q.into_raw().unwrap();
     let (model, diags) = intern(raw);
     assert!(diags.is_empty(), "intern diags: {diags:?}");
 

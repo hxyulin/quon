@@ -115,7 +115,7 @@ pub fn ensure_esp(
                 let abs = resolved.project_root.join(path);
                 if !abs.is_file() {
                     return Err(Error::Compile(format!(
-                        "esp(\"{}\").add_file(\"{}\", \"{}\"): host file does not exist \
+                        "Esp::new(\"{}\").add(\"{}\", \"{}\"): host file does not exist \
                          at {} (paths are relative to the project root)",
                         esp.name,
                         path,
@@ -752,6 +752,6 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("add_file(\"missing.conf\""), "{err}");
+        assert!(err.contains(".add(\"missing.conf\""), "{err}");
     }
 }

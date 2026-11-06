@@ -14,19 +14,13 @@
 // `vendor_sync` path. Network-gated only — `cargo vendor` and
 // `cargo metadata` both shell out for real against crates.io.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("vendor-cross-minimal", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("vendor-cross-minimal", "0.1.0");
 
-    let kernel = cfg.target("x86_64-unknown-none");
-
-    cfg.profile("dev")
-        .target(kernel)
-        .opt_level(0)
-        .debug_info(true);
-
-    cfg.dependency("bitflags").version("2.11").target(kernel);
+    let kernel = Target::builtin("x86_64-unknown-none");
+    q.add(Dependency::crates_io("bitflags", "2.11").target(&kernel));
 
     Ok(())
 }

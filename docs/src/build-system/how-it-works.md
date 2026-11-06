@@ -9,8 +9,8 @@ certain things (like sysroot compilation) only happen on the first build.
 ### 1. Evaluate
 
 Quon parses and executes your `quon.rs` script. The script declares
-projects, targets, crate groups, profiles, rules, pipelines, and QEMU
-settings. The result is a **BuildModel** -- a structured, in-memory
+the project, its packages and crates with their targets, profiles,
+runners, ESPs, images and build steps. The result is a **BuildModel** -- a structured, in-memory
 representation of everything the build needs to know.
 
 ### 2. Resolve
@@ -39,7 +39,7 @@ several node types:
 - **Sysroot nodes** -- the sysroot compilation tasks
 - **ConfigCrate nodes** -- an auto-generated crate that exposes build
   configuration to your code
-- **Rule nodes** -- user-defined build steps (copy, exec, mkimage)
+- **Build step nodes** -- host tools that write one file each (see [Build steps](./build-steps.md))
 - **ESP nodes** -- EFI System Partition assembly tasks
 - **Image nodes** -- disk image creation tasks
 
@@ -88,4 +88,4 @@ Quon drives `rustc` directly and assembles flags per-crate from your
 - Linker scripts
 - Mixed-target compilation (e.g., a UEFI bootloader and a bare-metal
   kernel in the same build)
-- Build rules and pipelines for post-processing steps
+- Build steps for post-processing

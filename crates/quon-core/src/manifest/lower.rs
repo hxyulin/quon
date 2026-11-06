@@ -1,8 +1,8 @@
-//! Manifest expansion: turn `group.package(...)` roots into crates.
+//! Manifest expansion: turn `Package::new(..)` roots into crates.
 //!
 //! [`expand`] runs in `script_runner::finalize`, after `quon.rs` has
 //! produced its [`RawBuildModel`] and before intern. It reads the Cargo
-//! workspace named by `cfg.cargo_workspace(dir)`, resolves features per
+//! workspace named by `q.cargo_workspace(dir)`, resolves features per
 //! domain for the roots, and replaces each root with the units the
 //! resolver produced. Every later stage (intern, `config::resolve`, unit
 //! lowering, the DAG) sees one uniform set of crates.
@@ -43,7 +43,7 @@
 //! (owners that compile it identically share it), source, edition,
 //! `links`, and its build-dependencies as names of host crates. Unit
 //! lowering (`crate::unit::lower`) turns it into a script unit and one
-//! run per owner, as it does for `cfg.dependency()` crates. The run's
+//! run per owner, as it does for `Dependency` crates. The run's
 //! environment is assembled when the run is dispatched, from the
 //! owner's features and platform, so the resolver's
 //! [`BuildScriptRun::env`](super::resolve::BuildScriptRun) is not used
@@ -52,7 +52,7 @@
 //! ### Registry sources
 //!
 //! Registry packages are read from Cargo's registry cache, or from the
-//! vendor directory named by `cfg.cargo_workspace(..).vendored(dir)`;
+//! vendor directory named by `q.cargo_workspace(..).vendored(dir)`;
 //! see [`super::sources`]. A registry edge whose source cannot be found
 //! is an error only when the resolver activates it, so an optional
 //! dependency no feature enables never is.
@@ -62,9 +62,8 @@
 //! Two packages with the same `links` value in one domain, a root whose
 //! `quon.rs` crate type (`Bin` or `RawBinary`) the manifest does not
 //! back with a bin target, lib crate types other than one of `lib`,
-//! `rlib` or `staticlib`, a root in a `no_sysroot` group that has
-//! dependencies, a crate declared with
-//! `group.add` that depends on a manifest unit or lives in a workspace
+//! `rlib` or `staticlib`, a `no_sysroot` root that has dependencies, a
+//! crate declared with `Crate` that depends on a manifest unit or lives in a workspace
 //! member's directory (it would be described twice), and unit names that
 //! collide with declared crates.
 //!
@@ -92,7 +91,7 @@ use std::path::{Path, PathBuf};
 pub const SYNTHETIC_GROUP_PREFIX: &str = "cargo:";
 
 /// Expand the manifest roots in `raw`. A model without
-/// `cfg.cargo_workspace(...)` and without roots is left untouched and
+/// `q.cargo_workspace(...)` and without roots is left untouched and
 /// reads nothing. `cache_dir` (the build directory) holds the target cfg
 /// cache and the registry source map; `None` caches nothing. Returns
 /// warnings for the caller to print.
@@ -130,13 +129,13 @@ pub fn load(
         if roots.is_empty() && raw.host_tests.is_empty() {
             return Ok(None);
         }
-        let hint = "add `cfg.cargo_workspace(\"<dir>\")` to quon.rs";
+        let hint = "add `q.cargo_workspace(\"<dir>\")` to quon.rs";
         return Err(Error::Diagnostics(
             roots
                 .iter()
                 .map(|c| {
                     Diagnostic::error(format!(
-                        "`package(\"{}\")` needs a Cargo workspace; {hint}",
+                        "`Package::new(\"{}\")` needs a Cargo workspace; {hint}",
                         c.name
                     ))
                     .with_optional_span(c.span.clone())
@@ -204,7 +203,7 @@ fn probe_platforms(
     Ok(platforms)
 }
 
-/// One `group.package(...)` root.
+/// One `Package::new(..)` root.
 struct RootInfo {
     /// The root's `RawCrateDef`, whose settings root units take.
     def: RawCrateDef,
@@ -310,7 +309,7 @@ pub fn expand_with(
                 ))
                 .with_note(format!(
                     "add `[[test]] name = \"{}\"` with `harness = false` to {} to boot it, \
-                     or `cfg.host_tests().package(\"{}\")` to quon.rs to run it on the host",
+                     or `q.host_tests().package(\"{}\")` to quon.rs to run it on the host",
                     t.name,
                     pkg.manifest_path.display(),
                     pkg.name()
@@ -460,10 +459,9 @@ fn check_unsupported(graph: &UnitGraph, roots: &[RootInfo], errors: &mut Vec<Dia
         if has_deps {
             errors.push(
                 Diagnostic::error(format!(
-                    "package `{}` is in `no_sysroot` group '{}' but has dependencies; they \
+                    "package `{}` is built with `no_sysroot` but has dependencies; they \
                      would need to be `no_core` too",
                     graph.packages[r.package].name(),
-                    r.def.group
                 ))
                 .with_optional_span(r.def.span.clone()),
             );
@@ -471,7 +469,7 @@ fn check_unsupported(graph: &UnitGraph, roots: &[RootInfo], errors: &mut Vec<Dia
     }
 }
 
-/// Reject crates declared with `group.add` that overlap the workspace:
+/// Reject crates declared with `Crate` that overlap the workspace:
 /// a name taken by a unit, an edge into a manifest unit, or a crate
 /// directory that is a workspace member's.
 fn check_declared_crates(
@@ -501,7 +499,7 @@ fn check_declared_crates(
         if let Some(pkg) = unit_names.get(c.name.as_str()) {
             errors.push(
                 Diagnostic::error(format!(
-                    "crate '{}' is declared with `group.add`, and package `{pkg}` in the \
+                    "crate '{}' is declared with `Crate`, and package `{pkg}` in the \
                      Cargo workspace has a unit of the same name",
                     c.name
                 ))
@@ -513,7 +511,7 @@ fn check_declared_crates(
             if unit_names.contains_key(target) || root_names.contains(target) {
                 errors.push(
                     Diagnostic::error(format!(
-                        "crate '{}' (declared with `group.add`) depends on '{target}' \
+                        "crate '{}' (declared with `Crate`) depends on '{target}' \
                          (as `{extern_name}`), which comes from the Cargo workspace; \
                          declare '{}' as a workspace package instead",
                         c.name, c.name
@@ -526,8 +524,8 @@ fn check_declared_crates(
         if let Some(pkg) = member_dirs.get(&dir) {
             errors.push(
                 Diagnostic::error(format!(
-                    "crate '{}' is declared with `group.add` at {}, which is the directory of \
-                     workspace member `{pkg}`; use `package(\"{pkg}\")` instead",
+                    "crate '{}' is declared with `Crate` at {}, which is the directory of \
+                     workspace member `{pkg}`; use `Package::new(\"{pkg}\")` instead",
                     c.name, c.path
                 ))
                 .with_optional_span(c.span.clone()),

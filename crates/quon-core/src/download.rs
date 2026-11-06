@@ -1,8 +1,8 @@
 //! Pinned downloads: files fetched over HTTPS once and checked
 //! against a SHA-256 written in `quon.rs`.
 //!
-//! A [`DownloadDef`] is declared with `cfg.download(...)` or the
-//! `cfg.limine(...)` helper and consumed by ESP and image entries. The
+//! A [`DownloadDef`] is declared with `q.add(Download::new(..))` or the
+//! `Download::limine(..)` helper and consumed by ESP and image entries. The
 //! ESP and image nodes call [`ensure_download`] when they resolve such
 //! an entry, so nothing is fetched unless a declared download is used.
 //!

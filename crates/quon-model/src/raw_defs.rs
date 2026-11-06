@@ -2,7 +2,7 @@
 //!
 //! Each type here mirrors a corresponding `Def` in
 //! [`crate::build_model`] but stores cross-references as name strings
-//! instead of `Handle<...>`. `quon-config` builders write these; the
+//! instead of `Handle<...>`. `quon_config::Quon` writes these; the
 //! [`crate::intern`] pass converts them to handles in the final
 //! [`crate::build_model::BuildModel`].
 
@@ -152,7 +152,7 @@ pub struct RawCrateDef {
     pub artifact_deps: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_env: BTreeMap<String, String>,
-    /// Set by `group.package(...)`: this entry names a workspace
+    /// Set by `Package::new(..)`: this entry names a workspace
     /// package. Manifest expansion replaces it with the package's
     /// units before intern.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,7 +175,7 @@ pub struct RawManifestRoot {
     pub default_features: bool,
 }
 
-/// `cfg.cargo_workspace(dir)`.
+/// `q.cargo_workspace(dir)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawCargoWorkspace {
     /// Directory holding the workspace `Cargo.toml`, relative to the
@@ -187,7 +187,7 @@ pub struct RawCargoWorkspace {
     pub vendored: Option<String>,
 }
 
-/// `cfg.boot_test(name)`, before intern resolves the profile name.
+/// `BootTest::new(name, &profile)`, before intern resolves the profile name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawBootTestDef {
     pub name: String,
@@ -230,9 +230,8 @@ impl Named for RawCrateDef {
 }
 
 /// Raw form of [`crate::build_model::BootloaderDef`]. `kind` already
-/// uses the typed [`BootloaderKind`] — `quon-config` builders parse
-/// the user-supplied `&str` via [`BootloaderKind::from_str`] before
-/// writing, so the wire format is symmetric with the resolved model.
+/// uses the typed [`BootloaderKind`], so the wire format is symmetric
+/// with the resolved model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawBootloaderDef {
     pub kind: BootloaderKind,

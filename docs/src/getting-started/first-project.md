@@ -1,4 +1,4 @@
-# Your First Project
+# Your first project
 
 This page walks through creating a minimal bare-metal kernel project with
 Quon. By the end you will have a `quon.rs` configuration file and a
@@ -19,30 +19,17 @@ It lives at the root of your project.
 
 ## Writing quon.rs
 
-A minimal configuration needs four declarations: a project, a target, a
-profile, and a group containing at least one crate.
+A minimal configuration names the project, the target, and at least
+one crate:
 
 ```rust
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("my-kernel", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-kernel", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    let target = cfg.target("x86_64-unknown-none");
-
-    cfg.profile("dev")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-
-    cfg.group("kernel")
-        .target(target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs")
-            .linker_script("crates/kernel/kernel.ld");
+    q.add(Crate::bin("kernel", "crates/kernel").linker_script("crates/kernel/kernel.ld"));
 
     Ok(())
 }
@@ -50,53 +37,52 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ### What each declaration does
 
-- **`project(name, version)`** -- declares the project name and version. This
-  is metadata used in build output paths and diagnostics.
+- **`q.project(name, version)`** declares the project name and version.
+  Quon uses them in build output paths and diagnostics.
 
-- **`target(triple)`** -- registers a rustc target triple. Quon will compile a
-  custom sysroot for each registered target. You can register multiple targets
-  if your project needs them (e.g., one for the kernel, another for a
-  bootloader).
+- **`q.default_target(&target)`** sets the target that crates build for
+  when they name none. `Target::builtin(triple)` is a target rustc
+  knows. Quon compiles a custom sysroot for each target in use. A
+  crate can name its own with `.target(&t)`, for example a bootloader
+  next to the kernel.
 
-- **`profile(name)`** -- defines a compilation profile (analogous to Cargo's
-  `dev` / `release` profiles). `.target()` sets which target triple this
-  profile compiles for, `.opt_level()` and `.debug_info()` control optimization
-  and debug symbols, and `.run_binary()` names the crate whose output is the
-  final bootable artifact.
+- **`q.add(Crate::bin(name, path))`** declares a binary crate with its
+  sources in `path`, rooted at `src/main.rs`. `.linker_script(path)`
+  links it with the given script. In a Cargo workspace, declare
+  `Package::new(name)` instead, and Quon reads the rest from the
+  package's `Cargo.toml`.
 
-- **`group(name)`** -- collects one or more crates that share a target and
-  edition. `.add(name, path)` registers a crate within the group, returning a
-  crate builder where you set the crate type, source root, linker script, and
-  other per-crate options.
+The project gets a `dev` and a `release` profile without declaring
+them. They build for the kernel's target.
 
 ## Adding QEMU configuration
 
-If you want to launch your kernel in QEMU with `quon run`, declare a QEMU
-runner and name it in the profile:
+To launch your kernel in QEMU with `quon run`, declare a QEMU runner
+and name the kernel as the run entry:
 
 ```rust,ignore
-cfg.runner("qemu")
-    .qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(128)
-    .cores(1)
-    .serial_stdio();
+let kernel = q.add(Crate::bin("kernel", "crates/kernel").linker_script("crates/kernel/kernel.ld"));
 
-cfg.profile("dev")
-    .target(target)
-    .run_binary("kernel")
-    .runner("qemu");
+let qemu = q.add(
+    Qemu::new("qemu-system-x86_64")
+        .machine("q35")
+        .memory_mb(128)
+        .cores(1)
+        .serial(Serial::Stdio),
+);
+q.run(&kernel).runner(&qemu);
 ```
 
-- **`runner(name)`** -- declares a [runner](../running/runners.md), the
-  thing that starts the built kernel. A profile picks one with
-  `.runner(name)`.
-- **`.qemu(binary)`** -- the QEMU system emulator binary to invoke.
-- **`.machine(type)`** -- the machine/board model (`q35`, `virt`, etc.).
-- **`.memory(mb)`** -- guest RAM in megabytes.
-- **`.cores(n)`** -- number of virtual CPU cores.
-- **`.serial_stdio()`** -- redirects the guest serial port to the host terminal,
-  so `print!` / serial output appears in your shell.
+- **`Qemu::new(program)`** declares a [runner](../running/runners.md),
+  the thing that starts the built kernel. `program` is the QEMU system
+  emulator to invoke.
+- **`.machine(type)`** is the machine model (`q35`, `virt`, etc.).
+- **`.memory_mb(mb)`** is guest RAM in megabytes.
+- **`.cores(n)`** is the number of virtual CPU cores.
+- **`.serial(Serial::Stdio)`** connects the guest serial port to the
+  host terminal, so serial output appears in your shell.
+- **`q.run(&kernel).runner(&qemu)`** makes `quon run` boot the kernel
+  with that runner.
 
 ## Next steps
 

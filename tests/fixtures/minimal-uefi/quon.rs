@@ -4,46 +4,37 @@
 // dependency. Dry-run tests never compile anything, so source content
 // is essentially ceremony.
 
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("minimal-uefi", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("minimal-uefi", "0.1.0");
 
-    let target = cfg.target("x86_64-unknown-none");
+    let target = Target::builtin("x86_64-unknown-none");
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-
-    cfg.group("host_tools")
-        .target_host()
-        .edition("2021")
-        .add("minimal_derive", "crates/proc_macro")
-        .crate_type(CrateType::ProcMacro)
-        .root("src/lib.rs");
-
-    cfg.group("kernel")
-        .target(target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .crate_type(CrateType::Bin)
-        .root("src/main.rs")
-        .linker_script("crates/kernel/kernel.ld")
-        .dep("minimal_derive", "minimal_derive");
+    let derive = q.add(
+        Crate::proc_macro("minimal_derive", "crates/proc_macro").edition(Edition::E2021),
+    );
+    let kernel = q.add(
+        Crate::bin("kernel", "crates/kernel")
+            .target(&target)
+            .edition(Edition::E2021)
+            .linker_script("crates/kernel/kernel.ld")
+            .dep(&derive),
+    );
 
     // UEFI boot mode: OVMF pflash + ESP directory mounted via VVFAT.
     // OVMF paths are left unset here — tests inject them via the
     // OVMF_CODE / OVMF_VARS env vars so the fixture stays hermetic.
-    cfg.runner("qemu").qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(512)
-        .cores(2)
-        .serial_stdio()
-        .boot_mode("uefi")
-        .esp_dir("./esp");
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(512)
+            .cores(2)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi)
+            .esp_dir("./esp"),
+    );
+    q.run(&kernel).runner(&qemu);
 
     Ok(())
 }

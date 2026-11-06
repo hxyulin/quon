@@ -425,7 +425,7 @@ pub fn configure(
         (None, None)
     };
 
-    // Lower with the vendor context the build uses, so `cfg.dependency()`
+    // Lower with the vendor context the build uses, so `Dependency`
     // crates get entries and their dependents' paths match the build.
     // Before `quon vendor` has run there is no context; the file then
     // leaves those crates out instead of failing.

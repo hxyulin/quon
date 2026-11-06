@@ -1,76 +1,79 @@
 # Migrating `quon.rhai` to `quon.rs`
 
-Quon 0.x phases out the Rhai DSL in favor of a typed Rust build
-script (`quon.rs`) that imports the
-[`quon-config`](https://docs.rs/quon-config) crate. This guide
-covers the mechanical translation. For the rationale, see the
+Quon no longer reads `quon.rhai`. A project describes its build in
+`quon.rs`, a typed Rust build script that imports the
+[`quon-config`](https://docs.rs/quon-config) crate. This guide covers
+the mechanical translation. For the rationale, see the
 [restructure spec](https://github.com/hxyulin/quon/blob/main/docs/superpowers/specs/2026-05-01-quon-restructure-spec.md#d1-replace-rhai-with-a-typed-rust-build-script).
 
 ## Quick reference
 
-| Rhai                                          | Rust                                            |
-|-----------------------------------------------|-------------------------------------------------|
-| `project("name", "1.0.0");`                   | `cfg.project("name", "1.0.0");`                 |
-| `project("name", "1.0.0").default_profile("dev");` | `cfg.project("name", "1.0.0").default_profile("dev");` |
-| `target("x86_64-unknown-none");`              | `let t = cfg.target("x86_64-unknown-none");`    |
-| `target("custom", "spec.json");`              | `let t = cfg.target_spec("custom", "spec.json");` |
-| `profile("dev").target("x86_64-...")`         | `cfg.profile("dev").target(t)`                  |
-| `group("g").target("host")`                   | `cfg.group("g").target_host()`                  |
-| `group("g").add("crate", "path").crate_type("bin")` | `cfg.group("g").add("crate", "path").crate_type(CrateType::Bin)` |
-| Multi-`add` (Rhai `let cross = group(...); cross.add(...); cross.add(...);`) | `let mut g = cfg.group(...).target(t).edition("2021"); g.add(...); g.add(...);` |
-| `crate.deps(#{ ext: #{ crate: "c" } })`       | `crate.dep("ext", "c")`                         |
-| `crate.deps(#{ ext: #{ crate: "c", features: ["x"] } })` | `crate.dep_with("ext", "c", \|b\| { b.features(&["x"]); })` |
-| `crate.cfg_flags(["a", "b"])`                 | `crate.cfg_flag("a").cfg_flag("b")`             |
-| `crate.artifact_env("K", "kernel")`           | `crate.artifact_env("K", "kernel")`             |
-| `qemu("qemu").boot_mode("uefi")`              | `cfg.runner("qemu").qemu("qemu").boot_mode("uefi")`, plus `.runner("qemu")` on the profile |
-| `esp("default").add("bl", "EFI/BOOT/BOOTX64.EFI")` | `cfg.esp("default").add("bl", "EFI/BOOT/BOOTX64.EFI")` |
-| `dependency("d").path("../d")`                | `cfg.dependency("d").path("../d")`              |
-| `config_bool("F").default_value(true)`        | `cfg.config_bool("F").default_value(ConfigValue::Bool(true))` |
-| `config_u32("L").range(0, 5)`                 | `cfg.config_u32("L").range(0, 5)`               |
-| `config_*.depends_on("X")`                    | `cfg.config_*.depends_on(Expr::Ident("X".into()))` |
-| `config_*.depends_on(["X", "Y"])`             | `cfg.config_*.depends_on(Expr::And(vec![Expr::Ident("X".into()), Expr::Ident("Y".into())]))` |
-| `config_*.depends_on_expr("A && !B")`         | (see "Boolean expressions" below)               |
-| `preset("p").set("F", true)`                  | `cfg.preset("p").set("F", ConfigValue::Bool(true))` |
-| `load_kconfig("./options.kconfig");`          | `cfg.include_kconfig("./options.kconfig")?;`    |
+| Rhai | Rust |
+|---|---|
+| `project("name", "1.0.0");` | `q.project("name", "1.0.0");` |
+| `project(..).default_profile("debug");` | `q.default_profile(&debug);`, with `debug` from `q.add(Profile::new("debug"))` |
+| `target("x86_64-unknown-none");` | `let t = Target::builtin("x86_64-unknown-none");` |
+| `target("custom", "spec.json");` | `let t = Target::spec("custom", "spec.json");` |
+| `profile("dev").target("x86_64-...")` | `q.default_target(&t);`, or `q.run(&artifact)` on a crate of that target |
+| `profile("dev").run_binary("kernel")` | `q.run(&kernel);` |
+| `group("g").target("host")` | `.target(&Target::host())` on each package or crate |
+| `group("g").add("crate", "path").crate_type("bin")` | `q.add(Crate::bin("crate", "path").target(&t))` |
+| `crate.deps(#{ ext: #{ crate: "c" } })` | `.dep(Dep::on(&c).rename("ext"))` |
+| `crate.deps(#{ ext: #{ crate: "c", features: ["x"] } })` | `.dep(Dep::on(&c).rename("ext").features(["x"]))` |
+| `crate.cfg_flags(["a", "b"])` | `.cfg("a").cfg("b")` |
+| `crate.artifact_env("K", "kernel")` | `.artifact_env("K", &kernel)` |
+| `qemu("qemu").boot_mode("uefi")` | `let qemu = q.add(Qemu::new("qemu").boot(BootMode::Uefi));` and `q.run(&k).runner(&qemu);` |
+| `esp("default").add("bl", "EFI/BOOT/BOOTX64.EFI")` | `q.add(Esp::new("default").add(&bl, "EFI/BOOT/BOOTX64.EFI"));` |
+| `dependency("d").path("../d")` | `q.add(Dependency::path("d", "../d"))` |
+| `config_bool("F").default_value(true)` | `q.add(opt::bool("F").default(true))` |
+| `config_u32("L").range(0, 5)` | `q.add(opt::u32("L").range(0..=5))` |
+| `config_*.depends_on("X")` | `.depends_on(&x)` |
+| `config_*.depends_on(["X", "Y"])` | `.depends_on(&x & &y)` |
+| `config_*.depends_on_expr("A && !B")` | `.depends_on(&a & !&b)` |
+| `preset("p").set("F", true)` | `q.add(Preset::new("p").set(&f, true))` |
+| `load_kconfig("./options.kconfig");` | `q.include_kconfig("options.kconfig");` |
+
+Where Rhai names an item by string, Rust passes the handle that
+`q.add` returned for it. In the table, `kernel`, `bl`, `c`, `x`, `a`
+and `f` are such handles.
 
 ## Skeleton
 
 Every `quon.rs` looks like this:
 
 ```rust
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
+pub fn config(q: &mut Quon) -> Result<()> {
     // ... declarations ...
     Ok(())
 }
 ```
 
-Quon creates the `Config`, calls `config`, then serialises the model
-as JSON to stdout, failing with the first accumulated diagnostic if
-any. The quon CLI captures that JSON, runs intern + validate, and
-proceeds with the build.
+Quon creates the `Quon`, calls `config`, then prints the model as
+JSON on stdout. If any declaration reported an error, it prints every
+error instead and fails. The quon CLI reads that JSON, runs intern and
+validate, and proceeds with the build.
 
-## Targets are handles, not strings
+## Items are handles, not strings
 
-Rhai accepts the target *name* in every place a target is needed
-(`profile.target("x86_64-unknown-none")`). Rust's typed API takes a
-`Handle<TargetDef>` — bind it once and pass it around:
+Rhai accepts the *name* of a target, crate or option in every place
+one is needed. In Rust, `q.add` returns a handle, and other
+declarations take the handle:
 
-```rust
-let target = cfg.target("x86_64-unknown-none");
-cfg.profile("dev").target(target);
-cfg.group("kernel").target(target);
+```rust,ignore
+let kernel = q.add(Package::new("kernel").target(&none));
+let boot = q.add(Package::new("bootloader").target(&uefi).artifact_env("KERNEL_PATH", &kernel));
+q.add(Esp::new("default").add(&boot, "EFI/BOOT/BOOTX64.EFI"));
 ```
 
-This catches typos at compile time. Stage 4 reshapes the model so
-*every* cross-reference goes through handles; Stage 2's surface is
-the leading edge of that change.
+A reference to something that was never declared does not compile.
+A `Target` is a plain value: build it where you need it, or bind it
+once and pass `&t`.
 
-## Multiple crates in one group
+## Groups
 
-Rhai's pattern is to bind the group locally and call `.add` on it
-repeatedly:
+Rhai groups crates that share a target:
 
 ```rhai
 let cross = group("kernel").target("x86_64-unknown-none").edition("2021");
@@ -78,21 +81,17 @@ cross.add("mylib", "crates/mylib");
 cross.add("app", "crates/app").crate_type("bin");
 ```
 
-The Rust API takes `&mut self` on `add`, so the same shape works:
+The Rust API has no groups. Each crate carries its own target and
+edition. Set the common target once with `q.default_target`:
 
-```rust
-let mut cross = cfg.group("kernel").target(target).edition("2021");
-cross.add("mylib", "crates/mylib");
-cross.add("app", "crates/app").crate_type(CrateType::Bin);
+```rust,ignore
+q.default_target(&Target::builtin("x86_64-unknown-none"));
+let mylib = q.add(Crate::lib("mylib", "crates/mylib").edition(Edition::E2021));
+q.add(Crate::bin("app", "crates/app").edition(Edition::E2021).dep(&mylib));
 ```
 
-For groups with a single crate, the inline chain still works:
-
-```rust
-cfg.group("kernel").target(target).edition("2021")
-    .add("kernel", "crates/kernel")
-    .crate_type(CrateType::Bin);
-```
+For a Cargo workspace, declare `Package::new(name)` instead. Its
+edition, dependencies and crate types come from its `Cargo.toml`.
 
 ## Boolean expressions in `depends_on`
 
@@ -104,69 +103,43 @@ config_u32("Y").depends_on(["A", "B"]);     // AND of idents
 config_bool("Z").depends_on_expr("A && !B"); // string-form expression
 ```
 
-The Rust DSL collapses these into one method that takes a
-structural [`Expr`] value:
+In Rust, `.depends_on` takes a condition built from option handles
+with `&`, `|` and `!`:
 
-```rust
-use quon_config::Expr;
+```rust,ignore
+let a = q.add(opt::bool("A"));
+let b = q.add(opt::bool("B"));
 
-cfg.config_bool("X").depends_on(Expr::Ident("A".into()));
-
-cfg.config_u32("Y").depends_on(Expr::And(vec![
-    Expr::Ident("A".into()),
-    Expr::Ident("B".into()),
-]));
-
-cfg.config_bool("Z").depends_on(Expr::And(vec![
-    Expr::Ident("A".into()),
-    Expr::Not(Box::new(Expr::Ident("B".into()))),
-]));
+q.add(opt::bool("X").depends_on(&a));
+q.add(opt::u32("Y").depends_on(&a & &b));
+q.add(opt::bool("Z").depends_on(&a & !&b));
 ```
 
-This is more verbose but explicit — every node is a typed Rust
-value and rust-analyzer can introspect it. For projects with many
-complex expressions, declare options in a `.kconfig` file and pull
-it in:
+An option declared in a `.kconfig` file has no handle. Refer to it
+with `Cond::named("A")`. The `.kconfig` format keeps the string-form
+grammar (`A && !B`, `||`, `!`, parenthesised subexpressions):
 
-```rust
-cfg.include_kconfig("./options.kconfig")?;
+```rust,ignore
+q.include_kconfig("options.kconfig");
 ```
 
-The `.kconfig` format keeps the string-form expression grammar
-(`A && !B`, `||`, `!`, parenthesised subexpressions) and is the
-intended path for configurations that lean heavily on boolean logic.
+## Diagnostics
 
-## Diagnostics: builder-time errors
-
-Rhai surfaces builder errors with full source spans. The Rust DSL
-uses the call-site position from `Location::caller()` — sufficient
-for "duplicate target name" but coarser than what Rhai produced.
-Errors accumulate on the [`Config`] and are reported (one at a
-time, first-failure-wins) after `config` returns.
+Rhai surfaced builder errors with source spans. The Rust API reports
+errors without a source position. Each names the item at fault, such
+as `profile 'p' is declared more than once`. The script runs to the
+end, and Quon reports every error at once after `config` returns.
 
 ## Editor support
 
 Run `quon configure` to generate a `rust-project.json`.
 rust-analyzer indexes the build script alongside your kernel
-sources — every builder method gets autocomplete, hover docs, and
-live type errors. No extra LSP setup needed.
+sources, with completions, hover docs and type errors for every
+builder method.
 
-## During the transition
+## Porting a project
 
-Both `quon.rhai` and `quon.rs` work simultaneously while you
-port. When both files exist, `quon.rs` wins — so the safest
-migration is:
-
-1. Add `quon.rs` next to your existing `quon.rhai`.
-2. Run `quon build` to confirm the `.rs` form compiles and
-   produces a valid model.
-3. Compare build outputs across both forms (e.g., delete `build/`,
-   rebuild with `.rhai`, save artifacts; rename `.rhai` out of the
-   way, rebuild with `.rs`, diff).
-4. Once you're confident, delete `quon.rhai`.
-
-Stage 3 of the quon restructure removes `.rhai` support entirely.
-Until then, no rush — both paths are equivalent.
-
-[`Expr`]: https://docs.rs/quon-config/latest/quon_config/enum.Expr.html
-[`Config`]: https://docs.rs/quon-config/latest/quon_config/struct.Config.html
+1. Write `quon.rs` next to `quon.rhai`, using the table above.
+2. Run `quon build` to check that it compiles and produces a valid
+   model.
+3. Delete `quon.rhai`. Quon ignores it.

@@ -7,7 +7,7 @@
 //!   a [`sources::RegistrySources`] map).
 //! - [`platform`] probes target cfgs and matches `[target.'...']` keys.
 //! - [`resolve`] resolves features per domain into a [`UnitGraph`].
-//! - [`lower`] expands `group.package(...)` roots in the raw build
+//! - [`lower`] expands `Package::new(..)` roots in the raw build
 //!   model into crates, before intern.
 //!
 //! `quon manifest` prints what the loader and resolver produce.

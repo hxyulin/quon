@@ -218,7 +218,7 @@ pub fn write_vendor_stamp(workspace_root: &Path, vendor_dir: &Path) -> Result<()
 ///
 /// Cargo's progress goes to stderr. The `.cargo/config.toml` snippet
 /// `cargo vendor` prints is dropped: Quon reads the directory itself,
-/// configured with `cfg.cargo_workspace(..).vendored(..)`.
+/// configured with `q.cargo_workspace(..).vendored(..)`.
 pub fn vendor(workspace_root: &Path, vendor_dir: &Path, offline: bool) -> Result<usize> {
     // The stamp goes first, so a failed run never leaves a directory
     // that claims to match the lock.
@@ -288,7 +288,7 @@ fn check_status(out: &Output, args: &[&str], workspace_root: &Path) -> Result<()
     }
     Err(Error::Diagnostics(vec![d.with_note(
         "to build without Cargo or the network, vendor the sources with `quon vendor` and \
-         add `.vendored(\"vendor\")` to `cfg.cargo_workspace(...)`",
+         add `.vendored(\"vendor\")` to `q.cargo_workspace(...)`",
     )]))
 }
 

@@ -364,7 +364,7 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
                 let abs = ictx.resolved.project_root.join(path);
                 if !abs.exists() {
                     return Err(Error::Compile(format!(
-                        "image('{}') add_file('{}', '{}'): host file does not exist \
+                        "Image::new(\"{}\").add(\"{}\", \"{}\"): host file does not exist \
                          at {} (paths are relative to the project root)",
                         image.name,
                         path,
@@ -386,8 +386,9 @@ fn resolve_entries(image: &ImageDef, ictx: &ImageCtx<'_>) -> Result<Vec<Resolved
                     .and_then(|h| ictx.model.downloads.get(h))
                     .ok_or_else(|| {
                         Error::Compile(format!(
-                            "image('{}') add_entry_download('{}', '{}'): download '{}' is not \
-                             declared (declare it with cfg.download(...) or cfg.limine(...))",
+                            "Image::new(\"{}\") entry '{}' -> '{}': download '{}' is not \
+                             declared (declare it with q.add(Download::new(..)) or \
+                             q.add(Download::limine(..)))",
                             image.name, name, entry.dest_path, name
                         ))
                     })?;

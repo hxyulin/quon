@@ -2,62 +2,63 @@
 
 [Introduction](./introduction.md)
 
-# Getting Started
+# Getting started
 
 - [Installation](./getting-started/installation.md)
-- [Your First Project](./getting-started/first-project.md)
+- [Your first project](./getting-started/first-project.md)
 - [Generating quon.rs](./getting-started/init.md)
-- [Building and Running](./getting-started/building-and-running.md)
+- [Building and running](./getting-started/building-and-running.md)
 
-# Configuration Guide
+# Configuration guide
 
-- [The quon.rs Build Script](./configuration/quon-rs.md)
-- [Projects, Targets, and Profiles](./configuration/projects-targets-profiles.md)
-- [Groups and Crates](./configuration/groups-and-crates.md)
-- [Config Options and Kconfig](./configuration/config-options.md)
-- [Configuration Overrides](./configuration/overrides.md)
+- [The quon.rs build script](./configuration/quon-rs.md)
+- [Projects, targets and profiles](./configuration/projects-targets-profiles.md)
+- [Packages and crates](./configuration/packages-and-crates.md)
+- [Config options and Kconfig](./configuration/config-options.md)
+- [Configuration overrides](./configuration/overrides.md)
 - [Dependencies](./configuration/dependencies.md)
 
-# Build System
+# Build system
 
-- [How Quon Builds Your Code](./build-system/how-it-works.md)
-- [Custom Sysroots](./build-system/sysroots.md)
-- [Build Cache](./build-system/build-cache.md)
-- [Pipelines and Rules](./build-system/pipelines-and-rules.md)
+- [How Quon builds your code](./build-system/how-it-works.md)
+- [Custom sysroots](./build-system/sysroots.md)
+- [Build cache](./build-system/build-cache.md)
+- [Build steps](./build-system/build-steps.md)
 
-# Running and Booting
+# Running and booting
 
 - [Runners](./running/runners.md)
-- [QEMU Orchestration](./running/qemu.md)
-- [UEFI Boot and ESP Assembly](./running/uefi-boot.md)
+- [QEMU orchestration](./running/qemu.md)
+- [UEFI boot and ESP assembly](./running/uefi-boot.md)
 - [Debugging with GDB](./running/debugging.md)
 - [Testing](./running/testing.md)
 
-# CLI Reference
+# CLI reference
 
-- [Commands and Flags](./cli/commands.md)
+- [Commands and flags](./cli/commands.md)
 
-# Tooling Integration
+# Tooling integration
 
 - [rust-analyzer](./tooling/rust-analyzer.md)
-- [Editor Setup](./tooling/editor-setup.md)
+- [Editor setup](./tooling/editor-setup.md)
 
 # Cookbook
 
-- [Minimal Kernel](./cookbook/minimal-kernel.md)
-- [Kernel with Config Options](./cookbook/config-options.md)
-- [UEFI Bootloader + Kernel](./cookbook/uefi-bootloader.md)
-- [Limine Kernel](./cookbook/limine.md)
+- [Minimal kernel](./cookbook/minimal-kernel.md)
+- [Kernel with config options](./cookbook/config-options.md)
+- [UEFI bootloader and kernel](./cookbook/uefi-bootloader.md)
+- [Limine kernel](./cookbook/limine.md)
 
 # Architecture
 
-- [Build Cache](./architecture/cache.md)
+- [Build cache](./architecture/cache.md)
 - [Determinism](./architecture/determinism.md)
 - [Concurrency](./architecture/concurrency.md)
-- [External Dependencies](./architecture/external-deps.md)
+- [External dependencies](./architecture/external-deps.md)
 
 # Migration
 
+- [From Config to Quon](./migration/config-to-quon.md)
 - [Rhai to Rust](./migration/rhai-to-rust.md)
 
 ---

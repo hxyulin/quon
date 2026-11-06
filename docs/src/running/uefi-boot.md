@@ -1,4 +1,4 @@
-# UEFI Boot and ESP Assembly
+# UEFI boot and ESP assembly
 
 UEFI boot is the standard boot path for modern x86_64 systems and is
 required if your OS uses a UEFI bootloader. Quon handles the full
@@ -17,46 +17,46 @@ UEFI boot requires three components:
    containing the UEFI application at the standard path
    (`EFI/BOOT/BOOTX64.EFI` for x86_64).
 
-## ESP Assembly
+## ESP assembly
 
 Declare an ESP layout in `quon.rs`:
 
-```rust
-cfg.esp("default")
-    .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+```rust,ignore
+let bootloader = q.add(Package::new("bootloader").target(&uefi));
+q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 ```
 
-The `.add(crate_name, esp_path)` method copies the named crate's output
-binary to the given path inside a staging directory. Quon assembles the
-ESP automatically after compilation completes.
+`.add(source, esp_path)` copies `source` to the given path inside a
+staging directory. Quon assembles the ESP after compilation. A source
+is one of these:
 
-You can add multiple files to the ESP:
+- the handle of a crate, which copies its output binary;
+- the handle of a `Download`;
+- a string, which names a file in the project, relative to the project
+  root. An edited file is copied again on the next build.
 
-```rust
-cfg.esp("default")
-    .add("bootloader", "EFI/BOOT/BOOTX64.EFI")
-    .add("shell", "EFI/tools/Shell.efi");
+```rust,ignore
+q.add(
+    Esp::new("default")
+        .add(&bootloader, "EFI/BOOT/BOOTX64.EFI")
+        .add(&shell, "EFI/tools/Shell.efi")
+        .add("limine.conf", "limine.conf"),
+);
 ```
 
-`.add_file(path, esp_path)` copies a file Quon does not build, such as
-a bootloader configuration file. `path` is relative to the project
-root, and an edited file is copied again on the next build:
-
-```rust
-cfg.esp("default")
-    .add("kernel", "boot/kernel")
-    .add_file("limine.conf", "limine.conf");
-```
+A destination must be relative to the ESP root. A UEFI QEMU boot
+mounts the ESP when it is the project's only one, unless the runner
+sets `.esp_dir(..)` or `.esp_image(..)`.
 
 The staging directory is located at
 `build/cross/<target>/<profile>/esp/` and is rebuilt whenever any of its
 input files change.
 
-## OVMF Firmware
+## OVMF firmware
 
 Quon probes for OVMF firmware in this order:
 
-1. **Explicit paths** from the QEMU runner's `.ovmf_code(...)` and `.ovmf_vars(...)`
+1. **Explicit paths** from the QEMU runner's `.ovmf(code, vars)`
 2. **Environment variables:** `OVMF_CODE` and `OVMF_VARS`
 3. **Firmware beside QEMU:** `share/qemu/edk2-x86_64-code.fd` and
    `edk2-i386-vars.fd` next to the `bin/` directory of the QEMU binary
@@ -78,53 +78,45 @@ export OVMF_CODE="$(brew --prefix)/share/qemu/edk2-x86_64-code.fd"
 export OVMF_VARS="$(brew --prefix)/share/qemu/edk2-i386-vars.fd"
 ```
 
-## Complete Example
+## Complete example
 
 The following `quon.rs` defines a project with a bare-metal kernel and
 a UEFI bootloader. The bootloader embeds the kernel binary at compile time
 using `artifact_env`.
 
 ```rust
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("my-os", "0.1.0")
-        .default_profile("debug");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-os", "0.1.0");
 
-    let kernel_target = cfg.target("x86_64-unknown-none");
-    let uefi_target = cfg.target("x86_64-unknown-uefi");
+    let kernel_target = Target::builtin("x86_64-unknown-none");
+    let uefi_target = Target::builtin("x86_64-unknown-uefi");
 
-    cfg.profile("debug")
-        .runner("qemu")
-        .target(uefi_target)
-        .opt_level(0)
-        .run_binary("bootloader");
+    // Kernel: bare-metal, compiled for x86_64-unknown-none
+    let kernel = q.add(
+        Crate::bin("kernel", "crates/kernel")
+            .target(&kernel_target)
+            .linker_script("crates/kernel/kernel.ld"),
+    );
 
-    // Kernel -- bare-metal, compiled for x86_64-unknown-none
-    cfg.group("kernel")
-        .target(kernel_target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .linker_script("crates/kernel/kernel.ld");
+    // Bootloader: a UEFI application that embeds the kernel binary
+    let bootloader = q.add(
+        Crate::bin("bootloader", "crates/bootloader")
+            .target(&uefi_target)
+            .artifact_env("KERNEL_PATH", &kernel),
+    );
 
-    // Bootloader -- UEFI application, embeds the kernel binary
-    cfg.group("uefi")
-        .target(uefi_target)
-        .edition("2021")
-        .add("bootloader", "crates/bootloader")
-            .crate_type(CrateType::Bin)
-            .artifact_env("KERNEL_PATH", "kernel");
+    q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 
-    cfg.esp("default")
-        .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
-
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(256)
-        .serial_stdio()
-        .boot_mode("uefi");
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(256)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi),
+    );
+    q.run(&bootloader).runner(&qemu);
 
     Ok(())
 }
@@ -132,7 +124,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ### How artifact_env works
 
-The `.artifact_env("KERNEL_PATH", "kernel")` call tells Quon to set the
+The `.artifact_env("KERNEL_PATH", &kernel)` call tells Quon to set the
 `KERNEL_PATH` environment variable to the output path of the `kernel`
 crate when compiling the `bootloader` crate. This lets the bootloader
 embed the kernel at compile time:

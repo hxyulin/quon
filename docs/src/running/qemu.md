@@ -7,36 +7,40 @@ the build model, so the run environment is versioned with your source code.
 ## Configuring QEMU
 
 Declare a QEMU [runner](./runners.md) in your `quon.rs`, and name it
-in the profile:
+in the run entry:
 
 ```rust,ignore
-cfg.runner("qemu")
-    .qemu("qemu-system-x86_64")
-    .machine("q35")
-    .memory(256)
-    .cores(2)
-    .serial_stdio()
-    .boot_mode("direct");
-
-cfg.profile("dev").target(x86_64).run_binary("kernel").runner("qemu");
+let qemu = q.add(
+    Qemu::new("qemu-system-x86_64")
+        .machine("q35")
+        .memory_mb(256)
+        .cores(2)
+        .serial(Serial::Stdio)
+        .boot(BootMode::Direct),
+);
+q.run(&kernel).runner(&qemu);
 ```
 
-The argument to `.qemu(...)` is the QEMU executable name. It must be on
-your `$PATH` or specified as an absolute path. A project can declare
+The argument to `Qemu::new(...)` is the QEMU executable name. It must
+be on your `$PATH` or be an absolute path. A project can declare
 several QEMU runners, for example one per machine, and pick one per
-profile.
+profile with `Profile::runner(&r)`.
 
 ### Builder methods
 
-| Method              | Description                                     |
-|---------------------|-------------------------------------------------|
-| `.machine(type)`    | QEMU machine type (e.g., `"q35"`, `"virt"`)    |
-| `.memory(mib)`      | RAM in MiB                                      |
-| `.cores(n)`         | Number of virtual CPUs                          |
-| `.serial_stdio()`   | Redirect the serial port to the terminal        |
-| `.boot_mode(mode)`  | `"direct"` (default) or `"uefi"`                |
-| `.extra_args(list)` | Additional QEMU arguments passed verbatim       |
+| Method | Description |
+|---|---|
+| `.machine(type)` | `-machine <type>`, such as `"q35"` or `"virt"` |
+| `.memory_mb(n)` | `-m <n>M` |
+| `.cores(n)` | `-smp <n>` |
+| `.serial(mode)` | Where the first serial port goes: `Serial::Stdio`, `Serial::None` or `Serial::File(path)` |
+| `.display(mode)` | The display backend. QEMU runs headless by default |
+| `.boot(mode)` | `BootMode::Direct`, `BootMode::Uefi` or `BootMode::Bios` |
+| `.args([..])` | Arguments appended after every argument Quon sets |
 | `.success_exit_code(n)` | Exit status that `quon run` reports as success |
+| `.ovmf(code, vars)` | The OVMF firmware files for UEFI boot |
+| `.esp_dir(path)`, `.esp_image(path)` | The EFI system partition, as a host directory or an image file |
+| `.disk(&image)`, `.disk_file(path)` | Boot from a declared `Image`, or from a disk image file |
 
 ### Exit status
 
@@ -46,10 +50,11 @@ with `(value << 1) | 1`, where `value` is what the kernel wrote to the
 port. Set the status that means success:
 
 ```rust,ignore
-cfg.runner("qemu")
-    .qemu("qemu-system-x86_64")
-    .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-    .success_exit_code(33); // the kernel writes 0x10
+let qemu = q.add(
+    Qemu::new("qemu-system-x86_64")
+        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+        .success_exit_code(33), // the kernel writes 0x10
+);
 ```
 
 With `.success_exit_code(n)` set, status `n` makes `quon run` exit 0.
@@ -72,10 +77,13 @@ overriding or supplementing the configured arguments.
 Quon resolves the boot mode using the following precedence (highest to
 lowest):
 
-1. **CLI flags:** `--uefi` or `--direct`
-2. **Profile settings:** `profile.qemu_boot_mode("uefi")`
-3. **Runner settings:** `.boot_mode("uefi")` on the QEMU runner
-4. **Default:** direct kernel boot
+1. **CLI flags:** `--uefi`, `--direct` or `--bios`
+2. **Runner settings:** `.boot(BootMode::Uefi)` on the QEMU runner
+3. **Default:** direct kernel boot
+
+To boot one kernel two ways, declare two QEMU runners and give one
+profile the second with `Profile::runner(&r)`. See
+[What `quon run` starts](../configuration/projects-targets-profiles.md#what-quon-run-starts).
 
 ### Direct boot
 
@@ -98,29 +106,3 @@ quon run -T 30           # Kill QEMU after 30 seconds
 The timeout is useful for automated testing: QEMU is terminated after the
 specified number of seconds, and Quon reports whether the process exited
 cleanly.
-
-The timeout can also be set per-profile in `quon.rs`:
-
-```rust
-cfg.profile("test")
-    .inherits("dev")
-    .test_timeout(60);
-```
-
-## Profile overrides
-
-Profiles can override QEMU settings to tailor the run environment for
-different use cases:
-
-```rust
-cfg.profile("test")
-    .inherits("dev")
-    .qemu_memory(512)
-    .qemu_cores(4)
-    .qemu_extra_args(&["-display", "none"])
-    .test_timeout(60);
-```
-
-This is particularly useful for CI, where you might want to disable the
-display and set a hard timeout, or for performance testing, where you
-might want more cores and memory than the default.

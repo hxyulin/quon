@@ -36,11 +36,11 @@ The generated `rust-project.json` contains:
 
 - **Every crate** the build compiles, with its root module path: crates from
   `quon.rs`, Cargo workspace members, and registry, vendored and
-  `cfg.dependency()` packages. Registry packages point at their sources under
+  `Dependency` packages. Registry packages point at their sources under
   `$CARGO_HOME/registry/src`. A package built for both host and target appears
   twice, once per platform.
 - **Dependency relationships** between crates (including the generated config
-  crate if `.config(true)` is set on a group)
+  crate, for the crates that link it)
 - **The toolchain sysroot and its library sources**, so rust-analyzer resolves
   `core` and `alloc` and can start its proc-macro server
 - **`--cfg` flags and features** for each crate, matching what `quon build`
@@ -74,7 +74,7 @@ The record is read as it is, without a freshness check. After you change a
 build script or its inputs, rust-analyzer sees the old output until you run
 `quon build` and `quon configure` again.
 
-`cfg.dependency()` crates appear only once `quon vendor` has populated their
+`Dependency` crates appear only once `quon vendor` has populated their
 workspace. Before that, `quon configure` leaves them out instead of failing.
 
 ## Editor configuration

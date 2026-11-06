@@ -107,18 +107,18 @@ pub enum Error {
     #[error("download '{name}': {message}")]
     Download { name: String, message: String },
 
-    #[error("profile '{profile}' has no run_binary set — required by `quon run`")]
+    #[error("profile '{profile}' has no run binary; name one with `q.run(..)` in quon.rs")]
     NoRunBinary { profile: String },
 
     #[error(
-        "profile '{profile}' has no runner; declare one with `cfg.runner(\"<name>\")` and add \
-         `.runner(\"<name>\")` to the profile"
+        "profile '{profile}' has no runner; add one with `q.add(Qemu::new(..))`, \
+         `Command::new(..)` or `Plugin::new(..)` and pass it to `q.run(..).runner(..)`"
     )]
     NoRunner { profile: String },
 
     #[error(
         "runner '{runner}': program '{program}' not found on PATH; install it or change the \
-         program in `cfg.runner(\"{runner}\")`"
+         program its `Qemu::new(..)` or `Command::new(..)` names in quon.rs"
     )]
     RunnerProgramNotFound { runner: String, program: String },
 

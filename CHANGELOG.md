@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (`quon.rs` API)
+
+- **`quon.rs` fills in a `Quon` instead of a `Config`.** The script is
+  `pub fn config(q: &mut Quon) -> Result<()>`, with
+  `use quon_config::prelude::*;`. A script written for `Config` fails
+  to compile, and Quon prints a note with the new form.
+- **Items are values passed to `q.add`**, which returns a typed handle:
+  `q.add(Package::new("kernel"))` returns an `Artifact`, and
+  `q.add(Qemu::new(..))` a `Runner`. Other declarations take handles,
+  not name strings.
+- **Groups are removed.** Each `Package` and `Crate` carries its own
+  target, and `q.default_target(&t)` sets it for the rest.
+- **`dev` and `release` are built in.** Profiles hold opt-level, debug
+  info, LTO, a preset and an optional runner override.
+  `q.run(&artifact).runner(&runner)` names what `quon run` starts, and
+  profiles build for that artifact's target.
+- `cfg.rule(..)`, `cfg.bootloader(..)` and
+  `Profile::qemu_boot_mode` are removed. See
+  [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the

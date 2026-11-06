@@ -81,7 +81,7 @@ pub fn build_qemu_command(
     // Precedence (highest first):
     //   a. User passed `-display` via `extra_args` or CLI pass-through —
     //      respect their literal flag and skip everything else here.
-    //   b. `qemu().display(...)` is set — emit the matching variant.
+    //   b. `Qemu::display(..)` is set — emit the matching variant.
     //      `Default` deliberately omits `-display` so QEMU picks its
     //      compiled-in backend (cocoa on macOS, gtk/sdl on Linux). Use
     //      this when the user wants a window without naming the backend.
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn display_default_omits_flag_so_qemu_picks_backend() {
-        // `qemu().display("default")` → DisplayMode::Default → no
+        // `Qemu::display(DisplayMode::Default)` → no
         // `-display` flag at all. QEMU then uses its compiled-in
         // default backend (cocoa on macOS, gtk/sdl on Linux).
         let mut r = stub_resolved();
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn user_extra_args_display_override_wins_over_qemu_display() {
         // Precedence (a) in qemu_cmd:84-comment: even when the user set
-        // qemu().display(...), an explicit -display in extra_args wins.
+        // Qemu::display(..), an explicit -display in extra_args wins.
         let mut r = stub_resolved();
         r.display = Some(DisplayMode::Spec("cocoa".into()));
         r.extra_args = vec!["-display".into(), "gtk".into()];

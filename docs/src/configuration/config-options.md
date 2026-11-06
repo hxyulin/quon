@@ -1,4 +1,4 @@
-# Config Options and Kconfig
+# Config options and Kconfig
 
 Quon supports typed configuration options that become compile-time constants
 in an auto-generated Rust crate. This is similar in spirit to Linux's Kconfig
@@ -6,84 +6,92 @@ system, adapted for Rust's type system.
 
 ## Inline config options
 
-Declare config options directly in `quon.rs` using the typed builder
-functions:
+Declare an option with the function for its type, in the `opt`
+module, and add it. `q.add` returns an `OptRef` handle typed by the
+option's kind:
 
-```rust
-use quon_config::{ConfigValue, Expr};
+```rust,ignore
+let log = q.add(opt::bool("LOG_ENABLED").default(true).help("Enable runtime logging subsystem"));
 
-cfg.config_bool("LOG_ENABLED")
-    .default_value(ConfigValue::Bool(true))
-    .help("Enable runtime logging subsystem");
+let level = q.add(
+    opt::u32("LOG_LEVEL")
+        .default(3)
+        .range(0..=5)
+        .depends_on(&log)
+        .help("Verbosity: 0 = off, 5 = trace"),
+);
 
-cfg.config_u32("LOG_LEVEL")
-    .default_value(ConfigValue::U32(3))
-    .range(0, 5)
-    .depends_on(Expr::Ident("LOG_ENABLED".into()))
-    .help("Verbosity: 0 = off, 5 = trace");
-
-cfg.config_str("KERNEL_NAME")
-    .default_value(ConfigValue::Str("my-kernel".into()))
-    .help("Kernel display name");
+q.add(opt::str("KERNEL_NAME").default("my-kernel").help("Kernel display name"));
 ```
 
 ### Available types
 
-| Function | Rust type | Description |
+| Function | Value | Default |
 |---|---|---|
-| `config_bool(name)` | `bool` | Boolean option |
-| `config_u32(name)` | `u32` | Unsigned 32-bit integer |
-| `config_str(name)` | `&str` | String constant |
+| `opt::bool(name)` | `bool` | `false` |
+| `opt::tristate(name)` | `TristateVal`: yes, module or no | no |
+| `opt::u32(name)` | `u32` | 0 |
+| `opt::u64(name)` | `u64` | 0 |
+| `opt::str(name)` | a string | empty |
+| `opt::choice(name, [..])` | one of the listed names | the first |
+| `opt::list(name)` | a list of strings, with no constant in the config crate | empty |
+
+`.default(value)` takes a value of the option's type, so
+`opt::u32("X").default("3")` does not compile.
 
 ### Common methods
 
 | Method | Description |
 |---|---|
-| `.default_value(val)` | Default when no override is applied (pass `ConfigValue::Bool(true)`, etc.) |
-| `.help("...")` | Human-readable description |
-| `.range(lo, hi)` | Valid range (integers only) |
-| `.depends_on(expr)` | Only active when `expr` evaluates to true (pass an `Expr` value) |
+| `.default(value)` | The value when no preset or override sets one |
+| `.help(text)` | Human-readable description |
+| `.menu(name)` | The menu the option belongs to, for tools that list options |
+| `.range(lo..=hi)` | Valid range, for `u32` and `u64` options |
+| `.depends_on(cond)` | Turn the option off unless `cond` holds |
+| `.selects(&other)` | Turn the `bool` or `tristate` option `other` on whenever this one is on. Call it once per option |
+| `.binding(binding)` | Also expose the option through `binding`, such as `Binding::Cfg` |
 
-When a config option has a `.depends_on()` constraint and the dependency
-evaluates to false, the option is disabled and uses its default value (or is
-omitted entirely, depending on the type).
+### Conditions
+
+`.depends_on` takes a condition built from the handles of `bool` and
+`tristate` options, combined with `&`, `|` and `!`:
+
+```rust,ignore
+let log = q.add(opt::bool("LOG"));
+let debug = q.add(opt::bool("DEBUG"));
+q.add(opt::bool("FANCY").depends_on(&log & !&debug));
+```
+
+`Cond::named("X")` refers to an option declared in a `.kconfig` file,
+which has no handle: `.depends_on(&log & Cond::named("EXTRA"))`.
 
 ## Presets
 
-Presets are named bundles of config overrides:
+A preset is a named set of option values:
 
-```rust
-use quon_config::ConfigValue;
-
-cfg.preset("verbose")
-    .set("LOG_LEVEL", ConfigValue::U32(5))
-    .set("DEBUG", ConfigValue::Bool(true));
+```rust,ignore
+let verbose = q.add(Preset::new("verbose").set(&level, 5).set(&debug, true));
 ```
 
-Apply a preset to a profile:
+`.set(&option, value)` checks the value's type against the option's.
+`.set_named("X", ConfigValue::U32(5))` sets an option declared in a
+`.kconfig` file, and Quon checks the type when it resolves the
+preset. `.inherits(&other)` starts from another preset's values.
 
-```rust
-let target = cfg.target("x86_64-unknown-none");
+A profile applies a preset:
 
-cfg.profile("dev")
-    .target(target)
-    .preset("verbose");
+```rust,ignore
+let dev = q.profile("dev");
+q.add(Profile::new("verbose-dev").inherits(&dev).preset(&verbose));
 ```
-
-Presets are useful for defining common configurations that multiple profiles
-can share (e.g., a "verbose" preset for development, a "minimal" preset for
-release).
 
 ## The generated config crate
 
 Config options are compiled into an auto-generated Rust crate named
-`<project>_config` by default. You can customize this name with
-`project().config_crate_name()` (see
-[Projects, Targets, and Profiles](./projects-targets-profiles.md)).
+`<project>_config`, after the name given to `q.project`. It exports
+each option, except list options, as a public constant:
 
-The generated crate exports each config option as a public constant:
-
-```rust
+```rust,ignore
 use my_kernel_config::*;
 
 if LOG_ENABLED {
@@ -91,21 +99,21 @@ if LOG_ENABLED {
 }
 ```
 
-Groups with `.config(true)` automatically link against the config crate. For
-individual crates, use `.requires_config(true)` to opt in or
-`.requires_config(false)` to opt out regardless of the group setting.
+A crate declared with `Crate` links the config crate whenever it links
+the sysroot. A `Package` links it only with `.link_config()`, so its
+workspace dependencies don't.
 
 ## Kconfig files
 
 For projects with many configuration options, you can load them from a
 Linux-style Kconfig file instead of (or in addition to) declaring them inline:
 
-```rust
-cfg.include_kconfig("./options.kconfig")?;
+```rust,ignore
+q.include_kconfig("options.kconfig");
 ```
 
-The path is relative to the `quon.rs` file. The `?` operator propagates errors
-out of `config()`, which returns `Result<()>`.
+The path is relative to the project root. Quon reads the file after
+the script runs.
 
 ### Supported Kconfig syntax
 
@@ -118,6 +126,6 @@ Quon's Kconfig parser supports the standard constructs:
 - **Includes**: `source` for pulling in other Kconfig files
 - **Expressions**: full `&&`, `||`, `!` grammar in conditions
 
-Kconfig options and inline `config_*()` declarations coexist in the same
-namespace. You can declare some options inline and load others from Kconfig
-files -- just avoid duplicate names.
+Kconfig options and options declared with `opt::*` share one
+namespace. You can declare some options inline and load others from
+Kconfig files, as long as no name repeats.

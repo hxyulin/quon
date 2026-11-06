@@ -155,7 +155,7 @@ impl BootModeAssembler for BiosAssembler {
         // synthesises a FAT filesystem at the partition level and
         // doesn't expose an MBR / boot sector, so SeaBIOS can't
         // find anything to boot. The user must build a real disk
-        // image via image() or pre-supply one via disk_image().
+        // image with `Image` or pre-supply one with `Qemu::disk_file`.
         if let Some(disk) = &resolved.disk {
             if !skip_path_checks && !disk.exists() {
                 return Err(Error::EspMissing { path: disk.clone() });
@@ -169,10 +169,10 @@ impl BootModeAssembler for BiosAssembler {
             match esp {
                 EspSource::Dir(_) => {
                     return Err(Error::Config(
-                        "qemu.boot_mode = \"bios\" with esp_dir(...) is not supported: \
+                        "BootMode::Bios with Qemu::esp_dir(..) is not supported: \
                          QEMU's VVFAT driver does not expose an MBR/boot-sector for \
-                         SeaBIOS to read. Use esp_image(<raw disk path>) or build a \
-                         hybrid disk via image()."
+                         SeaBIOS to read. Use Qemu::esp_image(<raw disk path>) or build a \
+                         hybrid disk with Image."
                             .into(),
                     ));
                 }

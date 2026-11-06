@@ -27,7 +27,7 @@
 //!
 //! ### Host tests
 //!
-//! Packages listed in `cfg.host_tests()` join the test pass as roots in
+//! Packages listed in `q.host_tests()` join the test pass as roots in
 //! [`Domain::HostTest`], with their dev edges. That domain has the
 //! host's cfgs but its own feature sets: Cargo does not unify the
 //! features of normal dependencies with those of build-dependencies and
@@ -53,7 +53,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Domain {
     Host,
-    /// The host, for the unit tests of `cfg.host_tests()` packages and
+    /// The host, for the unit tests of `q.host_tests()` packages and
     /// what they link. See the module docs.
     HostTest,
     /// A Quon target, by name.

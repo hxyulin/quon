@@ -2,11 +2,9 @@
 //
 // UEFI project with a bootloader that embeds a kernel binary.
 //
-// Demonstrates the two-group pattern used when a UEFI bootloader
-// needs to include_bytes! a bare-metal kernel ELF. Quon's
-// `artifact_env` mechanism injects the kernel's output path into
-// the bootloader's compile-time environment, and automatically
-// adds a build dependency so the kernel compiles first.
+// The kernel and the bootloader build for different targets, so each
+// package names its own. The bootloader include_bytes!-es the kernel
+// ELF through `artifact_env`.
 //
 //     quon build
 //     quon run --uefi
@@ -17,60 +15,51 @@
 // `boot-info` for the kernel's target and `boot-info@x86_64-unknown-uefi`
 // for the bootloader's.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.cargo_workspace(".");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-os", "0.1.0");
+    q.cargo_workspace(".");
 
-    cfg.project("my-os", "0.1.0").default_profile("debug");
+    let kernel_target = Target::builtin("x86_64-unknown-none");
+    let uefi_target = Target::builtin("x86_64-unknown-uefi");
 
-    let kernel_target = cfg.target("x86_64-unknown-none");
-    let uefi_target = cfg.target("x86_64-unknown-uefi");
+    let kernel = q.add(
+        Package::new("kernel")
+            .target(&kernel_target)
+            .linker_script("crates/kernel/kernel.ld"),
+    );
 
-    cfg.profile("debug")
-        .runner("qemu")
-        .target(uefi_target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("bootloader");
+    // `artifact_env("KERNEL_PATH", &kernel)` passes the kernel's
+    // output path to rustc as KERNEL_PATH and builds the kernel first,
+    // so the bootloader can use:
+    //
+    //     static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
+    let bootloader = q.add(
+        Package::new("bootloader")
+            .target(&uefi_target)
+            .artifact_env("KERNEL_PATH", &kernel),
+    );
 
-    cfg.profile("release")
-        .runner("qemu")
-        .target(uefi_target)
-        .opt_level(2)
-        .debug_info(false)
-        .lto("thin")
-        .run_binary("bootloader");
+    q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 
-    // ── Kernel group ──────────────────────────────────────────────
-    cfg.group("kernel")
-        .target(kernel_target)
-        .package("kernel")
-        .linker_script("crates/kernel/kernel.ld");
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(256)
+            .cores(1)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi),
+    );
 
-    // ── Bootloader group ──────────────────────────────────────────
-    // `artifact_env("KERNEL_PATH", "kernel")` does two things:
-    //   1. Passes `--env KERNEL_PATH=<absolute path to kernel binary>`
-    //      to rustc so the bootloader can use:
-    //          static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
-    //   2. Auto-adds a build-order dependency: the kernel group
-    //      compiles before the bootloader group.
-    cfg.group("uefi")
-        .target(uefi_target)
-        .package("bootloader")
-        .artifact_env("KERNEL_PATH", "kernel");
+    // Profiles build for the bootloader's target, since that is what
+    // `quon run` starts.
+    q.run(&bootloader).runner(&qemu);
 
-    // ── ESP assembly ──────────────────────────────────────────────
-    cfg.esp("default")
-        .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
-
-    // ── QEMU ──────────────────────────────────────────────────────
-    cfg.runner("qemu").qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(256)
-        .cores(1)
-        .serial_stdio()
-        .boot_mode("uefi");
-
+    // `debug` has the built-in `dev` settings under the name this
+    // project uses by default.
+    let debug = q.add(Profile::new("debug").opt_level(0).debug_info(true));
+    q.default_profile(&debug);
+    q.add(Profile::release().opt_level(2).lto(Lto::Thin));
     Ok(())
 }

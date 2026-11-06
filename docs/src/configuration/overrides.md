@@ -1,4 +1,4 @@
-# Configuration Overrides
+# Configuration overrides
 
 Config option values are resolved through a three-layer precedence system.
 From highest to lowest priority:
@@ -33,8 +33,7 @@ KERNEL_NAME = "debug-kernel"
 The `.quon-config` file is typically added to `.gitignore` so each developer
 can maintain their own overrides without creating merge conflicts.
 
-The file path can be customized in the project declaration or overridden on the
-command line with `-C` / `--config-file`.
+The command line can name another file with `-C` / `--config-file`.
 
 ## Environment variables
 
@@ -51,22 +50,22 @@ modifying any files.
 
 ## Where presets fit in
 
-Presets (applied via `profile().preset()`) sit between the `quon.rs`
-defaults and the `.quon-config` overrides. The full precedence order is:
+Presets, applied with `Profile::preset(&preset)`, sit between the
+`quon.rs` defaults and the `.quon-config` overrides. The full
+precedence order is:
 
 1. `QUON_*` environment variables
 2. `.quon-config` file
-3. Profile-level `.config(key, value)` calls
-4. Preset values (via `cfg.profile().preset()`)
-5. `quon.rs` `cfg.config_*().default_value()` declarations
+3. The active profile's preset
+4. The `.default(value)` of each option in `quon.rs`
 
 ## Precedence example
 
 Given these three layers:
 
-```rust
+```rust,ignore
 // quon.rs
-cfg.config_u32("LOG_LEVEL").default_value(ConfigValue::U32(3));
+q.add(opt::u32("LOG_LEVEL").default(3));
 ```
 
 ```

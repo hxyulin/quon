@@ -1,10 +1,9 @@
 //! Lower a parsed [`ast::File`] into the `quon-model` representation
 //! consumed by the resolver.
 //!
-//! This layer mirrors the type-directed coercion done by
-//! `quon-config::builders::config_option` but operates on parser
-//! literals rather than builder API calls, so there is no dependency on
-//! the builder crate. Keeping them separate means the `.kconfig` loader
+//! This layer mirrors the typed defaults that `quon_config::opt`
+//! gives options, but operates on parser literals rather than API
+//! calls, so there is no dependency on `quon-config`. Keeping them separate means the `.kconfig` loader
 //! compiles cleanly without pulling in `quon-config` when used from an
 //! LSP or validator.
 //!
@@ -431,7 +430,7 @@ fn neutral_default(ty: ConfigType) -> ConfigValue {
         ConfigType::Choice => ConfigValue::Choice(String::new()),
         ConfigType::List => ConfigValue::List(Vec::new()),
         // Group-typed options never carry a value; use a neutral Bool(false)
-        // placeholder (matches `quon-config::builders::config_option` behaviour).
+        // placeholder.
         ConfigType::Group => ConfigValue::Bool(false),
     }
 }

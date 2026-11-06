@@ -110,7 +110,7 @@ pub type Result<T> = std::result::Result<T, ParseError>;
 /// `crates` is keyed by `(name, version)` so the same crate at two
 /// versions (rare but possible with transitives) stays distinguishable.
 /// `roots` lists the crates the user declared via
-/// `cfg.dependency(...).target(t)` — the entry points the scheduler
+/// `Dependency::..(..).target(&t)` — the entry points the scheduler
 /// must build to satisfy the consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedGraph {

@@ -1,60 +1,42 @@
 // examples/basic-kernel/quon.rs
 //
-// Minimal bare-metal kernel project.
-//
-// This is the simplest useful quon.rs: one target, one profile, and
-// one package from the Cargo workspace in this directory, compiled
-// into a kernel binary. Run with:
+// Minimal bare-metal kernel project: one target and one package from
+// the Cargo workspace in this directory, booted under QEMU. Run with:
 //
 //     quon build
 //     quon run
 //
 // The kernel's edition, source path and dependencies come from
 // crates/kernel/Cargo.toml. quon.rs holds only what Cargo has no
-// concept of: the target, the profile, the linker script and QEMU.
+// concept of: the target, the linker script and QEMU.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    // ── Project declaration ───────────────────────────────────────
-    cfg.project("my-kernel", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-kernel", "0.1.0");
 
-    // ── Target ────────────────────────────────────────────────────
-    // Declare the target triple. `target_spec(name, spec_path)`
-    // points at a custom JSON spec file instead. Use `target(name)`
-    // for built-in/rustup targets.
-    let target = cfg.target("x86_64-unknown-none");
-
-    // ── Cargo workspace ───────────────────────────────────────────
     // The directory holding the workspace Cargo.toml, relative to
     // this file.
-    cfg.cargo_workspace(".");
+    q.cargo_workspace(".");
 
-    // ── Profile ───────────────────────────────────────────────────
-    // Profiles control optimisation level, debug info, LTO, and
-    // which target to build for. `run_binary` tells `quon run`
-    // which binary QEMU boots.
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
+    // Every crate builds for this target unless it names its own.
+    // `Target::spec(name, path)` points at a custom JSON spec instead.
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    // ── Group + package ───────────────────────────────────────────
-    // A group pins a target. `package` builds a workspace package for
-    // it: its lib and bins, plus everything they depend on.
-    cfg.group("kernel")
-        .target(target)
-        .package("kernel")
-        .linker_script("crates/kernel/kernel.ld");
+    // Builds the workspace package: its lib and bins, plus everything
+    // they depend on.
+    let kernel = q.add(Package::new("kernel").linker_script("crates/kernel/kernel.ld"));
 
-    // ── QEMU ──────────────────────────────────────────────────────
-    cfg.runner("qemu").qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(128)
-        .cores(1)
-        .serial_stdio();
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(128)
+            .cores(1)
+            .serial(Serial::Stdio),
+    );
 
+    // `quon run` boots the kernel under QEMU. The built-in `dev` and
+    // `release` profiles build for its target.
+    q.run(&kernel).runner(&qemu);
     Ok(())
 }

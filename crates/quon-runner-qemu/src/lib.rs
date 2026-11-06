@@ -5,7 +5,7 @@
 //! over the runner protocol (see [`quon_runner`]).
 //!
 //! Its settings are the fields of [`quon_model::QemuDef`], which
-//! `cfg.runner(name).qemu(program)` fills in. The overrides are the
+//! `Qemu::new(program)` fills in. The overrides are the
 //! profile's `qemu_memory`, `qemu_cores`, `qemu_extra_args` and
 //! `qemu_boot_mode`, and a boot mode flag from the command line (see
 //! [`resolve::Overrides`]).
@@ -115,8 +115,8 @@ fn prepare(request: &PrepareRequest) -> Result<PrepareResponse> {
     let context = &request.context;
     let (def, mut resolved) = parse(context)?;
 
-    // `disk_image("path")` is a host file the user manages directly.
-    // `disk_ref("name")` references an `image("name")` or a build step
+    // `Qemu::disk_file(path)` is a host file the user manages directly.
+    // `Qemu::disk(&image)` references an `Image` or a build step
     // declared in the same script, found among the artifacts.
     if let Some(disk) = &def.disk {
         resolved.disk = Some(resolve_disk_source(disk, &request.artifacts)?);
@@ -125,8 +125,8 @@ fn prepare(request: &PrepareRequest) -> Result<PrepareResponse> {
     // Auto-wire the ESP directory for UEFI boot.
     //
     // A test's ESP copy wins over everything. Otherwise, if the user
-    // has NOT set an explicit `qemu().esp_dir()` / `esp_image()` and
-    // the project declares exactly one `esp(...)` block, point QEMU at
+    // has NOT set an explicit `Qemu::esp_dir` / `Qemu::esp_image` and
+    // the project declares exactly one `Esp`, point QEMU at
     // the ESP directory the build assembled (or, under `--dry-run` /
     // `--no-build`, at the path it would have). More than one declared
     // ESP is an error: the user must pick explicitly because we can't
@@ -145,9 +145,9 @@ fn prepare(request: &PrepareRequest) -> Result<PrepareResponse> {
             [esp] => resolved.esp = esp.path.clone().map(EspSource::Dir),
             many => {
                 return Err(Error::Compile(format!(
-                    "profile '{}' uses boot_mode('uefi') and the project declares {} esp(...) \
-                     blocks; quon can't guess which one to mount. Set qemu().esp_dir(...) \
-                     explicitly, or remove the extra esp declarations.",
+                    "profile '{}' boots with BootMode::Uefi and the project declares {} ESPs; \
+                     quon can't guess which one to mount. Set Qemu::esp_dir(..) explicitly, \
+                     or remove the extra Esp declarations.",
                     context.profile,
                     many.len()
                 )));
@@ -368,6 +368,6 @@ mod tests {
             path: Some("/p/build/esp/other".into()),
         });
         let err = QemuRunner.prepare(&req).unwrap_err();
-        assert!(err.0.contains("declares 2 esp(...) blocks"), "{err}");
+        assert!(err.0.contains("declares 2 ESPs"), "{err}");
     }
 }

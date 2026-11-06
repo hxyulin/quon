@@ -71,9 +71,9 @@ const RELEASES: &[Release] = &[
 ];
 
 /// The lines of the example's quon.rs that the test rewrites.
-const EXAMPLE_LIMINE_LINE: &str = r#"cfg.limine("11.4.1").file("BOOTX64.EFI", "333f7a69379b1f47e019be215885cdc078b9edd6e9255cbe2f706d6c5ec0ef06");"#;
-const EXAMPLE_CONF_LINE: &str = r#".add_file("limine.conf", "limine.conf")"#;
-const EXAMPLE_SUCCESS_LINE: &str = ".success_exit_code(33);";
+const EXAMPLE_LIMINE_LINE: &str = r#"Download::limine("11.4.1", "BOOTX64.EFI", "333f7a69379b1f47e019be215885cdc078b9edd6e9255cbe2f706d6c5ec0ef06")"#;
+const EXAMPLE_CONF_LINE: &str = r#".add("limine.conf", "limine.conf")"#;
+const EXAMPLE_SUCCESS_LINE: &str = ".success_exit_code(33),";
 
 /// Why the test cannot run here, if anything is missing.
 fn missing_prerequisite() -> Option<String> {
@@ -142,13 +142,13 @@ fn boot(project: &Path, template: &str, release: &Release) -> (String, bool) {
         .replace(
             EXAMPLE_LIMINE_LINE,
             &format!(
-                r#"cfg.limine("{}").file("BOOTX64.EFI", "{}");"#,
+                r#"Download::limine("{}", "BOOTX64.EFI", "{}")"#,
                 release.version, release.sha256
             ),
         )
         .replace(
             EXAMPLE_CONF_LINE,
-            &format!(r#".add_file("{conf_name}", "{conf_name}")"#),
+            &format!(r#".add("{conf_name}", "{conf_name}")"#),
         );
     fs::write(project.join("quon.rs"), quon_rs).unwrap();
 
@@ -200,7 +200,7 @@ fn limine_releases_boot_the_example_kernel() {
     fs::write(project.join(conf_name), conf_text).unwrap();
     fs::write(
         project.join("quon.rs"),
-        template.replace(EXAMPLE_SUCCESS_LINE, ".success_exit_code(35);"),
+        template.replace(EXAMPLE_SUCCESS_LINE, ".success_exit_code(35),"),
     )
     .unwrap();
     let (output, success) = quon_run(&project);

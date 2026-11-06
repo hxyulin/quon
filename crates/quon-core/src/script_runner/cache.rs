@@ -28,8 +28,7 @@
 //!
 //! Stderr from rustc on a *successful* compile is discarded. On
 //! failure we surface the full stderr verbatim through `Error::Config`,
-//! plus a migration hint when the script still has the old `fn main`
-//! entry point.
+//! plus a migration hint when the script is written for the old API.
 //! There is no diagnostic-level structured-error path yet — Stage 4
 //! may upgrade this to parse `--error-format=json` and emit
 //! `Error::Diagnostics`.
@@ -44,7 +43,7 @@ use std::path::{Path, PathBuf};
 /// `<build_dir>/script-runner/scripts/<key>/quon_script[.exe]`.
 /// Returns the path to the binary (cached or freshly built).
 ///
-/// `quon.rs` defines `pub fn config(cfg: &mut Config) -> Result<()>`
+/// `quon.rs` defines `pub fn config(q: &mut Quon) -> Result<()>`
 /// and no `main`. The binary's crate root is a generated `main.rs` in
 /// the entry dir that includes the script as a module and calls it.
 ///
@@ -115,32 +114,33 @@ fn wrapper_source(script_path: &Path) -> Result<String> {
          mod script;\n\
          \n\
          fn main() -> quon_config::Result<()> {{\n    \
-             let mut cfg = quon_config::Config::new();\n    \
-             script::config(&mut cfg)?;\n    \
-             cfg.emit()\n\
+             let mut q = quon_config::Quon::new();\n    \
+             script::config(&mut q)?;\n    \
+             q.emit()\n\
          }}\n"
     ))
 }
 
-/// Appended to a failed compile of a script that still has the old
-/// `fn main` entry point.
+/// Appended to a failed compile of a script written for the API before
+/// `Quon`: one with a `fn main`, or one taking `&mut Config`.
 const MIGRATION_HINT: &str = "\
-note: quon.rs no longer defines `main`. Replace
+note: quon.rs now fills in a `Quon` and declares items with `q.add`:
 
-    fn main() -> Result<()> {
-        let mut cfg = Config::new();
-        ...
-        cfg.emit()
-    }
+    use quon_config::prelude::*;
 
-with
-
-    pub fn config(cfg: &mut Config) -> Result<()> {
-        ...
+    pub fn config(q: &mut Quon) -> Result<()> {
+        q.project(\"my-kernel\", \"0.1.0\");
+        q.cargo_workspace(\".\");
+        q.default_target(&Target::builtin(\"x86_64-unknown-none\"));
+        let kernel = q.add(Package::new(\"kernel\"));
+        let qemu = q.add(Qemu::new(\"qemu-system-x86_64\"));
+        q.run(&kernel).runner(&qemu);
         Ok(())
     }
 
-Quon creates the `Config` and emits it.";
+Groups are gone: set the target on each `Package`, or once with
+`q.default_target`. Profiles hold codegen settings only; `q.run` names
+what `quon run` starts. See docs/src/configuration/quon-rs.md.";
 
 /// Filename of the cached script binary inside its entry dir.
 ///
@@ -356,7 +356,7 @@ fn compile_script(
             output.status,
             String::from_utf8_lossy(&output.stderr)
         );
-        if has_old_entry_point(script_path) {
+        if uses_old_api(script_path) {
             msg.push('\n');
             msg.push_str(MIGRATION_HINT);
         }
@@ -365,10 +365,12 @@ fn compile_script(
     Ok(())
 }
 
-/// Whether the script source contains `fn main`. A plain text search:
-/// it only decides whether a failed compile gets the migration hint.
-fn has_old_entry_point(script_path: &Path) -> bool {
-    std::fs::read_to_string(script_path).is_ok_and(|s| s.contains("fn main"))
+/// Whether the script looks written for the old API: a `fn main`, or a
+/// `config` taking `&mut Config`. A plain text search: it only decides
+/// whether a failed compile gets the migration hint.
+fn uses_old_api(script_path: &Path) -> bool {
+    std::fs::read_to_string(script_path)
+        .is_ok_and(|s| s.contains("fn main") || s.contains("&mut Config"))
 }
 
 #[cfg(test)]
@@ -442,7 +444,7 @@ mod tests {
             w.contains(r#"#[path = "/proj/my \"kernel\"/quon.rs"]"#),
             "{w}"
         );
-        assert!(w.contains("script::config(&mut cfg)?;"), "{w}");
+        assert!(w.contains("script::config(&mut q)?;"), "{w}");
     }
 
     #[test]

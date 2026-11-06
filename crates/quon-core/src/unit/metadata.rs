@@ -160,7 +160,7 @@ pub(crate) fn unit_metadata(
         PackageSource::Path(p) => h.field(format!("path:{}", project_relative(p, project_root))),
         PackageSource::Registry { checksum } => {
             h.field("registry");
-            // Only when known, so `cfg.dependency()` units, which have
+            // Only when known, so `Dependency` units, which have
             // none, keep their hashes.
             if let Some(c) = checksum {
                 h.field(format!("checksum:{c}"));

@@ -6,27 +6,23 @@
 // gets only `--extern bytemuck_derive=<host dylib>`.
 // Network-gated: `cargo vendor` fetches from crates.io.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("vendor-proc-macro-syn", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("vendor-proc-macro-syn", "0.1.0");
 
-    let kernel = cfg.target("x86_64-unknown-none");
+    let kernel = Target::builtin("x86_64-unknown-none");
+    q.default_target(&kernel);
 
-    cfg.profile("dev")
-        .target(kernel)
-        .opt_level(0)
-        .debug_info(true);
+    let bytemuck = q.add(Dependency::crates_io("bytemuck", "1").target(&kernel));
+    let bytemuck_derive = q.add(Dependency::crates_io("bytemuck_derive", "1").target(&kernel));
 
-    cfg.dependency("bytemuck").version("1").target(kernel);
-    cfg.dependency("bytemuck_derive").version("1").target(kernel);
-
-    cfg.group("kernel")
-        .target(kernel)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .dep("bytemuck", "bytemuck")
-        .dep("bytemuck_derive", "bytemuck_derive");
+    q.add(
+        Crate::lib("kernel", "crates/kernel")
+            .edition(Edition::E2021)
+            .dep(&bytemuck)
+            .dep(&bytemuck_derive),
+    );
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 //! `quon manifest`: print what Quon reads from a Cargo workspace and
 //! how it resolves features. Builds resolve the workspace named by
-//! `cfg.cargo_workspace` the same way, for the roots in `quon.rs`.
+//! `q.cargo_workspace` the same way, for the roots in `quon.rs`.
 
 use crate::cli::{ManifestArgs, ManifestCommand, ManifestUnitsArgs};
 use anyhow::{Context, Result, bail};

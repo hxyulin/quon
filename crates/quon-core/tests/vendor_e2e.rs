@@ -6,14 +6,14 @@
 //!
 //! against a real fixture on disk. Unit tests already cover every
 //! individual helper under `crates/quon-core/src/vendor/`; these are
-//! the tests that catch integration bugs between the Config builder,
+//! the tests that catch integration bugs between the `Quon` API,
 //! the lockfile format, and the model load path.
 //!
 //! # Two tiers
 //!
 //! 1. **Path-only**: always runs. Uses `quon.path-only.rs` which
 //!    declares a single `DepSource::Path` dep and never touches the
-//!    network. Exercises the `.path(...)` builder, the
+//!    network. Exercises `Dependency::path`, the
 //!    `vendor_sync` Path branch, lockfile round-trip,
 //!    fingerprint-stable fast path, and auto-registration.
 //!
@@ -101,8 +101,8 @@ fn path_only_fixture_vendors_and_auto_registers() {
     use_path_only_script(&project);
 
     // Load the model via load_build_model. Pre-check the model has
-    // our path dep before vendor_sync to make sure the .path(...)
-    // builder method actually wired it up.
+    // our path dep before vendor_sync to make sure Dependency::path
+    // actually wired it up.
     let model = quon_core::load_build_model(&project).expect("load_build_model");
     let helper_handle = model
         .external_deps
@@ -177,16 +177,17 @@ fn path_only_fixture_detects_stale_lock_after_model_edit() {
     // an extra `bitflags` crates.io dep. This replicates a user editing
     // the build script after the initial vendor run, without touching
     // the on-disk quon.rs.
-    use quon_config::Config;
+    use quon_config::prelude::*;
     use quon_model::intern;
-    let mut cfg = Config::new();
-    cfg.project("vendor-minimal", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).opt_level(0).debug_info(true);
-    cfg.dependency("vendor_minimal_helper")
-        .path("../vendor-minimal-helper");
-    cfg.dependency("bitflags").version("2.11");
-    let raw = cfg.into_raw();
+    let mut q = Quon::new();
+    q.project("vendor-minimal", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
+    q.add(Dependency::path(
+        "vendor_minimal_helper",
+        "../vendor-minimal-helper",
+    ));
+    q.add(Dependency::crates_io("bitflags", "2.11"));
+    let raw = q.into_raw().unwrap();
     let (model_v2, diags) = intern(raw);
     assert!(diags.is_empty(), "intern diags: {diags:?}");
 

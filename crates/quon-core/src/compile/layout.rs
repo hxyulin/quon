@@ -239,10 +239,10 @@ impl BuildLayout {
 
     /// Path of an image artifact (`<root>/images/<name>.img`).
     ///
-    /// Image outputs are profile-agnostic: a single `image()` block in
+    /// Image outputs are profile-agnostic: a single `Image` in
     /// `quon.rs` produces one canonical artifact, regardless of which
     /// profile triggered the build. This reflects how images are
-    /// consumed downstream — `qemu().disk(image_ref("..."))` references
+    /// consumed downstream — `Qemu::disk(&image)` references
     /// an image by name, not by (profile, name) pair, and rebuilding
     /// the same image into different paths per profile would just waste
     /// disk and confuse the cache.
@@ -310,7 +310,7 @@ impl BuildLayout {
     /// pin; it is intended to be committed via a `.gitignore` carveout
     /// so repeat vendor runs are deterministic across machines.
     ///
-    /// Cross-target deps (declared via `cfg.dependency(...).target(t)`)
+    /// Cross-target deps (declared via `Dependency::..(..).target(&t)`)
     /// get a sibling workspace at
     /// [`Self::vendor_workspace_for_target`].
     pub fn vendor_workspace_dir(&self) -> PathBuf {

@@ -1,4 +1,4 @@
-# UEFI Bootloader + Kernel
+# UEFI bootloader and kernel
 
 This is the most advanced cookbook example: a UEFI bootloader that embeds a
 bare-metal kernel binary, with ESP assembly and QEMU integration. It
@@ -8,61 +8,44 @@ boot configuration.
 ## quon.rs
 
 ```rust
-use quon_config::{Config, CrateType, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("my-os", "0.1.0")
-        .default_profile("debug");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-os", "0.1.0");
 
-    // Two targets: bare-metal for kernel, UEFI for bootloader
-    let kernel_target = cfg.target("x86_64-unknown-none");
-    let uefi_target = cfg.target("x86_64-unknown-uefi");
+    // Two targets: bare-metal for the kernel, UEFI for the bootloader
+    let kernel_target = Target::builtin("x86_64-unknown-none");
+    let uefi_target = Target::builtin("x86_64-unknown-uefi");
 
-    cfg.profile("debug")
-        .runner("qemu")
-        .target(uefi_target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("bootloader");
+    let kernel = q.add(
+        Crate::bin("kernel", "crates/kernel")
+            .target(&kernel_target)
+            .linker_script("crates/kernel/kernel.ld"),
+    );
 
-    cfg.profile("release")
-        .runner("qemu")
-        .target(uefi_target)
-        .opt_level(2)
-        .lto("thin")
-        .run_binary("bootloader");
-
-    // Kernel group -- compiled for bare-metal
-    cfg.group("kernel")
-        .target(kernel_target)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs")
-            .linker_script("crates/kernel/kernel.ld");
-
-    // Bootloader group -- compiled for UEFI
-    // artifact_env injects the kernel's output path and adds a build dependency
-    cfg.group("uefi")
-        .target(uefi_target)
-        .edition("2021")
-        .add("bootloader", "crates/bootloader")
-            .crate_type(CrateType::Bin)
-            .root("src/main.rs")
-            .artifact_env("KERNEL_PATH", "kernel");
+    // artifact_env passes the kernel's output path and builds it first
+    let bootloader = q.add(
+        Crate::bin("bootloader", "crates/bootloader")
+            .target(&uefi_target)
+            .artifact_env("KERNEL_PATH", &kernel),
+    );
 
     // Assemble an EFI System Partition
-    cfg.esp("default")
-        .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+    q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 
     // QEMU with UEFI boot (requires OVMF)
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(256)
-        .cores(1)
-        .serial_stdio()
-        .boot_mode("uefi");
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(256)
+            .cores(1)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi),
+    );
+
+    // Profiles build for the bootloader's target, the UEFI one.
+    q.run(&bootloader).runner(&qemu);
+    q.add(Profile::release().lto(Lto::Thin));
 
     Ok(())
 }
@@ -87,7 +70,7 @@ The build has four stages:
 
 ### 1. Kernel compiles first
 
-The `artifact_env("KERNEL_PATH", "kernel")` declaration on the bootloader crate
+The `artifact_env("KERNEL_PATH", &kernel)` declaration on the bootloader crate
 does two things: it creates an automatic build dependency so the kernel is
 always compiled before the bootloader, and it sets the `KERNEL_PATH` environment
 variable to the absolute path of the kernel binary during bootloader
@@ -107,14 +90,14 @@ payload inside itself.
 
 ### 3. ESP assembly
 
-The `esp()` block tells Quon to copy the compiled bootloader binary into an
-EFI System Partition layout. The `.add("bootloader", "EFI/BOOT/BOOTX64.EFI")`
-line places it at the standard UEFI boot path. Quon creates a FAT filesystem
-image from this staging directory.
+The `Esp` tells Quon to copy the compiled bootloader binary into an
+EFI System Partition layout. `.add(&bootloader, "EFI/BOOT/BOOTX64.EFI")`
+places it at the standard UEFI boot path. Quon assembles the ESP as a
+directory, and a UEFI boot mounts it when it is the project's only ESP.
 
 ### 4. QEMU launches with UEFI
 
-The `.boot_mode("uefi")` setting tells Quon to pass OVMF firmware flags to
+The `.boot(BootMode::Uefi)` setting tells Quon to pass OVMF firmware flags to
 QEMU. OVMF loads the bootloader from the ESP, which then loads the embedded
 kernel into memory and transfers control to it.
 
@@ -122,7 +105,7 @@ kernel into memory and transfers control to it.
 
 ```sh
 quon run                 # Build + UEFI boot in QEMU
-quon run -p release      # Use release profile
+quon run -r              # Use the release profile
 quon run --gdb           # Start with GDB server for debugging
 quon run --dry-run       # Print QEMU command without executing
 ```
@@ -149,8 +132,8 @@ Common locations by distribution:
 ## Multi-target builds
 
 This example uses two target triples in the same build. Quon compiles a
-separate sysroot for each target and routes crates to the correct one based on
-their group's `.target()` setting. The dependency graph spans target boundaries
+separate sysroot for each target and builds each crate for the target its
+`.target(&t)` names. The dependency graph spans target boundaries
 -- the bootloader (UEFI target) depends on the kernel (bare-metal target) via
 `artifact_env`.
 

@@ -6,28 +6,25 @@
 // Network-gated: `cargo vendor` fetches from crates.io. The test swaps in
 // `quon.json-target.rs` to cover a custom JSON target.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("vendor-zerocopy", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("vendor-zerocopy", "0.1.0");
 
-    let kernel = cfg.target("x86_64-unknown-none");
+    let kernel = Target::builtin("x86_64-unknown-none");
+    q.default_target(&kernel);
 
-    cfg.profile("dev")
-        .target(kernel)
-        .opt_level(0)
-        .debug_info(true);
+    let zerocopy = q.add(
+        Dependency::crates_io("zerocopy", "0.8")
+            .features(["derive"])
+            .target(&kernel),
+    );
 
-    cfg.dependency("zerocopy")
-        .version("0.8")
-        .features(&["derive"])
-        .target(kernel);
-
-    cfg.group("kernel")
-        .target(kernel)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .dep("zerocopy", "zerocopy");
+    q.add(
+        Crate::lib("kernel", "crates/kernel")
+            .edition(Edition::E2021)
+            .dep(&zerocopy),
+    );
 
     Ok(())
 }

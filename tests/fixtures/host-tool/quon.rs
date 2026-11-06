@@ -1,16 +1,12 @@
-// Host-tool fixture: a profile that builds for the host, declares no
-// target, and runs its binary directly with `quon run`.
+// Host-tool fixture: the project names no target, so its profiles
+// build for the host and `quon run` runs the binary directly.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("host-tool", "0.1.0");
-    cfg.cargo_workspace(".");
-    cfg.group("tools").target_host().package("hello");
-    cfg.profile("dev")
-        .target_host()
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("hello");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("host-tool", "0.1.0");
+    q.cargo_workspace(".");
+    let hello = q.add(Package::new("hello"));
+    q.run(&hello);
     Ok(())
 }

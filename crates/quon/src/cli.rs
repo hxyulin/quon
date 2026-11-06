@@ -128,10 +128,10 @@ pub enum Command {
     Setup,
     /// Vendor external dependencies.
     ///
-    /// For the Cargo workspace named by `cfg.cargo_workspace`, runs
+    /// For the Cargo workspace named by `q.cargo_workspace`, runs
     /// `cargo vendor --versioned-dirs --locked` into the configured
     /// vendor directory (default `vendor/`) and stamps it with the
-    /// `Cargo.lock` hash. For `cfg.dependency()` declarations,
+    /// `Cargo.lock` hash. For `Dependency` declarations,
     /// synthesises a scratch `Cargo.toml`, invokes `cargo vendor` to
     /// populate `./vendor/`, and writes `quon.lock` pinning the
     /// result. `--check` verifies without touching disk; `--force`
@@ -142,19 +142,20 @@ pub enum Command {
     ///
     /// A QEMU runner picks between direct-kernel boot (`-kernel <elf>`)
     /// and UEFI (OVMF pflash): `--uefi`/`--direct` flags, then the
-    /// profile's `qemu_boot_mode(...)`, then the runner's
-    /// `.boot_mode(...)`, then direct. A command runner runs its argv.
+    /// `.boot(...)` of the runner the profile uses, then direct. A
+    /// command runner runs its argv.
     /// Extra arguments after `--` are appended to the runner's.
     Run(RunArgs),
     /// Build and run the tests: host tests, then integration tests,
     /// then boot tests.
     ///
     /// Host tests are the unit tests and `harness = true` tests of the
-    /// packages in `cfg.host_tests()`, run on the host. Integration
+    /// packages in `q.host_tests()`, run on the host. Integration
     /// tests are the `harness = false` targets in `tests/` of packages
-    /// named with `group.package(...)`; each boots the way `quon run`
+    /// declared with `Package::new(...)`; each boots the way `quon run`
     /// boots the run binary, with the test binary in its place.
-    /// Boot tests (`cfg.boot_test(...)`) run a profile's run binary.
+    /// Boot tests (`BootTest::new(...)`) build their profile and boot
+    /// its run binary.
     /// Both pass when the runner exits with its success status. Every
     /// run happens even when an earlier one fails.
     Test(TestArgs),
@@ -255,19 +256,19 @@ pub struct ConfigureArgs {
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
     /// Force UEFI boot (OVMF pflash). Overrides the QEMU
-    /// runner's `.boot_mode(...)`. Mutually exclusive with
+    /// runner's `.boot(...)`. Mutually exclusive with
     /// `--direct` and `--bios`.
     #[arg(long, conflicts_with_all = ["direct", "bios"])]
     pub uefi: bool,
     /// Force direct-kernel boot (`-kernel <path>`). Overrides the
-    /// QEMU runner's `.boot_mode(...)`. Mutually exclusive
+    /// QEMU runner's `.boot(...)`. Mutually exclusive
     /// with `--bios`.
     #[arg(long, conflicts_with = "bios")]
     pub direct: bool,
     /// Force legacy-BIOS boot (SeaBIOS, no `-kernel`, no pflash). Boots
-    /// from the disk attached via the runner's `.disk_*(...)` (or the
-    /// legacy `.esp_image(...)` raw image). Overrides the QEMU runner's
-    /// `.boot_mode(...)`.
+    /// from the disk attached with the runner's `.disk(...)` or
+    /// `.disk_file(...)` (or the legacy `.esp_image(...)` raw image).
+    /// Overrides the QEMU runner's `.boot(...)`.
     #[arg(long)]
     pub bios: bool,
     /// Wall-clock timeout in seconds. The runner is killed on expiry and

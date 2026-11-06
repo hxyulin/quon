@@ -5,7 +5,7 @@
 Quon works with Cargo rather than around it: it reads the Cargo
 manifests on every build. It adds what Cargo leaves to scripts:
 
-- **Several targets in one build**, each group of crates for its own
+- **Several targets in one build**, each package or crate for its own
   triple.
 - **Custom sysroot compilation** without the unstable `-Zbuild-std`
   flag, with control over the flags.
@@ -31,19 +31,25 @@ rustup component add rust-src
 
 ## How do I add a new target?
 
-Add a `target()` declaration in `quon.rs`:
+Build a `Target` value and pass it to the packages or crates that
+build for it:
 
-```rust
-let target = cfg.target("aarch64-unknown-none");
+```rust,ignore
+let arm = Target::builtin("aarch64-unknown-none");
+q.add(Package::new("kernel-arm").target(&arm));
 ```
 
-For custom target specs, provide a path to the JSON file:
+For a custom target spec, give the path to the JSON file, relative to
+the project root:
 
-```rust
-let target = cfg.target_spec("my-custom-target", "./targets/my-custom-target.json");
+```rust,ignore
+let custom = Target::spec("my-custom-target", "targets/my-custom-target.json");
 ```
 
-Quon will compile a separate sysroot for each declared target.
+`q.default_target(&t)` sets the target for every package and crate
+that names none. Quon compiles a separate sysroot for each target in
+use. All profiles build for one target; see
+[The target profiles build for](./configuration/projects-targets-profiles.md#the-target-profiles-build-for).
 
 ## Where are build artifacts?
 
@@ -66,7 +72,7 @@ changes to your Rust source code.
 
 ## Can I use Quon for projects that are not kernels?
 
-Yes. A profile with `.target_host()` builds for the build machine, and
+Yes. A project with no target builds for the build machine, and
 `quon run` runs the binary directly. Quon's own repository builds
 this way. For bare-metal projects other than kernels (firmware,
 bootloaders, embedded images), declare their targets as for a kernel.

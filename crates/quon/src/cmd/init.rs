@@ -113,8 +113,8 @@ impl Target {
     /// The `quon.rs` call that declares the target.
     fn declare(&self) -> String {
         match &self.spec {
-            Some(spec) => format!("cfg.target_spec({:?}, {spec:?})", self.name),
-            None => format!("cfg.target({:?})", self.name),
+            Some(spec) => format!("Target::spec({:?}, {spec:?})", self.name),
+            None => format!("Target::builtin({:?})", self.name),
         }
     }
 
@@ -139,7 +139,7 @@ pub enum LinkerScript {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kernel {
     pub package: String,
-    /// The bin target, which `run_binary` and the ESP name.
+    /// The bin target, which `q.run` and the ESP name.
     pub bin: String,
     /// The package directory, relative to the project root.
     pub dir: String,
@@ -172,8 +172,8 @@ pub struct Boot {
 pub struct Plan {
     pub name: String,
     pub version: String,
-    /// The target every group builds for, or `None` to build for the
-    /// host.
+    /// The target every package builds for, or `None` to build for
+    /// the host.
     pub target: Option<Target>,
     /// Where `target` came from, for the comment over it.
     pub target_source: &'static str,
@@ -338,7 +338,7 @@ fn looks_bare_metal(set: &PackageSet) -> bool {
         })
 }
 
-/// Index of the target the groups build for. Explicit `--target` flags
+/// Index of the target the packages build for. Explicit `--target` flags
 /// keep their order; inferred lists prefer a UEFI target for a UEFI
 /// kernel and a non-UEFI one otherwise, since `rust-toolchain.toml`
 /// often lists a bootloader's UEFI target next to the kernel's.
@@ -675,9 +675,6 @@ pub fn render(plan: &Plan) -> String {
         return render_host(plan);
     };
     let mut o = String::new();
-    // The groups' target is named after its architecture; the targets
-    // that only appear in comments keep the full name.
-    let tv = ident(t.arch());
 
     let run_line = match plan.boot.as_ref().map(|b| b.bootloader) {
         Some(Bootloader::Limine) => {
@@ -695,7 +692,7 @@ pub fn render(plan: &Plan) -> String {
          //     quon clippy    lint every crate\n\
          {run_line}\
          \n\
-         use quon_config::{{Config, Result}};\n\n",
+         use quon_config::prelude::*;\n\n",
         name = plan.name
     );
 
@@ -715,21 +712,17 @@ pub fn render(plan: &Plan) -> String {
         );
     }
 
-    o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
-    let _ = writeln!(
-        o,
-        "    cfg.project({:?}, {:?}).default_profile(\"dev\");",
-        plan.name, plan.version
-    );
+    o.push_str("pub fn config(q: &mut Quon) -> Result<()> {\n");
+    let _ = writeln!(o, "    q.project({:?}, {:?});", plan.name, plan.version);
+    o.push_str("    q.cargo_workspace(\".\");\n");
     if plan.target_source.is_empty() {
         o.push_str(
             "    // TODO: no target found in .cargo/config.toml or rust-toolchain.toml.\n\
              \x20   // Replace the triple with the kernel's target, or a `.json` spec with\n\
-             \x20   // cfg.target_spec(\"<name>\", \"<path>.json\").\n",
+             \x20   // Target::spec(\"<name>\", \"<path>.json\").\n",
         );
     }
-    let _ = writeln!(o, "    let {tv} = {};", t.declare());
-    o.push_str("    cfg.cargo_workspace(\".\");\n\n");
+    let _ = writeln!(o, "    q.default_target(&{});\n", t.declare());
 
     if !plan.other_targets.is_empty() {
         let source = plan.target_source;
@@ -737,115 +730,40 @@ pub fn render(plan: &Plan) -> String {
             &mut o,
             &format!(
                 "TODO: {source} also names {}. Quon builds each package for one target. \
-                 To build packages for another, declare it and give it a group:",
+                 To build a package for another, declare the target and pass it to the \
+                 package:",
                 names(plan.other_targets.iter().map(|t| t.name.as_str()))
             ),
         );
         for other in &plan.other_targets {
             let _ = writeln!(o, "    // let {} = {};", other.var(), other.declare());
         }
-        let first = &plan.other_targets[0];
         let _ = writeln!(
             o,
-            "    // cfg.group({:?}).target({}).package(\"<package>\");\n",
-            first.var(),
-            first.var()
+            "    // q.add(Package::new(\"<package>\").target(&{}));\n",
+            plan.other_targets[0].var()
         );
     }
 
-    // Profile.
     match &plan.kernel {
-        Ok(_) => {}
+        Ok(k) => render_kernel(&mut o, plan, t, k),
         Err(why) => {
-            let _ = writeln!(
-                o,
-                "    // TODO: {}. Name the kernel's bin target\n\
-                 \x20   // so `quon run` boots it, and declare its package in its own group:\n\
-                 \x20   //     .run_binary(\"<bin>\")",
-                capitalize(&describe_no_kernel(why))
+            comment(
+                &mut o,
+                &format!(
+                    "TODO: {}. Move the kernel's package out of PACKAGES and declare it on \
+                     its own, so `quon run` boots its bin:",
+                    capitalize(&describe_no_kernel(why))
+                ),
             );
-        }
-    }
-    let _ = write!(
-        o,
-        "    cfg.profile(\"dev\")\n        .target({tv})\n        .opt_level(0)\n        .debug_info(true)"
-    );
-    if let Ok(k) = &plan.kernel {
-        let _ = write!(o, "\n        .run_binary({:?})", k.bin);
-    }
-    // `render_qemu` declares the runner exactly when this holds.
-    if plan.boot.is_some() && qemu_for(t.arch()).is_some() {
-        o.push_str("\n        .runner(\"qemu\")");
-    }
-    o.push_str(";\n");
-    render_release(&mut o);
-
-    // Kernel group.
-    if let Ok(k) = &plan.kernel {
-        let static_reloc = plan.boot.as_ref().map(|b| b.bootloader) == Some(Bootloader::Limine)
-            && t.name == "x86_64-unknown-none";
-        if !plan.rustflags.is_empty() {
-            let _ = writeln!(
-                o,
-                "    // TODO: .cargo/config.toml passes these rustflags, which Quon does not\n\
-                 \x20   // read. Add the ones the kernel needs to the kernel group:"
-            );
-            for f in &plan.rustflags {
-                let _ = writeln!(o, "    //     .rustc_flag({f:?})");
-            }
-        }
-        match &k.linker_script {
-            LinkerScript::Path(_) => {}
-            LinkerScript::BuildScript => {
-                o.push_str("    // The kernel's build script passes the linker script.\n");
-            }
-            LinkerScript::None => {
-                let _ = writeln!(
-                    o,
-                    "    // TODO: if the kernel needs a linker script, add it to the kernel group:\n\
-                     \x20   //     .linker_script({:?})",
-                    join_rel(&k.dir, "<name>.ld")
-                );
-            }
-            LinkerScript::Ambiguous(paths) => {
-                let _ = writeln!(
-                    o,
-                    "    // TODO: {} holds several linker scripts. Add the kernel's to the\n\
-                     \x20   // kernel group, one of:",
-                    if k.dir.is_empty() { "." } else { &k.dir }
-                );
-                for p in paths {
-                    let _ = writeln!(o, "    //     .linker_script({p:?})");
-                }
-            }
-        }
-        if static_reloc {
             o.push_str(
-                "    // x86_64-unknown-none links a position-independent executable by\n\
-                 \x20   // default. Limine loads one only with a PT_DYNAMIC segment, so link a\n\
-                 \x20   // plain executable at the address the linker script sets.\n",
+                "    //     let kernel = q.add(Package::new(\"<package>\"));\n\
+                 \x20   //     q.run(&kernel);\n\n",
             );
         }
-        let _ = write!(
-            o,
-            "    cfg.group(\"kernel\")\n        .target({tv})\n        .package({:?})",
-            k.package
-        );
-        if let LinkerScript::Path(p) = &k.linker_script {
-            let _ = write!(o, "\n        .linker_script({p:?})");
-        }
-        if static_reloc {
-            o.push_str("\n        .rustc_flag(\"-Crelocation-model=static\")");
-        }
-        o.push_str(";\n\n");
     }
 
-    // Library group.
     if !plan.libraries.is_empty() {
-        let (group, var) = match plan.kernel {
-            Ok(_) => ("libraries", "libraries"),
-            Err(_) => ("packages", "packages"),
-        };
         comment(
             &mut o,
             &format!(
@@ -855,34 +773,108 @@ pub fn render(plan: &Plan) -> String {
         );
         let _ = writeln!(
             o,
-            "    let mut {var} = cfg.group({group:?}).target({tv});\n\
-             \x20   for name in {list_name} {{\n\
-             \x20       {var}.package(name);\n\
-             \x20   }}\n\
-             \x20   drop({var});\n"
+            "    for &name in {list_name} {{\n\
+             \x20       q.add(Package::new(name));\n\
+             \x20   }}\n"
         );
     }
 
-    // Boot.
     let arch = t.arch();
     match &plan.boot {
-        None => render_qemu_commented(&mut o, arch),
+        None => {
+            render_qemu_commented(&mut o, arch);
+            if plan.kernel.is_ok() {
+                o.push_str("    q.run(&kernel);\n");
+            }
+        }
         Some(boot) => {
-            let kernel = plan
-                .kernel
-                .as_ref()
-                .expect("infer requires a kernel to boot");
-            render_esp(&mut o, boot, &kernel.bin);
+            render_esp(&mut o, boot);
             render_qemu(&mut o, arch);
         }
     }
+    o.push('\n');
 
     o.push_str("    Ok(())\n}\n");
     o
 }
 
-/// Render a plan that builds for the host: every member in one host
-/// group, with its unit tests, `tests/` and doctests under `quon test`.
+/// The kernel package, as `let kernel`, with the comments on what the
+/// workspace files say about its linker script and rustflags.
+fn render_kernel(o: &mut String, plan: &Plan, t: &Target, k: &Kernel) {
+    let static_reloc = plan.boot.as_ref().map(|b| b.bootloader) == Some(Bootloader::Limine)
+        && t.name == "x86_64-unknown-none";
+    if !plan.rustflags.is_empty() {
+        let _ = writeln!(
+            o,
+            "    // TODO: .cargo/config.toml passes these rustflags, which Quon does not\n\
+             \x20   // read. Add the ones the kernel needs to the kernel package:"
+        );
+        for f in &plan.rustflags {
+            let _ = writeln!(o, "    //     .rustc_flag({f:?})");
+        }
+    }
+    match &k.linker_script {
+        LinkerScript::Path(_) => {}
+        LinkerScript::BuildScript => {
+            o.push_str("    // The kernel's build script passes the linker script.\n");
+        }
+        LinkerScript::None => {
+            let _ = writeln!(
+                o,
+                "    // TODO: if the kernel needs a linker script, add it to the kernel package:\n\
+                 \x20   //     .linker_script({:?})",
+                join_rel(&k.dir, "<name>.ld")
+            );
+        }
+        LinkerScript::Ambiguous(paths) => {
+            let _ = writeln!(
+                o,
+                "    // TODO: {} holds several linker scripts. Add the kernel's to the\n\
+                 \x20   // kernel package, one of:",
+                if k.dir.is_empty() { "." } else { &k.dir }
+            );
+            for p in paths {
+                let _ = writeln!(o, "    //     .linker_script({p:?})");
+            }
+        }
+    }
+    if static_reloc {
+        o.push_str(
+            "    // x86_64-unknown-none links a position-independent executable by\n\
+             \x20   // default. Limine loads one only with a PT_DYNAMIC segment, so link a\n\
+             \x20   // plain executable at the address the linker script sets.\n",
+        );
+    }
+
+    let mut settings = Vec::new();
+    if let LinkerScript::Path(p) = &k.linker_script {
+        settings.push(format!(".linker_script({p:?})"));
+    }
+    if static_reloc {
+        settings.push(".rustc_flag(\"-Crelocation-model=static\")".to_string());
+    }
+    // `q.add` returns the bin named after the package; another bin is
+    // reached through the handle.
+    let bin = if k.bin == k.package {
+        String::new()
+    } else {
+        format!(".bin({:?})", k.bin)
+    };
+    let package = format!("Package::new({:?})", k.package);
+    if settings.is_empty() {
+        let _ = writeln!(o, "    let kernel = q.add({package}){bin};\n");
+    } else {
+        let _ = writeln!(
+            o,
+            "    let kernel = q.add(\n        {package}\n            {},\n    ){bin};\n",
+            settings.join("\n            ")
+        );
+    }
+}
+
+/// Render a plan that builds for the host: every member is a host
+/// package, with its unit tests, `tests/` and doctests under
+/// `quon test`.
 fn render_host(plan: &Plan) -> String {
     let mut o = String::new();
     let run_line = match &plan.kernel {
@@ -901,77 +893,100 @@ fn render_host(plan: &Plan) -> String {
          // No target was found, so this builds for the host. To build for another\n\
          // target, run `quon init --force --target <triple>`.\n\
          \n\
-         use quon_config::{{Config, Result}};\n\n",
+         use quon_config::prelude::*;\n\n",
         name = plan.name
     );
-    let quoted: Vec<_> = plan.libraries.iter().map(|n| format!("{n:?}")).collect();
-    let _ = writeln!(
-        o,
-        "/// Workspace packages.\nconst PACKAGES: &[&str] = &[{}];\n",
-        quoted.join(", ")
-    );
-    o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
-    let _ = writeln!(
-        o,
-        "    cfg.project({:?}, {:?}).default_profile(\"dev\");",
-        plan.name, plan.version
-    );
-    o.push_str("    cfg.cargo_workspace(\".\");\n\n");
+    // The package `quon run` runs is declared on its own, for its
+    // handle; the rest are declared in a loop.
+    let run = plan.kernel.as_ref().ok();
+    let packages: Vec<_> = plan
+        .libraries
+        .iter()
+        .filter(|n| run.is_none_or(|k| **n != k.package))
+        .map(|n| format!("{n:?}"))
+        .collect();
+    if !packages.is_empty() {
+        let doc = match run {
+            Some(k) => format!("Workspace packages other than `{}`.", k.package),
+            None => "Workspace packages.".to_string(),
+        };
+        let _ = writeln!(
+            o,
+            "/// {doc}\nconst PACKAGES: &[&str] = &[{}];\n",
+            packages.join(", ")
+        );
+    }
+    o.push_str("pub fn config(q: &mut Quon) -> Result<()> {\n");
+    let _ = writeln!(o, "    q.project({:?}, {:?});", plan.name, plan.version);
+    o.push_str("    q.cargo_workspace(\".\");\n\n");
 
-    match &plan.kernel {
-        Ok(_) => {}
-        Err(NoKernel::NoBins) => {}
-        Err(why @ NoKernel::SeveralBins(_)) => {
+    match (&plan.kernel, run) {
+        (_, Some(k)) => {
+            let bin = if k.bin == k.package {
+                String::new()
+            } else {
+                format!(".bin({:?})", k.bin)
+            };
             let _ = writeln!(
                 o,
-                "    // TODO: {}. Name the bin target `quon run`\n\
-                 \x20   // runs:\n\
-                 \x20   //     .run_binary(\"<bin>\")",
-                capitalize(&describe_no_kernel(why))
+                "    let app = q.add(Package::new({:?})){bin};\n    q.run(&app);",
+                k.package
             );
         }
+        (Err(why @ NoKernel::SeveralBins(_)), None) => {
+            comment(
+                &mut o,
+                &format!(
+                    "TODO: {}. Move the package of the bin `quon run` runs out of \
+                     PACKAGES and declare it on its own:",
+                    capitalize(&describe_no_kernel(why))
+                ),
+            );
+            o.push_str(
+                "    //     let app = q.add(Package::new(\"<package>\"));\n\
+                 \x20   //     q.run(&app);\n\
+                 \x20   //     q.host_tests().package(\"<package>\");\n",
+            );
+        }
+        _ => {}
     }
-    o.push_str(
-        "    cfg.profile(\"dev\")\n        .target_host()\n        .opt_level(0)\n        .debug_info(true)",
-    );
-    if let Ok(k) = &plan.kernel {
-        let _ = write!(o, "\n        .run_binary({:?})", k.bin);
-    }
-    o.push_str(";\n");
-    render_release(&mut o);
-
-    if !plan.libraries.is_empty() {
+    if !packages.is_empty() {
         o.push_str(
-            "    let mut packages = cfg.group(\"packages\").target_host();\n\
-             \x20   for name in PACKAGES {\n\
-             \x20       packages.package(name);\n\
-             \x20   }\n\
-             \x20   drop(packages);\n\n\
-             \x20   let mut tests = cfg.host_tests();\n\
-             \x20   for name in PACKAGES {\n\
-             \x20       tests = tests.package(name);\n\
-             \x20   }\n\
-             \x20   drop(tests);\n\n",
+            "    for &name in PACKAGES {\n\
+             \x20       q.add(Package::new(name));\n\
+             \x20   }\n",
         );
+    }
+
+    let mut tests = String::from("    q.host_tests()");
+    if let Some(k) = run {
+        let _ = write!(tests, ".package({:?})", k.package);
+    }
+    if !packages.is_empty() {
+        tests.push_str(".packages(PACKAGES)");
+    }
+    if run.is_some() || !packages.is_empty() {
+        let _ = writeln!(o, "{tests};\n");
     }
     o.push_str("    Ok(())\n}\n");
     o
 }
 
-fn render_esp(o: &mut String, boot: &Boot, bin: &str) {
+fn render_esp(o: &mut String, boot: &Boot) {
     let efi = &boot.efi_file;
     match boot.bootloader {
         Bootloader::Uefi => {
             let _ = writeln!(
                 o,
                 "    // UEFI firmware starts EFI/BOOT/{efi}.\n\
-                 \x20   cfg.esp(\"default\").add({bin:?}, \"EFI/BOOT/{efi}\");\n"
+                 \x20   q.add(Esp::new(\"default\").add(&kernel, \"EFI/BOOT/{efi}\"));\n"
             );
         }
         Bootloader::Limine => {
-            let limine_line =
-                |version: &str| format!("cfg.limine({version:?}).file({efi:?}, \"\");");
-            let download = format!(".add_download(\"limine/{efi}\", \"EFI/BOOT/{efi}\")");
+            let limine_line = |version: &str| {
+                format!("let limine = q.add(Download::limine({version:?}, {efi:?}, \"\"));")
+            };
+            let download = format!(".add(&limine, \"EFI/BOOT/{efi}\")");
             match &boot.limine_version {
                 Some(v) => {
                     let _ = writeln!(
@@ -987,8 +1002,8 @@ fn render_esp(o: &mut String, boot: &Boot, bin: &str) {
                     let _ = writeln!(
                         o,
                         "    // TODO: pin a Limine release. Uncomment this line and the\n\
-                         \x20   // add_download line below, and set the version. The first build\n\
-                         \x20   // fails and prints the hash to fill in.\n\
+                         \x20   // `.add(&limine, ..)` line below, and set the version. The first\n\
+                         \x20   // build fails and prints the hash to fill in.\n\
                          \x20   // {}\n",
                         limine_line("<version>")
                     );
@@ -1006,48 +1021,41 @@ fn render_esp(o: &mut String, boot: &Boot, bin: &str) {
                 let _ = writeln!(
                     o,
                     "    // TODO: write limine.conf next to this file, with an entry whose path\n\
-                     \x20   // is boot():/{}, and uncomment the add_file line.",
+                     \x20   // is boot():/{}, and uncomment the limine.conf line.",
                     boot.kernel_path
                 );
             }
-            o.push_str("    cfg.esp(\"default\")\n");
+            o.push_str("    q.add(\n        Esp::new(\"default\")\n");
             if boot.limine_version.is_some() {
-                let _ = writeln!(o, "        {download}");
+                let _ = writeln!(o, "            {download}");
             } else {
-                let _ = writeln!(o, "        // {download}");
+                let _ = writeln!(o, "            // {download}");
             }
             match conf {
                 Some(c) => {
-                    let _ = writeln!(o, "        .add_file({c:?}, {c:?})");
+                    let _ = writeln!(o, "            .add({c:?}, {c:?})");
                 }
-                None => o.push_str("        // .add_file(\"limine.conf\", \"limine.conf\")\n"),
+                None => o.push_str("            // .add(\"limine.conf\", \"limine.conf\")\n"),
             }
-            let _ = writeln!(o, "        .add({bin:?}, {:?});\n", boot.kernel_path);
+            let _ = writeln!(
+                o,
+                "            .add(&kernel, {:?}),\n    );\n",
+                boot.kernel_path
+            );
         }
         Bootloader::None => {}
     }
 }
 
-/// The release profile, after the dev profile it inherits from: the
-/// target, run binary and runner come from dev. rustc turns debug
-/// assertions and overflow checks off above opt-level 0, as in Cargo's
-/// release profile.
-fn render_release(o: &mut String) {
-    o.push_str(
-        "    cfg.profile(\"release\")\n\
-         \x20       .inherits(\"dev\")\n\
-         \x20       .opt_level(3)\n\
-         \x20       .debug_info(false);\n\n",
-    );
-}
-
+/// The QEMU runner and the run entry that uses it.
 fn render_qemu(o: &mut String, arch: &str) {
     let Some((program, machine)) = qemu_for(arch) else {
         let _ = writeln!(
             o,
             "    // TODO: no QEMU machine is known for `{arch}`. Declare QEMU to use\n\
-             \x20   // `quon run`, and add `.runner(\"qemu\")` to the dev profile:\n\
-             \x20   // cfg.runner(\"qemu\").qemu(\"qemu-system-<arch>\").machine(\"<machine>\").boot_mode(\"uefi\");\n"
+             \x20   // `quon run`, and add `.runner(&qemu)` to `q.run(&kernel)`:\n\
+             \x20   // let qemu = q.add(Qemu::new(\"qemu-system-<arch>\").machine(\"<machine>\").boot(BootMode::Uefi));\n\
+             \x20   q.run(&kernel);"
         );
         return;
     };
@@ -1055,19 +1063,21 @@ fn render_qemu(o: &mut String, arch: &str) {
         o.push_str(
             "    // TODO: if the kernel exits QEMU through isa-debug-exit, add the device and\n\
              \x20   // the status QEMU then exits with, (<value> << 1) | 1, to the runner:\n\
-             \x20   //     .extra_args(&[\"-device\", \"isa-debug-exit,iobase=0xf4,iosize=0x04\"])\n\
+             \x20   //     .args([\"-device\", \"isa-debug-exit,iobase=0xf4,iosize=0x04\"])\n\
              \x20   //     .success_exit_code(<status>)\n",
         );
     }
     let _ = writeln!(
         o,
-        "    cfg.runner(\"qemu\")\n\
-         \x20       .qemu({program:?})\n\
-         \x20       .machine({machine:?})\n\
-         \x20       .memory(256)\n\
-         \x20       .cores(1)\n\
-         \x20       .serial_stdio()\n\
-         \x20       .boot_mode(\"uefi\");\n"
+        "    let qemu = q.add(\n\
+         \x20       Qemu::new({program:?})\n\
+         \x20           .machine({machine:?})\n\
+         \x20           .memory_mb(256)\n\
+         \x20           .cores(1)\n\
+         \x20           .serial(Serial::Stdio)\n\
+         \x20           .boot(BootMode::Uefi),\n\
+         \x20   );\n\
+         \x20   q.run(&kernel).runner(&qemu);"
     );
 }
 
@@ -1075,15 +1085,16 @@ fn render_qemu_commented(o: &mut String, arch: &str) {
     let (program, machine) = qemu_for(arch).unwrap_or(("qemu-system-<arch>", "<machine>"));
     let _ = writeln!(
         o,
-        "    // TODO: to boot the kernel with `quon run`, uncomment this block, or run\n\
-         \x20   // `quon init --force --bootloader limine` (or `uefi`) to boot through UEFI.\n\
-         \x20   // Add `.runner(\"qemu\")` to the dev profile too.\n\
-         \x20   // cfg.runner(\"qemu\")\n\
-         \x20   //     .qemu({program:?})\n\
-         \x20   //     .machine({machine:?})\n\
-         \x20   //     .memory(256)\n\
-         \x20   //     .cores(1)\n\
-         \x20   //     .serial_stdio();\n"
+        "    // TODO: to boot the kernel with `quon run`, uncomment this block and add\n\
+         \x20   // `.runner(&qemu)` to `q.run(&kernel)`, or run `quon init --force\n\
+         \x20   // --bootloader limine` (or `uefi`) to boot through UEFI.\n\
+         \x20   // let qemu = q.add(\n\
+         \x20   //     Qemu::new({program:?})\n\
+         \x20   //         .machine({machine:?})\n\
+         \x20   //         .memory_mb(256)\n\
+         \x20   //         .cores(1)\n\
+         \x20   //         .serial(Serial::Stdio),\n\
+         \x20   // );"
     );
 }
 
@@ -1196,7 +1207,7 @@ mod tests {
         );
         assert!(plan.other_targets.is_empty());
         assert!(render(&plan).contains(
-            "let x86_64 = cfg.target_spec(\"x86_64-myos\", \"targets/x86_64-myos.json\");"
+            "q.default_target(&Target::spec(\"x86_64-myos\", \"targets/x86_64-myos.json\"));"
         ));
     }
 
@@ -1235,7 +1246,7 @@ mod tests {
         assert_eq!(boot.efi_file, "BOOTX64.EFI");
         assert!(
             render(&plan)
-                .contains("cfg.esp(\"default\").add(\"kernel\", \"EFI/BOOT/BOOTX64.EFI\");")
+                .contains("q.add(Esp::new(\"default\").add(&kernel, \"EFI/BOOT/BOOTX64.EFI\"));")
         );
     }
 
@@ -1246,7 +1257,7 @@ mod tests {
         assert_eq!(plan.target_source, "");
         let text = render(&plan);
         assert!(text.contains("// TODO: no target found"), "{text}");
-        assert!(text.contains("let x86_64 = cfg.target(\"x86_64-unknown-none\");"));
+        assert!(text.contains("q.default_target(&Target::builtin(\"x86_64-unknown-none\"));"));
     }
 
     #[test]
@@ -1329,8 +1340,8 @@ mod tests {
         );
         assert_eq!(plan.libraries, ["kernel", "tool", "util"]);
         let text = render(&plan);
-        assert!(text.contains("//     .run_binary(\"<bin>\")"), "{text}");
-        assert!(!text.contains("cfg.group(\"kernel\")"));
+        assert!(text.contains("//     q.run(&kernel);"), "{text}");
+        assert!(!text.contains("\n    let kernel"), "{text}");
         assert!(text.contains("const PACKAGES"));
 
         // A boot setup needs to know the kernel.
@@ -1380,16 +1391,17 @@ mod tests {
         assert_eq!(boot.limine_conf.as_deref(), Some("limine.conf"));
         assert_eq!(boot.kernel_path, "os/kernel.elf");
         let text = render(&plan);
-        assert!(text.contains("cfg.limine(\"11.4.1\").file(\"BOOTX64.EFI\", \"\");"));
         assert!(
             text.contains(
-                "        .add_download(\"limine/BOOTX64.EFI\", \"EFI/BOOT/BOOTX64.EFI\")"
+                "let limine = q.add(Download::limine(\"11.4.1\", \"BOOTX64.EFI\", \"\"));"
             )
         );
-        assert!(text.contains(".add_file(\"limine.conf\", \"limine.conf\")"));
-        assert!(text.contains(".add(\"kernel\", \"os/kernel.elf\");"));
+        assert!(text.contains("            .add(&limine, \"EFI/BOOT/BOOTX64.EFI\")"));
+        assert!(text.contains(".add(\"limine.conf\", \"limine.conf\")"));
+        assert!(text.contains(".add(&kernel, \"os/kernel.elf\"),"));
         assert!(text.contains(".rustc_flag(\"-Crelocation-model=static\")"));
-        assert!(text.contains(".boot_mode(\"uefi\")"));
+        assert!(text.contains(".boot(BootMode::Uefi)"));
+        assert!(text.contains("q.run(&kernel).runner(&qemu);"));
     }
 
     #[test]
@@ -1401,10 +1413,12 @@ mod tests {
         };
         let plan = infer(ws.path(), &o).unwrap();
         let text = render(&plan);
-        assert!(text.contains("    // cfg.limine(\"<version>\").file(\"BOOTX64.EFI\", \"\");"));
-        assert!(text.contains("        // .add_download("));
-        assert!(text.contains("        // .add_file(\"limine.conf\", \"limine.conf\")"));
-        assert!(text.contains(".add(\"kernel\", \"boot/kernel\");"));
+        assert!(text.contains(
+            "    // let limine = q.add(Download::limine(\"<version>\", \"BOOTX64.EFI\", \"\"));"
+        ));
+        assert!(text.contains("            // .add(&limine, "));
+        assert!(text.contains("            // .add(\"limine.conf\", \"limine.conf\")"));
+        assert!(text.contains(".add(&kernel, \"boot/kernel\"),"));
     }
 
     #[test]
@@ -1440,12 +1454,12 @@ mod tests {
         let ws = kernel_workspace(&[]);
         let text = render(&infer(ws.path(), &opts()).unwrap());
         assert!(
-            text.contains("    //     .qemu(\"qemu-system-x86_64\")"),
+            text.contains("    //     Qemu::new(\"qemu-system-x86_64\")"),
             "{text}"
         );
-        assert!(!text.contains("    cfg.runner("));
-        assert!(!text.contains("        .runner(\"qemu\")"), "{text}");
-        assert!(!text.contains("cfg.esp("));
+        assert!(!text.contains("    let qemu"), "{text}");
+        assert!(text.contains("    q.run(&kernel);\n"), "{text}");
+        assert!(!text.contains("Esp::new("), "{text}");
     }
 
     #[test]
@@ -1482,7 +1496,7 @@ mod tests {
 
         run_at(ws.path(), &args(true)).unwrap();
         let text = fs::read_to_string(ws.path().join("quon.rs")).unwrap();
-        assert!(text.contains("pub fn config(cfg: &mut Config)"));
+        assert!(text.contains("pub fn config(q: &mut Quon)"));
     }
 
     #[test]
@@ -1506,30 +1520,21 @@ mod tests {
         assert_eq!(plan.version, "0.2.0");
         assert_eq!(plan.libraries, ["app"]);
         let text = render(&plan);
-        assert!(text.contains("        .target_host()"), "{text}");
-        assert!(text.contains("        .run_binary(\"app\");"), "{text}");
+        assert!(!text.contains("default_target"), "{text}");
         assert!(
-            text.contains("const PACKAGES: &[&str] = &[\"app\"];"),
+            text.contains("    let app = q.add(Package::new(\"app\"));\n    q.run(&app);"),
             "{text}"
         );
-        assert!(text.contains("tests = tests.package(name);"), "{text}");
-        assert!(
-            text.contains("\"0.2.0\").default_profile(\"dev\");"),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "    cfg.profile(\"release\")\n        .inherits(\"dev\")\n        \
-                 .opt_level(3)\n        .debug_info(false);"
-            ),
-            "{text}"
-        );
+        assert!(!text.contains("const PACKAGES"), "{text}");
+        assert!(text.contains("q.host_tests().package(\"app\");"), "{text}");
+        assert!(text.contains(", \"0.2.0\");"), "{text}");
+        assert!(!text.contains("Profile"), "{text}");
         assert!(!text.contains("TODO"), "{text}");
         assert!(!text.contains("qemu"), "{text}");
     }
 
     #[test]
-    fn a_host_workspace_with_several_bins_leaves_run_binary_to_a_todo() {
+    fn a_host_workspace_with_several_bins_leaves_the_run_to_a_todo() {
         let ws = workspace(&[
             ("Cargo.toml", ROOT),
             ("crates/a/Cargo.toml", &APP.replace("app", "a")),
@@ -1543,7 +1548,12 @@ mod tests {
         assert_eq!(plan.target, None);
         assert_eq!(plan.libraries, ["a", "b", "util"]);
         let text = render(&plan);
-        assert!(text.contains("//     .run_binary(\"<bin>\")"), "{text}");
+        assert!(text.contains("//     q.run(&app);"), "{text}");
+        assert!(!text.contains("\n    let app"), "{text}");
+        assert!(
+            text.contains("q.host_tests().packages(PACKAGES);"),
+            "{text}"
+        );
         assert!(!text.contains("//     quon run "), "{text}");
     }
 

@@ -3,23 +3,13 @@
 // quon.rs names only the root package; everything else comes from the
 // Cargo workspace.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("cargo-hadron", "0.1.0");
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.cargo_workspace(".");
-
-    cfg.profile("dev")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-
-    cfg.group("kernel")
-        .target(target)
-        .package("kernel")
-        .linker_script("crates/kernel/kernel/kernel.ld");
-
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("cargo-hadron", "0.1.0");
+    q.cargo_workspace(".");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
+    let kernel = q.add(Package::new("kernel").linker_script("crates/kernel/kernel/kernel.ld"));
+    q.run(&kernel);
     Ok(())
 }

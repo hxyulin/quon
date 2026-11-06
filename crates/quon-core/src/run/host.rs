@@ -1,5 +1,5 @@
 //! `quon test` on the host: the libtest executables of the
-//! `cfg.host_tests()` packages.
+//! `q.host_tests()` packages.
 //!
 //! Manifest expansion lowers each host-test package's lib and its
 //! `harness = true` tests to [`CrateType::Test`] crates in the
@@ -164,7 +164,7 @@ pub fn host_tests(
             unbuilt: false,
         });
     }
-    // `cfg.host_tests().env(..)` wins over the variables Quon sets.
+    // `q.host_tests().env(..)` wins over the variables Quon sets.
     for t in &mut tests {
         t.env.extend(extra_env.iter().cloned());
     }

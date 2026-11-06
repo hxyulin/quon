@@ -28,7 +28,7 @@ and QEMU setup from `.cargo/config.toml`, `rust-toolchain.toml` and
 features, editions, lints and build scripts from the manifests on every
 build, and writes to `build/`, so `cargo build` keeps working beside it.
 
-Quon builds itself this way: its [`quon.rs`](quon.rs) is 44 lines,
+Quon builds itself this way: its [`quon.rs`](quon.rs) is 38 lines,
 and `quon test` runs the same tests as `cargo test`.
 
 ## Why Quon?
@@ -37,7 +37,7 @@ Cargo builds one target per invocation and stops at the compiled
 binary. Quon covers what comes before and after:
 
 - **Several targets in one build.** A UEFI bootloader, a kernel and the
-  host tools they need build together, each group for its own target.
+  host tools they need build together, each package for its own target.
 - **Custom sysroots.** For a target with no prebuilt standard library,
   Quon builds `core`, `alloc` and `compiler_builtins` from source with
   the flags you choose, without `-Zbuild-std`.
@@ -94,35 +94,29 @@ quon configure          # write rust-project.json for rust-analyzer
 ## A kernel `quon.rs`
 
 ```rust
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("my-kernel", "0.1.0");
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.cargo_workspace(".");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("my-kernel", "0.1.0");
+    q.cargo_workspace(".");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-
-    cfg.group("kernel")
-        .target(target)
-        .package("kernel")
-        .linker_script("crates/kernel/kernel.ld");
-
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(128)
-        .cores(1)
-        .serial_stdio();
-
+    let kernel = q.add(Package::new("kernel").linker_script("crates/kernel/kernel.ld"));
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(128)
+            .cores(1)
+            .serial(Serial::Stdio),
+    );
+    q.run(&kernel).runner(&qemu);
     Ok(())
 }
 ```
+
+`q.add` declares a package, runner or other item and returns a handle
+that other declarations take. The `dev` and `release` profiles are
+built in, and build for the target of what `q.run` starts.
 
 See [the quon.rs guide](docs/src/configuration/quon-rs.md) for the
 full API, including how to
@@ -132,8 +126,8 @@ full API, including how to
 
 - **Direct `rustc` invocation**: per-crate flag assembly from the Cargo
   manifests
-- **Host and cross profiles**: `profile.target_host()` for tools,
-  declared or `.json` targets for everything else
+- **Host and cross builds**: each package builds for the host, a
+  builtin target or a `.json` target
 - **Custom sysroot compilation**: `core`, `alloc` and
   `compiler_builtins` built for your target
 - **Kconfig-style options**: typed options with defaults, ranges,
@@ -151,11 +145,11 @@ full API, including how to
   and boot tests from one `quon test`
 - **rust-analyzer integration**: `quon configure` writes
   `rust-project.json`
-- **Pipelines and rules**: build stages with copy, mkimage and exec
-  rules
+- **Build steps**: host tools that Quon builds and runs to produce
+  files, cached like crates
 - **ESP assembly**: EFI System Partition layout for UEFI boot
 - **External plugins**: `quon foo` runs `quon-foo` from `$PATH`, and
-  a runner named `.plugin("x")` asks `quon-runner-x` for its command
+  a `Plugin::new("x")` runner asks `quon-runner-x` for its command
 
 ## Documentation
 

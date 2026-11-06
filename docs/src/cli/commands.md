@@ -192,7 +192,7 @@ selects integration and boot tests by name. See
 | `--boot` | | Run the boot tests |
 | `--uefi` | | Force UEFI boot (conflicts with `--direct`) |
 | `--direct` | | Force direct kernel boot |
-| `--timeout <SECS>` | `-T` | Per-boot timeout (default: the profile's `test_timeout`, then the QEMU runner's `.test_timeout(...)`, then 60) |
+| `--timeout <SECS>` | `-T` | Per-boot timeout in seconds (default: the runner plugin's default, else 60) |
 | `--dry-run` | | Print each test's command without building or running it |
 | `--no-build` | | Skip the build step (use existing artifacts) |
 

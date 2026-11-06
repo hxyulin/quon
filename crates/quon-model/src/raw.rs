@@ -50,19 +50,19 @@ pub struct RawBuildModel {
     pub downloads: Arena<DownloadDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kconfig_includes: Vec<PathBuf>,
-    /// `cfg.cargo_workspace(dir)`. Consumed by manifest expansion
+    /// `q.cargo_workspace(dir)`. Consumed by manifest expansion
     /// before intern, like `kconfig_includes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo_workspace: Option<RawCargoWorkspace>,
-    /// `cfg.host_tests().package(name)`: workspace packages whose unit
+    /// `q.host_tests().package(name)`: workspace packages whose unit
     /// tests `quon test` builds and runs on the host. Consumed by
     /// manifest expansion, like `cargo_workspace`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub host_tests: BTreeSet<String>,
-    /// `cfg.host_tests().env(..)` and `.env_path(..)`.
+    /// `q.host_tests().env(..)` and `.env_path(..)`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_test_env: BTreeMap<String, crate::build_model::HostTestEnv>,
-    /// `cfg.boot_test(name)`: suites that boot a profile's run binary.
+    /// `BootTest::new(name, &profile)`: suites that boot a profile's run binary.
     #[serde(default)]
     pub boot_tests: Arena<RawBootTestDef>,
 }

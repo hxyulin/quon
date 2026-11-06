@@ -507,7 +507,7 @@ fn reachable_crates(
         }
     }
 
-    // Host-test seed: the host test executables (`cfg.host_tests()`),
+    // Host-test seed: the host test executables (`q.host_tests()`),
     // and the plain libs their doctests link. Nothing depends on them,
     // and they build for the host whatever the profile's target is.
     for (h, krate) in model.crates.iter() {
@@ -827,23 +827,46 @@ fn _crate_handle_marker(_: Handle<CrateDef>, _: Handle<TargetDef>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quon_config::Config;
-    use quon_model::{BootloaderKind, BuildModel, ConfigValue, CrateType, ImageFormat, intern};
+    use quon_config::{Artifact, BuildStep, Crate, Esp, Image, Preset, Profile, Quon, Target, opt};
+    use quon_model::{
+        BootloaderKind, BuildModel, ConfigValue, ImageFormat, RawBootloaderDef, RawBuildModel,
+        RawProfileDef, intern,
+    };
 
-    /// Build a `BuildModel` in-process via the quon-config builder
-    /// and the quon-model intern pass. Replaces the Stage 1/2
-    /// `evaluate_script` call sites that drove the same model
-    /// construction through inline Rhai strings.
-    fn build_model<F>(build: F) -> BuildModel
+    /// Build a `RawBuildModel` in-process with the `Quon` API, for
+    /// tests that then change fields the API cannot set.
+    fn build_raw<F>(build: F) -> RawBuildModel
     where
-        F: FnOnce(&mut Config),
+        F: FnOnce(&mut Quon),
     {
-        let mut cfg = Config::new();
-        build(&mut cfg);
-        let raw = cfg.into_raw();
+        let mut q = Quon::new();
+        build(&mut q);
+        q.into_raw().expect("quon errors")
+    }
+
+    fn intern_raw(raw: RawBuildModel) -> BuildModel {
         let (model, diags) = intern::intern(raw);
         assert!(diags.is_empty(), "intern produced diagnostics: {:?}", diags);
         model
+    }
+
+    /// Build a `BuildModel` in-process with the `Quon` API and the
+    /// quon-model intern pass.
+    fn build_model<F>(build: F) -> BuildModel
+    where
+        F: FnOnce(&mut Quon),
+    {
+        intern_raw(build_raw(build))
+    }
+
+    /// The project, a `default` profile and the spec target `x` that
+    /// most tests share.
+    fn base(q: &mut Quon) -> Target {
+        q.project("t", "1");
+        let x = Target::spec("x", "t.json");
+        q.default_target(&x);
+        q.add(Profile::new("default"));
+        x
     }
 
     fn resolve_default(model: &BuildModel) -> Result<ResolvedConfig> {
@@ -851,25 +874,19 @@ mod tests {
     }
 
     /// Helper for the kconfig depends_on tests: build the base model
-    /// with the Config builder (project/target/profile), then load
-    /// and merge a kconfig file, and resolve the default profile.
+    /// with `Quon` (project/target/profile), then load and merge a
+    /// kconfig file, and resolve the default profile.
     ///
-    /// The .kconfig path is what populates `depends_on_expr` — the
-    /// Config builder produces only structural `Expr` values. Writing
-    /// the kconfig to a temp file and loading it is the only way to
-    /// drive the kconfig-parsed expression path end-to-end.
+    /// Writing the kconfig to a temp file and loading it drives the
+    /// kconfig-parsed `depends_on` expression path end to end.
     fn resolve_kconfig(kconfig: &str) -> Result<ResolvedConfig> {
         let dir = tempfile::tempdir().expect("tempdir");
         let kconfig_path = dir.path().join("options.kconfig");
         std::fs::write(&kconfig_path, kconfig).expect("write kconfig");
 
-        let mut cfg = Config::new();
-        cfg.project("t", "1");
-        let t = cfg.target_spec("x", "t.json");
-        cfg.profile("default").target(t);
-        let raw = cfg.into_raw();
-        let (mut model, diags) = intern::intern(raw);
-        assert!(diags.is_empty(), "intern produced diagnostics: {:?}", diags);
+        let mut model = build_model(|q| {
+            base(q);
+        });
 
         // Load kconfig and merge options/presets directly into the
         // interned BuildModel, mirroring what `script_runner::finalize`
@@ -887,13 +904,10 @@ mod tests {
 
     #[test]
     fn resolve_basic_profile() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default")
-                .target(t)
-                .opt_level(2)
-                .debug_info(true);
+        let model = build_model(|q| {
+            q.project("t", "1");
+            q.default_target(&Target::spec("x", "t.json"));
+            q.add(Profile::new("default").opt_level(2).debug_info(true));
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.profile.opt_level, 2);
@@ -907,11 +921,11 @@ mod tests {
 
     #[test]
     fn resolve_profile_inheritance() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("base").target(t).opt_level(2);
-            cfg.profile("dev").inherits("base").debug_info(true);
+        let model = build_model(|q| {
+            q.project("t", "1");
+            q.default_target(&Target::spec("x", "t.json"));
+            let base = q.add(Profile::new("base").opt_level(2));
+            q.add(Profile::new("dev").inherits(&base).debug_info(true));
         });
         let cfg = resolve(&model, "dev", None, Path::new("/tmp"), None).expect("resolve");
         assert_eq!(
@@ -929,14 +943,12 @@ mod tests {
     /// resolve as host crates.
     #[test]
     fn resolve_host_profile() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            cfg.group("tools")
-                .target_host()
-                .add("tool", "tool")
-                .crate_type(quon_model::CrateType::Bin);
-            cfg.profile("dev").target_host().run_binary("tool");
-            cfg.profile("child").inherits("dev");
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let tool = q.add(Crate::bin("tool", "tool"));
+            q.run(&tool);
+            let dev = q.profile("dev");
+            q.add(Profile::new("child").inherits(&dev));
         });
         for name in ["dev", "child"] {
             let cfg = resolve(&model, name, None, Path::new("/tmp"), None).expect("resolve");
@@ -949,12 +961,24 @@ mod tests {
 
     #[test]
     fn resolve_target_override() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let a = cfg.target_spec("a", "a.json");
-            let _ = cfg.target_spec("b", "b.json");
-            cfg.profile("default").target(a);
+        // `Quon` registers a target only when something uses it, so
+        // the override target `b` goes into the raw model directly.
+        let mut raw = build_raw(|q| {
+            q.project("t", "1");
+            q.default_target(&Target::spec("a", "a.json"));
+            q.add(Profile::new("default"));
         });
+        raw.targets.insert(
+            "b".into(),
+            quon_model::TargetDef {
+                name: "b".into(),
+                spec: "b.json".into(),
+                builtin: false,
+                panic_strategy: None,
+                span: None,
+            },
+        );
+        let model = intern_raw(raw);
         let cfg = resolve(&model, "default", Some("b"), Path::new("/tmp"), None).expect("resolve");
         assert_eq!(
             cfg.profile.target,
@@ -964,10 +988,8 @@ mod tests {
 
     #[test]
     fn resolve_unknown_profile_error() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
+        let model = build_model(|q| {
+            base(q);
         });
         let err =
             resolve(&model, "missing", None, Path::new("/tmp"), None).expect_err("should fail");
@@ -981,10 +1003,20 @@ mod tests {
 
     #[test]
     fn resolve_profile_without_target_error() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            cfg.profile("default").opt_level(0);
+        // Every root profile gets a target from `Quon`, so the
+        // targetless profile is written into the raw model.
+        let mut raw = build_raw(|q| {
+            q.project("t", "1");
         });
+        raw.profiles.insert(
+            "default".into(),
+            RawProfileDef {
+                name: "default".into(),
+                opt_level: Some(0),
+                ..RawProfileDef::default()
+            },
+        );
+        let model = intern_raw(raw);
         let err = resolve_default(&model).expect_err("should fail");
         match err {
             Error::Diagnostics(v) => {
@@ -999,28 +1031,33 @@ mod tests {
 
     #[test]
     fn resolve_config_defaults() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
-            cfg.config_bool("DEBUG")
-                .default_value(ConfigValue::Bool(true));
+        let model = build_model(|q| {
+            base(q);
+            q.add(opt::u32("SIZE").default(4096));
+            q.add(opt::bool("DEBUG").default(true));
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.options.get("SIZE"), Some(&ResolvedValue::U32(4096)));
         assert_eq!(cfg.options.get("DEBUG"), Some(&ResolvedValue::Bool(true)));
     }
 
+    /// A `default` profile on target `x` that applies preset `big`,
+    /// which sets the U32 option `SIZE` to a U64 value.
+    fn sized_preset_model() -> BuildModel {
+        build_model(|q| {
+            q.project("t", "1");
+            q.default_target(&Target::spec("x", "t.json"));
+            q.add(opt::u32("SIZE").default(4096));
+            // `set_named` skips the typed check, so the resolver's
+            // coercion of a U64 into a U32 option is still covered.
+            let big = q.add(Preset::new("big").set_named("SIZE", ConfigValue::U64(8192)));
+            q.add(Profile::new("default").preset(&big));
+        })
+    }
+
     #[test]
     fn resolve_config_preset_override() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
-            cfg.preset("big").set("SIZE", ConfigValue::U64(8192));
-            cfg.profile("default").target(t).preset("big");
-        });
+        let model = sized_preset_model();
         let cfg = resolve_default(&model).expect("resolve");
         // Note: preset.set with U64 but option declared U32; coercion narrows it.
         assert_eq!(cfg.options.get("SIZE"), Some(&ResolvedValue::U32(8192)));
@@ -1028,13 +1065,7 @@ mod tests {
 
     #[test]
     fn resolve_config_external_override() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.config_u32("SIZE").default_value(ConfigValue::U32(4096));
-            cfg.preset("big").set("SIZE", ConfigValue::U64(8192));
-            cfg.profile("default").target(t).preset("big");
-        });
+        let model = sized_preset_model();
         let mut overrides = BTreeMap::new();
         overrides.insert("SIZE".to_string(), ConfigValue::U32(16384));
         let cfg =
@@ -1044,13 +1075,9 @@ mod tests {
 
     #[test]
     fn resolve_config_range_violation() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.config_u32("SIZE")
-                .default_value(ConfigValue::U32(999999))
-                .range(0, 65536);
+        let model = build_model(|q| {
+            base(q);
+            q.add(opt::u32("SIZE").default(999999).range(0..=65536));
         });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
@@ -1165,14 +1192,10 @@ mod tests {
 
     #[test]
     fn resolve_config_selects() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.config_bool("A")
-                .default_value(ConfigValue::Bool(true))
-                .selects(&["B"]);
-            cfg.config_bool("B").default_value(ConfigValue::Bool(false));
+        let model = build_model(|q| {
+            base(q);
+            let b = q.add(opt::bool("B").default(false));
+            q.add(opt::bool("A").default(true).selects(&b));
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(cfg.options.get("A"), Some(&ResolvedValue::Bool(true)));
@@ -1185,14 +1208,10 @@ mod tests {
 
     #[test]
     fn resolve_interpolation() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.config_str("NAME")
-                .default_value(ConfigValue::Str("foo".into()));
-            cfg.config_str("MSG")
-                .default_value(ConfigValue::Str("hello ${NAME}".into()));
+        let model = build_model(|q| {
+            base(q);
+            q.add(opt::str("NAME").default("foo"));
+            q.add(opt::str("MSG").default("hello ${NAME}"));
         });
         let cfg = resolve_default(&model).expect("resolve");
         assert_eq!(
@@ -1203,14 +1222,10 @@ mod tests {
 
     #[test]
     fn resolve_interpolation_cycle_is_error() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.config_str("A")
-                .default_value(ConfigValue::Str("${B}".into()));
-            cfg.config_str("B")
-                .default_value(ConfigValue::Str("${A}".into()));
+        let model = build_model(|q| {
+            base(q);
+            q.add(opt::str("A").default("${B}"));
+            q.add(opt::str("B").default("${A}"));
         });
         let err = resolve_default(&model).expect_err("should fail");
         match err {
@@ -1226,18 +1241,10 @@ mod tests {
 
     #[test]
     fn resolve_crates_list() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            {
-                let mut kg = cfg.group("kernel").target(t);
-                kg.add("kfoo", "crates/kfoo");
-            }
-            {
-                let mut hg = cfg.group("tools").target_host();
-                hg.add("hbar", "crates/hbar");
-            }
+        let model = build_model(|q| {
+            base(q);
+            q.add(Crate::lib("kfoo", "crates/kfoo"));
+            q.add(Crate::lib("hbar", "crates/hbar").target(&Target::host()));
         });
         let cfg = resolve_default(&model).expect("resolve");
         let names: Vec<&str> = cfg
@@ -1273,19 +1280,11 @@ mod tests {
 
     #[test]
     fn filter_no_run_binary_includes_all() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x);
-            {
-                let mut g1 = cfg.group("a").target(x);
-                g1.add("crate_a", "crates/a");
-            }
-            {
-                let mut g2 = cfg.group("b").target(y);
-                g2.add("crate_b", "crates/b");
-            }
+        let model = build_model(|q| {
+            base(q);
+            let y = Target::spec("y", "y.json");
+            q.add(Crate::lib("crate_a", "crates/a"));
+            q.add(Crate::lib("crate_b", "crates/b").target(&y));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"crate_a".into()), "got {names:?}");
@@ -1297,19 +1296,14 @@ mod tests {
 
     #[test]
     fn filter_run_binary_restricts_to_reachable() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).run_binary("crate_a");
-            {
-                let mut g1 = cfg.group("a").target(x);
-                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("b").target(y);
-                g2.add("crate_b", "crates/b").crate_type(CrateType::Bin);
-            }
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let y = Target::spec("y", "y.json");
+            let a = q.add(Crate::bin("crate_a", "crates/a").target(&x));
+            q.add(Crate::bin("crate_b", "crates/b").target(&y));
+            q.run(&a);
+            q.add(Profile::new("default"));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"crate_a".into()), "run_binary is reachable");
@@ -1324,25 +1318,17 @@ mod tests {
         // A library on the profile's own target that the run binary
         // does not use still builds: only other targets' crates are
         // filtered. Its host proc macro comes with it.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).run_binary("kernel");
-            {
-                let mut h = cfg.group("host_tools").target_host();
-                h.add("lib_derive", "crates/derive")
-                    .crate_type(CrateType::ProcMacro);
-            }
-            {
-                let mut g = cfg.group("kernel").target(x);
-                g.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
-                g.add("lib", "crates/lib").dep("lib_derive", "lib_derive");
-            }
-            {
-                let mut g = cfg.group("other").target(y);
-                g.add("other", "crates/other");
-            }
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let y = Target::spec("y", "y.json");
+            let derive =
+                q.add(Crate::proc_macro("lib_derive", "crates/derive").target(&Target::host()));
+            let kernel = q.add(Crate::bin("kernel", "crates/kernel").target(&x));
+            q.add(Crate::lib("lib", "crates/lib").target(&x).dep(&derive));
+            q.add(Crate::lib("other", "crates/other").target(&y));
+            q.run(&kernel);
+            q.add(Profile::new("default"));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"kernel".into()), "got {names:?}");
@@ -1360,24 +1346,28 @@ mod tests {
         );
     }
 
+    /// A kernel on target `x` and a bootloader on `y` that embeds it
+    /// through `artifact_env`, with the bootloader as the run binary.
+    fn kernel_and_bootloader(q: &mut Quon) -> Artifact {
+        q.project("t", "1");
+        let x = Target::spec("x", "t.json");
+        let y = Target::spec("y", "y.json");
+        let kernel = q.add(Crate::bin("kernel", "crates/kernel").target(&x));
+        let boot = q.add(
+            Crate::bin("bootloader", "crates/boot")
+                .target(&y)
+                .artifact_env("KERNEL_PATH", &kernel),
+        );
+        q.run(&boot);
+        q.add(Profile::new("default"));
+        boot
+    }
+
     #[test]
     fn filter_artifact_deps_cross_target_included() {
         // Bootloader on target Y depends on kernel on target X via artifact_env.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(y).run_binary("bootloader");
-            {
-                let mut g1 = cfg.group("kernel").target(x);
-                g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("boot").target(y);
-                g2.add("bootloader", "crates/boot")
-                    .crate_type(CrateType::Bin)
-                    .artifact_env("KERNEL_PATH", "kernel");
-            }
+        let model = build_model(|q| {
+            kernel_and_bootloader(q);
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(
@@ -1393,21 +1383,17 @@ mod tests {
     #[test]
     fn filter_deps_host_crate_included() {
         // Cross crate depends on a host proc-macro — both should be included.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(x).run_binary("kernel");
-            {
-                let mut h = cfg.group("host_tools").target_host();
-                h.add("my_derive", "crates/derive")
-                    .crate_type(CrateType::ProcMacro);
-            }
-            {
-                let mut k = cfg.group("kernel").target(x);
-                k.add("kernel", "crates/kernel")
-                    .crate_type(CrateType::Bin)
-                    .dep("my_derive", "my_derive");
-            }
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let derive = q.add(Crate::proc_macro("my_derive", "crates/derive"));
+            let kernel = q.add(
+                Crate::bin("kernel", "crates/kernel")
+                    .target(&x)
+                    .dep(&derive),
+            );
+            q.run(&kernel);
+            q.add(Profile::new("default"));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(names.contains(&"kernel".into()), "got {names:?}");
@@ -1419,22 +1405,29 @@ mod tests {
 
     #[test]
     fn filter_two_profiles_disjoint_sets() {
-        // Two profiles with different run_binary should produce disjoint crate sets.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("prof_x").target(x).run_binary("crate_x");
-            cfg.profile("prof_y").target(y).run_binary("crate_y");
-            {
-                let mut g1 = cfg.group("gx").target(x);
-                g1.add("crate_x", "crates/x").crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("gy").target(y);
-                g2.add("crate_y", "crates/y").crate_type(CrateType::Bin);
-            }
+        // Two profiles with different run_binary should produce disjoint
+        // crate sets. `Quon` has one run entry per project, so the two
+        // profiles go into the raw model directly.
+        let mut raw = build_raw(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let y = Target::spec("y", "y.json");
+            q.add(Crate::bin("crate_x", "crates/x").target(&x));
+            q.add(Crate::bin("crate_y", "crates/y").target(&y));
+            q.default_target(&x);
         });
+        for (name, target, bin) in [("prof_x", "x", "crate_x"), ("prof_y", "y", "crate_y")] {
+            raw.profiles.insert(
+                name.into(),
+                RawProfileDef {
+                    name: name.into(),
+                    target: Some(target.into()),
+                    run_binary: Some(bin.into()),
+                    ..RawProfileDef::default()
+                },
+            );
+        }
+        let model = intern_raw(raw);
         let names_x = crate_names_for_profile(&model, "prof_x");
         let names_y = crate_names_for_profile(&model, "prof_y");
         assert_eq!(names_x, vec!["crate_x"], "prof_x only builds crate_x");
@@ -1445,22 +1438,9 @@ mod tests {
     fn filter_esp_expansion() {
         // ESP source crate is pulled in even if not directly reachable,
         // as long as another entry in the same ESP is reachable.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(y).run_binary("bootloader");
-            {
-                let mut g1 = cfg.group("kernel").target(x);
-                g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("boot").target(y);
-                g2.add("bootloader", "crates/boot")
-                    .crate_type(CrateType::Bin)
-                    .artifact_env("KERNEL_PATH", "kernel");
-            }
-            cfg.esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+        let model = build_model(|q| {
+            let boot = kernel_and_bootloader(q);
+            q.add(Esp::new("default").add(&boot, "EFI/BOOT/BOOTX64.EFI"));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(
@@ -1475,22 +1455,15 @@ mod tests {
         // not reach. Without the image-seed expansion, that crate would
         // be silently dropped and `compile_image` would later fail with
         // a missing-artifact error far from the configuration.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).run_binary("crate_a");
-            {
-                let mut g1 = cfg.group("a").target(x);
-                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("b").target(y);
-                g2.add("crate_b", "crates/b").crate_type(CrateType::Bin);
-            }
-            cfg.image("disk")
-                .size_mb(1)
-                .raw_write_crate(0, "crate_b", None);
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let y = Target::spec("y", "y.json");
+            let a = q.add(Crate::bin("crate_a", "crates/a").target(&x));
+            let b = q.add(Crate::bin("crate_b", "crates/b").target(&y));
+            q.run(&a);
+            q.add(Profile::new("default"));
+            q.add(Image::new("disk").size_mb(1).raw_write(0, &b, None));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(
@@ -1501,33 +1474,24 @@ mod tests {
 
     #[test]
     fn filter_build_step_runner_and_inputs_pulled_in() {
-        // A build_step's runner crate (a host bin) and its crate_in
-        // inputs must be in the reachable set even when the active
-        // profile's run_binary closure doesn't reach them — quon
-        // needs to compile the runner before spawning it and the
-        // inputs before passing their artifact paths in.
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let x = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(x).run_binary("crate_a");
-            {
-                let mut g1 = cfg.group("a").target(x);
-                g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
-            }
-            {
-                let mut host = cfg.group("host-tools").target_host();
-                host.add("runner", "tools/runner")
-                    .crate_type(CrateType::Bin);
-            }
-            {
-                let mut g2 = cfg.group("b").target(x);
-                g2.add("input_crate", "crates/inp")
-                    .crate_type(CrateType::Bin);
-            }
-            cfg.build_step("step")
-                .runner("runner")
-                .input_crate("INPUT", "input_crate")
-                .output("out.bin");
+        // A build step's tool crate (a host bin) and its crate inputs
+        // must be in the reachable set even when the active profile's
+        // run_binary closure doesn't reach them — quon needs to compile
+        // the tool before spawning it and the inputs before passing
+        // their artifact paths in.
+        let model = build_model(|q| {
+            q.project("t", "1");
+            let x = Target::spec("x", "t.json");
+            let a = q.add(Crate::bin("crate_a", "crates/a").target(&x));
+            let tool = q.add(Crate::bin("runner", "tools/runner").target(&Target::host()));
+            let input = q.add(Crate::bin("input_crate", "crates/inp").target(&x));
+            q.add(
+                BuildStep::new("step", "out.bin")
+                    .tool(&tool)
+                    .input("INPUT", &input),
+            );
+            q.run(&a);
+            q.add(Profile::new("default"));
         });
         let names = crate_names_for_profile(&model, "default");
         assert!(
@@ -1541,24 +1505,30 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Builder tests for BootloaderDef and ImageDef
+    // Intern tests for BootloaderDef and ImageDef
     // -----------------------------------------------------------------------
 
     #[test]
-    fn bootloader_builder_populates_typed_fields() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.group("bootloader_group")
-                .target(t)
-                .add("boot", "crates/boot");
-            cfg.bootloader("uefi").entry_crate("boot").protocol("gop");
+    fn raw_bootloader_interns_typed_fields() {
+        // `Quon` no longer declares a bootloader, but the model still
+        // carries one, so the raw form is written directly.
+        let mut raw = build_raw(|q| {
+            let x = base(q);
+            q.add(Crate::lib("boot", "crates/boot").target(&x));
         });
+        raw.bootloader = Some(RawBootloaderDef {
+            kind: BootloaderKind::Uefi,
+            protocol: Some("gop".into()),
+            entry_crate: Some("boot".into()),
+            config_file: None,
+            extras: BTreeMap::new(),
+            span: None,
+        });
+        let model = intern_raw(raw);
         let bl = model
             .bootloader
             .as_ref()
-            .expect("bootloader populated by builder");
+            .expect("bootloader populated by intern");
         assert_eq!(bl.kind, BootloaderKind::Uefi);
         let entry = bl
             .entry_crate
@@ -1570,16 +1540,18 @@ mod tests {
 
     #[test]
     fn image_builder_populates_model() {
-        let model = build_model(|cfg| {
-            cfg.project("t", "1");
-            let t = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(t);
-            cfg.image("disk")
-                .format("fat32")
-                .size_mb(64)
-                .add_entry_crate("bootloader", "EFI/BOOT/BOOTX64.EFI")
-                .add_entry_file("splash.bmp", "boot/splash.bmp")
-                .add_entry_esp("default", "/");
+        let model = build_model(|q| {
+            base(q);
+            let boot = q.add(Crate::bin("bootloader", "crates/boot"));
+            let esp = q.add(Esp::new("default"));
+            q.add(
+                Image::new("disk")
+                    .format(ImageFormat::Fat32)
+                    .size_mb(64)
+                    .add(&boot, "EFI/BOOT/BOOTX64.EFI")
+                    .add("splash.bmp", "boot/splash.bmp")
+                    .add(&esp, "/"),
+            );
         });
         let h = model.images.lookup("disk").expect("image must exist");
         let img = model.images.get(h).unwrap();

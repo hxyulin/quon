@@ -66,7 +66,7 @@ pub struct BuildModel {
     pub config_options: Arena<ConfigOptionDef>,
     pub presets: BTreeMap<String, PresetDef>,
     /// Bootloader configuration (singleton per project). `None` when the
-    /// `quon.rs` did not declare a `cfg.bootloader(...)` block.
+    /// raw model sets no bootloader; `quon_config::Quon` never does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootloader: Option<BootloaderDef>,
     /// Disk image definitions. Zero or more named images describing how
@@ -81,19 +81,19 @@ pub struct BuildModel {
     /// other build-step inputs).
     #[serde(default)]
     pub build_steps: Arena<BuildStepDef>,
-    /// Runners (`cfg.runner(...)`): how `quon run`, the integration
+    /// Runners (`Qemu`, `Command`, `Plugin`): how `quon run`, the integration
     /// tests and the boot tests execute a profile's run binary. A
     /// profile picks one with `.runner(name)`.
     #[serde(default)]
     pub runners: Arena<RunnerDef>,
-    /// Pinned downloads (`cfg.download(...)`, `cfg.limine(...)`).
+    /// Pinned downloads (`Download::new(..)`, `Download::limine(..)`).
     /// ESP and image entries refer to them by name.
     #[serde(default)]
     pub downloads: Arena<DownloadDef>,
-    /// Boot test suites (`cfg.boot_test(...)`), run by `quon test`.
+    /// Boot test suites (`BootTest::new(..)`), run by `quon test`.
     #[serde(default)]
     pub boot_tests: Arena<BootTestDef>,
-    /// Environment of every host test run (`cfg.host_tests().env(..)`).
+    /// Environment of every host test run (`q.host_tests().env(..)`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_test_env: BTreeMap<String, HostTestEnv>,
 }
@@ -250,7 +250,7 @@ pub enum CrateType {
     RawBinary,
     /// A libtest harness executable: rustc `--test` instead of
     /// `--crate-type`. Manifest expansion lowers host unit tests and
-    /// `harness = true` integration tests of `cfg.host_tests()`
+    /// `harness = true` integration tests of `q.host_tests()`
     /// packages to it.
     Test,
 }
@@ -289,7 +289,7 @@ pub struct ProfileDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherits: Option<Handle<ProfileDef>>,
     /// Resolved target: a declared target, or the host for
-    /// `.target_host()`. `None` when the profile inherits its target
+    /// `Target::host()`. `None` when the profile inherits its target
     /// from a parent (resolution walks the chain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetSpec>,
@@ -307,8 +307,9 @@ pub struct ProfileDef {
     pub qemu_memory: Option<u32>,
     pub qemu_cores: Option<u32>,
     pub qemu_extra_args: Option<Vec<String>>,
-    /// Profile-level boot-mode override. Wins over the project-level
-    /// `qemu().boot_mode(...)` and is itself overridden by CLI flags
+    /// Profile-level boot-mode override. `quon_config` no longer sets
+    /// it; a script declares a second `Qemu` instead. Wins over the
+    /// runner's `Qemu::boot(..)` and is itself overridden by CLI flags
     /// (`--uefi` / `--direct` / `--bios`). Lets a single config define
     /// `dev-bios` and `dev-uefi` profiles that share crates and the
     /// disk image while diverging only on firmware.
@@ -452,7 +453,7 @@ pub struct CrateDef {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub artifact_env: BTreeMap<String, String>,
     /// Set on crates lowered from a Cargo manifest; `None` for crates
-    /// declared with `group.add(...)`.
+    /// declared with `Crate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo: Option<CargoUnitDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1030,11 +1031,11 @@ impl Named for RunnerDef {
 /// What a runner does with the binary it is given.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunnerKind {
-    /// Boot it under QEMU: `cfg.runner(name).qemu(program)`.
+    /// Boot it under QEMU: `Qemu::new(program)`.
     Qemu(Box<QemuDef>),
-    /// Run a command: `cfg.runner(name).command([...])`.
+    /// Run a command: `Command::new([..])`.
     Command(CommandRunnerDef),
-    /// Hand the binary to a runner plugin: `cfg.runner(name).plugin(plugin)`.
+    /// Hand the binary to a runner plugin: `Plugin::new(plugin)`.
     Plugin(PluginRunnerDef),
 }
 
@@ -1242,11 +1243,11 @@ pub enum DiskSource {
 ///
 /// The typical shape is a single entry for the bootloader:
 /// ```rust,ignore
-/// cfg.esp("default").add("bootloader", "EFI/BOOT/BOOTX64.EFI");
+/// q.add(Esp::new("default").add(&bootloader, "EFI/BOOT/BOOTX64.EFI"));
 /// ```
 ///
-/// `quon run` auto-picks this ESP when a profile is `boot_mode("uefi")`
-/// and the user has not set an explicit `qemu().esp_dir(...)`.
+/// `quon run` auto-picks this ESP when the runner has
+/// `Qemu::boot(BootMode::Uefi)` and no explicit `Qemu::esp_dir(..)`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EspDef {
     pub name: String,

@@ -267,15 +267,15 @@ removed.
 ## Pinned downloads and curl
 
 **Where:** `download` (fetch and verify), `quon-config`'s
-`Config::download` and `Config::limine`.
+`Download::new` and `Download::limine`.
 **What we depend on:** a `curl` binary on `PATH`, and Limine's
 `v<version>-binary` tags at
 `https://raw.githubusercontent.com/Limine-Bootloader/Limine`.
 
-`cfg.download(name, url, sha256)` declares a file that ESP entries
-(`add_download`) and image entries (`add_entry_download`) can use.
-`cfg.limine(version).file(name, sha256)` builds the URL of a file in
-Limine's binary tag and declares it as `limine/<name>`. Nothing is
+`Download::new(name, url, sha256)` declares a file that ESP and image
+entries can use through its handle. `Download::limine(version, file,
+sha256)` builds the URL of a file in Limine's binary tag and declares
+it as `limine/<file>`. Nothing is
 fetched unless an entry uses a download.
 
 Quon runs `curl --fail --location --proto =https,file` instead of
@@ -302,5 +302,5 @@ not move, and the pinned hash catches a tag that does.
 | QEMU flags | `quon_runner_qemu::{qemu_cmd, boot_mode}` | argv golden tests diff |
 | OVMF system paths | `quon_runner_qemu::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
 | hadris-fat API | `image::fat` | compile error or image-hash test diff |
-| curl, Limine binary tags | `download`, `Config::limine` | `Error::Download` with both hashes |
+| curl, Limine binary tags | `download`, `Download::limine` | `Error::Download` with both hashes |
 | FAT32 size minimum | `image::mod::compute_size_bytes` | image refuses to mount |

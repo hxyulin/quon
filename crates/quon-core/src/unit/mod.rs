@@ -6,7 +6,7 @@
 //! two crate sources the build knows about into one table:
 //!
 //! - every crate in `ResolvedConfig::crates` (declared in `quon.rs`),
-//! - every build in the [`VendorBuildContext`] (`cfg.dependency()`
+//! - every build in the [`VendorBuildContext`] (`Dependency`
 //!   crates compiled for a cross target, plus their host proc macros).
 //! - the build script of every vendored crate and every manifest unit
 //!   that has one: a host executable unit, plus one [`ScriptRun`] per
@@ -118,7 +118,7 @@ pub enum UnitOrigin {
     /// [`BuildUnit::is_build_script`] before reading the crate's
     /// settings.
     Crate(Handle<CrateDef>),
-    /// A `cfg.dependency()` crate from the cross vendor pipeline.
+    /// A `Dependency` crate from the cross vendor pipeline.
     Vendor(VendorBuildId),
 }
 
@@ -136,12 +136,12 @@ pub enum PackageSource {
     /// Crate directory relative to the project root.
     Path(PathBuf),
     /// A crates.io package: a manifest unit from Cargo's registry cache
-    /// or a vendor directory, or a `cfg.dependency()` crate.
+    /// or a vendor directory, or a `Dependency` crate.
     Registry {
         /// The `.crate` checksum from `Cargo.lock`. Registry sources are
         /// never stat'ed (see `cache::store`), so the checksum is what
         /// tells two registries' `name@version` apart. `None` for
-        /// `cfg.dependency()` crates and lock entries without one.
+        /// `Dependency` crates and lock entries without one.
         checksum: Option<String>,
     },
 }

@@ -1,82 +1,79 @@
 # Dependencies
 
-Quon manages external crate dependencies directly, without relying on Cargo
-for resolution. Dependencies are declared in `quon.rs` and linked to
-individual crates in the build model.
+Quon can build external crates without a Cargo workspace. A
+`Dependency` declared in `quon.rs` is a crate from crates.io, a git
+repository or a local path, and a `Crate` links it with `.dep`.
+Packages in a Cargo workspace take their dependencies from their
+`Cargo.toml` instead; see
+[Registry dependencies of a Cargo workspace](#registry-dependencies-of-a-cargo-workspace).
 
 ## Declaring external dependencies
 
-Use the `cfg.dependency()` builder to declare an external crate:
+```rust,ignore
+let kernel = Target::builtin("x86_64-unknown-none");
 
-```rust
-cfg.dependency("log")
-    .version("0.4");
+let log = q.add(Dependency::crates_io("log", "0.4").target(&kernel));
 
-cfg.dependency("spin")
-    .version("0.9")
-    .default_features(false)
-    .features(&["mutex"]);
+let spin = q.add(
+    Dependency::crates_io("spin", "0.9")
+        .no_default_features()
+        .features(["mutex"])
+        .target(&kernel),
+);
 
-cfg.dependency("my-local-crate")
-    .path("../my-local-crate");
+let local = q.add(Dependency::path("my-local-crate", "../my-local-crate"));
 
-cfg.dependency("my-git-dep")
-    .git("https://github.com/user/repo")
-    .branch("main");
+let git = q.add(Dependency::git("my-git-dep", "https://github.com/user/repo").branch("main"));
 ```
 
-### Dependency methods
+The constructor sets the source:
+
+| Constructor | Source |
+|---|---|
+| `Dependency::crates_io(name, version)` | crates.io, with a version requirement such as `"0.4"` |
+| `Dependency::path(name, path)` | A local directory, relative to the project root |
+| `Dependency::git(name, url)` | A git repository, on its default branch |
 
 | Method | Description |
 |---|---|
-| `.version(ver)` | crates.io version requirement (e.g., `"0.4"`, `"^1.0"`) |
-| `.path(path)` | Local path dependency (relative to project root) |
-| `.git(url)` | Git repository URL |
-| `.branch(name)` | Git branch (used with `.git()`) |
-| `.tag(name)` | Git tag (used with `.git()`) |
-| `.rev(hash)` | Git revision hash (used with `.git()`) |
-| `.default_features(bool)` | Enable or disable default features |
-| `.features(&[...])` | Enable specific features as a slice of string references |
-| `.optional(bool)` | Mark as an optional dependency |
+| `.rev(hash)`, `.tag(name)`, `.branch(name)` | Pin a git source. On another source, an error |
+| `.features([..])` | Enable features |
+| `.no_default_features()` | Leave the `default` feature off |
+| `.cfg(flag)` | Pass `--cfg <flag>` to rustc |
+| `.rustc_flag(flag)` | Pass `flag` to rustc |
+| `.target(&t)` | Build for `t` instead of the host |
 
-Source specifiers (`.version()`, `.path()`, `.git()`) are mutually exclusive --
-each dependency must use exactly one.
+A dependency builds for one target, the host unless `.target(..)`
+names another. To use the same crate on two targets, declare it twice
+under two names.
 
 ## Linking dependencies to crates
 
-After declaring a dependency at the top level, reference it from a crate with
-`.dep()`:
+`q.add` returns an `Artifact` handle. Pass it to `.dep` on a `Crate`:
 
-```rust
-cfg.dependency("log").version("0.4");
+```rust,ignore
+let kernel_target = Target::builtin("x86_64-unknown-none");
+let log = q.add(Dependency::crates_io("log", "0.4").target(&kernel_target));
 
-let target = cfg.target("x86_64-unknown-none");
-
-cfg.group("kernel")
-    .target(target)
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .dep("log", "log");
+q.add(Crate::bin("kernel", "crates/kernel").target(&kernel_target).dep(&log));
 ```
 
-The first argument to `.dep()` is the **alias** -- the name used in
-`extern crate` or `use` statements in your Rust code. The second argument is
-the **dependency name** as declared in the `cfg.dependency()` call.
+The crate uses the dependency under its name, with `-` replaced by
+`_`. `Dep::on(&handle).rename(name)` picks another name:
 
-These are often the same, but they can differ when you want to rename a crate:
-
-```rust
-cfg.dependency("spin").version("0.9");
-
-let target = cfg.target("x86_64-unknown-none");
+```rust,ignore
+let spin = q.add(Dependency::crates_io("spin", "0.9").target(&kernel_target));
 
 // Use as `use spinlock::Mutex;` in Rust code
-cfg.group("kernel")
-    .target(target)
-    .edition("2021")
-    .add("kernel", "crates/kernel")
-        .dep("spinlock", "spin");
+q.add(
+    Crate::bin("kernel", "crates/kernel")
+        .target(&kernel_target)
+        .dep(Dep::on(&spin).rename("spinlock")),
+);
 ```
+
+See [Dependencies between crates](./packages-and-crates.md#dependencies-between-crates)
+for the other `Dep` options.
 
 ## Vendoring
 
@@ -92,8 +89,8 @@ quon vendor --offline    # No network access (lockfile must exist)
 
 ### How vendoring works
 
-1. Quon generates a scratch `Cargo.toml` from the declared `dependency()`
-   entries.
+1. Quon generates a scratch `Cargo.toml` from the declared `Dependency`
+   items.
 2. It runs `cargo vendor` to download and populate `./vendor/`.
 3. It writes `quon.lock`, which pins every dependency with checksums.
 4. On subsequent builds, Quon automatically registers vendored crates into the
@@ -101,7 +98,7 @@ quon vendor --offline    # No network access (lockfile must exist)
 
 ### Build scripts
 
-A dependency built for a cross target (`.target(kernel)`) is compiled by
+A dependency built for a cross target (`.target(&kernel)`) is compiled by
 Quon with `rustc`, and so is every crate in its closure. When one of those
 crates has a build script (`build.rs`), Quon compiles the script for the
 host, runs it with the environment Cargo gives scripts, and applies its
@@ -137,7 +134,7 @@ needed.
 
 ## Registry dependencies of a Cargo workspace
 
-Packages built with `cfg.cargo_workspace(dir)` and `group.package(name)`
+Packages declared with `q.cargo_workspace(dir)` and `Package::new(name)`
 take their dependencies from their `Cargo.toml`. Registry dependencies
 use the versions in the workspace's `Cargo.lock`, which Cargo writes.
 
@@ -158,8 +155,8 @@ This runs `cargo vendor --versioned-dirs --locked vendor` on the
 workspace and writes `vendor/.quon-vendor-stamp`, which holds the
 SHA-256 of `Cargo.lock`. Then name the directory in `quon.rs`:
 
-```rust
-cfg.cargo_workspace(".").vendored("vendor");
+```rust,ignore
+q.cargo_workspace(".").vendored("vendor");
 ```
 
 A build then reads `vendor/<name>-<version>/`, runs no Cargo command, and
@@ -179,19 +176,19 @@ Proc macros, build scripts and their dependencies build for the host with
 the fixed host profile. A package needed both by a proc macro and by a
 target crate builds once for each.
 
-Differences from vendored `cfg.dependency()` crates:
+Differences from vendored `Dependency` crates:
 
 - Quon shows warnings from the scripts of path packages on every build.
   Warnings from registry packages' scripts appear only with `quon -v`.
 - `rustc-link-arg` applies to the package's bins, so a kernel can set its
   linker script from `build.rs`:
 
-  ```rust
+  ```rust,ignore
   let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
   println!("cargo::rustc-link-arg=-T{dir}/kernel.ld");
   ```
 
 - Two packages with the same `links` value in one target, or on the
   host, are an error.
-- `crate_type(CrateType::RawBinary)` on a `group.package(...)` root needs
-  a bin target in the package's `Cargo.toml`.
+- `Package::raw_binary()` needs a bin target in the package's
+  `Cargo.toml`.

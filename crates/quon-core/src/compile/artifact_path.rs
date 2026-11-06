@@ -11,7 +11,7 @@
 //!
 //! Vendored crates are not part of the lowered table here, because
 //! building the vendor context runs `cargo metadata`. A declared library
-//! that depends on a `cfg.dependency()` cross crate therefore gets a
+//! that depends on a `Dependency` cross crate therefore gets a
 //! different metadata hash here than in the build, and its predicted
 //! path is wrong. Cross executables (the usual `artifact_env` target)
 //! have no hash in their path and are unaffected.

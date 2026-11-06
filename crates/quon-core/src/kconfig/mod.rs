@@ -2,10 +2,10 @@
 //!
 //! Quon config options can be declared in two equivalent ways:
 //!
-//! 1. **Inline in `quon.rs`** via the `quon_config` builder API
-//!    (`cfg.config_bool("NAME", ...)` and friends).
+//! 1. **Inline in `quon.rs`** through the `quon_config` API
+//!    (`q.add(opt::bool("NAME"))` and the other `opt` functions).
 //! 2. **Externally in a `.kconfig` file** referenced from `quon.rs` via
-//!    `cfg.load_kconfig("./options.kconfig")`.
+//!    `q.include_kconfig("options.kconfig")`.
 //!
 //! Both paths produce the same [`quon_model::ConfigOptionDef`] and
 //! [`quon_model::PresetDef`] shapes, so downstream resolution and codegen

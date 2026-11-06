@@ -1,124 +1,173 @@
-# Projects, Targets, and Profiles
-
-Every `quon.rs` file declares at least one project, one target, and one
-profile. These three entities establish the core identity and compilation
-settings for your build.
+# Projects, targets and profiles
 
 ## Project
 
-```rust
-cfg.project("my-kernel", "0.1.0")
-    .default_profile("dev");
-
-cfg.config_crate_name("my_kernel_config");
+```rust,ignore
+q.project("my-kernel", "0.1.0");
 ```
 
-- **`cfg.project(name, version)`** -- the name and version are required. They are
-  used in build output paths and diagnostics. Returns a `ProjectBuilder` for
-  chaining `.default_profile()`.
-- **`.default_profile(name)`** -- the profile used when neither `-p` nor `-r`
-  is passed to the CLI. If omitted, Quon uses the first profile in
-  alphabetical order.
-- **`cfg.config_crate_name(name)`** -- overrides the name of the auto-generated
-  config crate. The default is `<project>_config` (e.g., `my_kernel_config`
-  for a project named `my-kernel`). See
-  [Config Options and Kconfig](./config-options.md) for details on the config
-  crate.
+`q.project(name, version)` names the project. Quon uses the name and
+version in build output paths and diagnostics. The generated config
+crate is `<name>_config`, for example `my_kernel_config` for a project
+named `my-kernel`. See [Config Options and Kconfig](./config-options.md).
 
-## Target
+`q.default_profile(&profile)` picks the profile Quon uses when neither
+`-p` nor `-r` is given. Without it, Quon uses `dev`:
 
-```rust
-let t1 = cfg.target("x86_64-unknown-none");
-let t2 = cfg.target("aarch64-unknown-none").panic_strategy("abort");
-let t3 = cfg.target_spec("riscv64gc-custom", "./targets/riscv64gc-custom.json");
+```rust,ignore
+let debug = q.add(Profile::new("debug").opt_level(1).debug_info(true));
+q.default_profile(&debug);
 ```
 
-- **`cfg.target(triple)`** -- registers a rustc target triple and returns a
-  handle to it. Quon will compile a custom sysroot (`core`, `alloc`,
-  `compiler_builtins`) for each registered target.
-- **`cfg.target_spec(name, path)`** -- like `target()`, but the second argument
-  is a path to a custom target-spec JSON file, relative to `quon.rs`. Use this
-  for targets that are not built into rustc. rustc accepts a JSON spec only
-  on nightly.
-- **`.panic_strategy("abort")`** -- sets the panic strategy for bare-metal
-  targets. Common values are `"abort"` and `"unwind"`.
+## Targets
 
-Built-in rustc targets (like `x86_64-unknown-none` or `aarch64-unknown-none`)
-do not need a JSON spec. Custom targets -- for example, a modified RISC-V
-triple -- require one.
-
-## Profile
-
-Profiles control how code is compiled. They are analogous to Cargo's `dev` and
-`release` profiles but are more explicit and flexible.
-
-```rust
-let target = cfg.target("x86_64-unknown-none");
-
-cfg.profile("dev")
-    .target(target)
-    .opt_level(0)
-    .debug_info(true)
-    .run_binary("kernel");
-
-cfg.profile("release")
-    .inherits("dev")
-    .opt_level(2)
-    .lto("thin");
+```rust,ignore
+let none = Target::builtin("x86_64-unknown-none");
+let custom = Target::spec("riscv64gc-custom", "targets/riscv64gc-custom.json");
+let host = Target::host();
 ```
+
+A `Target` is a plain value. Declaring one does nothing on its own:
+Quon registers it the first time a package, crate, dependency or
+`q.default_target` uses it, and builds a sysroot (`core`, `alloc`,
+`compiler_builtins`) for each registered target other than the host.
+
+- `Target::builtin(triple)` is a target rustc knows, such as
+  `x86_64-unknown-none`.
+- `Target::spec(name, path)` is a custom target defined by the JSON
+  spec at `path`, relative to the project root. rustc accepts a JSON
+  spec only on nightly.
+- `Target::host()` is the machine Quon runs on. Crates built for it
+  link the host's standard library, and Quon builds no sysroot for
+  them.
+
+Each `Package`, `Crate` and `Dependency` builds for its own target.
+Name it with `.target(&t)`, or set the common one once:
+
+```rust,ignore
+q.default_target(&Target::builtin("x86_64-unknown-none"));
+let kernel = q.add(Package::new("kernel"));        // x86_64-unknown-none
+let boot = q.add(Package::new("bootloader")
+    .target(&Target::builtin("x86_64-unknown-uefi")));
+```
+
+A package or crate without `.target(..)` builds for
+`q.default_target`, else for the host. A `Dependency` without
+`.target(..)` builds for the host.
+
+## Profiles
+
+A profile says how crates are compiled, like a Cargo profile. Select
+one with `quon -p <name>`, or `-r` for `release`.
+
+Every project has a `dev` and a `release` profile:
+
+| Profile | Settings |
+|---|---|
+| `dev` | opt-level 0, debug info |
+| `release` | inherits `dev`, opt-level 3, no debug info |
+
+Adding a profile with one of these names replaces the built-in one.
+`Profile::dev()` and `Profile::release()` start from the built-in
+settings:
+
+```rust,ignore
+q.add(Profile::release().lto(Lto::Thin));
+
+let dev = q.profile("dev");
+q.add(Profile::new("debug-log").inherits(&dev).preset(&verbose));
+```
+
+`q.profile(name)` returns a `ProfileRef` to a profile by name, which
+is how a script refers to the built-in `dev` and `release`. Quon
+reports an unknown name when it checks the model.
 
 ### Profile methods
 
 | Method | Description |
 |---|---|
-| `.target(handle)` | Which registered target to build for (pass a target handle) |
-| `.target_host()` | Build for the host instead: a profile for a host tool |
-| `.opt_level(n)` | Optimization level: 0, 1, 2, or 3 |
-| `.debug_info(bool)` | Include debug symbols in the output |
-| `.lto(mode)` | Link-time optimization: `"thin"`, `"fat"`, or `"off"` |
-| `.run_binary(crate_name)` | The binary `quon run` starts with the profile's runner |
-| `.runner(name)` | The [runner](../running/runners.md) that starts it |
-| `.inherits(profile_name)` | Inherit settings from another profile |
-| `.preset(name)` | Apply a named config preset |
-| `.config(key, value)` | Set a config option value for this profile |
+| `.opt_level(n)` | rustc's `-C opt-level`, 0 to 3 |
+| `.debug_info(bool)` | Include debug info |
+| `.lto(Lto::Thin)` | Link-time optimisation: `Lto::Off`, `Lto::Thin` or `Lto::Fat` |
+| `.preset(&preset)` | Apply a [preset](./config-options.md#presets) of config option values |
+| `.inherits(&profile)` | Take every unset setting from `profile` |
+| `.runner(&runner)` | Run with this runner instead of the one `q.run` names |
+
+A profile from `Profile::new(name)` sets nothing. Its unset settings
+come from the profile it inherits, else opt-level 0, no debug info and
+no LTO. rustc turns debug assertions and overflow checks off above
+opt-level 0, as in Cargo's release profile.
+
+### What `quon run` starts
+
+`q.run(&artifact)` names the binary `quon run` starts and boot tests
+boot, for every profile. `.runner(&runner)` names the
+[runner](../running/runners.md) that starts it:
+
+```rust,ignore
+let kernel = q.add(Package::new("kernel"));
+let qemu = q.add(Qemu::new("qemu-system-x86_64").machine("q35"));
+q.run(&kernel).runner(&qemu);
+```
+
+Without `.runner(..)`, `quon run` runs a host binary directly. A
+profile's own `.runner(&r)` replaces the run entry's runner for that
+profile and the profiles that inherit from it, for example to boot
+the same kernel under BIOS and UEFI:
+
+```rust,ignore
+let uefi = q.add(Qemu::new("qemu-system-x86_64").boot(BootMode::Uefi));
+let bios = q.add(Qemu::new("qemu-system-x86_64").boot(BootMode::Bios));
+q.run(&kernel).runner(&uefi);
+let dev = q.profile("dev");
+q.add(Profile::new("bios").inherits(&dev).runner(&bios));
+```
+
+`quon -p bios run` then boots under BIOS.
+
+### The target profiles build for
+
+All profiles build for one target. Quon picks it in this order:
+
+1. The target of the artifact `q.run` names.
+2. `q.default_target`.
+3. The one non-host target that the project's packages, crates and
+   dependencies use.
+4. The host.
+
+A project whose crates use several non-host targets, with no `q.run`
+and no `q.default_target`, is an error. The error lists the targets.
 
 ### What a profile builds
 
-Without `.run_binary(...)`, a profile builds every crate. With it, the
-profile builds every crate of its own target, the run binary, and what
-they depend on. Crates of other targets build only when something the
-profile builds needs them, for example through `artifact_env`. A project
-with an x86_64 profile and an aarch64 profile therefore does not compile
-the aarch64 crates for the x86_64 profile.
+Without `q.run`, a profile builds every crate. With it, the profile
+builds every crate of its own target, the run binary, and what they
+depend on. Crates of other targets build only when something the
+profile builds needs them, for example through `artifact_env`.
 
 ### Host profiles
 
-A profile with `.target_host()` builds for the machine Quon runs on. It
-needs no declared target, and builds no sysroot and no config crate:
-its crates link the host's standard library, as under Cargo. Put its
-packages in a group with `.target_host()`:
+When the profiles build for the host, they need no declared target,
+and build no sysroot and no config crate. Their crates link the host's
+standard library, as under Cargo:
 
 ```rust,ignore
-cfg.cargo_workspace(".");
-cfg.group("tools").target_host().package("my-tool");
-cfg.profile("dev").target_host().run_binary("my-tool");
+q.cargo_workspace(".");
+let tool = q.add(Package::new("my-tool"));
+q.run(&tool);
 ```
 
-With no `.runner(...)` named, `quon run` runs the binary directly,
-with the arguments after `--`, and passes when it exits with status 0.
-An ESP or a QEMU runner needs a declared target, so a host profile
-reports an error for either.
+With no runner named, `quon run` runs the binary directly, with the
+arguments after `--`, and passes when it exits with status 0. An ESP
+or a QEMU runner needs a declared target, so a host profile reports an
+error for either.
 
 ### Profile inheritance
 
-The `.inherits(profile_name)` method creates a parent-child relationship
-between profiles. The child profile inherits all settings from the parent, then
-overrides any settings it explicitly sets.
+`.inherits(&parent)` makes a profile take every setting it leaves
+unset from `parent`. A profile inherits from one parent, and chains
+can be several levels deep (`release` -> `dev` -> a base profile).
 
-In the example above, `release` inherits everything from `dev` (target,
-debug_info, run_binary) and overrides `opt_level` and `lto`. Unset fields fall
-through to the parent.
-
-Inheritance chains are resolved at configuration resolution time. A profile can
-only inherit from one parent, but chains can be multiple levels deep
-(`release` -> `dev` -> some base profile).
+The target, the run binary and the run entry's runner are set on the
+root of each chain, the profile that inherits nothing. Profiles that
+inherit take them from it.

@@ -1,4 +1,4 @@
-# Limine Kernel
+# Limine kernel
 
 A kernel booted by [Limine](https://github.com/Limine-Bootloader/Limine)
 over UEFI. Quon builds the kernel, fetches Limine's prebuilt
@@ -9,41 +9,42 @@ Limine configuration file.
 ## quon.rs
 
 ```rust
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("limine-kernel", "0.1.0");
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.cargo_workspace(".");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("limine-kernel", "0.1.0");
+    q.cargo_workspace(".");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
+    let kernel = q.add(
+        Package::new("kernel")
+            .linker_script("crates/kernel/kernel.ld")
+            .rustc_flag("-Crelocation-model=static"),
+    );
 
-    cfg.group("kernel")
-        .target(target)
-        .package("kernel")
-        .linker_script("crates/kernel/kernel.ld")
-        .rustc_flag("-Crelocation-model=static");
+    let limine = q.add(Download::limine(
+        "11.4.1",
+        "BOOTX64.EFI",
+        "333f7a69379b1f47e019be215885cdc078b9edd6e9255cbe2f706d6c5ec0ef06",
+    ));
 
-    cfg.limine("11.4.1").file("BOOTX64.EFI", "333f7a69379b1f47e019be215885cdc078b9edd6e9255cbe2f706d6c5ec0ef06");
+    q.add(
+        Esp::new("default")
+            .add(&limine, "EFI/BOOT/BOOTX64.EFI")
+            .add("limine.conf", "limine.conf")
+            .add(&kernel, "boot/kernel"),
+    );
 
-    cfg.esp("default")
-        .add_download("limine/BOOTX64.EFI", "EFI/BOOT/BOOTX64.EFI")
-        .add_file("limine.conf", "limine.conf")
-        .add("kernel", "boot/kernel");
-
-    cfg.runner("qemu")
-        .qemu("qemu-system-x86_64")
-        .machine("q35")
-        .memory(256)
-        .serial_stdio()
-        .boot_mode("uefi")
-        .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
-        .success_exit_code(33);
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .machine("q35")
+            .memory_mb(256)
+            .serial(Serial::Stdio)
+            .boot(BootMode::Uefi)
+            .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+            .success_exit_code(33),
+    );
+    q.run(&kernel).runner(&qemu);
 
     Ok(())
 }
@@ -51,9 +52,11 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ## Pinning Limine
 
-`cfg.limine(version).file(name, sha256)` declares one file from the
+`Download::limine(version, file, sha256)` declares one file from the
 release's `v<version>-binary` tag in the GitHub repository, as a
-download named `limine/<name>`. The ESP takes it with `add_download`.
+download named `limine/<file>`. `q.add` returns its handle, which the
+ESP takes like any other artifact. A string source in `Esp::add`, such
+as `"limine.conf"`, names a file in the project.
 An x86_64 UEFI boot needs only `BOOTX64.EFI`.
 
 The first build that needs the file fetches it with `curl`, checks its
@@ -61,14 +64,14 @@ SHA-256 and caches it at `build/downloads/<sha256>/BOOTX64.EFI`. Later
 builds hash the cached copy and fetch again only if it no longer
 matches. A hash mismatch fails the build and prints both hashes.
 
-To upgrade, change the version and the hash on the `cfg.limine` line.
+To upgrade, change the version and the hash in `Download::limine`.
 To find the new hash, leave it empty (`""`): the build fails and prints
 the hash of the file it fetched. Check where the file came from before
 you pin it. Limine 8 and later read `limine.conf`; Limine 7 reads
 `limine.cfg`, which has a different syntax.
 
-`cfg.download(name, url, sha256)` pins any other file the same way, and
-`image(...).add_entry_download(name, dest)` puts a download into a disk
+`Download::new(name, url, sha256)` pins any other file the same way,
+and `Image::new(..).add(&download, dest)` puts a download into a disk
 image.
 
 ## Kernel requirements

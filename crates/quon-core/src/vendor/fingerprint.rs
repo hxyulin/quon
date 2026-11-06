@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn cross_target_spec_change_does_not_perturb_hash() {
-        // Changing `target_spec("kernel", "...")` from one triple to
+        // Changing `Target::spec("kernel", "...")` from one triple to
         // another while keeping the name `"kernel"` does NOT change
         // the fingerprint: vendor output is keyed by target name in
         // our setup, and per-node compile stamps catch spec changes

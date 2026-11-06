@@ -11,20 +11,13 @@
 //   - `tool` is a host root, so `consumer` and `probe` build for the
 //     host and for the kernel's target, and each script runs twice.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("build-script-cfg", "0.1.0");
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.cargo_workspace(".");
-
-    cfg.profile("dev")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true);
-
-    cfg.group("kernel").target(target).package("kernel");
-    cfg.group("tools").target_host().package("tool");
-
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("build-script-cfg", "0.1.0");
+    q.cargo_workspace(".");
+    // Profiles build for the kernel's target, the one non-host target.
+    q.add(Package::new("kernel").target(&Target::builtin("x86_64-unknown-none")));
+    q.add(Package::new("tool"));
     Ok(())
 }

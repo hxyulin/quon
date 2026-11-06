@@ -150,9 +150,8 @@ fn run_script_binary(bin: &Path) -> Result<Vec<u8>> {
 /// ([`crate::manifest::lower::expand`]), run intern, and translate any
 /// intern diagnostics into quon-core's [`Diagnostic`] type.
 ///
-/// Mirrors `quon-config/src/builders/config_option.rs` for cross-source
-/// duplicate detection so `.rs` and `.kconfig` users see the same
-/// diagnostic wording.
+/// A `.kconfig` option or preset with the name of one `quon.rs`
+/// declared is an error, as a repeat within `quon.rs` is.
 fn finalize(
     mut raw: RawBuildModel,
     project_root: &Path,
@@ -224,10 +223,12 @@ mod tests {
         // Mirror the body in the plan's Step 4 verbatim so the parity
         // test in Task 12 can reuse a structurally-identical script.
         let body = r#"
-pub fn config(cfg: &mut quon_config::Config) -> quon_config::Result<()> {
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).opt_level(0).debug_info(true);
+use quon_config::prelude::*;
+
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("demo", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
+    q.add(Profile::dev());
     Ok(())
 }
 "#;

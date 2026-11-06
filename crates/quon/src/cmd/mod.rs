@@ -374,13 +374,14 @@ mod tests {
     use std::fs;
 
     /// Write the smallest possible valid `quon.rs` that evaluates
-    /// and resolves cleanly — a project, a builtin target, and a
-    /// profile pinned to that target. No crates or groups required.
+    /// and resolves cleanly — a project and a builtin default target,
+    /// which the built-in `dev` profile builds for. No crates required.
     fn write_min_script(dir: &Path) {
-        let script = r#"pub fn config(cfg: &mut quon_config::Config) -> quon_config::Result<()> {
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).opt_level(0).debug_info(true);
+        let script = r#"use quon_config::prelude::*;
+
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("demo", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
     Ok(())
 }
 "#;
@@ -416,17 +417,21 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn default_profile_picks_first_alphabetically() {
+    fn default_profile_is_dev_unless_the_script_names_one() {
         if quon_core::RustcInfo::probe().is_err() {
             eprintln!("cli e2e test skipped: rustc probe failed");
             return;
         }
         let tmp = tempfile::tempdir().expect("tempdir");
-        let script = r#"pub fn config(cfg: &mut quon_config::Config) -> quon_config::Result<()> {
-    cfg.project("demo", "0.1.0");
-    let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("zeta").target(t);
-    cfg.profile("alpha").target(t);
+        // `alpha` sorts ahead of `dev`, so a fallback to the first
+        // profile by name would pick it.
+        let script = r#"use quon_config::prelude::*;
+
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("demo", "0.1.0");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
+    q.add(Profile::new("zeta"));
+    q.add(Profile::new("alpha"));
     Ok(())
 }
 "#;
@@ -434,6 +439,6 @@ mod tests {
         let cmd =
             build_context_at_for_driver(tmp.path(), None, None, None, quon_core::DriverKind::Rustc)
                 .expect("build_context_at_for_driver");
-        assert_eq!(cmd.resolved.profile.name, "alpha");
+        assert_eq!(cmd.resolved.profile.name, "dev");
     }
 }

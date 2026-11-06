@@ -18,8 +18,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
     // CLI boot-mode override, passed to a plugin runner as its
     // `boot_mode` override. The three flags are mutually exclusive in
     // the clap schema; if none are set, we pass `None` so the
-    // profile's own `qemu_boot_mode(...)` (or project-level
-    // runner-level `.boot_mode(...)`) wins.
+    // runner's own `.boot(...)` wins.
     let boot_mode_override = match (args.uefi, args.direct, args.bios) {
         (true, false, false) => Some(BootMode::Uefi),
         (false, true, false) => Some(BootMode::Direct),

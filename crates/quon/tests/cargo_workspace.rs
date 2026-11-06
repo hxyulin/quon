@@ -1,5 +1,5 @@
 //! End-to-end builds of projects whose crates come from a Cargo
-//! workspace (`cfg.cargo_workspace` and `group.package`): the
+//! workspace (`q.cargo_workspace` and `Package::new`): the
 //! `cargo-build` and `cargo-registry` fixtures and every example under
 //! `examples/`.
 //!
@@ -125,8 +125,8 @@ fn use_vendor_dir(project: &Path) {
     let path = project.join("quon.rs");
     let text = fs::read_to_string(&path).unwrap();
     let edited = text.replace(
-        "cfg.cargo_workspace(\".\");",
-        "cfg.cargo_workspace(\".\").vendored(\"vendor\");",
+        "q.cargo_workspace(\".\");",
+        "q.cargo_workspace(\".\").vendored(\"vendor\");",
     );
     assert_ne!(text, edited, "fixture quon.rs changed shape");
     fs::write(path, edited).unwrap();
@@ -300,7 +300,7 @@ fn registry_dependency_from_crates_io_and_quon_vendor() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("cfg.cargo_workspace(\".\").vendored(\"vendor\");"),
+        stdout.contains("q.cargo_workspace(\".\").vendored(\"vendor\");"),
         "{stdout}"
     );
     assert!(project.join("vendor/.quon-vendor-stamp").is_file());

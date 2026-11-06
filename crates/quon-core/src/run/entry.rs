@@ -61,7 +61,7 @@ pub struct RunOptions {
     pub gdb: bool,
     /// Set by `quon test`: the per-test timeout applies, and a plugin
     /// runner is told it runs a test (QEMU then adds its
-    /// `test_extra_args(...)`).
+    /// `QemuDef::test_extra_args`).
     pub test: bool,
     /// The runner plugins built into the caller.
     pub runners: Runners,

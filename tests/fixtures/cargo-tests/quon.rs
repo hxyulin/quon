@@ -5,31 +5,29 @@
 // dev-dependency that `quon build` leaves out. The `smoke` boot test
 // builds the `test` profile and boots the kernel itself.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("cargo-tests", "0.1.0");
-    let target = cfg.target("x86_64-unknown-none");
-    cfg.cargo_workspace(".");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("cargo-tests", "0.1.0");
+    q.cargo_workspace(".");
+    q.default_target(&Target::builtin("x86_64-unknown-none"));
 
-    cfg.profile("dev")
-        .runner("qemu")
-        .target(target)
-        .opt_level(0)
-        .debug_info(true)
-        .run_binary("kernel");
-    cfg.profile("test").inherits("dev");
-    cfg.boot_test("smoke").profile("test");
+    let kernel = q.add(Package::new("kernel"));
+    q.add(
+        Esp::new("default")
+            .add("boot.conf", "boot.conf")
+            .add(&kernel, "boot/kernel"),
+    );
 
-    cfg.group("kernel").target(target).package("kernel");
+    let qemu = q.add(
+        Qemu::new("qemu-system-x86_64")
+            .boot(BootMode::Uefi)
+            .success_exit_code(33),
+    );
+    q.run(&kernel).runner(&qemu);
 
-    cfg.esp("default")
-        .add_file("boot.conf", "boot.conf")
-        .add("kernel", "boot/kernel");
-
-    cfg.runner("qemu").qemu("qemu-system-x86_64")
-        .boot_mode("uefi")
-        .success_exit_code(33);
-
+    let dev = q.profile("dev");
+    let test = q.add(Profile::new("test").inherits(&dev));
+    q.add(BootTest::new("smoke", &test));
     Ok(())
 }

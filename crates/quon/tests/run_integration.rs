@@ -187,7 +187,7 @@ fn quon_run_cli_uefi_flag_overrides_direct_profile() {
     // Start from the `minimal` fixture (direct mode) and force UEFI
     // via the CLI flag, supplying OVMF via env vars. Should produce
     // a UEFI argv even though the fixture's QEMU runner never
-    // called .boot_mode("uefi").
+    // calls .boot(BootMode::Uefi).
     let (_tmp, fixture) = setup_fixture("minimal");
     let code = fixture.join("OVMF_CODE.fd");
     let vars = fixture.join("OVMF_VARS.fd");
@@ -221,7 +221,7 @@ fn quon_run_cli_uefi_flag_overrides_direct_profile() {
 
 #[test]
 fn quon_run_without_runner_errors_clearly() {
-    // The `minimal` fixture's dev profile names the `qemu` runner; drop
+    // The `minimal` fixture runs the kernel with its QEMU runner; drop
     // that and confirm `quon run` rejects the profile with the
     // `NoRunner` diagnostic. `--dry-run` keeps the test hermetic, and
     // would still catch a regression that moved the check past the
@@ -249,8 +249,8 @@ fn quon_run_without_runner_errors_clearly() {
 
 #[test]
 fn quon_run_uefi_without_ovmf_errors_loudly() {
-    // `minimal-uefi` declares boot_mode uefi but its qemu() block
-    // does not set explicit ovmf paths. With env vars scrubbed
+    // `minimal-uefi` boots its QEMU runner through UEFI but does not
+    // set explicit OVMF paths. With env vars scrubbed
     // (quon_command already does this) and no system OVMF, the
     // resolver should fail with the three-layer diagnostic.
     //
@@ -385,15 +385,15 @@ fn rewrite_qemu_binary(fixture: &Path, new_binary: &str) {
     fs::write(&rs_path, rewritten).expect("write quon.rs");
 }
 
-/// Drop `.runner("qemu")` from the fixture's dev profile, leaving the
+/// Drop `.runner(&qemu)` from the fixture's run entry, leaving the
 /// runner declared but unused, so the profile has no runner.
 fn strip_profile_runner(fixture: &Path) {
     let rs_path = fixture.join("quon.rs");
     let original = fs::read_to_string(&rs_path).expect("read quon.rs");
-    let rewritten = original.replacen("        .runner(\"qemu\")\n", "", 1);
+    let rewritten = original.replacen(".runner(&qemu);", ";", 1);
     assert_ne!(
         original, rewritten,
-        "expected the fixture's profile to name the qemu runner"
+        "expected the fixture to run the kernel with the qemu runner"
     );
     fs::write(&rs_path, rewritten).expect("write quon.rs");
 }
@@ -695,22 +695,18 @@ fn spawn_real_qemu_smoke() {
     );
 }
 
-/// Point the fixture's dev profile at a command runner declared next to
-/// its QEMU runner.
+/// Run the fixture's kernel with a command runner declared next to its
+/// QEMU runner. Quon names it `command`.
 fn use_command_runner(fixture: &Path, argv: &str) {
     let rs_path = fixture.join("quon.rs");
     let original = fs::read_to_string(&rs_path).expect("read quon.rs");
-    let rewritten = original
-        .replacen(
-            "        .runner(\"qemu\")\n",
-            "        .runner(\"board\")\n",
-            1,
-        )
-        .replacen(
-            "    cfg.runner(\"qemu\")",
-            &format!("    cfg.runner(\"board\").command(&{argv});\n    cfg.runner(\"qemu\")"),
-            1,
-        );
+    let rewritten = original.replacen(
+        "    q.run(&kernel).runner(&qemu);",
+        &format!(
+            "    let board = q.add(Command::new({argv}));\n    q.run(&kernel).runner(&board);"
+        ),
+        1,
+    );
     assert_ne!(original, rewritten, "fixture shape drifted");
     fs::write(&rs_path, rewritten).expect("write quon.rs");
 }
@@ -740,7 +736,7 @@ fn command_runner_runs_its_argv_with_the_binary() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{flag} should fail");
         assert!(
-            stderr.contains("runner 'board' is a command runner")
+            stderr.contains("runner 'command' is a command runner")
                 && stderr.contains("needs a QEMU runner"),
             "{flag}: {stderr}"
         );
@@ -771,7 +767,7 @@ fn command_runner_exit_status_decides_the_run() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("runner 'board' exited with status 7"),
+        stderr.contains("runner 'command' exited with status 7"),
         "{stderr}"
     );
 
@@ -780,7 +776,11 @@ fn command_runner_exit_status_decides_the_run() {
     let text = fs::read_to_string(&rs_path).unwrap();
     fs::write(
         &rs_path,
-        text.replacen("\"{binary}\"]);", "\"{binary}\"]).success_exit_code(7);", 1),
+        text.replacen(
+            "\"{binary}\"]));",
+            "\"{binary}\"]).success_exit_code(7));",
+            1,
+        ),
     )
     .unwrap();
     let output = quon_command(&fixture)
@@ -790,27 +790,22 @@ fn command_runner_exit_status_decides_the_run() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("Exited runner 'board' with status 7"),
+        stderr.contains("Exited runner 'command' with status 7"),
         "{stderr}"
     );
 }
 
-/// Point the fixture's dev profile at a runner served by the `fake`
-/// plugin, declared next to its QEMU runner.
+/// Run the fixture's kernel with a runner served by the `fake` plugin,
+/// declared next to its QEMU runner. Quon names it `fake`.
 fn use_plugin_runner(fixture: &Path) {
     let rs_path = fixture.join("quon.rs");
     let original = fs::read_to_string(&rs_path).expect("read quon.rs");
-    let rewritten = original
-        .replacen(
-            "        .runner(\"qemu\")\n",
-            "        .runner(\"board\")\n",
-            1,
-        )
-        .replacen(
-            "    cfg.runner(\"qemu\")",
-            "    cfg.runner(\"board\").plugin(\"fake\").setting(\"chip\", \"nrf\");\n    cfg.runner(\"qemu\")",
-            1,
-        );
+    let rewritten = original.replacen(
+        "    q.run(&kernel).runner(&qemu);",
+        "    let board = q.add(Plugin::new(\"fake\").setting(\"chip\", \"nrf\"));\n    \
+         q.run(&kernel).runner(&board);",
+        1,
+    );
     assert_ne!(original, rewritten, "fixture shape drifted");
     fs::write(&rs_path, rewritten).expect("write quon.rs");
 }
@@ -875,7 +870,7 @@ fn an_external_runner_plugin_on_path_assembles_the_command() {
     assert_eq!(validate["protocol"], 1);
     assert_eq!(validate["request"]["method"], "validate");
     let params = &validate["request"]["params"];
-    assert_eq!(params["runner"], "board");
+    assert_eq!(params["runner"], "fake");
     assert_eq!(params["target"], "x86_64-unknown-none");
     assert_eq!(params["settings"], serde_json::json!({"chip": "nrf"}));
     assert_eq!(
@@ -909,7 +904,7 @@ fn a_missing_runner_plugin_names_the_executable() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("runner 'board' uses the 'fake' runner plugin")
+        stderr.contains("runner 'fake' uses the 'fake' runner plugin")
             && stderr.contains("`quon-runner-fake` is not on PATH"),
         "{stderr}"
     );

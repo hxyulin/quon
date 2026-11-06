@@ -428,14 +428,14 @@ fn multi_profile_fixture_model() {
     assert_eq!(release.debug_info, Some(false));
     assert_eq!(release.lto.as_deref(), Some("thin"));
 
-    // -- Two groups --
+    // -- One group per crate --
     assert!(
-        model.groups.lookup("host_tools").is_some(),
-        "model should have a 'host_tools' group"
+        model.groups.lookup("mylib").is_some(),
+        "model should have a 'mylib' group"
     );
     assert!(
-        model.groups.lookup("kernel").is_some(),
-        "model should have a 'kernel' group"
+        model.groups.lookup("app").is_some(),
+        "model should have an 'app' group"
     );
 
     // -- Two crates --
@@ -481,19 +481,6 @@ fn multi_profile_fixture_model() {
 // Freshness
 // ---------------------------------------------------------------------------
 
-/// Add a `release` profile to the minimal fixture.
-fn add_release_profile(fixture: &Path) {
-    let quon_rs = fixture.join("quon.rs");
-    let script = fs::read_to_string(&quon_rs).expect("read quon.rs");
-    let script = script.replace(
-        "    cfg.runner(\"qemu\")",
-        "    cfg.profile(\"release\")\n        .runner(\"qemu\")\n        .target(target)\n        \
-         .opt_level(3)\n        .debug_info(false)\n        .run_binary(\"kernel\");\n\n    \
-         cfg.runner(\"qemu\")",
-    );
-    fs::write(&quon_rs, script).expect("write quon.rs");
-}
-
 /// Add two kernel libraries, `klib_top` using `klib_base`, and make the
 /// kernel use `klib_top`.
 fn add_library_using_library(fixture: &Path) {
@@ -510,19 +497,27 @@ fn add_library_using_library(fixture: &Path) {
     }
     let quon_rs = fixture.join("quon.rs");
     let script = fs::read_to_string(&quon_rs).expect("read quon.rs");
-    let script = script.replace(
-        "    Ok(())",
-        "    let mut libs = cfg.group(\"kernel_libs\").target(target).edition(\"2021\");\n    \
-         libs.add(\"klib_base\", \"crates/klib_base\");\n    \
-         libs.add(\"klib_top\", \"crates/klib_top\").dep(\"klib_base\", \"klib_base\");\n    \
-         drop(libs);\n\n    Ok(())",
+    // The libraries come before the kernel, which takes their handles.
+    let edited = script.replacen(
+        "    let kernel = q.add(",
+        "    let klib_base = q.add(\n        \
+         Crate::lib(\"klib_base\", \"crates/klib_base\")\n            \
+         .target(&target)\n            .edition(Edition::E2021),\n    );\n    \
+         let klib_top = q.add(\n        \
+         Crate::lib(\"klib_top\", \"crates/klib_top\")\n            \
+         .target(&target)\n            .edition(Edition::E2021)\n            \
+         .dep(&klib_base),\n    );\n    \
+         let kernel = q.add(",
+        1,
     );
     // Only crates reachable from the kernel are part of the build.
-    let script = script.replace(
-        ".dep(\"minimal_derive\", \"minimal_derive\");",
-        ".dep(\"minimal_derive\", \"minimal_derive\")\n        .dep(\"klib_top\", \"klib_top\");",
+    let edited = edited.replacen(
+        ".dep(&derive),",
+        ".dep(&derive)\n            .dep(&klib_top),",
+        1,
     );
-    fs::write(&quon_rs, script).expect("write quon.rs");
+    assert_ne!(script, edited, "fixture quon.rs changed shape");
+    fs::write(&quon_rs, edited).expect("write quon.rs");
     let main_rs = fixture.join("crates/kernel/src/main.rs");
     let main = fs::read_to_string(&main_rs).expect("read main.rs");
     fs::write(
@@ -851,8 +846,6 @@ fn failures_and_profile_switches_keep_finished_work() {
     // Every unit, the config crate included, keeps one output per
     // profile, and proc macros use the fixed host profile, so switching
     // back to dev spawns no rustc.
-    add_release_profile(&s.dir);
-    s.ok("dev with a release profile", &["build"], None);
     let (_, release) = s.ok("release", &["--profile", "release", "build"], None);
     assert!(
         !release.contains("--crate-name minimal_derive"),
@@ -884,8 +877,8 @@ fn target_spec_edit_rebuilds() {
     let quon_rs = fixture.join("quon.rs");
     let script = fs::read_to_string(&quon_rs).expect("read quon.rs");
     let script = script.replace(
-        r#"cfg.target("x86_64-unknown-none")"#,
-        r#"cfg.target_spec("x86_64-unknown-test", "targets/x86_64-unknown-test.json")"#,
+        r#"Target::builtin("x86_64-unknown-none")"#,
+        r#"Target::spec("x86_64-unknown-test", "targets/x86_64-unknown-test.json")"#,
     );
     fs::write(&quon_rs, script).expect("write quon.rs");
     quon_ok(&fixture, &["build"]);

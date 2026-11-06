@@ -11,27 +11,23 @@
 // - `probe-sys` declares `links = "probe"` and passes metadata to
 //   `consumer`'s build script.
 
-use quon_config::{Config, Result};
+use quon_config::prelude::*;
 
-pub fn config(cfg: &mut Config) -> Result<()> {
-    cfg.project("vendor-cross-build-script", "0.1.0");
+pub fn config(q: &mut Quon) -> Result<()> {
+    q.project("vendor-cross-build-script", "0.1.0");
 
-    let kernel = cfg.target("x86_64-unknown-none");
+    let kernel = Target::builtin("x86_64-unknown-none");
+    q.default_target(&kernel);
 
-    cfg.profile("dev")
-        .target(kernel)
-        .opt_level(0)
-        .debug_info(true);
+    let hello_derive = q.add(Dependency::crates_io("hello-derive", "0.1").target(&kernel));
+    let consumer = q.add(Dependency::crates_io("consumer", "0.1").target(&kernel));
 
-    cfg.dependency("hello-derive").version("0.1").target(kernel);
-    cfg.dependency("consumer").version("0.1").target(kernel);
-
-    cfg.group("kernel")
-        .target(kernel)
-        .edition("2021")
-        .add("kernel", "crates/kernel")
-        .dep("hello_derive", "hello-derive")
-        .dep("consumer", "consumer");
+    q.add(
+        Crate::lib("kernel", "crates/kernel")
+            .edition(Edition::E2021)
+            .dep(&hello_derive)
+            .dep(&consumer),
+    );
 
     Ok(())
 }

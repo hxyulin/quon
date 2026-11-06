@@ -14,7 +14,7 @@
 //! vendored crate and every manifest package with a build script. The
 //! scheduler runs each one as a `RunBuildScript` node and passes its
 //! output to the owner's rustc command (`compile::command_builder`).
-//! Crates declared with `group.add` have no build scripts.
+//! Crates declared with `Crate` have no build scripts.
 
 pub mod directive;
 pub mod env;

@@ -1,6 +1,6 @@
 //! Runners: how a profile's run binary is executed.
 //!
-//! A profile names a runner (`cfg.runner(name)`, `profile.runner(name)`)
+//! A profile names a runner (`q.run(..).runner(&r)`, `Profile::runner(&r)`)
 //! and every place that starts a built binary goes through it:
 //! `quon run`, the integration tests and the boot tests. Host tests
 //! are libtest executables and always run on the host (see
@@ -9,7 +9,7 @@
 //! Each runner turns a binary into an [`Invocation`]:
 //!
 //! - a plugin runner asks its plugin (see [`quon_runner`]). QEMU is
-//!   one: `cfg.runner(name).qemu(program)` is a runner served by the
+//!   one: `q.add(Qemu::new(program))` is a runner served by the
 //!   `qemu` plugin, with the `QemuDef` as its settings. Quon finds a
 //!   plugin among the ones the caller registered in [`Runners`], then
 //!   as `quon-runner-<plugin>` on `$PATH`;
@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The plugin that serves `cfg.runner(name).qemu(...)`.
+/// The plugin that serves `Qemu::new(..)` runners.
 pub const QEMU_PLUGIN: &str = "qemu";
 
 /// A process to start for a run or a test, plus how to judge it.

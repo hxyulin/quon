@@ -4,9 +4,9 @@
 
 | Kind | What Quon builds | Where it runs | Passes when |
 |------|-------------------|---------------|-------------|
-| Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
-| Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | The profile's [runner](./runners.md), one run per test | The runner exits with its success status |
-| Boot tests | The run binary of the profile a `cfg.boot_test(...)` names | That profile's runner, one run per suite | The runner exits with its success status |
+| Host tests | The lib and `harness = true` tests of each `q.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
+| Integration tests | The `harness = false` tests in `tests/` of each declared `Package` | The profile's [runner](./runners.md), one run per test | The runner exits with its success status |
+| Boot tests | The run binary, built with the profile a `BootTest` names | That profile's runner, one run per suite | The runner exits with its success status |
 
 Host tests run first because they are the fastest and need no QEMU.
 Every run happens even when an earlier one fails, and `quon test` ends
@@ -27,16 +27,18 @@ bookkeeping or page-table arithmetic, can be tested on the host with
 the libtest harness and `std`. List the packages whose tests to run:
 
 ```rust,ignore
-cfg.host_tests().package("acpi").package("elf");
+q.host_tests().package("acpi").package("elf");
 ```
+
+`.packages([..])` adds several at once.
 
 For each package, Quon builds its lib and each of its bins with
 `rustc --test` against the host's standard library, and each
 `harness = true` test in `tests/` the same way, then runs the
 executables. The package must compile for the
 host. A `#![no_std]` crate usually needs `#![cfg_attr(not(test),
-no_std)]` so its tests can use `std`. A package does not need to be in a
-group to have host tests.
+no_std)]` so its tests can use `std`. A package does not need a
+`Package` declaration to have host tests.
 
 Host tests resolve like `cargo test -p <package>` on the host:
 
@@ -51,8 +53,9 @@ Host tests resolve like `cargo test -p <package>` on the host:
   tests get each bin's path as `CARGO_BIN_EXE_<name>` and a scratch
   directory, `build/tmp`, as `CARGO_TARGET_TMPDIR`.
 
-Group settings (linker scripts, rustc flags and `cfg_flag`s) and the
-config crate do not apply, since they describe the kernel target.
+The package's `quon.rs` settings (linker script, rustc flags and
+`cfg` flags) and the config crate do not apply, since they describe
+the kernel target.
 Optimisation and debug info come from the active profile. Build
 scripts run, as under Cargo.
 
@@ -64,10 +67,10 @@ package yet.
 ### Environment
 
 Tests that read an environment variable at run time, the way Cargo's
-`[env]` table would set it, get it from the host-test builder:
+`[env]` table would set it, get it from `q.host_tests()`:
 
 ```rust,ignore
-cfg.host_tests()
+q.host_tests()
     .package("my-tool")
     .env("RUST_LOG", "debug")
     .env_path("MY_TOOL_HOME", "build/my-tool-home");
@@ -107,7 +110,7 @@ test boots from its own copy of the ESP.
 
 ### Declaring a test
 
-Tests live in `tests/` of a package named with `group.package(...)`,
+Tests live in `tests/` of a package declared with `Package::new(..)`,
 the same place Cargo looks. Each needs `harness = false`, because the
 libtest harness needs `std`:
 
@@ -118,18 +121,17 @@ harness = false
 ```
 
 Quon skips a test without `harness = false` and warns about it,
-unless the package is in `cfg.host_tests()`, which runs it on the host.
-The
-test builds like the package's bin: it links the package's lib, its
-normal dependencies and its dev-dependencies, and takes the group's
-linker script, rustc flags and config crate. Quon also passes
+unless the package is in `q.host_tests()`, which runs it on the host.
+The test builds like the package's bin: it links the package's lib,
+its normal dependencies and its dev-dependencies, and takes the
+package's linker script, rustc flags and config crate. Quon also passes
 `--cfg test`, as Cargo does.
 
 ### Dev-dependencies
 
 A test can use the package's `[dev-dependencies]`, including
 `[target.'cfg(...)'.dev-dependencies]` tables matched against the
-group's target, and proc macros, which build for the host:
+package's target, and proc macros, which build for the host:
 
 ```toml
 [dev-dependencies]
@@ -150,7 +152,7 @@ extra feature, for the tests. The second copy takes the suffix
 it, such as the package's lib. Crates the dev-dependencies leave
 unchanged build once.
 
-Only the dev-dependencies of a package named with `group.package(...)`
+Only the dev-dependencies of a package declared with `Package::new(..)`
 apply. Those of its dependencies never do, as in Cargo.
 
 A test file defines what the kernel binary defines, such as the entry
@@ -180,8 +182,8 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
 ### How a test boots
 
-`quon test` boots a test the way `quon run` boots the profile's
-`run_binary`, with the test binary in its place:
+`quon test` boots a test the way `quon run` boots the binary `q.run`
+names, with the test binary in its place:
 
 - **UEFI:** Quon copies the built ESP that holds the run binary to
   `esp/<esp>.tests/<test>/` and replaces each entry whose source is the
@@ -200,14 +202,15 @@ image that run after boot, selected by a config option. A boot test
 suite builds a profile that turns the runner on and boots it:
 
 ```rust,ignore
-cfg.config_bool("KTEST").default_value(ConfigValue::Bool(false));
-cfg.preset("test").set("KTEST", ConfigValue::Bool(true));
-cfg.profile("test").inherits("dev").preset("test");
+let ktest = q.add(opt::bool("KTEST"));
+let on = q.add(Preset::new("ktest").set(&ktest, true));
+let dev = q.profile("dev");
+let test = q.add(Profile::new("test").inherits(&dev).preset(&on));
 
-cfg.boot_test("ktest").profile("test");
+q.add(BootTest::new("ktest", &test));
 ```
 
-`quon test` builds the suite's profile and boots its run binary as
+`quon test` builds the suite's profile and boots the run binary as
 `quon run -p <profile>` would. The suite passes when the runner exits with
 the runner's `.success_exit_code(...)`, or 0 when that is unset, within the
 timeout. Quon reports the suite as one result; the kernel's own
