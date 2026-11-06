@@ -30,9 +30,10 @@ the libtest harness and `std`. List the packages whose tests to run:
 cfg.host_tests().package("acpi").package("elf");
 ```
 
-For each package, Gluon builds its lib with `rustc --test` against the
-host's standard library, and each `harness = true` test in `tests/` the
-same way, then runs the executables. The package must compile for the
+For each package, Gluon builds its lib and each of its bins with
+`rustc --test` against the host's standard library, and each
+`harness = true` test in `tests/` the same way, then runs the
+executables. The package must compile for the
 host. A `#![no_std]` crate usually needs `#![cfg_attr(not(test),
 no_std)]` so its tests can use `std`. A package does not need to be in a
 group to have host tests.
@@ -44,8 +45,11 @@ Host tests resolve like `cargo test -p <package>` on the host:
   scripts and proc macros, so a feature the kernel or a
   build-dependency turns on does not reach the tests.
 - Copies of crates built for the host tests take the suffix
-  `@host-test` in the build output, and the unit-test executable takes
-  `@test`, as in `calc@test`.
+  `@host-test` in the build output. The lib's unit-test executable
+  takes `@test`, as in `calc@test`, and a bin's takes `@bin-test`.
+- When the package has tests in `tests/`, its bins build too, and those
+  tests get each bin's path as `CARGO_BIN_EXE_<name>` and a scratch
+  directory, `build/tmp`, as `CARGO_TARGET_TMPDIR`.
 
 Group settings (linker scripts, rustc flags and `cfg_flag`s) and the
 config crate do not apply, since they describe the kernel target.
@@ -56,6 +60,23 @@ Each executable runs from its package's directory, with the
 `CARGO_PKG_*` and `CARGO_MANIFEST_DIR` variables Cargo sets, and its
 output passes through. Gluon cannot run the tests of a proc-macro
 package yet.
+
+### Environment
+
+Tests that read an environment variable at run time, the way Cargo's
+`[env]` table would set it, get it from the host-test builder:
+
+```rust,ignore
+cfg.host_tests()
+    .package("my-tool")
+    .env("RUST_LOG", "debug")
+    .env_path("MY_TOOL_HOME", "build/my-tool-home");
+```
+
+`.env_path` makes the path absolute against the project root, since each
+test runs from its own package directory. Both apply to every host test
+run, doctests included, when it runs. They do not reach `env!`, which
+reads variables at compile time.
 
 ### Doctests
 

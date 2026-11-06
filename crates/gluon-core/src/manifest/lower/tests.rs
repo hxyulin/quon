@@ -1323,9 +1323,10 @@ fn root_a_with_host_tests() -> RawBuildModel {
     })
 }
 
-/// A host-test package's lib and libtest tests build for the host
+/// A host-test package's lib, bin and libtest tests build for the host
 /// with `--test`, with its dev-dependencies, in the `cargo:host-test`
-/// group. Their `util` is not the build script's: the host-test
+/// group. Because `tests/api.rs` exists, the bin builds too, and the
+/// test gets its path as `CARGO_BIN_EXE_a`. Their `util` is not the build script's: the host-test
 /// domain does not take the build-dependency's `extra` feature. Every
 /// host-test unit is test-only, and the target units are unchanged.
 #[test]
@@ -1340,9 +1341,11 @@ fn host_tests_build_for_the_host_in_their_own_domain() {
     assert_eq!(
         dump(&raw),
         "\
-a@host-test [cargo:host-test] host Lib a/src/lib.rs 2021 f=[] d=[util->util@host-test] rustc=a
+a@host-test@lib [cargo:host-test] host Lib a/src/lib.rs 2021 f=[] d=[util->util@host-test] rustc=a
+a@host-test [cargo:host-test] host Bin a/src/main.rs 2021 f=[] d=[a->a@host-test@lib,util->util@host-test] rustc=a
 a@test [cargo:host-test] host Test a/src/lib.rs 2021 f=[] d=[kit->kit@host-test,util->util@host-test] rustc=a
-api [cargo:host-test] host Test a/tests/api.rs 2021 f=[] d=[a->a@host-test,kit->kit@host-test,util->util@host-test] rustc=api
+a@bin-test [cargo:host-test] host Test a/src/main.rs 2021 f=[] d=[a->a@host-test@lib,kit->kit@host-test,util->util@host-test] rustc=a
+api [cargo:host-test] host Test a/tests/api.rs 2021 f=[] d=[a->a@host-test@lib,kit->kit@host-test,util->util@host-test] rustc=api
 a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
 a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
 boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit,util->util] rustc=boot
@@ -1356,8 +1359,10 @@ util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=
     assert_eq!(
         test_only(&raw),
         [
+            "a@host-test@lib",
             "a@host-test",
             "a@test",
+            "a@bin-test",
             "api",
             "boot",
             "kit@host-test",
@@ -1379,6 +1384,20 @@ util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=
         Some("1")
     );
     assert!(!cargo.is_test, "host tests do not boot");
+    let api = raw.crates.iter().find(|(_, c)| c.name == "api").unwrap().1;
+    assert_eq!(
+        api.artifact_env.get("CARGO_BIN_EXE_a").map(String::as_str),
+        Some("a@host-test")
+    );
+    assert_eq!(api.artifact_deps, ["a@host-test"]);
+    assert!(
+        api.cargo
+            .as_ref()
+            .unwrap()
+            .env
+            .contains_key("CARGO_TARGET_TMPDIR"),
+        "tests in tests/ get a scratch directory"
+    );
 
     // Listing the package changes none of the target units.
     let with = units_at(root_a_with_host_tests(), ws.path());
@@ -1503,7 +1522,8 @@ fn host_test_lib_tests_name_their_doctest_lib() {
     assert_eq!(
         doctest_lib(&raw),
         [
-            ("a@test".to_string(), Some("a@host-test".to_string())),
+            ("a@test".to_string(), Some("a@host-test@lib".to_string())),
+            ("a@bin-test".to_string(), None),
             ("api".to_string(), None),
         ]
     );
@@ -1511,9 +1531,14 @@ fn host_test_lib_tests_name_their_doctest_lib() {
     std::fs::remove_file(ws.path().join("a/tests/api.rs")).unwrap();
     let mut raw = root_a_with_host_tests();
     expand_at(&mut raw, ws.path()).expect("expand");
+    // Without `tests/` files no bin builds, so the lib keeps the plain
+    // host-test name.
     assert_eq!(
         doctest_lib(&raw),
-        [("a@test".to_string(), Some("a@host-test".to_string()))]
+        [
+            ("a@test".to_string(), Some("a@host-test".to_string())),
+            ("a@bin-test".to_string(), None),
+        ]
     );
     assert!(raw.crates.iter().any(|(_, c)| c.name == "a@host-test"));
 
@@ -1522,7 +1547,13 @@ fn host_test_lib_tests_name_their_doctest_lib() {
     std::fs::write(&manifest_path, format!("{text}[lib]\ndoctest = false\n")).unwrap();
     let mut raw = root_a_with_host_tests();
     expand_at(&mut raw, ws.path()).expect("expand");
-    assert_eq!(doctest_lib(&raw), [("a@test".to_string(), None)]);
+    assert_eq!(
+        doctest_lib(&raw),
+        [
+            ("a@test".to_string(), None),
+            ("a@bin-test".to_string(), None)
+        ]
+    );
 }
 
 /// With a run binary, a profile builds what the target's crates reach,
@@ -1549,8 +1580,10 @@ fn host_tests_build_under_a_run_binary() {
         .collect();
     for name in [
         "a@test",
+        "a@bin-test",
         "api",
         "a@host-test",
+        "a@host-test@lib",
         "kit@host-test",
         "util@host-test",
     ] {

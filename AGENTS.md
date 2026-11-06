@@ -58,4 +58,9 @@ cargo nextest run --workspace --run-ignored all
 cargo test --workspace --doc
 ```
 
+Gluon also builds itself from the repository's `gluon.rs`. After a
+change to resolution, lowering or host tests, `gluon test` with the
+freshly built binary (`target/debug/gluon test`) should still pass the
+same tests as `cargo test`.
+
 Commit messages follow the format in [CONTRIBUTING.md](CONTRIBUTING.md).

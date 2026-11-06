@@ -8,3 +8,4 @@ tests/fixtures/*/esp/
 examples/*/build/
 examples/*/esp/
 examples/*/rust-project.json
+/build

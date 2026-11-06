@@ -15,6 +15,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   own domain, so neither the kernel's features nor those of build
   scripts and proc macros reach them. `gluon build` builds none of
   them. Proc-macro packages are not supported yet.
+- **Bin unit tests.** A host-test package's bins are built with
+  `--test` too, as `<bin>@bin-test`. When the package has tests in
+  `tests/`, its bins build and those tests get `CARGO_BIN_EXE_<name>`
+  and `CARGO_TARGET_TMPDIR` (`build/tmp`), as under Cargo.
+- **`cfg.host_tests().env(name, value)` and `.env_path(name, path)`**
+  set variables for every host test run; `.env_path` resolves against
+  the project root.
+- **Gluon builds and tests itself.** The repository's `gluon.rs` uses a
+  host profile; `gluon test` runs the same 860 tests as
+  `cargo nextest run --workspace`.
 - **Doctests.** Host-test packages also run their doctests with
   `rustdoc --test`, linking the lib and its dev-dependencies, with the
   lib's features and build-script output. `doctest = false` turns them

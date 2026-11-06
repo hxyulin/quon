@@ -93,6 +93,20 @@ pub struct BuildModel {
     /// Boot test suites (`cfg.boot_test(...)`), run by `gluon test`.
     #[serde(default)]
     pub boot_tests: Arena<BootTestDef>,
+    /// Environment of every host test run (`cfg.host_tests().env(..)`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_test_env: BTreeMap<String, HostTestEnv>,
+}
+
+/// The value of a variable set for host test runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostTestEnv {
+    /// Set as written: `.env(name, value)`.
+    Value(String),
+    /// A path relative to the project root, made absolute when the tests
+    /// run, since each runs from its own package directory:
+    /// `.env_path(name, path)`.
+    Path(PathBuf),
 }
 
 /// A boot test suite: `gluon test` builds `profile`, boots its boot

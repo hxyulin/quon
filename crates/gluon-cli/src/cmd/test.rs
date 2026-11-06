@@ -165,6 +165,9 @@ fn run_host_tests(
 ) -> Result<()> {
     let tests = gluon_core::run::host_tests(&ctx.ctx, &ctx.model, &ctx.resolved)?;
     let libtest_args: Vec<OsString> = opts.filter.iter().map(OsString::from).collect();
+    if !opts.dry_run && !tests.is_empty() {
+        gluon_core::run::host::create_tmpdir(&ctx.resolved)?;
+    }
     for test in tests {
         let name = format!("{} ({})", test.package, test.source);
         let mut cmd = test.command(&libtest_args);

@@ -32,7 +32,8 @@
 //! host's cfgs but its own feature sets: Cargo does not unify the
 //! features of normal dependencies with those of build-dependencies and
 //! proc macros, and `Domain::Host` holds the latter. Each such root
-//! yields a [`UnitKind::LibTest`] (its lib built with `--test`) and a
+//! yields a [`UnitKind::LibTest`] (its lib built with `--test`), a
+//! [`UnitKind::BinTest`] per bin (the bin built with `--test`), and a
 //! [`UnitKind::HarnessTest`] per `harness = true` test in `tests/`.
 //! Its units are not root units: they take none of a group's settings.
 
@@ -80,6 +81,9 @@ pub enum UnitKind {
     Test(String),
     /// The lib of a host-test root, built with `--test`.
     LibTest,
+    /// A bin of a host-test root, built with `--test` for its unit
+    /// tests.
+    BinTest(String),
     /// A `harness = true` test of a host-test root, built with `--test`.
     HarnessTest(String),
     BuildScript,
@@ -90,7 +94,7 @@ impl UnitKind {
     pub fn is_test(&self) -> bool {
         matches!(
             self,
-            UnitKind::Test(_) | UnitKind::LibTest | UnitKind::HarnessTest(_)
+            UnitKind::Test(_) | UnitKind::LibTest | UnitKind::BinTest(_) | UnitKind::HarnessTest(_)
         )
     }
 }
@@ -103,6 +107,7 @@ impl fmt::Display for UnitKind {
             UnitKind::Bin(n) => write!(f, "bin {n}"),
             UnitKind::Test(n) => write!(f, "test {n}"),
             UnitKind::LibTest => f.write_str("lib-test"),
+            UnitKind::BinTest(n) => write!(f, "bin-test {n}"),
             UnitKind::HarnessTest(n) => write!(f, "harness-test {n}"),
             UnitKind::BuildScript => f.write_str("build-script"),
         }
@@ -149,6 +154,10 @@ pub struct Unit {
     /// test is that lib, built with `--test`. `None` when the lib says
     /// `doctest = false`.
     pub doctest_lib: Option<UnitId>,
+    /// On a [`UnitKind::HarnessTest`]: the package's bin units in the
+    /// same domain, whose paths the test gets as `CARGO_BIN_EXE_<name>`,
+    /// as under Cargo. Not deps: a test does not link them.
+    pub bins: Vec<UnitId>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +182,8 @@ impl UnitGraph {
     /// A unit is named after its package (lib, proc-macro), its bin or
     /// test, or `<package>@build-script`. When names collide, root units
     /// keep the plain name and the others get suffixes in this order:
-    /// `@test` for a test sharing a name with any other unit,
+    /// `<bin>@bin-test` for a bin built with `--test`, then `@test` for
+    /// a test sharing a name with any other unit,
     /// `@host-test` for a [`Domain::HostTest`] unit sharing a name with a
     /// unit of another domain,
     /// `@test-pass` for another test-only unit sharing a name with a unit
@@ -191,6 +201,9 @@ impl UnitGraph {
                 let pkg = &self.packages[u.package];
                 match &u.kind {
                     UnitKind::Bin(n) | UnitKind::Test(n) | UnitKind::HarnessTest(n) => n.clone(),
+                    // Its own base name: a package's lib test and the
+                    // test of its same-named bin would otherwise collide.
+                    UnitKind::BinTest(n) => format!("{n}@bin-test"),
                     UnitKind::BuildScript => format!("{}@build-script", pkg.name()),
                     _ => pkg.name().to_string(),
                 }
@@ -797,11 +810,27 @@ fn build_units(
             if pkg.lib.as_ref().is_some_and(|l| !l.proc_macro) {
                 drafts.push(draft(UnitKind::LibTest));
             }
+            for b in &pkg.bins {
+                if b.required_features.iter().all(|f| st.features.contains(f)) {
+                    drafts.push(draft(UnitKind::BinTest(b.name.clone())));
+                }
+            }
             // `harness = false` tests are QEMU tests; they build only
             // for the package's target roots.
+            let mut harness_tests = false;
             for t in pkg.tests.iter().filter(|t| t.harness) {
                 if t.required_features.iter().all(|f| st.features.contains(f)) {
                     drafts.push(draft(UnitKind::HarnessTest(t.name.clone())));
+                    harness_tests = true;
+                }
+            }
+            // As Cargo does, a package's tests in `tests/` get its bins
+            // built, to run them through `CARGO_BIN_EXE_<name>`.
+            if harness_tests {
+                for b in &pkg.bins {
+                    if b.required_features.iter().all(|f| st.features.contains(f)) {
+                        drafts.push(draft(UnitKind::Bin(b.name.clone())));
+                    }
                 }
             }
         }
@@ -887,8 +916,10 @@ fn build_units(
                 kind: dep.kind,
             });
         }
-        if let (UnitKind::Bin(_) | UnitKind::Test(_) | UnitKind::HarnessTest(_), Some(lib)) =
-            (&d.kind, &pkg.lib)
+        if let (
+            UnitKind::Bin(_) | UnitKind::Test(_) | UnitKind::BinTest(_) | UnitKind::HarnessTest(_),
+            Some(lib),
+        ) = (&d.kind, &pkg.lib)
             && let Some(&unit) = lib_unit.get(&(d.package, d.domain.clone()))
         {
             deps.insert(UnitDep {
@@ -923,6 +954,19 @@ fn build_units(
                     lib_unit.get(&(d.package, d.domain.clone())).copied()
                 }
                 _ => None,
+            },
+            bins: match d.kind {
+                UnitKind::HarnessTest(_) => drafts
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| {
+                        matches!(o.kind, UnitKind::Bin(_))
+                            && o.package == d.package
+                            && o.domain == d.domain
+                    })
+                    .map(|(i, _)| i)
+                    .collect(),
+                _ => Vec::new(),
             },
         });
     }
@@ -965,8 +1009,9 @@ fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
         stack.extend(u.deps.iter().map(|d| d.unit));
         stack.extend(u.build_script.as_ref().map(|b| b.script));
         // Nothing else links the plain lib when the package has no
-        // `tests/` files.
+        // `tests/` files, and nothing links the bins.
         stack.extend(u.doctest_lib);
+        stack.extend(u.bins.iter().copied());
     }
 
     let mut merged: Vec<(bool, &Unit)> = build.iter().map(|u| (false, u)).collect();
@@ -1018,6 +1063,9 @@ fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
                 b.script = ids[b.script];
             }
             u.doctest_lib = u.doctest_lib.map(|l| ids[l]);
+            for b in &mut u.bins {
+                *b = ids[*b];
+            }
             u
         })
         .collect()

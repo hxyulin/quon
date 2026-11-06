@@ -59,6 +59,9 @@ pub struct RawBuildModel {
     /// manifest expansion, like `cargo_workspace`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub host_tests: BTreeSet<String>,
+    /// `cfg.host_tests().env(..)` and `.env_path(..)`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_test_env: BTreeMap<String, crate::build_model::HostTestEnv>,
     /// `cfg.boot_test(name)`: suites that boot a profile's run binary.
     #[serde(default)]
     pub boot_tests: Arena<RawBootTestDef>,

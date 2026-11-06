@@ -23,7 +23,7 @@
 
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
-use gluon_model::{BuildModel, CrateType, ResolvedConfig};
+use gluon_model::{BuildModel, CrateType, HostTestEnv, ResolvedConfig};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -70,6 +70,19 @@ impl HostTest {
     }
 }
 
+/// Create the `CARGO_TARGET_TMPDIR` that tests in `tests/` were
+/// compiled with, since they may write to it right away. Call before
+/// running them; `--dry-run` does not.
+pub fn create_tmpdir(resolved: &ResolvedConfig) -> Result<()> {
+    let tmp = resolved
+        .project_root
+        .join(crate::manifest::lower::HOST_TEST_TMPDIR);
+    std::fs::create_dir_all(&tmp).map_err(|e| Error::Io {
+        path: tmp,
+        source: e,
+    })
+}
+
 /// The host test executables in `resolved`, sorted by package, then
 /// source.
 pub fn host_tests(
@@ -92,6 +105,17 @@ pub fn host_tests(
         return Ok(Vec::new());
     }
     let outputs = crate::crate_outputs(ctx, model, resolved)?;
+    let extra_env: Vec<(OsString, OsString)> = model
+        .host_test_env
+        .iter()
+        .map(|(k, v)| {
+            let v = match v {
+                HostTestEnv::Value(s) => OsString::from(s),
+                HostTestEnv::Path(p) => resolved.project_root.join(p).into_os_string(),
+            };
+            (OsString::from(k), v)
+        })
+        .collect();
 
     let mut tests = Vec::with_capacity(wanted.len());
     for h in wanted {
@@ -139,6 +163,10 @@ pub fn host_tests(
             doctest: false,
             unbuilt: false,
         });
+    }
+    // `cfg.host_tests().env(..)` wins over the variables Gluon sets.
+    for t in &mut tests {
+        t.env.extend(extra_env.iter().cloned());
     }
     // Doctests last within a package, as in `cargo test`.
     tests.sort_by(|a, b| {

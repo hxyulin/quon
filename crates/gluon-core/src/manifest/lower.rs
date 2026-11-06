@@ -357,10 +357,28 @@ pub fn expand_with(
             .as_ref()
             .map(|run| build_script_def(&graph, run.script, &names));
         let doctest_lib = u.doctest_lib.map(|l| names[l].clone());
+        // `CARGO_BIN_EXE_<bin>` for a host test in `tests/`. The bin
+        // builds first (`artifact_deps`), and its path is a freshness
+        // input of the test (see `compile::env`).
+        let bin_exes: Vec<(String, String)> = u
+            .bins
+            .iter()
+            .map(|&b| {
+                let name = match &graph.units[b].kind {
+                    UnitKind::Bin(n) => n.clone(),
+                    other => unreachable!("a test's bins are bin units, got {other}"),
+                };
+                (format!("CARGO_BIN_EXE_{name}"), names[b].clone())
+            })
+            .collect();
         match lower_unit(u, pkg, source, &names, root, project_root, script) {
             Ok(mut def) => {
                 if let Some(c) = def.cargo.as_mut() {
                     c.doctest_lib = doctest_lib;
+                }
+                for (var, bin) in bin_exes {
+                    def.artifact_deps.push(bin.clone());
+                    def.artifact_env.insert(var, bin);
                 }
                 lowered.push(def)
             }
@@ -599,6 +617,10 @@ fn build_script_def(graph: &UnitGraph, script: usize, names: &[String]) -> Cargo
 }
 
 /// Lower one unit to a crate definition.
+/// `CARGO_TARGET_TMPDIR` of host tests in `tests/`, relative to the
+/// project root.
+pub const HOST_TEST_TMPDIR: &str = "build/tmp";
+
 fn lower_unit(
     u: &super::resolve::Unit,
     pkg: &Package,
@@ -648,6 +670,20 @@ fn lower_unit(
                 _ => CrateType::Bin,
             };
             (ty, &t.path, &t.edition, name.replace('-', "_"), None)
+        }
+        UnitKind::BinTest(name) => {
+            let b = pkg
+                .bins
+                .iter()
+                .find(|b| &b.name == name)
+                .expect("bin-test units come from a bin target");
+            (
+                CrateType::Test,
+                &b.path,
+                &b.edition,
+                name.replace('-', "_"),
+                Some(name),
+            )
         }
         UnitKind::LibTest => {
             let lib = pkg
@@ -725,11 +761,28 @@ fn lower_unit(
     env.insert("CARGO_CRATE_NAME".into(), rustc_name.clone());
     // Cargo sets it for the packages named on its command line, which
     // a host-test root is.
-    if u.is_root || matches!(u.kind, UnitKind::LibTest | UnitKind::HarnessTest(_)) {
+    if u.is_root
+        || matches!(
+            u.kind,
+            UnitKind::LibTest | UnitKind::BinTest(_) | UnitKind::HarnessTest(_)
+        )
+    {
         env.insert("CARGO_PRIMARY_PACKAGE".into(), "1".into());
     }
     if let Some(bin) = bin {
         env.insert("CARGO_BIN_NAME".into(), bin.clone());
+    }
+    // Cargo gives tests in `tests/` a scratch directory under its
+    // target directory; Gluon's is `build/tmp`, which `gluon test`
+    // creates before running them (see `run::host`).
+    if matches!(u.kind, UnitKind::HarnessTest(_)) {
+        env.insert(
+            "CARGO_TARGET_TMPDIR".into(),
+            project_root
+                .join(HOST_TEST_TMPDIR)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
 
     let manifest_dir = relative_to(dir, project_root);

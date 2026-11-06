@@ -2,8 +2,8 @@
 //! [`crate::Config::boot_test`].
 
 use crate::config::Config;
-use gluon_model::Handle;
 use gluon_model::RawBootTestDef;
+use gluon_model::{Handle, HostTestEnv};
 
 /// Chainable builder returned by [`Config::host_tests`].
 pub struct HostTestsBuilder<'cfg> {
@@ -17,6 +17,28 @@ impl HostTestsBuilder<'_> {
     /// twice has no further effect.
     pub fn package(self, name: &str) -> Self {
         self.cfg.raw.host_tests.insert(name.into());
+        self
+    }
+
+    /// Set `name` to `value` for every host test run. The variable is
+    /// set when the tests run, not when they compile, so `env!` does not
+    /// see it.
+    pub fn env(self, name: &str, value: &str) -> Self {
+        self.cfg
+            .raw
+            .host_test_env
+            .insert(name.into(), HostTestEnv::Value(value.into()));
+        self
+    }
+
+    /// Set `name` to `path` for every host test run, made absolute
+    /// against the project root, since each test runs from its own
+    /// package directory.
+    pub fn env_path(self, name: &str, path: impl Into<std::path::PathBuf>) -> Self {
+        self.cfg
+            .raw
+            .host_test_env
+            .insert(name.into(), HostTestEnv::Path(path.into()));
         self
     }
 }
@@ -39,5 +61,24 @@ impl BootTestBuilder<'_> {
             t.profile = Some(name.into());
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use crate::Config;
+    use gluon_model::HostTestEnv;
+
+    #[test]
+    fn host_test_env_records_values_and_paths() {
+        let mut cfg = Config::new();
+        cfg.host_tests()
+            .package("tool")
+            .env("RUST_LOG", "debug")
+            .env_path("TOOL_HOME", "build/home");
+        let env = &cfg.raw.host_test_env;
+        assert_eq!(env["RUST_LOG"], HostTestEnv::Value("debug".into()));
+        assert_eq!(env["TOOL_HOME"], HostTestEnv::Path("build/home".into()));
+        assert!(cfg.raw.host_tests.contains("tool"));
     }
 }
