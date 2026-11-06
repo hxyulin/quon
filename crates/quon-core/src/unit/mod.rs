@@ -1474,7 +1474,7 @@ mod tests {
                 profile: ResolvedProfile {
                     name: "dev".into(),
                     target: TargetSpec::Cross(target),
-                    opt_level: 0,
+                    opt_level: quon_model::OptLevel::Zero,
                     debug_info: true,
                     lto: None,
                     run_binary: None,
@@ -2158,7 +2158,7 @@ mod tests {
             }),
             ("profile", &|fx, _| {
                 fx.resolved.profile.name = "release".into();
-                fx.resolved.profile.opt_level = 3;
+                fx.resolved.profile.opt_level = quon_model::OptLevel::Three;
             }),
             ("project location", &|fx, _| {
                 fx.resolved.project_root = PathBuf::from("/moved");

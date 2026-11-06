@@ -187,6 +187,65 @@ pub struct ProjectDef {
     pub default_profile: Option<String>,
 }
 
+/// A profile's optimization level, as rustc's `-C opt-level` takes it:
+/// 0 to 3, `s` (optimize for size) or `z` (for size, more
+/// aggressively). Firmware commonly uses `s` to fit in flash. The wire
+/// format is the rustc spelling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OptLevel {
+    #[default]
+    #[serde(rename = "0")]
+    Zero,
+    #[serde(rename = "1")]
+    One,
+    #[serde(rename = "2")]
+    Two,
+    #[serde(rename = "3")]
+    Three,
+    #[serde(rename = "s")]
+    S,
+    #[serde(rename = "z")]
+    Z,
+}
+
+impl OptLevel {
+    /// The value of `-C opt-level=` and of a build script's `OPT_LEVEL`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Zero => "0",
+            Self::One => "1",
+            Self::Two => "2",
+            Self::Three => "3",
+            Self::S => "s",
+            Self::Z => "z",
+        }
+    }
+
+    /// The level rustc spells `s`, or `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "0" => Self::Zero,
+            "1" => Self::One,
+            "2" => Self::Two,
+            "3" => Self::Three,
+            "s" => Self::S,
+            "z" => Self::Z,
+            _ => return None,
+        })
+    }
+
+    /// Level `n` of 0 to 3.
+    pub fn from_number(n: u64) -> Option<Self> {
+        Self::parse(&n.to_string())
+    }
+}
+
+impl std::fmt::Display for OptLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Panic strategy for a target — wire format is the lowercase rustc
 /// spelling so existing JSON model dumps round-trip unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -308,7 +367,7 @@ pub struct ProfileDef {
     /// from a parent (resolution walks the chain).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<TargetSpec>,
-    pub opt_level: Option<u8>,
+    pub opt_level: Option<OptLevel>,
     pub debug_info: Option<bool>,
     pub lto: Option<String>,
     /// Resolved run binary. `None` means "use the profile's preset/default".

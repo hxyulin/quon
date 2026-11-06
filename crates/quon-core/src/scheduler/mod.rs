@@ -315,7 +315,7 @@ fn dispatch_run_build_script(
             "scheduler: {what} has no probed target cfgs (scheduler bug)"
         ))
     })?;
-    if opt_level == 0 {
+    if opt_level == quon_model::OptLevel::Zero {
         target_cfgs.push(("debug_assertions".into(), None));
     }
     let mut dep_metadata = Vec::new();
@@ -807,7 +807,7 @@ mod tests {
             profile: ResolvedProfile {
                 name: "dev".into(),
                 target: TargetSpec::Cross(target_handle),
-                opt_level: 0,
+                opt_level: quon_model::OptLevel::Zero,
                 debug_info: false,
                 lto: None,
                 run_binary: None,
@@ -1370,7 +1370,7 @@ mod tests {
             profile: ResolvedProfile {
                 name: "dev".into(),
                 target: TargetSpec::Cross(target_handle),
-                opt_level: 0,
+                opt_level: quon_model::OptLevel::Zero,
                 debug_info: false,
                 lto: None,
                 run_binary: None,

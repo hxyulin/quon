@@ -58,7 +58,7 @@ pub struct RawProfileDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub opt_level: Option<u8>,
+    pub opt_level: Option<crate::OptLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_info: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -368,7 +368,7 @@ mod tests {
             target: Some("x86_64".into()),
             run_binary: Some("kernel".into()),
             runner: Some("qemu".into()),
-            opt_level: Some(0),
+            opt_level: Some(crate::OptLevel::Zero),
             debug_info: Some(true),
             lto: Some("off".into()),
             preset: Some("baseline".into()),
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(de.inherits.as_deref(), Some("base"));
         assert_eq!(de.target.as_deref(), Some("x86_64"));
         assert_eq!(de.run_binary.as_deref(), Some("kernel"));
-        assert_eq!(de.opt_level, Some(0));
+        assert_eq!(de.opt_level, Some(crate::OptLevel::Zero));
         assert_eq!(de.qemu_memory, Some(512));
     }
 

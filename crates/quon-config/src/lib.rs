@@ -50,14 +50,14 @@ pub use error::{ConfigError, Result};
 pub use files::{BuildStep, Download, Esp, Image, Partition};
 pub use krate::{Crate, Dep, Dependency, Edition, Package};
 pub use opt::{Cond, OptRef, Preset, PresetRef};
-pub use profile::{Lto, Profile, ProfileRef};
+pub use profile::{IntoOptLevel, Lto, Profile, ProfileRef};
 pub use quon::{CargoWorkspace, Declare, Quon, Run};
 pub use runner::{Command, Plugin, Qemu, Runner};
 pub use target::Target;
 pub use tests::{BootTest, HostTests};
 
 pub use quon_model::{
-    Binding, BootMode, ConfigValue, CrateType, DisplayMode, ImageFormat, PartitionTable,
+    Binding, BootMode, ConfigValue, CrateType, DisplayMode, ImageFormat, OptLevel, PartitionTable,
     RawBuildModel, SerialMode as Serial, TristateVal,
 };
 /// For plugin settings that are arrays or objects:
@@ -70,7 +70,7 @@ pub mod prelude {
     pub use crate::{
         Artifact, Binding, BootMode, BootTest, BuildStep, Command, Cond, ConfigValue, Crate,
         CrateType, Declare, Dep, Dependency, DisplayMode, Download, Edition, Esp, Image,
-        ImageFormat, Lto, Package, Partition, PartitionTable, Plugin, Preset, Profile, Qemu, Quon,
-        Result, Runner, Serial, Target, TristateVal,
+        ImageFormat, Lto, OptLevel, Package, Partition, PartitionTable, Plugin, Preset, Profile,
+        Qemu, Quon, Result, Runner, Serial, Target, TristateVal,
     };
 }

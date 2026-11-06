@@ -525,7 +525,7 @@ mod tests {
         ResolvedProfile {
             name: "debug".into(),
             target: TargetSpec::Cross(target),
-            opt_level: 0,
+            opt_level: quon_model::OptLevel::Zero,
             debug_info: false,
             lto: None,
             run_binary: None,
@@ -2436,7 +2436,7 @@ mod tests {
         let mut model = BuildModel::default();
         let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
         let mut resolved = make_resolved(th, tmp.path().to_path_buf());
-        resolved.profile.opt_level = 3;
+        resolved.profile.opt_level = quon_model::OptLevel::Three;
         let mut vctx = VendorBuildContext::new();
         let syn = vctx
             .add(vendor_unit(
@@ -2479,7 +2479,7 @@ mod tests {
         let mut model = BuildModel::default();
         let th = insert_target(&mut model, build_std_target());
         let mut resolved = make_resolved(th, tmp.path().to_path_buf());
-        resolved.profile.opt_level = 3;
+        resolved.profile.opt_level = quon_model::OptLevel::Three;
         let cross = TargetSpec::Cross(th);
         let host = TargetSpec::Host;
         // top → a → b (cross libs); top → derive (host proc macro) → quote.

@@ -3,6 +3,7 @@
 use crate::opt::PresetRef;
 use crate::quon::{Declare, Quon};
 use crate::runner::Runner;
+use quon_model::OptLevel;
 
 /// Link-time optimisation, passed to rustc as `-C lto=<mode>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,42 @@ impl Lto {
         }
     }
 }
+
+/// A value [`Profile::opt_level`] takes: a number from 0 to 3, `"s"`,
+/// `"z"`, or an [`OptLevel`]. Another value is reported when `quon.rs`
+/// finishes.
+pub trait IntoOptLevel {
+    #[doc(hidden)]
+    fn into_opt_level(self) -> Result<OptLevel, String>;
+}
+
+impl IntoOptLevel for OptLevel {
+    fn into_opt_level(self) -> Result<OptLevel, String> {
+        Ok(self)
+    }
+}
+
+impl IntoOptLevel for &str {
+    fn into_opt_level(self) -> Result<OptLevel, String> {
+        OptLevel::parse(self).ok_or_else(|| format!("\"{self}\""))
+    }
+}
+
+// An unsuffixed literal such as `opt_level(2)` is an `i32`, so the
+// signed type needs an impl too.
+macro_rules! numbers_into_opt_level {
+    ($($t:ty),*) => {$(
+        impl IntoOptLevel for $t {
+            fn into_opt_level(self) -> Result<OptLevel, String> {
+                u64::try_from(self)
+                    .ok()
+                    .and_then(OptLevel::from_number)
+                    .ok_or_else(|| self.to_string())
+            }
+        }
+    )*};
+}
+numbers_into_opt_level!(i32, u8, u32);
 
 /// A build profile, like a Cargo profile: optimisation, debug info,
 /// LTO, and the preset of config options. Select one with
@@ -43,7 +80,8 @@ impl Lto {
 pub struct Profile {
     pub(crate) name: String,
     pub(crate) inherits: Option<String>,
-    pub(crate) opt_level: Option<u8>,
+    /// The level, or the value `opt_level` was given that is none.
+    pub(crate) opt_level: Option<Result<OptLevel, String>>,
     pub(crate) debug_info: Option<bool>,
     pub(crate) lto: Option<Lto>,
     pub(crate) preset: Option<String>,
@@ -86,9 +124,17 @@ impl Profile {
         self
     }
 
-    /// rustc's `-C opt-level`, 0 to 3.
-    pub fn opt_level(mut self, level: u8) -> Self {
-        self.opt_level = Some(level);
+    /// rustc's `-C opt-level`: 0 to 3, `"s"` to optimize for size, or
+    /// `"z"` to optimize for size more aggressively.
+    ///
+    /// ```
+    /// # use quon_config::prelude::*;
+    /// let fw = Profile::release().opt_level("s");
+    /// let dev = Profile::dev().opt_level(1);
+    /// # let _ = (fw, dev);
+    /// ```
+    pub fn opt_level(mut self, level: impl IntoOptLevel) -> Self {
+        self.opt_level = Some(level.into_opt_level());
         self
     }
 

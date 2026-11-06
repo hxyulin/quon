@@ -31,7 +31,7 @@ pub struct ResolvedProfile {
     pub name: String,
     /// The profile's target, or the host for `Target::host()`.
     pub target: TargetSpec,
-    pub opt_level: u8,
+    pub opt_level: crate::OptLevel,
     pub debug_info: bool,
     pub lto: Option<String>,
     pub run_binary: Option<Handle<CrateDef>>,
@@ -155,7 +155,7 @@ mod tests {
         let parent = ResolvedProfile {
             name: "parent".into(),
             target: TargetSpec::Cross(Handle::new(0)),
-            opt_level: 2,
+            opt_level: crate::OptLevel::Two,
             debug_info: false,
             lto: Some("fat".into()),
             run_binary: None,
@@ -169,7 +169,7 @@ mod tests {
         let mut child = ResolvedProfile {
             name: "child".into(),
             target: TargetSpec::Cross(Handle::new(0)),
-            opt_level: 0, // child overrides
+            opt_level: crate::OptLevel::Zero, // child overrides
             debug_info: true,
             lto: None, // child inherits
             run_binary: None,
@@ -182,7 +182,8 @@ mod tests {
         };
         child.merge_inherited(&parent);
         assert_eq!(
-            child.opt_level, 0,
+            child.opt_level,
+            crate::OptLevel::Zero,
             "child's value preserved (already non-default)"
         );
         assert!(child.debug_info, "child's value preserved");

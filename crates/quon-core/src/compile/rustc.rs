@@ -282,7 +282,7 @@ impl RustcCommandBuilder {
         self
     }
 
-    pub fn opt_level(&mut self, level: u8) -> &mut Self {
+    pub fn opt_level(&mut self, level: quon_model::OptLevel) -> &mut Self {
         self.args.push(OsString::from("-C"));
         self.args.push(OsString::from(format!("opt-level={level}")));
         self
@@ -548,9 +548,21 @@ mod tests {
     }
 
     #[test]
+    fn size_opt_levels_use_rustcs_spelling() {
+        for (level, arg) in [
+            (quon_model::OptLevel::S, "opt-level=s"),
+            (quon_model::OptLevel::Z, "opt-level=z"),
+        ] {
+            let mut bld = b("/usr/bin/rustc");
+            bld.opt_level(level);
+            assert_eq!(bld.args(), &[os("-C"), os(arg)]);
+        }
+    }
+
+    #[test]
     fn codegen_setters_emit_dash_c_pairs() {
         let mut bld = b("/usr/bin/rustc");
-        bld.opt_level(3)
+        bld.opt_level(quon_model::OptLevel::Three)
             .debug_info(true)
             .debug_info(false)
             .lto("fat")

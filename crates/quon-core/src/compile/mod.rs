@@ -50,7 +50,7 @@ pub use rustc_info::RustcInfo;
 /// directories can stay profile-independent without serving an
 /// artifact built with the other profile's flags. Host tools declared
 /// in `quon.rs` use the active profile; see [`crate::unit`].
-pub const HOST_OPT_LEVEL: u8 = 0;
+pub const HOST_OPT_LEVEL: quon_model::OptLevel = quon_model::OptLevel::Zero;
 
 /// Debug-info setting for host units. See [`HOST_OPT_LEVEL`].
 pub const HOST_DEBUG_INFO: bool = false;

@@ -425,7 +425,7 @@ fn multi_profile_fixture_model() {
         .lookup("debug")
         .expect("model should have a 'debug' profile");
     let debug = model.profiles.get(debug_h).unwrap();
-    assert_eq!(debug.opt_level, Some(0));
+    assert_eq!(debug.opt_level, Some(quon_core::model::OptLevel::Zero));
     assert_eq!(debug.debug_info, Some(true));
 
     let release_h = model
@@ -433,7 +433,7 @@ fn multi_profile_fixture_model() {
         .lookup("release")
         .expect("model should have a 'release' profile");
     let release = model.profiles.get(release_h).unwrap();
-    assert_eq!(release.opt_level, Some(2));
+    assert_eq!(release.opt_level, Some(quon_core::model::OptLevel::Two));
     assert_eq!(release.debug_info, Some(false));
     assert_eq!(release.lto.as_deref(), Some("thin"));
 

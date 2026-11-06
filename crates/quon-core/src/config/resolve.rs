@@ -78,12 +78,9 @@ pub fn resolve(
     };
 
     // 4. opt_level / debug_info / lto / run_binary with defaults.
-    let opt_level = flattened.opt_level.unwrap_or(0);
-    if opt_level > 3 {
-        diags.push(Diagnostic::error(format!(
-            "profile '{profile_name}' opt_level {opt_level} out of range (expected 0..=3)"
-        )));
-    }
+    // quon-config rejects a level rustc does not take, so any value
+    // here is valid.
+    let opt_level = flattened.opt_level.unwrap_or_default();
     let debug_info = flattened.debug_info.unwrap_or(false);
     let lto = flattened.lto.clone();
     let run_binary = flattened.run_binary;
@@ -910,7 +907,7 @@ mod tests {
             q.add(Profile::new("default").opt_level(2).debug_info(true));
         });
         let cfg = resolve_default(&model).expect("resolve");
-        assert_eq!(cfg.profile.opt_level, 2);
+        assert_eq!(cfg.profile.opt_level, quon_model::OptLevel::Two);
         assert!(cfg.profile.debug_info);
         assert_eq!(
             cfg.profile.target,
@@ -929,7 +926,8 @@ mod tests {
         });
         let cfg = resolve(&model, "dev", None, Path::new("/tmp"), None).expect("resolve");
         assert_eq!(
-            cfg.profile.opt_level, 2,
+            cfg.profile.opt_level,
+            quon_model::OptLevel::Two,
             "should inherit opt_level from base"
         );
         assert!(cfg.profile.debug_info, "child sets debug_info");
@@ -1013,7 +1011,7 @@ mod tests {
             "default".into(),
             RawProfileDef {
                 name: "default".into(),
-                opt_level: Some(0),
+                opt_level: Some(quon_model::OptLevel::Zero),
                 ..RawProfileDef::default()
             },
         );

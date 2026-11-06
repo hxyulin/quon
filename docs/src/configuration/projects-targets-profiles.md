@@ -94,7 +94,7 @@ reports an unknown name when it checks the model.
 
 | Method | Description |
 |---|---|
-| `.opt_level(n)` | rustc's `-C opt-level`, 0 to 3 |
+| `.opt_level(n)` | rustc's `-C opt-level`: 0 to 3, `"s"` or `"z"` |
 | `.debug_info(bool)` | Include debug info |
 | `.lto(Lto::Thin)` | Link-time optimisation: `Lto::Off`, `Lto::Thin` or `Lto::Fat` |
 | `.preset(&preset)` | Apply a [preset](./config-options.md#presets) of config option values |

@@ -798,6 +798,17 @@ impl Lowering {
     /// parent's runner override reaches its children.
     fn lower_profile(&mut self, p: &Profile, target: Option<&str>, run: Option<&RawRunDef>) {
         let root = p.inherits.is_none();
+        let opt_level = match &p.opt_level {
+            Some(Ok(level)) => Some(*level),
+            Some(Err(value)) => {
+                self.error(format!(
+                    "profile '{}': opt_level {value} is not 0, 1, 2, 3, \"s\" or \"z\"",
+                    p.name
+                ));
+                None
+            }
+            None => None,
+        };
         let runner = p
             .runner
             .clone()
@@ -810,7 +821,7 @@ impl Lowering {
                 target: target.filter(|_| root).map(Into::into),
                 run_binary: run.filter(|_| root).map(|r| r.binary.clone()),
                 runner,
-                opt_level: p.opt_level,
+                opt_level,
                 debug_info: p.debug_info,
                 lto: p.lto.map(|l| l.as_str().into()),
                 preset: p.preset.clone(),
@@ -1095,11 +1106,11 @@ mod tests {
     #[test]
     fn dev_and_release_always_exist() {
         let raw = ok(|_| {});
-        assert_eq!(profile(&raw, "dev").opt_level, Some(0));
+        assert_eq!(profile(&raw, "dev").opt_level, Some(OptLevel::Zero));
         assert_eq!(profile(&raw, "dev").target.as_deref(), Some("host"));
         let release = profile(&raw, "release");
         assert_eq!(release.inherits.as_deref(), Some("dev"));
-        assert_eq!(release.opt_level, Some(3));
+        assert_eq!(release.opt_level, Some(OptLevel::Three));
         assert_eq!(release.target, None, "inherited from dev");
         assert_eq!(raw.project.unwrap().default_profile.as_deref(), Some("dev"));
     }
@@ -1315,6 +1326,31 @@ mod tests {
         });
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("Target::host() cannot use build_std()"));
+    }
+
+    #[test]
+    fn opt_level_takes_sizes_and_reports_other_values() {
+        let (raw, errors) = lower(|q| {
+            q.add(Profile::release().opt_level("s"));
+            q.add(Profile::new("tiny").opt_level("z"));
+            q.add(Profile::new("fast").opt_level(OptLevel::Two));
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(profile(&raw, "release").opt_level, Some(OptLevel::S));
+        assert_eq!(profile(&raw, "tiny").opt_level, Some(OptLevel::Z));
+        assert_eq!(profile(&raw, "fast").opt_level, Some(OptLevel::Two));
+
+        let (_, errors) = lower(|q| {
+            q.add(Profile::new("a").opt_level(4));
+            q.add(Profile::new("b").opt_level("x"));
+        });
+        assert_eq!(
+            errors,
+            [
+                "profile 'a': opt_level 4 is not 0, 1, 2, 3, \"s\" or \"z\"",
+                "profile 'b': opt_level \"x\" is not 0, 1, 2, 3, \"s\" or \"z\""
+            ]
+        );
     }
 
     #[test]

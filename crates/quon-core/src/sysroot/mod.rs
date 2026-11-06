@@ -335,7 +335,7 @@ fn build_sysroot_crate(
         .incremental(&incremental_dir)
         // Sysroot crates are always optimised — bare-metal code
         // performance is never worth trading for a faster sysroot build.
-        .opt_level(2)
+        .opt_level(quon_model::OptLevel::Two)
         .debug_info(false);
 
     // Propagate the target's panic strategy to sysroot crates. Bare-metal

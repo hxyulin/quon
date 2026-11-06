@@ -364,7 +364,7 @@ mod tests {
         ResolvedProfile {
             name: "debug".into(),
             target: quon_model::TargetSpec::Cross(Handle::new(0)),
-            opt_level: 0,
+            opt_level: quon_model::OptLevel::Zero,
             debug_info: true,
             lto: None,
             run_binary: None,

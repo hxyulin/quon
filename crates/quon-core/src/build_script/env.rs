@@ -62,7 +62,7 @@ pub enum ScriptPlatform<'a> {
         /// Quon's sysroot for this target. Passed to probes through
         /// `CARGO_ENCODED_RUSTFLAGS`.
         quon_sysroot: &'a Path,
-        opt_level: u8,
+        opt_level: quon_model::OptLevel,
         debug_info: bool,
     },
 }
@@ -153,9 +153,13 @@ pub fn script_env(input: &ScriptEnvInput<'_>) -> BTreeMap<String, OsString> {
             ..
         } => (opt_level, debug_info),
     };
-    let profile = if opt_level == 0 { "debug" } else { "release" };
+    let profile = if opt_level == quon_model::OptLevel::Zero {
+        "debug"
+    } else {
+        "release"
+    };
     set("PROFILE", profile.into());
-    set("OPT_LEVEL", opt_level.to_string().into());
+    set("OPT_LEVEL", opt_level.as_str().into());
     set("DEBUG", debug_info.to_string().into());
     set("NUM_JOBS", input.num_jobs.to_string().into());
 
@@ -367,7 +371,7 @@ mod tests {
         let platform = ScriptPlatform::Cross {
             target: ScriptTarget::Builtin("x86_64-unknown-none"),
             quon_sysroot: Path::new("/build/sysroot/kernel"),
-            opt_level: 2,
+            opt_level: quon_model::OptLevel::Two,
             debug_info: true,
         };
         let env = script_env(&input(&pkg, platform, &cfgs, &features, &flags, &deps));
@@ -446,7 +450,7 @@ TARGET=x86_64-unknown-none
         let platform = ScriptPlatform::Cross {
             target: ScriptTarget::Custom(Path::new("/proj/targets/x86_64-hadron.json")),
             quon_sysroot: Path::new("/build/sysroot/hadron"),
-            opt_level: 0,
+            opt_level: quon_model::OptLevel::Zero,
             debug_info: true,
         };
         let env = script_env(&input(&pkg, platform, &[], &[], &[], &[]));

@@ -84,7 +84,7 @@ impl Shell {
     /// (`built`, `checked`, `linted`); the counts follow Quon's cache
     /// summary.
     pub fn finished(&mut self, profile: &quon_core::model::ResolvedProfile, counts: Counts) {
-        let opt = if profile.opt_level == 0 {
+        let opt = if profile.opt_level == quon_core::model::OptLevel::Zero {
             "unoptimized"
         } else {
             "optimized"

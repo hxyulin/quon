@@ -69,6 +69,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`Target::builtin(..).build_std()` builds them from source**, as
   every builtin target did before. Custom JSON targets always do.
 
+### Added (size opt-levels)
+
+- **`Profile::opt_level` takes `"s"` and `"z"`**, rustc's levels that
+  optimize for size, as well as 0 to 3 and an `OptLevel`. Firmware
+  commonly builds its release profile with `"s"` to fit in flash. A
+  build script sees the level in `OPT_LEVEL`, as under Cargo.
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the
