@@ -59,6 +59,11 @@ pub struct RawBuildModel {
     /// manifest expansion, like `cargo_workspace`.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub host_tests: BTreeSet<String>,
+    /// `q.host_tests().package_with_features(name, ..)`: the features
+    /// of the `host_tests` packages that resolve on their own. A
+    /// package missing here resolves with the others.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_test_features: BTreeMap<String, BTreeSet<String>>,
     /// `q.env(..)`: set for every rustc and build-script run.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,

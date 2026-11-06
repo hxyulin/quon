@@ -528,6 +528,7 @@ impl Quon {
         });
         l.raw.cargo_workspace = self.workspace.map(|w| w.0);
         l.raw.host_tests = self.host_tests.packages;
+        l.raw.host_test_features = self.host_tests.features;
         l.raw.host_test_env = self.host_tests.env;
         l.raw.env = self.env;
         l.raw.kconfig_includes = self.kconfig;

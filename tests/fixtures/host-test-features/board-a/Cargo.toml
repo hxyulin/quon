@@ -1,0 +1,14 @@
+[package]
+name = "board-a"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+host = ["chip/a"]
+
+[dependencies]
+chip = { path = "../chip" }
+
+[[bin]]
+name = "board-a"
+test = false

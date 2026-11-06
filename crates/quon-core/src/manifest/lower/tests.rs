@@ -1468,6 +1468,180 @@ fn host_tests_reject_unknown_and_proc_macro_packages() {
     assert!(err.contains("`nope` is not a member"), "{err}");
 }
 
+/// Member `fw` with a lib, the MCU-only bin `fw` and the test `api`,
+/// both with `test = false`, the way firmware crates opt their bins out
+/// of `cargo test`.
+fn firmware_workspace(lib: &str) -> tempfile::TempDir {
+    let fw = manifest(
+        "fw",
+        &format!(
+            "{lib}[[bin]]\nname = \"fw\"\ntest = false\n[[test]]\nname = \"api\"\ntest = false\n"
+        ),
+    );
+    workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"fw\"]\n",
+        ),
+        ("fw/Cargo.toml", &fw),
+        ("fw/src/lib.rs", ""),
+        ("fw/src/main.rs", ""),
+        ("fw/tests/api.rs", ""),
+    ])
+}
+
+fn host_test_fw() -> RawBuildModel {
+    raw_model(|q, _| {
+        q.cargo_workspace(".");
+        q.host_tests().package("fw");
+    })
+}
+
+/// `test = false` leaves a target out of the host tests, as `cargo
+/// test` leaves it out: only the lib's unit tests build.
+#[test]
+fn host_tests_leave_out_targets_with_test_false() {
+    let ws = firmware_workspace("");
+    let mut raw = host_test_fw();
+    let warnings = expand_at(&mut raw, ws.path()).expect("expand");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        dump(&raw),
+        "\
+fw [cargo:host-test] host Lib fw/src/lib.rs 2021 f=[] d=[] rustc=fw
+fw@test [cargo:host-test] host Test fw/src/lib.rs 2021 f=[] d=[] rustc=fw
+"
+    );
+
+    // `[lib] test = false` drops the lib test, and with it the
+    // doctests, which Quon says unless `doctest = false` agrees.
+    let ws = firmware_workspace("[lib]\ntest = false\n");
+    let mut raw = host_test_fw();
+    let warnings = expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(dump(&raw), "");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.message.contains("so Quon skips its doctests too")),
+        "{warnings:?}"
+    );
+    let ws = firmware_workspace("[lib]\ntest = false\ndoctest = false\n");
+    let mut raw = host_test_fw();
+    let warnings = expand_at(&mut raw, ws.path()).expect("expand");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A `harness = false` lib or bin under test would build with libtest
+/// anyway, so it is an error that names the way out.
+#[test]
+fn host_tests_reject_a_lib_or_bin_without_a_harness() {
+    let ws = workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"a\"]\n",
+        ),
+        (
+            "a/Cargo.toml",
+            &manifest(
+                "a",
+                "[lib]\nharness = false\n[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n\
+                 harness = false\n",
+            ),
+        ),
+        ("a/src/lib.rs", ""),
+        ("a/src/main.rs", ""),
+    ]);
+    let mut raw = raw_model(|q, _| {
+        q.cargo_workspace(".");
+        q.host_tests().package("a");
+    });
+    let err = expand_err(&mut raw, ws.path());
+    assert!(
+        err.contains("the lib of package `a` sets `harness = false`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("bin `tool` of package `a` sets `harness = false`"),
+        "{err}"
+    );
+    assert!(err.contains("set `test = false` or remove"), "{err}");
+}
+
+/// Boards `ba` and `bb` turn on chip features of `hal` that exclude
+/// each other, through their `host` features. `proto` depends on `hal`
+/// without a chip, and `util` is shared by all three.
+fn chip_workspace() -> tempfile::TempDir {
+    let board = |chip: &str| {
+        format!(
+            "[features]\nhost = [\"hal/{chip}\"]\n\
+             [dependencies]\nhal = {{ path = \"../hal\" }}\nutil = {{ path = \"../util\" }}\n"
+        )
+    };
+    let files = [
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"ba\", \"bb\", \"proto\"]\n".to_string(),
+        ),
+        ("ba/Cargo.toml", manifest("ba", &board("chip-a"))),
+        ("bb/Cargo.toml", manifest("bb", &board("chip-b"))),
+        (
+            "proto/Cargo.toml",
+            manifest(
+                "proto",
+                "[dependencies]\nhal = { path = \"../hal\" }\nutil = { path = \"../util\" }\n",
+            ),
+        ),
+        (
+            "hal/Cargo.toml",
+            manifest("hal", "[features]\nchip-a = []\nchip-b = []\n"),
+        ),
+        ("util/Cargo.toml", manifest("util", "")),
+    ];
+    let mut files: Vec<(String, String)> = files
+        .iter()
+        .map(|(p, c)| (p.to_string(), c.clone()))
+        .collect();
+    for p in ["ba", "bb", "proto", "hal", "util"] {
+        files.push((format!("{p}/src/lib.rs"), String::new()));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    workspace(&files)
+}
+
+/// Each package given features resolves on its own, so `hal` builds
+/// once per chip and once for `proto`, without a chip. `util` has the
+/// same features and deps in all three resolutions, so it builds once.
+#[test]
+fn host_test_packages_with_features_resolve_on_their_own() {
+    let ws = chip_workspace();
+    let mut raw = raw_model(|q, _| {
+        q.cargo_workspace(".");
+        q.host_tests()
+            .package("proto")
+            .package_with_features("ba", ["host"])
+            .package_with_features("bb", ["host"]);
+    });
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        dump(&raw),
+        "\
+ba [cargo:host-test] host Lib ba/src/lib.rs 2021 f=[host] d=[hal->hal@host-test#1,util->util] rustc=ba
+ba@test [cargo:host-test] host Test ba/src/lib.rs 2021 f=[host] d=[hal->hal@host-test#1,util->util] rustc=ba
+bb [cargo:host-test] host Lib bb/src/lib.rs 2021 f=[host] d=[hal->hal@host-test#2,util->util] rustc=bb
+bb@test [cargo:host-test] host Test bb/src/lib.rs 2021 f=[host] d=[hal->hal@host-test#2,util->util] rustc=bb
+hal@host-test [cargo:host-test] host Lib hal/src/lib.rs 2021 f=[] d=[] rustc=hal
+hal@host-test#1 [cargo:host-test] host Lib hal/src/lib.rs 2021 f=[chip-a] d=[] rustc=hal
+hal@host-test#2 [cargo:host-test] host Lib hal/src/lib.rs 2021 f=[chip-b] d=[] rustc=hal
+proto [cargo:host-test] host Lib proto/src/lib.rs 2021 f=[] d=[hal->hal@host-test,util->util] rustc=proto
+proto@test [cargo:host-test] host Test proto/src/lib.rs 2021 f=[] d=[hal->hal@host-test,util->util] rustc=proto
+util [cargo:host-test] host Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
+"
+    );
+}
+
 #[test]
 fn host_tests_need_a_workspace() {
     let mut raw = raw_model(|q, _| {

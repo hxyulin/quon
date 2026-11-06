@@ -193,6 +193,8 @@ pub struct TomlBin {
     #[serde(default, alias = "required_features")]
     pub required_features: Vec<String>,
     pub edition: Option<String>,
+    pub test: Option<bool>,
+    pub harness: Option<bool>,
 }
 
 /// One `[[test]]` table.
@@ -204,6 +206,7 @@ pub struct TomlTest {
     #[serde(default, alias = "required_features")]
     pub required_features: Vec<String>,
     pub edition: Option<String>,
+    pub test: Option<bool>,
     pub harness: Option<bool>,
 }
 

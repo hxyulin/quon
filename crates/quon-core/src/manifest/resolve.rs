@@ -36,6 +36,13 @@
 //! [`UnitKind::BinTest`] per bin (the bin built with `--test`), and a
 //! [`UnitKind::HarnessTest`] per `harness = true` test in `tests/`.
 //! Its units are not root units: they take none of a group's settings.
+//! A target with `test = false` yields no unit.
+//!
+//! A host-test package given features (`package_with_features`)
+//! resolves in a pass of its own instead, as `cargo test -p <name>
+//! --features ..` would, so its features reach no other host test. Its
+//! units join the graph the way test-pass units do: one equal to a unit
+//! already there merges into it.
 
 use super::platform::TargetPlatform;
 use super::workspace::{
@@ -318,6 +325,15 @@ impl UnitGraph {
     }
 }
 
+/// A `q.host_tests()` package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTestRoot {
+    pub package: PackageIdx,
+    /// `Some` for a package that resolves on its own, with these
+    /// features. See the module docs.
+    pub features: Option<Vec<String>>,
+}
+
 /// A package to build in a domain, like `cargo build -p`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Root {
@@ -339,7 +355,7 @@ pub struct Root {
 pub fn resolve(
     set: &PackageSet,
     roots: &[Root],
-    host_tests: &[PackageIdx],
+    host_tests: &[HostTestRoot],
     platforms: &BTreeMap<Domain, TargetPlatform>,
     host_triple: &str,
 ) -> Result<UnitGraph> {
@@ -347,24 +363,44 @@ pub fn resolve(
     let mut units = build_units(set, roots, &states, platforms, host_triple, Pass::Build)?;
     let mut test_roots: BTreeSet<Key> = roots
         .iter()
-        .filter(|r| set.packages[r.package].tests.iter().any(|t| !t.harness))
+        .filter(|r| {
+            set.packages[r.package]
+                .tests
+                .iter()
+                .any(|t| t.test && !t.harness)
+        })
         .map(|r| (r.package, r.domain.clone()))
         .collect();
     // The build pass never sees the host-test roots, so `quon build`
     // builds none of their units.
     let mut all_roots = roots.to_vec();
-    for &p in host_tests {
-        test_roots.insert((p, Domain::HostTest));
-        all_roots.push(Root {
-            package: p,
+    let mut isolated = Vec::new();
+    for h in host_tests {
+        let root = Root {
+            package: h.package,
             domain: Domain::HostTest,
-            features: Vec::new(),
+            features: h.features.clone().unwrap_or_default(),
             default_features: true,
-        });
+        };
+        if h.features.is_some() {
+            isolated.push(root);
+        } else {
+            test_roots.insert((h.package, Domain::HostTest));
+            all_roots.push(root);
+        }
     }
     if !test_roots.is_empty() {
         let states = run_resolver(set, &all_roots, platforms, test_roots)?;
         let test = build_units(set, &all_roots, &states, platforms, host_triple, Pass::Test)?;
+        units = merge_test_units(units, test);
+    }
+    // Merging by hash means a dependency these passes give the same
+    // features, and so the same deps, builds once across all of them.
+    for root in isolated {
+        let dev_roots = BTreeSet::from([(root.package, Domain::HostTest)]);
+        let roots = [root];
+        let states = run_resolver(set, &roots, platforms, dev_roots)?;
+        let test = build_units(set, &roots, &states, platforms, host_triple, Pass::Test)?;
         units = merge_test_units(units, test);
     }
     Ok(UnitGraph {
@@ -785,7 +821,7 @@ fn build_units(
         if is_root && pass == Pass::Test {
             // Tests that need libtest are left to `cargo test`;
             // expansion warns about them.
-            for t in pkg.tests.iter().filter(|t| !t.harness) {
+            for t in pkg.tests.iter().filter(|t| t.test && !t.harness) {
                 if t.required_features.iter().all(|f| st.features.contains(f)) {
                     drafts.push(Draft {
                         package: key.0,
@@ -807,10 +843,12 @@ fn build_units(
                 state: key.clone(),
                 is_root: false,
             };
-            if pkg.lib.as_ref().is_some_and(|l| !l.proc_macro) {
+            // `test = false` leaves a target out, as `cargo test` does:
+            // a firmware bin that only builds for its MCU says so.
+            if pkg.lib.as_ref().is_some_and(|l| !l.proc_macro && l.test) {
                 drafts.push(draft(UnitKind::LibTest));
             }
-            for b in &pkg.bins {
+            for b in pkg.bins.iter().filter(|b| b.test) {
                 if b.required_features.iter().all(|f| st.features.contains(f)) {
                     drafts.push(draft(UnitKind::BinTest(b.name.clone())));
                 }
@@ -818,7 +856,7 @@ fn build_units(
             // `harness = false` tests are QEMU tests; they build only
             // for the package's target roots.
             let mut harness_tests = false;
-            for t in pkg.tests.iter().filter(|t| t.harness) {
+            for t in pkg.tests.iter().filter(|t| t.test && t.harness) {
                 if t.required_features.iter().all(|f| st.features.contains(f)) {
                     drafts.push(draft(UnitKind::HarnessTest(t.name.clone())));
                     harness_tests = true;
@@ -986,7 +1024,8 @@ fn sort_deps(deps: &mut Vec<UnitDep>) {
 }
 
 /// Add to the build pass's units the tests and every test-pass unit
-/// they reach that no build unit equals. Equal means equal hash, which
+/// they reach that no build unit equals. `build` may already hold the
+/// units of earlier test passes, which then count as build units. Equal means equal hash, which
 /// covers package, kind, domain, features and the deps' hashes, so a
 /// dependency the dev edges leave alone builds once. Ids follow the
 /// sort order, which keeps the build units in their relative order.

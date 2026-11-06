@@ -118,6 +118,12 @@ pub struct BinTarget {
     pub path: PathBuf,
     pub edition: String,
     pub required_features: Vec<String>,
+    /// `test`, true when absent: whether host tests build the bin with
+    /// `--test` for its unit tests.
+    pub test: bool,
+    /// `harness`, true when absent. Quon only builds a bin under test
+    /// with libtest; lowering rejects `harness = false` there.
+    pub harness: bool,
 }
 
 /// An integration test: a `[[test]]` table or a file Cargo would find
@@ -128,6 +134,9 @@ pub struct TestTarget {
     pub path: PathBuf,
     pub edition: String,
     pub required_features: Vec<String>,
+    /// `test`, true when absent. A test with `test = false` is left out
+    /// of `quon test`, as `cargo test` leaves it out.
+    pub test: bool,
     /// `harness`, true when absent. Quon builds only `harness = false`
     /// tests, since a harness needs libtest; lowering rejects the rest.
     pub harness: bool,
@@ -1082,6 +1091,8 @@ impl ManifestCx<'_> {
                 path,
                 edition,
                 required_features: b.required_features.clone(),
+                test: b.test.unwrap_or(true),
+                harness: b.harness.unwrap_or(true),
             });
         }
         if autobins != Some(false) {
@@ -1121,6 +1132,8 @@ impl ManifestCx<'_> {
                     path,
                     edition: edition.to_string(),
                     required_features: Vec::new(),
+                    test: true,
+                    harness: true,
                 });
             }
         }
@@ -1160,6 +1173,7 @@ impl ManifestCx<'_> {
                 path,
                 edition,
                 required_features: t.required_features.clone(),
+                test: t.test.unwrap_or(true),
                 harness: t.harness.unwrap_or(true),
             });
         }
@@ -1185,6 +1199,7 @@ impl ManifestCx<'_> {
                     path,
                     edition: edition.to_string(),
                     required_features: Vec::new(),
+                    test: true,
                     harness: true,
                 });
             }

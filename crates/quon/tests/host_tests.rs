@@ -97,6 +97,32 @@ fn host_tests_build_and_run_on_the_host() {
     );
 }
 
+/// Two boards whose host features select different chips of one crate
+/// each resolve on their own, and their firmware bins, which say
+/// `test = false` and do not compile for the host, are left out.
+#[test]
+#[ignore]
+fn host_test_packages_with_features_build_apart() {
+    if !support::rustc_available("host_test_packages_with_features_build_apart") {
+        return;
+    }
+    let (_tmp, fixture) = support::setup_fixture("host-test-features");
+    support::seed_sysroot(&fixture);
+    let (ok, stdout, stderr) = run(&fixture, &["test"], false);
+    assert!(ok, "{stderr}");
+    for t in ["uses_chip_a", "uses_chip_b"] {
+        assert!(
+            stdout.contains(&format!("test tests::{t} ... ok")),
+            "{stdout}"
+        );
+    }
+    // Each board's unit tests and (empty) doctests.
+    assert!(
+        stderr.contains("test result: ok. passed: host 4 of 4"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn dry_run_prints_each_host_test() {
     let (_tmp, fixture) = support::setup_fixture("host-tests");

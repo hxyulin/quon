@@ -48,15 +48,50 @@ impl Declare for BootTest {
 #[derive(Debug, Default)]
 pub struct HostTests {
     pub(crate) packages: BTreeSet<String>,
+    pub(crate) features: BTreeMap<String, BTreeSet<String>>,
     pub(crate) env: BTreeMap<String, HostTestEnv>,
 }
 
 impl HostTests {
-    /// Build and run package `name`'s unit tests, and its
-    /// `harness = true` tests in `tests/`, against the host's standard
-    /// library. The package must build for the host.
+    /// Build and run package `name`'s unit tests, its doctests, and
+    /// its `harness = true` tests in `tests/`, against the host's
+    /// standard library. The package must build for the host. A target
+    /// with `test = false` in `Cargo.toml` is left out, as `cargo test`
+    /// leaves it out.
+    ///
+    /// The packages added here resolve Cargo features together, as
+    /// `cargo test -p a -p b` does.
     pub fn package(&mut self, name: impl Into<String>) -> &mut Self {
         self.packages.insert(name.into());
+        self
+    }
+
+    /// Like [`package`](Self::package), with `features` of package
+    /// `name` enabled. The package resolves features on its own, as
+    /// `cargo test -p <name> --features <features>` does, so two such
+    /// packages can enable features of a shared dependency that exclude
+    /// each other, such as two chip features of one HAL. A dependency
+    /// that two resolutions give the same features builds once.
+    ///
+    /// ```
+    /// # use quon_config::prelude::*;
+    /// # let mut q = Quon::new();
+    /// q.host_tests()
+    ///     .package("protocol")
+    ///     .package_with_features("board-a", ["host"])
+    ///     .package_with_features("board-b", ["host"]);
+    /// ```
+    pub fn package_with_features<S: AsRef<str>>(
+        &mut self,
+        name: impl Into<String>,
+        features: impl IntoIterator<Item = S>,
+    ) -> &mut Self {
+        let name = name.into();
+        self.features
+            .entry(name.clone())
+            .or_default()
+            .extend(features.into_iter().map(|f| f.as_ref().to_owned()));
+        self.packages.insert(name);
         self
     }
 

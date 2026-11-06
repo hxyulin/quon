@@ -87,6 +87,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   build script sees `CARGO_CFG_DEBUG_ASSERTIONS` when the profile turns
   debug assertions on.
 
+### Added (host-test features)
+
+- **`q.host_tests().package_with_features(name, [..])`** runs a
+  package's host tests with those features. The package resolves on
+  its own, as `cargo test -p <name> --features ..` does, so two
+  packages can enable features of one dependency that exclude each
+  other, such as two chip features of a HAL.
+
+### Fixed (host tests)
+
+- **`test = false` on a `[lib]`, `[[bin]]` or `[[test]]` target leaves
+  it out of `quon test`**, as under `cargo test`. Before, a firmware bin
+  with `test = false` was built for the host and failed to compile.
+- A host-test lib or bin with `harness = false` is an error. Quon
+  built it with libtest anyway.
+
 ### Added (clippy arguments)
 
 - **`quon clippy -- <args>`** passes `<args>` to clippy for every

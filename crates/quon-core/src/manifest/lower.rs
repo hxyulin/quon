@@ -74,7 +74,7 @@
 //! editing a `Cargo.toml` does not recompile `quon.rs`.
 
 use super::platform::{self, ProbeTarget, TargetPlatform};
-use super::resolve::{Domain, Root, UnitGraph, UnitKind, package_env, resolve};
+use super::resolve::{Domain, HostTestRoot, Root, UnitGraph, UnitKind, package_env, resolve};
 use super::sources::{RegistrySources, check_vendor_stamp};
 use super::workspace::{Package, PackageIdx, PackageSet, PackageSource, load_workspace};
 use crate::compile::RustcInfo;
@@ -292,7 +292,16 @@ pub fn expand_with(
                 "`host_tests().package(\"{name}\")`: Quon cannot run the tests of a \
                  proc-macro package yet"
             ))),
-            Some(p) => host_tests.push(p),
+            Some(p) => {
+                check_host_test_targets(&set.packages[p], &mut errors, &mut warnings);
+                host_tests.push(HostTestRoot {
+                    package: p,
+                    features: raw
+                        .host_test_features
+                        .get(name)
+                        .map(|f| f.iter().cloned().collect()),
+                });
+            }
             None => errors.push(Diagnostic::error(format!(
                 "`host_tests().package(\"{name}\")`: `{name}` is not a member of the Cargo \
                  workspace at {}",
@@ -334,9 +343,12 @@ pub fn expand_with(
         .collect();
 
     check_unsupported(&graph, &roots, &mut errors);
-    for r in roots.iter().filter(|r| !host_tests.contains(&r.package)) {
+    for r in roots
+        .iter()
+        .filter(|r| !host_tests.iter().any(|h| h.package == r.package))
+    {
         let pkg = &graph.packages[r.package];
-        for t in pkg.tests.iter().filter(|t| t.harness) {
+        for t in pkg.tests.iter().filter(|t| t.test && t.harness) {
             warnings.push(
                 Diagnostic::warning(format!(
                     "test `{}` of package `{}` uses the libtest harness, so Quon skips it",
@@ -891,6 +903,62 @@ fn lower_unit(
         def.cfg_flags.push("test".into());
     }
     Ok(def)
+}
+
+/// Check the lib and bins of host-test package `pkg` against what
+/// Quon can run. Quon builds a lib or bin under test with libtest, so
+/// `harness = false` there would give another program than the one the
+/// author wrote. A lib's doctests come from its lib test build (see
+/// `compile::doctest`), so `test = false` drops them, where Cargo
+/// would still run them.
+fn check_host_test_targets(
+    pkg: &Package,
+    errors: &mut Vec<Diagnostic>,
+    warnings: &mut Vec<Diagnostic>,
+) {
+    let manifest = pkg.manifest_path.display();
+    if let Some(lib) = pkg.lib.as_ref().filter(|l| !l.proc_macro) {
+        if lib.test && !lib.harness {
+            errors.push(
+                Diagnostic::error(format!(
+                    "host tests: the lib of package `{}` sets `harness = false`, which Quon \
+                     cannot run yet",
+                    pkg.name()
+                ))
+                .with_note(format!(
+                    "set `test = false` or remove `harness = false` in the `[lib]` table of \
+                     {manifest}"
+                )),
+            );
+        }
+        if !lib.test && lib.doctest {
+            warnings.push(
+                Diagnostic::warning(format!(
+                    "host tests: the lib of package `{}` sets `test = false`, so Quon skips its \
+                     doctests too",
+                    pkg.name()
+                ))
+                .with_note(format!(
+                    "Quon runs doctests with a lib's unit tests; set `doctest = false` in the \
+                     `[lib]` table of {manifest} to say so"
+                )),
+            );
+        }
+    }
+    for b in pkg.bins.iter().filter(|b| b.test && !b.harness) {
+        errors.push(
+            Diagnostic::error(format!(
+                "host tests: bin `{}` of package `{}` sets `harness = false`, which Quon cannot \
+                 run yet",
+                b.name,
+                pkg.name()
+            ))
+            .with_note(format!(
+                "set `test = false` or remove `harness = false` in its `[[bin]]` table in \
+                 {manifest}"
+            )),
+        );
+    }
 }
 
 /// Swap the roots in `raw` for the lowered units: rebuild the crate

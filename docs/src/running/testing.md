@@ -31,11 +31,16 @@ q.host_tests().package("acpi").package("elf");
 ```
 
 `.packages([..])` adds several at once.
+`.package_with_features(name, [..])` adds one with features; see
+[Features](#features).
 
 For each package, Quon builds its lib and each of its bins with
 `rustc --test` against the host's standard library, and each
 `harness = true` test in `tests/` the same way, then runs the
-executables. The package must compile for the
+executables. A target with `test = false` in `Cargo.toml` is left out,
+as `cargo test` leaves it out, so a firmware bin that only builds for
+its board can say so. A lib or bin under test cannot set
+`harness = false`. The package must compile for the
 host. A `#![no_std]` crate usually needs `#![cfg_attr(not(test),
 no_std)]` so its tests can use `std`. A package does not need a
 `Package` declaration to have host tests.
@@ -64,6 +69,27 @@ Each executable runs from its package's directory, with the
 output passes through. Quon cannot run the tests of a proc-macro
 package yet.
 
+### Features
+
+The packages listed with `.package` resolve together, as
+`cargo test -p a -p b` does: a dependency they share gets the union of
+the features they ask for. When two packages ask for features that
+exclude each other, such as two chip features of one HAL, list them
+with their features instead:
+
+```rust,ignore
+q.host_tests()
+    .package("protocol")
+    .package_with_features("board-a", ["host"])
+    .package_with_features("board-b", ["host"]);
+```
+
+Each package listed this way resolves on its own, as
+`cargo test -p board-a --features host` does, so its features reach no
+other host test. A dependency that two resolutions give the same
+features builds once. Copies that differ by features take a `#<n>`
+suffix in the build output, as in `hal@host-test#1`.
+
 ### Environment
 
 Tests that read an environment variable at run time, the way Cargo's
@@ -90,6 +116,11 @@ output and `OUT_DIR` as the lib, as under `cargo test`. The filter goes
 to them too. A lib with `doctest = false` in its `[lib]` table gets no
 doctest run. Each doctest is named by its file relative to the package,
 as in `src/lib.rs - add (line 6)`.
+
+Quon runs a lib's doctests together with its unit tests, so
+`test = false` in the `[lib]` table skips the doctests too, and Quon
+warns about it. Cargo would still run them. Add `doctest = false` to
+the table to say that is intended.
 
 rustdoc compiles and runs the doctests in one step, so they are not
 cached: every `quon test` compiles them again, as `cargo test` does.
