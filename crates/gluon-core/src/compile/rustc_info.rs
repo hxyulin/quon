@@ -176,11 +176,15 @@ impl RustcInfo {
     /// Load a cached `RustcInfo` from `layout.rustc_info_cache()`, falling
     /// back to [`RustcInfo::probe`] if the cache is missing or stale.
     ///
-    /// Staleness is determined by two checks, in order: (1) the current
+    /// Staleness is determined by three checks, in order: (1) the current
     /// process's `$RUSTC` (or `"rustc"` if unset) must match the cached
     /// `rustc_arg`, otherwise the user has switched compilers and the
     /// cached info points at the wrong binary; (2) the current mtime of
-    /// the cached `rustc_path` must equal `mtime_ns`. Any I/O or parse
+    /// the cached `rustc_path` must equal `mtime_ns`; (3) unless
+    /// `rustc_arg` is an absolute path, `rustc --print sysroot` must
+    /// still print the cached sysroot, which catches a rustup toolchain
+    /// switch (a new `rust-toolchain.toml`, an override, a new default).
+    /// Any I/O or parse
     /// failure while reading the cache is treated as "not cached" — we
     /// reprobe.
     ///
@@ -207,6 +211,14 @@ impl RustcInfo {
             // given binary — true for every filesystem gluon is
             // realistically run on.
             && current_mtime == cached.mtime_ns
+            // A bare `rustc` is usually the rustup proxy, which picks the
+            // toolchain from `rust-toolchain.toml`, overrides and the
+            // default. Any of these can change while the cached binary
+            // stays untouched, so ask the proxy which sysroot it uses
+            // now. This costs one spawn; an absolute `$RUSTC` skips it.
+            && (Path::new(&cached.rustc_arg).is_absolute()
+                || run_rustc(&cached.rustc_arg, &["--print", "sysroot"])
+                    .is_ok_and(|s| Path::new(s.trim()) == cached.sysroot))
         {
             return Ok(cached);
         }
@@ -512,5 +524,30 @@ mod tests {
             loaded.rustc_arg, "some-nonexistent-path-xyz",
             "cache should have been invalidated",
         );
+    }
+
+    /// A cache whose sysroot differs from the one `rustc` reports now,
+    /// as after a rustup toolchain switch that leaves the cached binary
+    /// untouched, must be reprobed. Skipped when `$RUSTC` is absolute,
+    /// since then the check does not run.
+    #[test]
+    fn load_or_probe_reprobes_when_the_sysroot_moved() {
+        if Path::new(&resolve_rustc_arg()).is_absolute() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let layout = BuildLayout::new(tmp.path(), "demo");
+        let real = RustcInfo::load_or_probe(&layout).expect("populate cache");
+        let seeded = RustcInfo {
+            sysroot: PathBuf::from("/nonexistent/other-toolchain"),
+            ..real.clone()
+        };
+        std::fs::write(
+            layout.rustc_info_cache(),
+            serde_json::to_vec_pretty(&seeded).unwrap(),
+        )
+        .expect("seed cache");
+        let loaded = RustcInfo::load_or_probe(&layout).expect("reprobe");
+        assert_eq!(loaded.sysroot, real.sysroot);
     }
 }
