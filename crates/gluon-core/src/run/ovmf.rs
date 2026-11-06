@@ -256,7 +256,7 @@ fn render_attempts(
         "\nInstall OVMF (apt install ovmf / pacman -S edk2-ovmf, or a QEMU that ships\n\
          share/qemu/edk2-x86_64-code.fd such as Nix's or Homebrew's),\n\
          or set OVMF_CODE and OVMF_VARS, or declare explicit paths in gluon.rs via\n\
-         qemu().ovmf_code(\"...\").ovmf_vars(\"...\").",
+         cfg.runner(\"qemu\").qemu(..).ovmf_code(\"...\").ovmf_vars(\"...\").",
     );
     out
 }

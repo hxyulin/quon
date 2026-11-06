@@ -44,7 +44,7 @@ impl From<ColorWhen> for anstream::ColorChoice {
 
 /// Top-level `gluon` command-line interface.
 #[derive(Parser, Debug)]
-#[command(name = "gluon", version, about = "Bare-metal Rust kernel build system")]
+#[command(name = "gluon", version, about = "Declarative build system for Rust")]
 pub struct Cli {
     /// Profile name to use (overrides the default in gluon.rs).
     #[arg(short = 'p', long, global = true)]
@@ -250,20 +250,20 @@ pub struct ConfigureArgs {
 /// Arguments for `gluon run`.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
-    /// Force UEFI boot (OVMF pflash). Overrides the profile's
-    /// `qemu().boot_mode(...)` setting. Mutually exclusive with
+    /// Force UEFI boot (OVMF pflash). Overrides the QEMU
+    /// runner's `.boot_mode(...)`. Mutually exclusive with
     /// `--direct` and `--bios`.
     #[arg(long, conflicts_with_all = ["direct", "bios"])]
     pub uefi: bool,
     /// Force direct-kernel boot (`-kernel <path>`). Overrides the
-    /// profile's `qemu().boot_mode(...)` setting. Mutually exclusive
+    /// QEMU runner's `.boot_mode(...)`. Mutually exclusive
     /// with `--bios`.
     #[arg(long, conflicts_with = "bios")]
     pub direct: bool,
     /// Force legacy-BIOS boot (SeaBIOS, no `-kernel`, no pflash). Boots
-    /// from the disk attached via `qemu().disk_*(...)` (or the legacy
-    /// `qemu().esp_image(...)` raw image). Overrides the profile's
-    /// `qemu().boot_mode(...)` setting.
+    /// from the disk attached via the runner's `.disk_*(...)` (or the
+    /// legacy `.esp_image(...)` raw image). Overrides the QEMU runner's
+    /// `.boot_mode(...)`.
     #[arg(long)]
     pub bios: bool,
     /// Wall-clock timeout in seconds. The runner is killed on expiry and

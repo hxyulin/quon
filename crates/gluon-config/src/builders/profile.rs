@@ -112,7 +112,7 @@ impl<'cfg> ProfileBuilder<'cfg> {
     /// vocabulary as [`crate::builders::QemuBuilder::boot_mode`]:
     /// `"direct"`, `"uefi"`, or `"bios"`.
     ///
-    /// When set, this overrides the project-level `qemu().boot_mode(...)`
+    /// When set, this overrides the QEMU runner's `.boot_mode(...)`
     /// for runs of this profile — useful for projects whose `dev-uefi`
     /// and `dev-bios` profiles share a compilation graph but boot
     /// differently.

@@ -22,7 +22,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
     // CLI boot-mode override. The three flags are mutually exclusive
     // in the clap schema; if none are set, we pass `None` so the
     // profile's own `qemu_boot_mode(...)` (or project-level
-    // `qemu().boot_mode(...)`) wins.
+    // runner-level `.boot_mode(...)`) wins.
     let boot_mode_override = match (args.uefi, args.direct, args.bios) {
         (true, false, false) => Some(BootMode::Uefi),
         (false, true, false) => Some(BootMode::Direct),
@@ -72,7 +72,13 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
         shell.note("QEMU halted for GDB on :1234; connect with `target remote :1234`");
     }
     // The line marks where Gluon's output ends and the guest's starts.
-    shell.status("Running", format_args!("`{command}`"));
+    // Paths under the current directory are shown relative to it, as
+    // Cargo shows them; `--dry-run` above keeps them absolute.
+    let shown = match std::env::current_dir() {
+        Ok(cwd) => command.replace(&format!("{}/", cwd.display()), ""),
+        Err(_) => command.clone(),
+    };
+    shell.status("Running", format_args!("`{shown}`"));
     let started = Instant::now();
     let program = format!("runner '{}'", prepared.invocation.runner);
     let success_exit_code = prepared.invocation.success_exit_code;

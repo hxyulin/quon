@@ -90,7 +90,7 @@ use std::sync::mpsc;
 /// `image_paths` is the parallel surface for `DagNode::Image` nodes:
 /// keyed by [`gluon_model::Handle<ImageDef>`], it carries the
 /// `<build>/images/<name>.img` paths produced by `image()` blocks.
-/// Consumed by `run::entry` for `qemu().disk(image_ref(...))` and by
+/// Consumed by `run::entry` for a QEMU runner's `.disk(image_ref(...))` and by
 /// the `${image:name}` rule-substitution path.
 ///
 /// (`Copy` was dropped when `esp_dirs` was added — call sites clone
@@ -109,7 +109,7 @@ pub struct BuildSummary {
     pub image_paths:
         std::collections::BTreeMap<gluon_model::Handle<gluon_model::ImageDef>, std::path::PathBuf>,
     /// Build-step output paths keyed by [`gluon_model::BuildStepDef`]
-    /// handle. Consumed by `run::entry` so `qemu().disk_ref("name")`
+    /// handle. Consumed by `run::entry` so a QEMU runner's `.disk_ref("name")`
     /// can boot directly from a build step's output without needing an
     /// intermediate `image()` wrapper.
     pub build_step_paths: std::collections::BTreeMap<
