@@ -14,13 +14,6 @@ workspace = true
 
 [dependencies]
 gluon-model.workspace = true
-# Not used by gluon-core's code: gluon-core never `use`s gluon_config.
-# Listed so that `cargo install gluon-cli` downloads gluon-config's
-# sources (and its dependencies') into cargo's cache. An installed gluon
-# then builds the library that gluon.rs links against with `cargo build
-# --offline` (see `script_runner::rlib`). The `rust-project.json` that
-# `gluon configure` writes also points rust-analyzer at those sources.
-gluon-config.workspace = true
 fs2 = "0.4"
 # In-process FAT12/16/32 formatter + writer. Used by the `image()`
 # scheduler node to assemble bootable disk images from compiled
@@ -57,7 +50,14 @@ signal-hook = "0.3"
 # on in a dedicated job. See `tests/vendor_e2e.rs`.
 network-tests = []
 
+[build-dependencies]
+# build.rs embeds the gluon-config sources and generates a workspace
+# manifest for them from gluon's own (see `script_runner::rlib`).
+toml = "0.8"
+
 [dev-dependencies]
+# Tests build models through the gluon.rs DSL in process.
+gluon-config.workspace = true
 tempfile = "3"
 # Scoped, safe wrapper for env var mutation in tests. Uses a global
 # mutex internally so the unsafe `std::env::set_var` (Rust 1.80+) is

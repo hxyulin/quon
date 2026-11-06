@@ -27,6 +27,14 @@ The repository includes a `rust-toolchain.toml` that pins the required nightly
 toolchain. Cargo will automatically download and use it when you run
 `cargo install` inside the repo.
 
+The installed `gluon` carries the sources that `gluon.rs` scripts link
+against, so you can delete or move the clone afterwards. Installing
+straight from Git works too:
+
+```sh
+cargo install --git https://github.com/hxyulin/gluon.git gluon-cli
+```
+
 Verify the installation:
 
 ```sh

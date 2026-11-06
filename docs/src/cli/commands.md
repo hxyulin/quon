@@ -124,7 +124,8 @@ integration.
 
 Build the gluon-config library that `gluon.rs` links against, for the
 rustc the current directory uses, and print the library's directory.
-The library is built once per Gluon version and rustc into
+The library is built from the sources embedded in `gluon`, once per
+Gluon version and rustc, into
 `$GLUON_HOME` (default `~/.gluon`) and shared by every project. Other
 commands build it on first use, so `setup` is only needed to do that
 ahead of time, for example before going offline. See

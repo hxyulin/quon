@@ -1,42 +1,152 @@
-//! Build script: bake the gluon checkout path into the crate, so a
-//! gluon built from a checkout builds the gluon-config library that
-//! `gluon.rs` links against from that checkout's sources rather than
-//! from crates.io. See `script_runner::rlib`.
+//! Build script: embed the gluon-config and gluon-model sources into
+//! gluon, so it can build the library that `gluon.rs` links against
+//! without a gluon checkout or a crates.io release. See
+//! `script_runner::rlib`.
 //!
-//! The path is resolved at compile time by walking up from `CARGO_MANIFEST_DIR`
-//! until we find a parent that contains `crates/gluon-config/Cargo.toml`.
+//! The embedded tree is a small Cargo workspace:
 //!
-//! An installed gluon (`cargo install gluon-cli`) is compiled from an
-//! unpacked crate with no such parent. The fallback bakes the manifest
-//! dir itself, which has no `crates/gluon-config/Cargo.toml`, so at
-//! runtime gluon finds no checkout and uses the published gluon-config
-//! of its own version. The same happens when a checkout that gluon was
-//! built from is later deleted.
+//! - `Cargo.toml`: generated from the gluon workspace manifest, with
+//!   only the two crates as members, and the `[workspace.package]`,
+//!   `[workspace.lints]` and `[workspace.dependencies]` tables their
+//!   manifests inherit from;
+//! - `Cargo.lock`: gluon's own lock, so the library builds with the
+//!   dependency versions gluon was built and tested with;
+//! - each crate's `Cargo.toml` and every `.rs` file under its `src/`.
+//!
+//! The list goes to `$OUT_DIR/config_sources.rs` as `include_bytes!`
+//! entries, sorted by path, so the same sources always embed the same
+//! bytes in the same order.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+/// The crates `gluon.rs` links against, relative to the workspace root.
+const CRATES: [&str; 2] = ["crates/gluon-config", "crates/gluon-model"];
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=GLUON_CONFIG_SOURCE_DIR");
-
-    let manifest =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo");
-
-    // Walk up to find the workspace root (the first ancestor containing
-    // `crates/gluon-config/Cargo.toml`). The walk is bounded by the
-    // filesystem — `pop()` returns false at the root.
-    let mut p = std::path::PathBuf::from(&manifest);
-    let resolved = loop {
-        if p.join("crates/gluon-config/Cargo.toml").is_file() {
-            break p.clone();
-        }
-        if !p.pop() {
-            // No ancestor contained the marker — fall back to the
-            // manifest dir. The runtime helper validates this and
-            // surfaces a clear error if the marker is missing.
-            break std::path::PathBuf::from(&manifest);
-        }
-    };
-
-    println!(
-        "cargo:rustc-env=GLUON_CONFIG_WORKSPACE_DIR={}",
-        resolved.display()
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is always set by cargo"),
     );
+    // gluon-core sits at `crates/gluon-core` in the gluon workspace.
+    // gluon is installed from a checkout or a git URL, both of which
+    // have the whole workspace.
+    let root = manifest_dir
+        .join("../..")
+        .canonicalize()
+        .expect("gluon-core is built inside the gluon workspace");
+
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for krate in CRATES {
+        let dir = root.join(krate);
+        println!(
+            "cargo:rerun-if-changed={}",
+            dir.join("Cargo.toml").display()
+        );
+        // A directory makes cargo rerun on any change below it.
+        println!("cargo:rerun-if-changed={}", dir.join("src").display());
+        files.push((format!("{krate}/Cargo.toml"), dir.join("Cargo.toml")));
+        let mut sources = Vec::new();
+        collect_rs(&dir.join("src"), &mut sources);
+        for path in sources {
+            let rel = path
+                .strip_prefix(&root)
+                .expect("source under the workspace root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((rel, path));
+        }
+    }
+
+    let lock = root.join("Cargo.lock");
+    println!("cargo:rerun-if-changed={}", lock.display());
+    if lock.is_file() {
+        files.push(("Cargo.lock".into(), lock));
+    }
+
+    let root_manifest = root.join("Cargo.toml");
+    println!("cargo:rerun-if-changed={}", root_manifest.display());
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is always set by cargo"));
+    let generated = out_dir.join("config-workspace.toml");
+    std::fs::write(&generated, workspace_manifest(&root_manifest))
+        .expect("write the generated workspace manifest");
+    files.push(("Cargo.toml".into(), generated));
+
+    files.sort();
+    let mut code = String::from(
+        "/// The embedded gluon-config workspace: (path relative to the\n\
+         /// workspace root, contents), sorted by path. Generated by build.rs.\n\
+         pub(crate) const CONFIG_SOURCES: &[(&str, &[u8])] = &[\n",
+    );
+    for (rel, path) in &files {
+        writeln!(
+            code,
+            "    ({rel:?}, include_bytes!({:?})),",
+            path.to_string_lossy()
+        )
+        .unwrap();
+    }
+    code.push_str("];\n");
+    std::fs::write(out_dir.join("config_sources.rs"), code).expect("write config_sources.rs");
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
+        let path = entry.expect("read a directory entry").path();
+        if path.is_dir() {
+            collect_rs(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// A workspace manifest with only [`CRATES`] as members. The member
+/// manifests inherit `version.workspace = true`, lints and the
+/// gluon-model dependency, so those tables are copied from gluon's own
+/// manifest. Path dependencies on the other gluon crates are dropped,
+/// because their sources are not embedded.
+fn workspace_manifest(path: &Path) -> String {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let doc: toml::Table =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let ws = doc
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .expect("the gluon manifest has a [workspace] table");
+
+    let mut out = toml::Table::new();
+    out.insert(
+        "resolver".into(),
+        ws.get("resolver").cloned().unwrap_or("3".into()),
+    );
+    out.insert(
+        "members".into(),
+        toml::Value::Array(CRATES.iter().map(|c| (*c).into()).collect()),
+    );
+    for key in ["package", "lints"] {
+        if let Some(v) = ws.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(deps) = ws.get("dependencies").and_then(toml::Value::as_table) {
+        let kept: toml::Table = deps
+            .iter()
+            .filter(|(_, v)| match v.get("path").and_then(toml::Value::as_str) {
+                Some(p) => CRATES.contains(&p),
+                None => true,
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        out.insert("dependencies".into(), toml::Value::Table(kept));
+    }
+
+    let mut doc = toml::Table::new();
+    doc.insert("workspace".into(), toml::Value::Table(out));
+    format!(
+        "# Generated by gluon from its own workspace manifest. Builds the\n\
+         # gluon-config library that gluon.rs scripts link against.\n{}",
+        toml::to_string(&doc).expect("serialize the workspace manifest")
+    )
 }

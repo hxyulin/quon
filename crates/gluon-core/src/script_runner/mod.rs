@@ -100,9 +100,9 @@ pub fn compile_and_run_raw(
         )));
     }
 
+    let lib = rlib::ensure_gluon_config_rlib(rustc_info)?;
     let mut hashes =
         file_hashes::FileHashes::load(build_dir.join("script-runner").join("file-hashes.json"));
-    let lib = rlib::ensure_gluon_config_rlib(rustc_info, &mut hashes)?;
     let bin =
         cache::ensure_script_binary(&script_path, build_dir, rustc_info, &lib.paths, &mut hashes)?;
     // A failed save only means the next run rehashes; it must not fail
@@ -121,10 +121,7 @@ pub fn compile_and_run_raw(
 /// missing, and return it. `gluon setup` calls this ahead of time;
 /// other commands build it on first use.
 pub fn ensure_config_lib(rustc_info: &RustcInfo) -> Result<rlib::ConfigLib> {
-    // No project, so no persistent memo: in checkout mode the source
-    // hashes are recomputed, which costs a few milliseconds.
-    let mut hashes = file_hashes::FileHashes::load(std::path::PathBuf::new());
-    rlib::ensure_gluon_config_rlib(rustc_info, &mut hashes)
+    rlib::ensure_gluon_config_rlib(rustc_info)
 }
 
 /// Spawn the compiled script binary and capture its stdout. Stderr is

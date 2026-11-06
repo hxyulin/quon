@@ -18,11 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The gluon-config library that `gluon.rs` links against is built once
   per Gluon version and rustc into `~/.gluon`** (or `$GLUON_HOME`) and
   shared by every project, instead of into each project's `build/`.
-  An installed `gluon` builds it from the published `gluon-config` of
-  its own version, offline first, so `cargo install gluon-cli` works
-  without a Gluon checkout. A `gluon` built from a checkout still builds
-  it from that checkout, into `~/.gluon/dev/`. Concurrent `gluon`
-  processes build an entry once.
+  `gluon` embeds the gluon-config and gluon-model sources and its
+  `Cargo.lock`, and builds the library from them offline first, so it
+  no longer needs the checkout it was installed from.
+  `GLUON_CONFIG_SOURCE_DIR` is gone. Concurrent `gluon` processes build
+  an entry once.
 - **`gluon configure` declares `gluon.rs` as a library crate** in
   `rust-project.json`, and points rust-analyzer at the gluon-config
   sources the library was built from.

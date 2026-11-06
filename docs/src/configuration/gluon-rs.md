@@ -180,40 +180,38 @@ The trade-offs:
 
 ## The gluon-config library and `~/.gluon`
 
-The script links against a compiled gluon-config library. Gluon builds
-it with cargo once per Gluon version and rustc, and every project
-shares it. It lives in the Gluon home directory, `~/.gluon`, or the
-directory `GLUON_HOME` names:
+The script links against a compiled gluon-config library. Gluon
+carries the gluon-config and gluon-model sources inside its own binary,
+so it needs neither a Gluon checkout nor a crates.io release to build
+the library. It unpacks them and builds them with cargo once per set of
+sources and rustc, and every project shares the result. It lives in
+the Gluon home directory, `~/.gluon`, or the directory `GLUON_HOME`
+names:
 
 ```text
 ~/.gluon/
-└── <gluon version>/config-lib/<rustc hash>/
-    ├── Cargo.toml       # depends on gluon-config = "=<gluon version>"
-    ├── Cargo.lock       # written by the first build, then left as is
+└── config-lib/<hash of the sources and rustc>/
+    ├── src/             # the unpacked gluon-config and gluon-model sources
     ├── manifest.json    # paths of the built library files
     └── target/
 ```
 
 The first command that needs the library builds it, which takes about
-5 to 15 s. To build it ahead of time, run `gluon setup` in the project.
-It builds the library for the rustc that the directory uses, and
-prints the directory:
+5 s. To build it ahead of time, run `gluon setup` in the project. It
+builds the library for the rustc that the directory uses, and prints
+the directory:
 
 ```sh
 $ gluon setup
-/home/me/.gluon/0.1.1/config-lib/3f9c…
+/home/me/.gluon/config-lib/3f9c…
 ```
 
-The build runs offline first. `cargo install gluon-cli` has already
-downloaded gluon-config's sources, so it usually needs no network. If
-the offline build fails, Gluon retries online. A rustc upgrade gets a
-new entry; delete old entries to reclaim the space.
-
-A `gluon` built from a Gluon checkout builds the library from that
-checkout's sources instead, into `~/.gluon/dev/config-lib/<hash>/`.
-The hash covers the gluon-config and gluon-model sources, so an edit to
-them builds a new entry. `GLUON_CONFIG_SOURCE_DIR` points Gluon at a
-checkout explicitly.
+serde and serde_json come from crates.io, at the versions in Gluon's
+own `Cargo.lock`. Installing Gluon put them in cargo's cache, so the
+build runs offline first and usually needs no network. If the offline
+build fails, Gluon retries online. A rustc upgrade or a Gluon with
+different gluon-config sources gets a new entry; delete old entries to
+reclaim the space.
 
 The compiled script itself stays in the project, under
 `build/script-runner/`.
