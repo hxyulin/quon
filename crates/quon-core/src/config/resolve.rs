@@ -82,6 +82,12 @@ pub fn resolve(
     // here is valid.
     let opt_level = flattened.opt_level.unwrap_or_default();
     let debug_info = flattened.debug_info.unwrap_or(false);
+    // Unset, both follow rustc's own defaults, so a profile that names
+    // neither builds as rustc would without the flags.
+    let debug_assertions = flattened
+        .debug_assertions
+        .unwrap_or(opt_level == quon_model::OptLevel::Zero);
+    let overflow_checks = flattened.overflow_checks.unwrap_or(debug_assertions);
     let lto = flattened.lto.clone();
     let run_binary = flattened.run_binary;
 
@@ -376,6 +382,8 @@ pub fn resolve(
             target: effective_target,
             opt_level,
             debug_info,
+            debug_assertions,
+            overflow_checks,
             lto,
             run_binary,
             runner: flattened.runner,
@@ -454,6 +462,8 @@ fn flatten_profile(
             target,
             opt_level,
             debug_info,
+            debug_assertions,
+            overflow_checks,
             lto,
             run_binary,
             runner,
@@ -914,6 +924,39 @@ mod tests {
             TargetSpec::Cross(model.targets.lookup("x").unwrap())
         );
         assert_eq!(cfg.build_dir, Path::new("/tmp/proj/build"));
+    }
+
+    #[test]
+    fn debug_assertions_follow_the_profile_then_rustcs_default() {
+        let model = build_model(|q| {
+            q.project("t", "1");
+            q.default_target(&Target::spec("x", "t.json"));
+            q.add(Profile::dev().opt_level(1));
+            q.add(Profile::new("plain1").opt_level(1));
+            q.add(Profile::new("plain0"));
+            q.add(Profile::new("checked").opt_level(3).debug_assertions(true));
+            q.add(Profile::new("wrapping").overflow_checks(false));
+        });
+        let flags = |name: &str| {
+            let p = resolve(&model, name, None, Path::new("/tmp"), None)
+                .expect("resolve")
+                .profile;
+            (p.debug_assertions, p.overflow_checks)
+        };
+        assert_eq!(
+            flags("dev"),
+            (true, true),
+            "dev keeps them above opt-level 0"
+        );
+        assert_eq!(flags("release"), (false, false), "release turns them off");
+        assert_eq!(flags("plain1"), (false, false), "unset: rustc's default");
+        assert_eq!(flags("plain0"), (true, true), "unset: rustc's default");
+        assert_eq!(
+            flags("checked"),
+            (true, true),
+            "overflow follows assertions"
+        );
+        assert_eq!(flags("wrapping"), (true, false));
     }
 
     #[test]

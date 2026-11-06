@@ -336,7 +336,9 @@ fn build_command(
         UnitProfile::Active => {
             builder
                 .opt_level(resolved.profile.opt_level)
-                .debug_info(resolved.profile.debug_info);
+                .debug_info(resolved.profile.debug_info)
+                .debug_assertions(resolved.profile.debug_assertions)
+                .overflow_checks(resolved.profile.overflow_checks);
             if let Some(mode) = &resolved.profile.lto {
                 builder.lto(mode);
             }

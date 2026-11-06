@@ -209,6 +209,8 @@ pub(crate) mod test_support {
             target: quon_model::TargetSpec::Cross(target),
             opt_level: quon_model::OptLevel::Zero,
             debug_info: false,
+            debug_assertions: true,
+            overflow_checks: true,
             lto: None,
             run_binary: None,
             runner: None,

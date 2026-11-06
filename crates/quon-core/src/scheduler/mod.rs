@@ -269,12 +269,19 @@ fn dispatch_run_build_script(
     })?;
     let run_dir = units.run_dir(r, &ctx.layout, model, resolved)?;
     let out_dir = run_dir.join("out");
-    let (opt_level, debug_info) = match owner.profile {
+    // Host units pass no `-C debug-assertions`, so rustc's default for
+    // their opt-level decides; active units pass the profile's value.
+    let (opt_level, debug_info, debug_assertions) = match owner.profile {
         UnitProfile::Host => (
             crate::compile::HOST_OPT_LEVEL,
             crate::compile::HOST_DEBUG_INFO,
+            crate::compile::HOST_OPT_LEVEL == quon_model::OptLevel::Zero,
         ),
-        UnitProfile::Active => (resolved.profile.opt_level, resolved.profile.debug_info),
+        UnitProfile::Active => (
+            resolved.profile.opt_level,
+            resolved.profile.debug_info,
+            resolved.profile.debug_assertions,
+        ),
     };
     let spec_file;
     let quon_sysroot;
@@ -315,7 +322,7 @@ fn dispatch_run_build_script(
             "scheduler: {what} has no probed target cfgs (scheduler bug)"
         ))
     })?;
-    if opt_level == quon_model::OptLevel::Zero {
+    if debug_assertions {
         target_cfgs.push(("debug_assertions".into(), None));
     }
     let mut dep_metadata = Vec::new();
@@ -814,6 +821,8 @@ mod tests {
                 target: TargetSpec::Cross(target_handle),
                 opt_level: quon_model::OptLevel::Zero,
                 debug_info: false,
+                debug_assertions: true,
+                overflow_checks: true,
                 lto: None,
                 run_binary: None,
                 runner: None,
@@ -1377,6 +1386,8 @@ mod tests {
                 target: TargetSpec::Cross(target_handle),
                 opt_level: quon_model::OptLevel::Zero,
                 debug_info: false,
+                debug_assertions: true,
+                overflow_checks: true,
                 lto: None,
                 run_binary: None,
                 runner: None,

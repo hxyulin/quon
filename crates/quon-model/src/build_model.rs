@@ -373,6 +373,14 @@ pub struct ProfileDef {
     pub target: Option<TargetSpec>,
     pub opt_level: Option<OptLevel>,
     pub debug_info: Option<bool>,
+    /// `-C debug-assertions`. `None` inherits, and with no value in the
+    /// chain follows rustc's default: on only at opt-level 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_assertions: Option<bool>,
+    /// `-C overflow-checks`. `None` inherits, and with no value in the
+    /// chain follows `debug_assertions`, as rustc does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_checks: Option<bool>,
     pub lto: Option<String>,
     /// Resolved run binary. `None` means "use the profile's preset/default".
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -288,6 +288,26 @@ impl RustcCommandBuilder {
         self
     }
 
+    pub fn debug_assertions(&mut self, on: bool) -> &mut Self {
+        self.args.push(OsString::from("-C"));
+        self.args.push(OsString::from(if on {
+            "debug-assertions=on"
+        } else {
+            "debug-assertions=off"
+        }));
+        self
+    }
+
+    pub fn overflow_checks(&mut self, on: bool) -> &mut Self {
+        self.args.push(OsString::from("-C"));
+        self.args.push(OsString::from(if on {
+            "overflow-checks=on"
+        } else {
+            "overflow-checks=off"
+        }));
+        self
+    }
+
     pub fn debug_info(&mut self, on: bool) -> &mut Self {
         self.args.push(OsString::from("-C"));
         self.args.push(OsString::from(if on {

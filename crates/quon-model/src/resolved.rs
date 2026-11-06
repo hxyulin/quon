@@ -33,6 +33,8 @@ pub struct ResolvedProfile {
     pub target: TargetSpec,
     pub opt_level: crate::OptLevel,
     pub debug_info: bool,
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
     pub lto: Option<String>,
     pub run_binary: Option<Handle<CrateDef>>,
     /// The runner that executes the run binary and the integration
@@ -126,7 +128,8 @@ impl ResolvedProfile {
         if self.test_timeout.is_none() {
             self.test_timeout = parent.test_timeout;
         }
-        // opt_level and debug_info have concrete defaults from
+        // opt_level, debug_info, debug_assertions and overflow_checks
+        // have concrete defaults from
         // resolve_with_defaults — never inherited via this helper.
     }
 }
@@ -157,6 +160,8 @@ mod tests {
             target: TargetSpec::Cross(Handle::new(0)),
             opt_level: crate::OptLevel::Two,
             debug_info: false,
+            debug_assertions: false,
+            overflow_checks: false,
             lto: Some("fat".into()),
             run_binary: None,
             runner: None,
@@ -171,6 +176,8 @@ mod tests {
             target: TargetSpec::Cross(Handle::new(0)),
             opt_level: crate::OptLevel::Zero, // child overrides
             debug_info: true,
+            debug_assertions: true,
+            overflow_checks: true,
             lto: None, // child inherits
             run_binary: None,
             runner: None,

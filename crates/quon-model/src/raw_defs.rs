@@ -62,6 +62,10 @@ pub struct RawProfileDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_info: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug_assertions: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_checks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lto: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
@@ -370,6 +374,8 @@ mod tests {
             runner: Some("qemu".into()),
             opt_level: Some(crate::OptLevel::Zero),
             debug_info: Some(true),
+            debug_assertions: Some(true),
+            overflow_checks: None,
             lto: Some("off".into()),
             preset: Some("baseline".into()),
             config: BTreeMap::new(),

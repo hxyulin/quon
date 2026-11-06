@@ -527,6 +527,8 @@ mod tests {
             target: TargetSpec::Cross(target),
             opt_level: quon_model::OptLevel::Zero,
             debug_info: false,
+            debug_assertions: true,
+            overflow_checks: true,
             lto: None,
             run_binary: None,
             runner: None,
@@ -2455,6 +2457,12 @@ mod tests {
         );
         assert!(args.iter().any(|a| a == "opt-level=0"), "{args:?}");
         assert!(args.iter().any(|a| a == "debuginfo=0"), "{args:?}");
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.starts_with("debug-assertions") || a.starts_with("overflow-checks")),
+            "host units keep rustc's defaults: {args:?}"
+        );
         assert!(has_pair(&args, "--cap-lints", "allow"), "{args:?}");
         assert!(has_pair(&args, "--cfg", "feature=\"std\""), "{args:?}");
         assert!(has_pair(&args, "--extern", "proc_macro"), "{args:?}");
@@ -2480,6 +2488,8 @@ mod tests {
         let th = insert_target(&mut model, build_std_target());
         let mut resolved = make_resolved(th, tmp.path().to_path_buf());
         resolved.profile.opt_level = quon_model::OptLevel::Three;
+        resolved.profile.debug_assertions = true;
+        resolved.profile.overflow_checks = false;
         let cross = TargetSpec::Cross(th);
         let host = TargetSpec::Host;
         // top → a → b (cross libs); top → derive (host proc macro) → quote.
@@ -2513,6 +2523,10 @@ mod tests {
         );
         assert!(has_pair(&args, "--sysroot", "/sysroot"), "{args:?}");
         assert!(args.iter().any(|a| a == "opt-level=3"), "{args:?}");
+        // Passed whatever the opt-level, so a dev profile at opt-level 1
+        // keeps its checks.
+        assert!(has_pair(&args, "-C", "debug-assertions=on"), "{args:?}");
+        assert!(has_pair(&args, "-C", "overflow-checks=off"), "{args:?}");
         assert!(
             has_pair(&args, "--extern", "a=/built/a/artifact"),
             "{args:?}"

@@ -275,7 +275,9 @@ pub fn ensure_config_crate(
         .emit_with_dep_info_path(&[Emit::Link, Emit::Metadata, Emit::DepInfo], &depfile_path)
         .incremental(&incremental_dir)
         .opt_level(resolved.profile.opt_level)
-        .debug_info(resolved.profile.debug_info);
+        .debug_info(resolved.profile.debug_info)
+        .debug_assertions(resolved.profile.debug_assertions)
+        .overflow_checks(resolved.profile.overflow_checks);
 
     // Inject implicit sysroot crates. Must match what build_sysroot_crate
     // writes (sysroot crates keep the -quon-<name> extra-filename). A
@@ -383,6 +385,8 @@ mod tests {
                 target: quon_model::TargetSpec::Cross(Handle::new(0)),
                 opt_level: quon_model::OptLevel::Zero,
                 debug_info: false,
+                debug_assertions: true,
+                overflow_checks: true,
                 lto: None,
                 run_binary: None,
                 runner: None,

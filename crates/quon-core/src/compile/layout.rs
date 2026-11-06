@@ -366,6 +366,8 @@ mod tests {
             target: quon_model::TargetSpec::Cross(Handle::new(0)),
             opt_level: quon_model::OptLevel::Zero,
             debug_info: true,
+            debug_assertions: true,
+            overflow_checks: true,
             lto: None,
             run_binary: None,
             runner: None,

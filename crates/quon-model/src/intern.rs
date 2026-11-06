@@ -386,6 +386,8 @@ fn intern_profiles(
                 target: target_handle,
                 opt_level: p.opt_level,
                 debug_info: p.debug_info,
+                debug_assertions: p.debug_assertions,
+                overflow_checks: p.overflow_checks,
                 lto: p.lto.clone(),
                 run_binary: run_binary_handle,
                 runner: runner_handle,

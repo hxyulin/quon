@@ -76,6 +76,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   commonly builds its release profile with `"s"` to fit in flash. A
   build script sees the level in `OPT_LEVEL`, as under Cargo.
 
+### Added (debug assertions and overflow checks)
+
+- **`Profile::debug_assertions(bool)` and
+  `Profile::overflow_checks(bool)`** pass rustc's
+  `-C debug-assertions` and `-C overflow-checks`. `Profile::dev()` turns
+  both on and `Profile::release()` turns both off, as in Cargo, so
+  `Profile::dev().opt_level(1)` keeps the checks that rustc would drop
+  above opt-level 0. A profile that sets neither builds as before. A
+  build script sees `CARGO_CFG_DEBUG_ASSERTIONS` when the profile turns
+  debug assertions on.
+
 ### Added (compile-time environment)
 
 - **`q.env(key, value)` sets a variable for every rustc run and build

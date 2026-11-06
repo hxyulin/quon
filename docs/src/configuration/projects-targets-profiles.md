@@ -96,6 +96,8 @@ reports an unknown name when it checks the model.
 |---|---|
 | `.opt_level(n)` | rustc's `-C opt-level`: 0 to 3, `"s"` or `"z"` |
 | `.debug_info(bool)` | Include debug info |
+| `.debug_assertions(bool)` | rustc's `-C debug-assertions`: `debug_assert!` and `cfg(debug_assertions)` |
+| `.overflow_checks(bool)` | rustc's `-C overflow-checks`: panic on integer overflow |
 | `.lto(Lto::Thin)` | Link-time optimisation: `Lto::Off`, `Lto::Thin` or `Lto::Fat` |
 | `.preset(&preset)` | Apply a [preset](./config-options.md#presets) of config option values |
 | `.inherits(&profile)` | Take every unset setting from `profile` |
@@ -103,8 +105,20 @@ reports an unknown name when it checks the model.
 
 A profile from `Profile::new(name)` sets nothing. Its unset settings
 come from the profile it inherits, else opt-level 0, no debug info and
-no LTO. rustc turns debug assertions and overflow checks off above
-opt-level 0, as in Cargo's release profile.
+no LTO. Debug assertions then follow rustc's default, on only at
+opt-level 0, and overflow checks follow debug assertions.
+
+`Profile::dev()` turns both checks on and `Profile::release()` turns
+them off, as Cargo's profiles do. To raise dev's opt-level and keep the
+checks, start from `Profile::dev()`:
+
+```rust,ignore
+q.add(Profile::dev().opt_level(1));
+```
+
+`Profile::new("dev").opt_level(1)` replaces the built-in `dev`, so its
+crates build without the checks. Build scripts and their dependencies
+use a fixed host profile, at opt-level 0 with both checks on.
 
 ### What `quon run` starts
 

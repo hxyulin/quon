@@ -862,6 +862,8 @@ impl Lowering {
                 runner,
                 opt_level,
                 debug_info: p.debug_info,
+                debug_assertions: p.debug_assertions,
+                overflow_checks: p.overflow_checks,
                 lto: p.lto.map(|l| l.as_str().into()),
                 preset: p.preset.clone(),
                 ..RawProfileDef::default()
@@ -1151,6 +1153,15 @@ mod tests {
         assert_eq!(release.inherits.as_deref(), Some("dev"));
         assert_eq!(release.opt_level, Some(OptLevel::Three));
         assert_eq!(release.target, None, "inherited from dev");
+        let dev = profile(&raw, "dev");
+        assert_eq!(
+            (dev.debug_assertions, dev.overflow_checks),
+            (Some(true), Some(true))
+        );
+        assert_eq!(
+            (release.debug_assertions, release.overflow_checks),
+            (Some(false), Some(false))
+        );
         assert_eq!(raw.project.unwrap().default_profile.as_deref(), Some("dev"));
     }
 

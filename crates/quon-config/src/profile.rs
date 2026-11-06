@@ -83,6 +83,8 @@ pub struct Profile {
     /// The level, or the value `opt_level` was given that is none.
     pub(crate) opt_level: Option<Result<OptLevel, String>>,
     pub(crate) debug_info: Option<bool>,
+    pub(crate) debug_assertions: Option<bool>,
+    pub(crate) overflow_checks: Option<bool>,
     pub(crate) lto: Option<Lto>,
     pub(crate) preset: Option<String>,
     pub(crate) runner: Option<String>,
@@ -91,29 +93,42 @@ pub struct Profile {
 impl Profile {
     /// A profile that sets nothing. Unset settings come from the
     /// profile it [inherits](Self::inherits), else opt-level 0, no
-    /// debug info and no LTO.
+    /// debug info and no LTO, with debug assertions and overflow checks
+    /// on only at opt-level 0 (rustc's default).
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             inherits: None,
             opt_level: None,
             debug_info: None,
+            debug_assertions: None,
+            overflow_checks: None,
             lto: None,
             preset: None,
             runner: None,
         }
     }
 
-    /// `dev`: opt-level 0 with debug info.
+    /// `dev`: opt-level 0 with debug info, debug assertions and
+    /// overflow checks, as in Cargo's dev profile. The checks stay on
+    /// when the opt-level is raised: `Profile::dev().opt_level(1)`.
     pub fn dev() -> Self {
-        Self::new("dev").opt_level(0).debug_info(true)
+        Self::new("dev")
+            .opt_level(0)
+            .debug_info(true)
+            .debug_assertions(true)
+            .overflow_checks(true)
     }
 
-    /// `release`: inherits `dev`, at opt-level 3 without debug info.
-    /// rustc turns debug assertions and overflow checks off above
-    /// opt-level 0, as in Cargo's release profile.
+    /// `release`: inherits `dev`, at opt-level 3 without debug info,
+    /// debug assertions or overflow checks, as in Cargo's release
+    /// profile.
     pub fn release() -> Self {
-        let mut p = Self::new("release").opt_level(3).debug_info(false);
+        let mut p = Self::new("release")
+            .opt_level(3)
+            .debug_info(false)
+            .debug_assertions(false)
+            .overflow_checks(false);
         p.inherits = Some("dev".into());
         p
     }
@@ -140,6 +155,21 @@ impl Profile {
 
     pub fn debug_info(mut self, enable: bool) -> Self {
         self.debug_info = Some(enable);
+        self
+    }
+
+    /// rustc's `-C debug-assertions`: `debug_assert!` and
+    /// `cfg(debug_assertions)`, in this profile's target crates. Build
+    /// scripts and their dependencies keep a fixed host profile.
+    pub fn debug_assertions(mut self, enable: bool) -> Self {
+        self.debug_assertions = Some(enable);
+        self
+    }
+
+    /// rustc's `-C overflow-checks`: panic on integer overflow. Unset,
+    /// it follows [`debug_assertions`](Self::debug_assertions).
+    pub fn overflow_checks(mut self, enable: bool) -> Self {
+        self.overflow_checks = Some(enable);
         self
     }
 
