@@ -937,6 +937,58 @@ fn legacy_cache_manifest_is_removed_once() {
     assert_eq!(summary(&second).0, 0, "second build rebuilt:\n{second}");
 }
 
+/// A `no_std` binary without a `#[global_allocator]` links even when a
+/// library it uses names `alloc` in an intra-doc link. rustc resolves
+/// such links while it compiles a library, so `alloc` in the extern
+/// prelude would make the library depend on it. A crate that writes
+/// `extern crate alloc;` still finds it through the sysroot.
+#[test]
+#[ignore]
+fn alloc_links_only_through_extern_crate() {
+    if !rustc_available("alloc_links_only_through_extern_crate") {
+        return;
+    }
+    let (_tmp, fixture) = setup();
+    seed_sysroot(&fixture);
+    add_library_using_library(&fixture);
+    let base = fixture.join("crates/klib_base/src/lib.rs");
+
+    append(
+        &base,
+        "\n/// Holds nothing; see [`Box`](alloc::boxed::Box).\npub struct DocLink;\n",
+    );
+    quon_ok(&fixture, &["build"]);
+    assert!(kernel_bin(&fixture).is_file(), "step 1: kernel not built");
+
+    append(
+        &base,
+        r#"
+extern crate alloc;
+
+struct NoAlloc;
+
+unsafe impl core::alloc::GlobalAlloc for NoAlloc {
+    unsafe fn alloc(&self, _: core::alloc::Layout) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+    unsafe fn dealloc(&self, _: *mut u8, _: core::alloc::Layout) {}
+}
+
+#[global_allocator]
+static ALLOCATOR: NoAlloc = NoAlloc;
+
+pub fn vec_len(v: &alloc::vec::Vec<u8>) -> usize {
+    v.len()
+}
+"#,
+    );
+    let second = quon_ok(&fixture, &["build"]);
+    assert!(
+        summary(&second).0 > 0,
+        "step 2: the edited library did not rebuild:\n{second}"
+    );
+}
+
 /// `quon setup` builds the shared quon-config library under
 /// `QUON_HOME` (the checkout's `target/` for tests, per
 /// `.cargo/config.toml`) and prints its directory.

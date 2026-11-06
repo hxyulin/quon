@@ -201,12 +201,21 @@ fn build_command(
                 "compiler_builtins",
                 "libcompiler_builtins-quon-compiler_builtins.rlib",
             ),
-            ("alloc", "liballoc-quon-alloc.rlib"),
         ] {
             let rlib = sysroot_lib.join(file);
             builder.extern_crate(name, &rlib);
             dep_outputs.push(rlib);
         }
+        // `alloc` is not passed with `--extern`: that would put it in
+        // every crate's extern prelude, where any path naming it, even
+        // an intra-doc link such as `[Box]: alloc::boxed::Box`, loads
+        // it. The crate then depends on `alloc`, and a `no_std` binary
+        // without a `#[global_allocator]` fails to link. A crate that
+        // wants it writes `extern crate alloc;`, which rustc resolves
+        // through `--sysroot`, as with Cargo's prebuilt sysroots. It
+        // stays a dependency output, so such a crate rebuilds when the
+        // sysroot does.
+        dep_outputs.push(sysroot_lib.join("liballoc-quon-alloc.rlib"));
     }
     if let (true, Platform::Cross(t)) = (unit.config_crate, unit.platform)
         && let Some(config_path) = artifacts.config_crate(t)

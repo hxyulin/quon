@@ -114,6 +114,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **`no_std` binaries link without a global allocator.** Quon passed
+  `alloc` to every cross crate with `--extern`, so a dependency that
+  named it, even in an intra-doc link, depended on it, and the binary
+  failed with "no global memory allocator found". `alloc` now comes
+  from the sysroot, so a crate that uses it needs
+  `extern crate alloc;`, as with Cargo.
 - **A rustup toolchain switch is picked up.** The cached rustc info
   was keyed on `$RUSTC` and the binary's mtime only, so adding a
   `rust-toolchain.toml` or changing the rustup default kept the old

@@ -962,9 +962,11 @@ mod tests {
             args.iter().any(|a| a.starts_with("core=")),
             "--extern core= must be present for cross crates, got: {args:?}"
         );
+        // `alloc` comes from `--sysroot`, so only `extern crate alloc;`
+        // links it.
         assert!(
-            args.iter().any(|a| a.starts_with("alloc=")),
-            "--extern alloc= must be present for cross crates, got: {args:?}"
+            !args.iter().any(|a| a.starts_with("alloc=")),
+            "--extern alloc= must not be passed, got: {args:?}"
         );
         assert!(
             args.iter().any(|a| a.starts_with("compiler_builtins=")),
