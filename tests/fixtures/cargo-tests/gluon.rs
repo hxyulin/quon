@@ -1,7 +1,8 @@
 // Integration-test fixture: the kernel package has two `harness = false`
 // tests. `gluon test` boots each from a copy of the ESP with the test
 // binary in place of the kernel. The CLI tests swap QEMU for a script
-// that fails the `fails` test.
+// that fails the `fails` test. The `boot` test links `testkit`, a
+// dev-dependency that `gluon build` leaves out.
 
 use gluon_config::{Config, Result};
 
