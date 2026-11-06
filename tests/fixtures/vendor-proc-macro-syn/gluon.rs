@@ -8,9 +8,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("vendor-proc-macro-syn", "0.1.0");
 
     let kernel = cfg.target("x86_64-unknown-none");
@@ -30,5 +28,5 @@ fn main() -> Result<()> {
         .dep("bytemuck", "bytemuck")
         .dep("bytemuck_derive", "bytemuck_derive");
 
-    cfg.emit()
+    Ok(())
 }

@@ -6,9 +6,7 @@
 
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("minimal-uefi", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -46,5 +44,5 @@ fn main() -> Result<()> {
         .boot_mode("uefi")
         .esp_dir("./esp");
 
-    cfg.emit()
+    Ok(())
 }

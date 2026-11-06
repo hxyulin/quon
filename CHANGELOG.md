@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (gluon.rs entry point and `~/.gluon`)
+
+- **`gluon.rs` now defines `pub fn config(cfg: &mut Config) -> Result<()>`
+  instead of `main`.** Gluon generates the `main` that creates the
+  `Config`, calls `config` and emits the model. To migrate, replace
+  `fn main() -> Result<()> { let mut cfg = Config::new(); ... cfg.emit() }`
+  with `pub fn config(cfg: &mut Config) -> Result<()> { ... Ok(()) }` and
+  pass `cfg` instead of `&mut cfg` to helpers. A script that still
+  defines `main` fails to compile with a note saying this.
+- **The gluon-config library that `gluon.rs` links against is built once
+  per Gluon version and rustc into `~/.gluon`** (or `$GLUON_HOME`) and
+  shared by every project, instead of into each project's `build/`.
+  An installed `gluon` builds it from the published `gluon-config` of
+  its own version, offline first, so `cargo install gluon-cli` works
+  without a Gluon checkout. A `gluon` built from a checkout still builds
+  it from that checkout, into `~/.gluon/dev/`. Concurrent `gluon`
+  processes build an entry once.
+- **`gluon configure` declares `gluon.rs` as a library crate** in
+  `rust-project.json`, and points rust-analyzer at the gluon-config
+  sources the library was built from.
+
+### Added (`gluon setup`)
+
+- **`gluon setup`** builds the gluon-config library for the current
+  rustc ahead of time and prints its directory. Other commands build
+  it on first use.
+
 ### Added (Modular workspace config)
 
 - **`gluon.rs` config can now be split across multiple files** using

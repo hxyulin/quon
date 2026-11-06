@@ -11,9 +11,7 @@ Limine configuration file.
 ```rust
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("limine-kernel", "0.1.0");
     let target = cfg.target("x86_64-unknown-none");
     cfg.cargo_workspace(".");
@@ -45,7 +43,7 @@ fn main() -> Result<()> {
         .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .success_exit_code(33);
 
-    cfg.emit()
+    Ok(())
 }
 ```
 

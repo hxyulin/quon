@@ -40,16 +40,16 @@ Every `gluon.rs` looks like this:
 ```rust
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
+pub fn config(cfg: &mut Config) -> Result<()> {
     // ... declarations ...
-    cfg.emit()
+    Ok(())
 }
 ```
 
-`cfg.emit()` serialises the model as JSON to stdout and returns the
-first accumulated diagnostic if any. The gluon CLI captures that
-JSON, runs intern + validate, and proceeds with the build.
+Gluon creates the `Config`, calls `config`, then serialises the model
+as JSON to stdout, failing with the first accumulated diagnostic if
+any. The gluon CLI captures that JSON, runs intern + validate, and
+proceeds with the build.
 
 ## Targets are handles, not strings
 
@@ -141,8 +141,8 @@ intended path for configurations that lean heavily on boolean logic.
 Rhai surfaces builder errors with full source spans. The Rust DSL
 uses the call-site position from `Location::caller()` — sufficient
 for "duplicate target name" but coarser than what Rhai produced.
-Errors accumulate on the [`Config`] and are returned (one at a
-time, first-failure-wins) when you call `cfg.emit()`.
+Errors accumulate on the [`Config`] and are reported (one at a
+time, first-failure-wins) after `config` returns.
 
 ## Editor support
 

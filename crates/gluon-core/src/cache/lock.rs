@@ -40,10 +40,17 @@ impl CacheLock {
     /// wondering why nothing is happening — the most common confusing
     /// failure mode of locking systems.
     pub fn acquire(layout: &BuildLayout) -> Result<Self> {
-        let lock_path = lockfile_path(layout);
-        // Make sure the parent dir exists. The build path itself is
-        // about to need it; doing it here keeps the lock acquisition
-        // self-contained.
+        let what = format!("another build in {}", layout.root().display());
+        Self::acquire_file(&lockfile_path(layout), &what)
+    }
+
+    /// Acquire an exclusive lock on `lock_path`, creating it and its
+    /// parent directory if needed. `what` names the holder in the
+    /// notice printed while waiting ("gluon: waiting for <what>").
+    /// Used for caches outside a build directory, such as the shared
+    /// gluon-config library under `$GLUON_HOME`.
+    pub fn acquire_file(lock_path: &Path, what: &str) -> Result<Self> {
+        let lock_path = lock_path.to_path_buf();
         if let Some(parent) = lock_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io {
                 path: parent.to_path_buf(),
@@ -67,10 +74,7 @@ impl CacheLock {
         match file.try_lock_exclusive() {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                eprintln!(
-                    "gluon: waiting for another build in {}",
-                    layout.root().display()
-                );
+                eprintln!("gluon: waiting for {what}");
                 file.lock_exclusive().map_err(|e| Error::Io {
                     path: lock_path.clone(),
                     source: e,

@@ -1,22 +1,17 @@
-//! Build script: bake the gluon workspace path into the crate so the
-//! `script_runner` can locate `crates/gluon-config` at runtime without
-//! a config file.
+//! Build script: bake the gluon checkout path into the crate, so a
+//! gluon built from a checkout builds the gluon-config library that
+//! `gluon.rs` links against from that checkout's sources rather than
+//! from crates.io. See `script_runner::rlib`.
 //!
 //! The path is resolved at compile time by walking up from `CARGO_MANIFEST_DIR`
-//! until we find a parent that contains `crates/gluon-config/Cargo.toml`. This
-//! works for `cargo build`, `cargo test`, and any in-tree invocation.
+//! until we find a parent that contains `crates/gluon-config/Cargo.toml`.
 //!
-//! Limitations:
-//!
-//! - After `cargo install gluon-cli`, the baked path points at the build
-//!   machine's checkout — which won't exist on the user's machine. That's
-//!   why `script_runner::rlib::workspace_dir` consults the
-//!   `GLUON_CONFIG_SOURCE_DIR` env var first: install-time deployments must
-//!   set that variable (or pre-build the rlib via the Stage 1.7 follow-up).
-//!
-//! - If the manifest dir is somehow not nested under the workspace (unusual
-//!   custom layouts), the fallback bakes in the manifest dir itself — which
-//!   will fail at runtime with a clear error message rather than crash.
+//! An installed gluon (`cargo install gluon-cli`) is compiled from an
+//! unpacked crate with no such parent. The fallback bakes the manifest
+//! dir itself, which has no `crates/gluon-config/Cargo.toml`, so at
+//! runtime gluon finds no checkout and uses the published gluon-config
+//! of its own version. The same happens when a checkout that gluon was
+//! built from is later deleted.
 
 fn main() {
     println!("cargo:rerun-if-env-changed=GLUON_CONFIG_SOURCE_DIR");

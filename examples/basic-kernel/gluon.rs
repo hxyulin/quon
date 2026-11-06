@@ -15,9 +15,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     // ── Project declaration ───────────────────────────────────────
     cfg.project("my-kernel", "0.1.0");
 
@@ -57,5 +55,5 @@ fn main() -> Result<()> {
         .cores(1)
         .serial_stdio();
 
-    cfg.emit()
+    Ok(())
 }

@@ -3,16 +3,22 @@
 The single configuration file for every Gluon project.
 
 A `gluon.rs` is a regular Rust source file that imports the
-[`gluon-config`] crate, constructs a `Config` value, and emits it as
-JSON to stdout via `cfg.emit()`. Gluon compiles the script on first
-invocation (~5 s) and caches the binary; subsequent runs are ~50 ms.
+[`gluon-config`] crate and defines one function:
+
+```rust
+pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()>
+```
+
+The file has no `main`. Gluon generates a `main` that creates the
+`Config`, calls `config`, and prints the model as JSON. If `config`
+returns an error, Gluon reports it and stops. Gluon compiles the script
+when it changes (about 1 s) and caches the binary; later runs take
+about 50 ms.
 
 ## Minimal example
 
 ```rust
-fn main() -> gluon_config::Result<()> {
-    let mut cfg = gluon_config::Config::new();
-
+pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
     cfg.project("my-kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -36,7 +42,7 @@ fn main() -> gluon_config::Result<()> {
         .cores(1)
         .serial_stdio();
 
-    cfg.emit()
+    Ok(())
 }
 ```
 
@@ -75,19 +81,18 @@ mod kernel;
 #[path = "shared/gluon.rs"]
 mod shared;
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
     cfg.profile("dev").target(target).opt_level(0).debug_info(true);
     cfg.qemu("qemu-system-x86_64").machine("q35").memory(128);
 
-    shared::register(&mut cfg)?;
-    bootloader::register(&mut cfg)?;
-    kernel::register(&mut cfg)?;
+    shared::register(cfg)?;
+    bootloader::register(cfg)?;
+    kernel::register(cfg)?;
 
-    cfg.emit()
+    Ok(())
 }
 ```
 
@@ -162,8 +167,8 @@ errors against `gluon.rs` for free.
 
 The trade-offs:
 
-- **First-time compile cost.** ~5 s on a fresh build dir; cached after
-  that.
+- **First-time compile cost.** About 1 s per script change, plus a
+  one-time build of the gluon-config library for each rustc.
 - **Conditional logic in the script is real Rust.** `if`, `for`,
   arbitrary functions are available — more rope than Rhai. Use it
   judiciously; a build script that needs a binary search is probably
@@ -173,23 +178,79 @@ The trade-offs:
   builder method, which is enough for "duplicate target name" but not
   for "invalid value passed inside a deeply nested expression".
 
-## How distribution works
+## The gluon-config library and `~/.gluon`
 
-Stage 1 builds `gluon-config.rlib` on demand into
-`<build_dir>/script-runner/rlib/<key>/`. The cache is keyed on rustc
-version, gluon-config and gluon-model source contents, and `Cargo.lock`.
-Subsequent builds skip the cargo invocation when the key matches.
+The script links against a compiled gluon-config library. Gluon builds
+it with cargo once per Gluon version and rustc, and every project
+shares it. It lives in the Gluon home directory, `~/.gluon`, or the
+directory `GLUON_HOME` names:
 
-If you've installed gluon outside its source workspace and the harness
-can't find the gluon-config sources, set `GLUON_CONFIG_SOURCE_DIR` to
-the gluon source checkout. (Stage 1.7 follow-up: install-time pre-built
-rlib distribution.)
+```text
+~/.gluon/
+└── <gluon version>/config-lib/<rustc hash>/
+    ├── Cargo.toml       # depends on gluon-config = "=<gluon version>"
+    ├── Cargo.lock       # written by the first build, then left as is
+    ├── manifest.json    # paths of the built library files
+    └── target/
+```
+
+The first command that needs the library builds it, which takes about
+5 to 15 s. To build it ahead of time, run `gluon setup` in the project.
+It builds the library for the rustc that the directory uses, and
+prints the directory:
+
+```sh
+$ gluon setup
+/home/me/.gluon/0.1.1/config-lib/3f9c…
+```
+
+The build runs offline first. `cargo install gluon-cli` has already
+downloaded gluon-config's sources, so it usually needs no network. If
+the offline build fails, Gluon retries online. A rustc upgrade gets a
+new entry; delete old entries to reclaim the space.
+
+A `gluon` built from a Gluon checkout builds the library from that
+checkout's sources instead, into `~/.gluon/dev/config-lib/<hash>/`.
+The hash covers the gluon-config and gluon-model sources, so an edit to
+them builds a new entry. `GLUON_CONFIG_SOURCE_DIR` points Gluon at a
+checkout explicitly.
+
+The compiled script itself stays in the project, under
+`build/script-runner/`.
 
 ## Editor support
 
 Run `gluon configure` in the project root to generate a
 `rust-project.json`. rust-analyzer will pick it up and start indexing
 your kernel sources alongside `gluon.rs` itself — every builder method
-gets autocomplete, hover, and live diagnostics.
+gets autocomplete, hover, and live diagnostics. The file declares
+`gluon.rs` as a library crate, because it has no `main`, and points
+rust-analyzer at the gluon-config sources the library was built from.
+
+## Migrating from `fn main`
+
+Earlier versions had `gluon.rs` define `main`, create the `Config` and
+call `cfg.emit()`. Rewrite
+
+```rust
+fn main() -> Result<()> {
+    let mut cfg = Config::new();
+    // ...
+    cfg.emit()
+}
+```
+
+as
+
+```rust
+pub fn config(cfg: &mut Config) -> Result<()> {
+    // ...
+    Ok(())
+}
+```
+
+and pass `cfg` instead of `&mut cfg` to helper functions. A script
+that still defines `main` fails to compile, and the error says how to
+migrate.
 
 [`gluon-config`]: https://docs.rs/gluon-config

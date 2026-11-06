@@ -19,8 +19,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.cargo_workspace(".");
 
     cfg.project("my-os", "0.1.0").default_profile("debug");
@@ -71,5 +70,5 @@ fn main() -> Result<()> {
         .serial_stdio()
         .boot_mode("uefi");
 
-    cfg.emit()
+    Ok(())
 }

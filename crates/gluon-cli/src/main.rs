@@ -36,6 +36,11 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         return cmd::init::run(args);
     }
 
+    // `setup` prepares $GLUON_HOME; it needs no gluon.rs.
+    if let cli::Command::Setup = &cli.command {
+        return cmd::setup::run();
+    }
+
     // `manifest` reads a Cargo workspace directly; it needs no gluon.rs.
     if let cli::Command::Manifest(sub) = &cli.command {
         return cmd::manifest::run(sub, cli.target.as_deref());
@@ -125,6 +130,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         | cli::Command::Clean(_)
         | cli::Command::Fmt(_)
         | cli::Command::Init(_)
+        | cli::Command::Setup
         | cli::Command::Vendor(_)
         | cli::Command::Manifest(_)
         | cli::Command::External(_) => {

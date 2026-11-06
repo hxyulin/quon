@@ -1,0 +1,7 @@
+[env]
+# Gluon's tests compile gluon.rs scripts, which link against a
+# gluon-config library that Gluon builds once into $GLUON_HOME. Point
+# every process cargo starts (tests, and `cargo run`) at the checkout's
+# `target/` so they never write into the user's ~/.gluon. An explicit
+# GLUON_HOME in the environment still wins.
+GLUON_HOME = { value = "target/gluon-home", relative = true }

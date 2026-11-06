@@ -25,9 +25,7 @@ profile, and a group containing at least one crate.
 ```rust
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -46,7 +44,7 @@ fn main() -> Result<()> {
             .root("src/main.rs")
             .linker_script("crates/kernel/kernel.ld");
 
-    cfg.emit()
+    Ok(())
 }
 ```
 

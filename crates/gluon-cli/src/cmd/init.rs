@@ -679,7 +679,7 @@ pub fn render(plan: &Plan) -> String {
         );
     }
 
-    o.push_str("fn main() -> Result<()> {\n    let mut cfg = Config::new();\n\n");
+    o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
     let _ = writeln!(o, "    cfg.project({:?}, {:?});", plan.name, plan.version);
     if plan.target_source.is_empty() {
         o.push_str(
@@ -832,7 +832,7 @@ pub fn render(plan: &Plan) -> String {
         }
     }
 
-    o.push_str("    cfg.emit()\n}\n");
+    o.push_str("    Ok(())\n}\n");
     o
 }
 
@@ -1343,7 +1343,7 @@ mod tests {
 
         run_at(ws.path(), &args(true)).unwrap();
         let text = fs::read_to_string(ws.path().join("gluon.rs")).unwrap();
-        assert!(text.contains("cfg.emit()"));
+        assert!(text.contains("pub fn config(cfg: &mut Config)"));
     }
 
     #[test]

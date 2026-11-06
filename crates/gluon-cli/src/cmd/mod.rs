@@ -37,6 +37,7 @@ pub mod fmt;
 pub mod init;
 pub mod manifest;
 pub mod run;
+pub mod setup;
 pub mod test;
 pub mod vendor;
 
@@ -360,12 +361,11 @@ mod tests {
     /// and resolves cleanly — a project, a builtin target, and a
     /// profile pinned to that target. No crates or groups required.
     fn write_min_script(dir: &Path) {
-        let script = r#"fn main() -> gluon_config::Result<()> {
-    let mut cfg = gluon_config::Config::new();
+        let script = r#"pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
     cfg.project("demo", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
     cfg.profile("dev").target(t).opt_level(0).debug_info(true);
-    cfg.emit()
+    Ok(())
 }
 "#;
         fs::write(dir.join("gluon.rs"), script).expect("write gluon.rs");
@@ -411,13 +411,12 @@ mod tests {
             return;
         }
         let tmp = tempfile::tempdir().expect("tempdir");
-        let script = r#"fn main() -> gluon_config::Result<()> {
-    let mut cfg = gluon_config::Config::new();
+        let script = r#"pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
     cfg.project("demo", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
     cfg.profile("zeta").target(t);
     cfg.profile("alpha").target(t);
-    cfg.emit()
+    Ok(())
 }
 "#;
         fs::write(tmp.path().join("gluon.rs"), script).expect("write");

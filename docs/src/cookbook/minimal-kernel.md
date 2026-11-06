@@ -8,9 +8,7 @@ compiled for `x86_64-unknown-none` and launched in QEMU.
 ```rust
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     // Every project starts with a name and version.
     cfg.project("my-kernel", "0.1.0");
 
@@ -40,7 +38,7 @@ fn main() -> Result<()> {
         .cores(1)
         .serial_stdio();
 
-    cfg.emit()
+    Ok(())
 }
 ```
 

@@ -1,4 +1,5 @@
-//! On-demand build (and cache) of `libgluon_config.rlib`.
+//! The gluon-config library that `gluon.rs` links against, built once
+//! per gluon version and rustc and shared by every project.
 //!
 //! ## Why this layer exists
 //!
@@ -19,30 +20,32 @@
 //! every library in the graph. See [`parse_cargo_output`] for how the
 //! paths are picked and why both cargo build-dir layouts work.
 //!
-//! ## Caching
+//! ## Where the library lives
 //!
-//! Cargo already incrementally caches the compile, but running it costs
-//! a cargo startup and a lock on the target dir. We persist the resolved
-//! paths under `<build_dir>/script-runner/rlib/<hash>/manifest.json` so
-//! subsequent invocations skip cargo entirely and read the manifest
-//! directly. A manifest is only trusted while every path it records
-//! still exists.
+//! Under [`crate::home::gluon_home`] (`$GLUON_HOME`, default
+//! `~/.gluon`), in one of two kinds of entry:
 //!
-//! Cache key is `sha256(rustc_version || sources_of(gluon-config) ||
-//! sources_of(gluon-model))`. Touching either crate's sources or the
-//! compiler invalidates the entry. cargo is run with `RUSTC` set to the
-//! project's rustc, so the compiler in the key is the one that built
-//! the rlib.
+//! - **Installed gluon:** `<home>/<gluon version>/config-lib/<rustc>/`.
+//!   The generated `Cargo.toml` depends on `gluon-config =
+//!   "=<version>"`. `cargo install gluon-cli` already downloaded that
+//!   crate's sources, because gluon-core depends on it, so the build
+//!   runs `--offline` first and goes online only if that fails.
+//! - **Checkout:** `<home>/dev/config-lib/<key>/`, used when the
+//!   checkout `build.rs` baked in still exists or
+//!   `GLUON_CONFIG_SOURCE_DIR` is set. The `Cargo.toml` uses a path
+//!   dependency on the checkout, and the key adds the hash of the
+//!   gluon-config and gluon-model sources and the checkout's
+//!   `Cargo.lock`. An edit therefore gets a new entry, and a
+//!   development build never lands in a version-named one.
 //!
-//! ## Workspace discovery
-//!
-//! The cargo invocation needs a `Cargo.toml`. `crates/gluon-core/build.rs`
-//! bakes the workspace root into `GLUON_CONFIG_WORKSPACE_DIR` at compile
-//! time, and runtime can override via `GLUON_CONFIG_SOURCE_DIR`. After
-//! `cargo install` the baked path won't exist on the user's machine —
-//! Stage 1.7 will replace this with an install-time pre-built rlib;
-//! Stage 1's contract is "always run from a checkout".
+//! `<rustc>` is [`RustcInfo::version_hash`] in hex. An entry holds the
+//! generated `Cargo.toml` and `lib.rs`, its `Cargo.lock`, the cargo
+//! target dir, and `manifest.json` with the resolved paths. Later runs
+//! read the manifest and skip cargo entirely. cargo runs with `RUSTC`
+//! set to the project's rustc, so the compiler in the key is the one
+//! that built the library.
 
+use crate::cache::CacheLock;
 use crate::compile::RustcInfo;
 use crate::error::{Error, Result};
 use crate::script_runner::file_hashes::FileHashes;
@@ -50,7 +53,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Paths consumed by `cache::ensure_script_binary`'s rustc invocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RlibPaths {
     /// Absolute path to `libgluon_config-<hash>.rlib`.
     pub gluon_config_rlib: PathBuf,
@@ -62,109 +65,138 @@ pub struct RlibPaths {
     /// Directories holding the transitive libraries, sorted and
     /// deduplicated. Each is passed to rustc as `-L dependency=<dir>`.
     pub dep_dirs: Vec<PathBuf>,
+    /// gluon-config's `src/lib.rs`, as cargo reported it. `gluon
+    /// configure` points rust-analyzer at it.
+    pub gluon_config_src: Option<PathBuf>,
 }
 
-/// Build (or find-cached) the `gluon-config` rlib + deps directory.
-///
-/// On cache miss, shells out to `cargo build --release -p gluon-config
-/// --message-format=json` from the gluon workspace root, parses the JSON
-/// stream to extract the rlib path, and persists a manifest under
-/// `<build_dir>/script-runner/rlib/<hash>/manifest.json`.
+/// A built gluon-config library entry.
+#[derive(Debug, Clone)]
+pub struct ConfigLib {
+    /// The entry directory under `$GLUON_HOME`.
+    pub dir: PathBuf,
+    pub paths: RlibPaths,
+}
+
+/// Where gluon-config's sources come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// crates.io, at this gluon's version.
+    Registry,
+    /// A gluon checkout (the workspace root).
+    Checkout(PathBuf),
+}
+
+/// The gluon-config version an installed gluon depends on. The
+/// workspace gives every gluon crate one version
+/// (`workspace.package.version`), so gluon-core's is gluon-config's.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// A file that only a gluon checkout has, relative to its root.
+const CHECKOUT_MARKER: &str = "crates/gluon-config/Cargo.toml";
+
+/// Build, or find already built, the gluon-config library for
+/// `rustc_info`. Several gluon processes may call this at once: the
+/// first builds the entry under its lock, the rest wait and then read
+/// its manifest.
 pub(crate) fn ensure_gluon_config_rlib(
-    build_dir: &Path,
     rustc_info: &RustcInfo,
     hashes: &mut FileHashes,
-) -> Result<RlibPaths> {
-    let workspace = workspace_dir()?;
-    let cache_root = build_dir.join("script-runner").join("rlib");
+) -> Result<ConfigLib> {
+    let home = crate::home::gluon_home()?;
+    let source = source()?;
+    let dir = entry_dir(&home, &source, rustc_info, hashes)?;
+    let manifest_path = dir.join("manifest.json");
 
-    let key = compute_cache_key(&workspace, &rustc_info.version, hashes)?;
-    let entry_dir = cache_root.join(&key);
-    let manifest_path = entry_dir.join("manifest.json");
-
-    // Cache hit: the manifest exists *and* the paths it records still
-    // resolve to real files. The latter check guards against a wiped
-    // `target/` directory invalidating a stale manifest — without it,
-    // we'd return paths that the rustc invocation in `cache.rs` would
-    // then fail on with a confusing `No such file or directory`.
-    if let Some(paths) = read_cached_manifest(&manifest_path)
-        && paths.gluon_config_rlib.is_file()
-        && paths
-            .gluon_config_rmeta
-            .as_ref()
-            .is_none_or(|m| m.is_file())
-        && paths.dep_dirs.iter().all(|d| d.is_dir())
-    {
-        return Ok(paths);
+    // Freshness rule: the entry's directory name covers every input of
+    // the build: the gluon version (for a checkout, the hash of the
+    // gluon-config and gluon-model sources and Cargo.lock) and the
+    // rustc identity. The entry's Cargo.lock is written by its first
+    // build and passed `--locked` on every later one, so dependency
+    // versions cannot drift. The manifest is trusted while every path
+    // it records still exists; a missing one (a wiped target dir)
+    // rebuilds. Not detected: a library file under `target/` replaced
+    // by hand.
+    if let Some(paths) = read_cached_manifest(&manifest_path) {
+        return Ok(ConfigLib { dir, paths });
     }
 
-    // Cache miss: build via cargo and persist the resolved paths.
-    let paths = run_cargo_build(&workspace, &rustc_info.rustc_path)?;
-    if !paths.gluon_config_rlib.is_file() {
-        return Err(Error::Config(format!(
-            "cargo build -p gluon-config reported {} but the file does not exist",
-            paths.gluon_config_rlib.display()
-        )));
+    let _lock = CacheLock::acquire_file(
+        &dir.join(".lock"),
+        &format!("another gluon to build {}", dir.display()),
+    )?;
+    // Another process may have built the entry while we waited.
+    if let Some(paths) = read_cached_manifest(&manifest_path) {
+        return Ok(ConfigLib { dir, paths });
     }
 
-    std::fs::create_dir_all(&entry_dir).map_err(|e| Error::Io {
-        path: entry_dir.clone(),
-        source: e,
-    })?;
+    eprintln!(
+        "gluon: building the gluon-config library for {} in {}",
+        rustc_info.version,
+        dir.display()
+    );
+    let paths = build_entry(&dir, &source, &rustc_info.rustc_path)?;
     write_cached_manifest(&manifest_path, &paths)?;
-    Ok(paths)
+    Ok(ConfigLib { dir, paths })
 }
 
-/// Resolve the gluon workspace directory.
-///
-/// Order:
-/// 1. `GLUON_CONFIG_SOURCE_DIR` env var (runtime override — used by
-///    install-time deployments and test harnesses that need to point
-///    at a specific checkout).
-/// 2. `GLUON_CONFIG_WORKSPACE_DIR` baked in at compile time by
-///    `build.rs`.
-///
-/// Both must point at a directory whose `crates/gluon-config/Cargo.toml`
-/// exists; otherwise we fail loudly so the user knows to set the env var.
-///
-/// Exposed as `pub` so `configure` (Stage 1 shim) can compute the
-/// gluon-config `lib.rs` path without triggering a cargo build.
-pub fn workspace_dir() -> Result<PathBuf> {
+/// A checkout when `GLUON_CONFIG_SOURCE_DIR` is set or the checkout
+/// `build.rs` baked in still exists, else the registry. An installed
+/// gluon bakes its own unpacked crate directory, which has no
+/// [`CHECKOUT_MARKER`].
+fn source() -> Result<Source> {
     if let Some(p) = std::env::var_os("GLUON_CONFIG_SOURCE_DIR") {
         let p = PathBuf::from(p);
-        if !p.join("crates/gluon-config/Cargo.toml").is_file() {
+        if !p.join(CHECKOUT_MARKER).is_file() {
             return Err(Error::Config(format!(
-                "GLUON_CONFIG_SOURCE_DIR={} does not contain crates/gluon-config/Cargo.toml",
+                "GLUON_CONFIG_SOURCE_DIR={} does not contain {CHECKOUT_MARKER}",
                 p.display()
             )));
         }
-        return Ok(p);
+        return Ok(Source::Checkout(p));
     }
-    let baked = env!("GLUON_CONFIG_WORKSPACE_DIR");
-    let p = PathBuf::from(baked);
-    if !p.join("crates/gluon-config/Cargo.toml").is_file() {
-        return Err(Error::Config(format!(
-            "gluon-config workspace not found at {} (baked at compile time). \
-             Set GLUON_CONFIG_SOURCE_DIR to the gluon source checkout.",
-            p.display()
-        )));
+    let baked = PathBuf::from(env!("GLUON_CONFIG_WORKSPACE_DIR"));
+    if baked.join(CHECKOUT_MARKER).is_file() {
+        Ok(Source::Checkout(baked))
+    } else {
+        Ok(Source::Registry)
     }
-    Ok(p)
+}
+
+fn entry_dir(
+    home: &Path,
+    source: &Source,
+    rustc_info: &RustcInfo,
+    hashes: &mut FileHashes,
+) -> Result<PathBuf> {
+    let rustc = hex(&rustc_info.version_hash());
+    Ok(match source {
+        Source::Registry => home.join(VERSION).join("config-lib").join(rustc),
+        Source::Checkout(workspace) => home
+            .join("dev")
+            .join("config-lib")
+            .join(compute_cache_key(workspace, &rustc, hashes)?),
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Hash all `.rs` files and `Cargo.toml`s under `crates/gluon-config` and
-/// `crates/gluon-model`, plus the rustc version. Determinism: the file
-/// list is sorted by path before hashing. File hashes come from
-/// `hashes`, which skips files whose mtime and size are unchanged.
+/// `crates/gluon-model`, the checkout's `Cargo.lock`, and the rustc
+/// identity. Determinism: the file list is sorted by path before
+/// hashing. File hashes come from `hashes`, which skips files whose
+/// mtime and size are unchanged.
 fn compute_cache_key(
     workspace_dir: &Path,
-    rustc_version: &str,
+    rustc_id: &str,
     hashes: &mut FileHashes,
 ) -> Result<String> {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
-    hasher.update(rustc_version.as_bytes());
+    hasher.update(rustc_id.as_bytes());
 
     for sub in ["crates/gluon-config", "crates/gluon-model"] {
         let dir = workspace_dir.join(sub);
@@ -188,78 +220,153 @@ fn compute_cache_key(
             hasher.update(hashes.hash(&path)?);
         }
     }
-    // Lock file captures transitive dep versions. If serde bumps from 1.0.196
-    // → 1.0.197 with no source changes here, our cache MUST invalidate so the
-    // new rlib is rebuilt against the new transitive deps. Without this hash,
-    // the cache hit path would return paths into target/ that may no longer
-    // exist.
+    // The entry's first build copies this lock, so it decides the
+    // transitive dependency versions and must be part of the key.
     let lock_path = workspace_dir.join("Cargo.lock");
     if lock_path.is_file() {
         hasher.update(hashes.hash(&lock_path)?);
     }
-    // (If Cargo.lock is absent — e.g., an unusual library-only workspace —
-    // skip the hash; cargo will regenerate the lock and the next call will
-    // pick it up.)
 
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// On-disk shape of `manifest.json`. A manifest written by an older
-/// gluon (single `deps_dir` field) fails to deserialize, which
-/// [`read_cached_manifest`] treats as a cache miss.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct CachedManifest {
-    gluon_config_rlib: PathBuf,
-    gluon_config_rmeta: Option<PathBuf>,
-    dep_dirs: Vec<PathBuf>,
-}
-
-impl From<RlibPaths> for CachedManifest {
-    fn from(p: RlibPaths) -> Self {
-        Self {
-            gluon_config_rlib: p.gluon_config_rlib,
-            gluon_config_rmeta: p.gluon_config_rmeta,
-            dep_dirs: p.dep_dirs,
+/// Write the entry's package and run cargo in it. The caller holds
+/// the entry lock.
+fn build_entry(dir: &Path, source: &Source, rustc: &Path) -> Result<RlibPaths> {
+    let lock = dir.join("Cargo.lock");
+    // An existing lock was written by an earlier build of this entry;
+    // `--locked` keeps that build's dependency versions.
+    let locked = lock.is_file();
+    write_file(&dir.join("Cargo.toml"), cargo_toml(source).as_bytes())?;
+    write_file(
+        &dir.join("lib.rs"),
+        b"// Generated by gluon. Empty: only the gluon-config dependency is built.\n",
+    )?;
+    if !locked && let Source::Checkout(workspace) = source {
+        // Start from the checkout's resolution so the library is built
+        // with the dependency versions gluon itself was tested with.
+        // cargo drops the entries this package does not use.
+        let from = workspace.join("Cargo.lock");
+        if from.is_file() {
+            std::fs::copy(&from, &lock).map_err(|e| Error::Io {
+                path: from,
+                source: e,
+            })?;
         }
     }
-}
 
-impl From<CachedManifest> for RlibPaths {
-    fn from(m: CachedManifest) -> Self {
-        Self {
-            gluon_config_rlib: m.gluon_config_rlib,
-            gluon_config_rmeta: m.gluon_config_rmeta,
-            dep_dirs: m.dep_dirs,
-        }
+    let paths = run_cargo_build(dir, rustc, locked).map_err(|e| match (e, source) {
+        (Error::Config(msg), Source::Registry) => Error::Config(format!(
+            "{msg}\nnote: this gluon found no gluon checkout, so it builds gluon-config \
+             {VERSION} from crates.io. Set GLUON_CONFIG_SOURCE_DIR to a gluon checkout \
+             to build from its sources instead."
+        )),
+        (e, _) => e,
+    })?;
+    if !paths.gluon_config_rlib.is_file() {
+        return Err(Error::Config(format!(
+            "cargo build -p gluon-config in {} reported {} but the file does not exist",
+            dir.display(),
+            paths.gluon_config_rlib.display()
+        )));
     }
+    Ok(paths)
 }
 
-fn read_cached_manifest(path: &Path) -> Option<RlibPaths> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice::<CachedManifest>(&bytes)
-        .ok()
-        .map(Into::into)
+/// The entry's `Cargo.toml`. The empty `[workspace]` keeps cargo from
+/// treating the entry as part of a workspace above it, for example
+/// when `$GLUON_HOME` is inside a gluon checkout's `target/`.
+fn cargo_toml(source: &Source) -> String {
+    let dep = match source {
+        Source::Registry => toml_string(&format!("={VERSION}")),
+        Source::Checkout(workspace) => format!(
+            "{{ path = {} }}",
+            toml_string(&workspace.join("crates/gluon-config").to_string_lossy())
+        ),
+    };
+    format!(
+        "# Generated by gluon. Builds the gluon-config library that gluon.rs\n\
+         # scripts link against.\n\
+         [package]\n\
+         name = \"gluon-config-lib\"\n\
+         version = \"0.0.0\"\n\
+         edition = \"2024\"\n\
+         publish = false\n\
+         \n\
+         [lib]\n\
+         path = \"lib.rs\"\n\
+         \n\
+         [dependencies]\n\
+         gluon-config = {dep}\n\
+         \n\
+         [workspace]\n"
+    )
 }
 
-fn write_cached_manifest(path: &Path, paths: &RlibPaths) -> Result<()> {
-    let manifest: CachedManifest = paths.clone().into();
-    let bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| Error::Config(format!("serialize rlib manifest: {e}")))?;
+fn toml_string(s: &str) -> String {
+    toml::Value::String(s.to_owned()).to_string()
+}
+
+fn write_file(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(path, bytes).map_err(|e| Error::Io {
         path: path.to_path_buf(),
         source: e,
     })
 }
 
-/// `cargo build` for gluon-config, compiled by `rustc`.
+/// The manifest at `path`, if it parses and every path it records
+/// exists. Without the existence check, a wiped target dir would hand
+/// the script's rustc invocation paths that fail with a confusing
+/// `No such file or directory`.
+fn read_cached_manifest(path: &Path) -> Option<RlibPaths> {
+    let bytes = std::fs::read(path).ok()?;
+    let paths: RlibPaths = serde_json::from_slice(&bytes).ok()?;
+    let complete = paths.gluon_config_rlib.is_file()
+        && paths
+            .gluon_config_rmeta
+            .as_ref()
+            .is_none_or(|m| m.is_file())
+        && paths.dep_dirs.iter().all(|d| d.is_dir());
+    complete.then_some(paths)
+}
+
+/// Written to a temp file and renamed, because readers check the
+/// manifest without taking the entry lock.
+fn write_cached_manifest(path: &Path, paths: &RlibPaths) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(paths)
+        .map_err(|e| Error::Config(format!("serialize rlib manifest: {e}")))?;
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    write_file(&tmp, &bytes)?;
+    std::fs::rename(&tmp, path).map_err(|e| Error::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
+/// `cargo build` for gluon-config in the entry `dir`, compiled by
+/// `rustc`.
 ///
-/// cargo runs from the gluon workspace, where rustup would pick the
-/// workspace's own toolchain. The script binary is compiled by the
-/// project's rustc, and rustc refuses (E0514) to link a crate built by a
-/// different compiler. Setting `RUSTC` makes cargo use the project's
-/// compiler, which is also the one the cache key names.
-fn cargo_build_command(workspace_dir: &Path, rustc: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new("cargo");
+/// rustc refuses (E0514) to link a crate built by a different
+/// compiler, and the script binary is compiled by the project's rustc,
+/// so `RUSTC` makes cargo use that compiler too. The cargo beside that
+/// rustc is preferred over the one on `$PATH`: under rustup, `cargo`
+/// on `$PATH` picks a toolchain for the entry directory, which may not
+/// exist or may be older than the project's. `--target-dir` keeps a
+/// `CARGO_TARGET_DIR` from the environment from moving the build out
+/// of the entry.
+fn cargo_build_command(
+    dir: &Path,
+    rustc: &Path,
+    locked: bool,
+    offline: bool,
+) -> std::process::Command {
+    let sibling = rustc.with_file_name(if cfg!(windows) { "cargo.exe" } else { "cargo" });
+    let cargo = if sibling.is_file() {
+        sibling
+    } else {
+        PathBuf::from("cargo")
+    };
+    let mut cmd = std::process::Command::new(cargo);
     cmd.args([
         "build",
         "--release",
@@ -267,21 +374,40 @@ fn cargo_build_command(workspace_dir: &Path, rustc: &Path) -> std::process::Comm
         "gluon-config",
         "--message-format=json",
     ])
-    .env("RUSTC", rustc)
-    .current_dir(workspace_dir);
+    .arg("--manifest-path")
+    .arg(dir.join("Cargo.toml"))
+    .arg("--target-dir")
+    .arg(dir.join("target"));
+    if locked {
+        cmd.arg("--locked");
+    }
+    if offline {
+        cmd.arg("--offline");
+    }
+    cmd.env("RUSTC", rustc).current_dir(dir);
     cmd
 }
 
-fn run_cargo_build(workspace_dir: &Path, rustc: &Path) -> Result<RlibPaths> {
-    let output = cargo_build_command(workspace_dir, rustc)
-        .output()
-        .map_err(|e| Error::Io {
-            path: workspace_dir.to_path_buf(),
-            source: e,
-        })?;
+/// Build offline first: the sources are usually in cargo's cache
+/// already, and that keeps `gluon build` working without a network.
+/// Only when that fails is the build retried online.
+fn run_cargo_build(dir: &Path, rustc: &Path, locked: bool) -> Result<RlibPaths> {
+    let run = |offline: bool| {
+        cargo_build_command(dir, rustc, locked, offline)
+            .output()
+            .map_err(|e| Error::Io {
+                path: PathBuf::from("cargo"),
+                source: e,
+            })
+    };
+    let mut output = run(true)?;
+    if !output.status.success() {
+        output = run(false)?;
+    }
     if !output.status.success() {
         return Err(Error::Config(format!(
-            "cargo build -p gluon-config failed (status {}):\n{}",
+            "cargo build -p gluon-config failed in {} (status {}):\n{}",
+            dir.display(),
             output.status,
             String::from_utf8_lossy(&output.stderr)
         )));
@@ -326,6 +452,7 @@ fn run_cargo_build(workspace_dir: &Path, rustc: &Path) -> Result<RlibPaths> {
 ///   directory; on nightly one directory per unit.
 fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
     let mut gluon_config: Option<(PathBuf, Option<PathBuf>)> = None;
+    let mut gluon_config_src: Option<PathBuf> = None;
     let mut dep_dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let stdout_str = std::str::from_utf8(stdout)
         .map_err(|e| Error::Config(format!("cargo stdout was not utf-8: {e}")))?;
@@ -383,6 +510,7 @@ fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
         // Cargo emits both `gluon-config` (the package name) and
         // `gluon_config` (the crate name) interchangeably across versions.
         if is_lib && (name == "gluon-config" || name == "gluon_config") {
+            gluon_config_src = v["target"]["src_path"].as_str().map(PathBuf::from);
             let rmeta = filenames.iter().find(|f| has_ext(f, &["rmeta"]));
             if let Some(m) = rmeta {
                 gluon_config = Some((m.with_extension("rlib"), Some(m.clone())));
@@ -404,6 +532,7 @@ fn parse_cargo_output(stdout: &[u8]) -> Result<RlibPaths> {
         gluon_config_rlib,
         gluon_config_rmeta,
         dep_dirs: dep_dirs.into_iter().collect(),
+        gluon_config_src,
     })
 }
 
@@ -427,10 +556,14 @@ mod tests {
 {"reason":"compiler-artifact","target":{"name":"serde","kind":["lib"]},"filenames":["/t/release/deps/libserde-s.rlib","/t/release/deps/libserde-s.rmeta"]}
 {"reason":"compiler-artifact","target":{"name":"serde_derive","kind":["proc-macro"]},"filenames":["/t/release/deps/libserde_derive-d.dylib"]}
 {"reason":"compiler-artifact","target":{"name":"gluon-model","kind":["lib"]},"filenames":["/t/release/deps/libgluon_model-m.rlib","/t/release/deps/libgluon_model-m.rmeta"]}
-{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"]},"filenames":["/t/release/libgluon_config.rlib","/t/release/deps/libgluon_config-c.rmeta"]}
+{"reason":"compiler-artifact","target":{"name":"gluon-config","kind":["lib"],"src_path":"/src/gluon-config/src/lib.rs"},"filenames":["/t/release/libgluon_config.rlib","/t/release/deps/libgluon_config-c.rmeta"]}
 {"reason":"build-finished","success":true}
 "#;
         let paths = parse_cargo_output(stream.as_bytes()).expect("parse ok");
+        assert_eq!(
+            paths.gluon_config_src,
+            Some(PathBuf::from("/src/gluon-config/src/lib.rs"))
+        );
         assert_eq!(
             paths.gluon_config_rlib,
             PathBuf::from("/t/release/deps/libgluon_config-c.rlib")
@@ -520,36 +653,67 @@ also not json
     }
 
     #[test]
-    fn cargo_build_uses_the_project_rustc() {
-        // The rlib cache is keyed on the project's rustc, and the script
-        // is compiled by it, so cargo must build gluon-config with it too.
+    fn cargo_build_uses_the_project_rustc_and_the_entry() {
+        // The library is keyed on the project's rustc, and the script
+        // is compiled by it, so cargo must build gluon-config with it
+        // too, into the entry's own target dir.
         let rustc = Path::new("/toolchains/project/bin/rustc");
-        let cmd = cargo_build_command(Path::new("/gluon"), rustc);
+        let cmd = cargo_build_command(Path::new("/home/entry"), rustc, true, true);
         let rustc_env = cmd
             .get_envs()
             .find(|(k, _)| *k == "RUSTC")
             .and_then(|(_, v)| v);
         assert_eq!(rustc_env, Some(rustc.as_os_str()));
+        let args: Vec<_> = cmd.get_args().collect();
+        for want in ["--locked", "--offline", "/home/entry/target"] {
+            assert!(
+                args.contains(&std::ffi::OsStr::new(want)),
+                "{want}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_toml_depends_on_the_source() {
+        let cases = [
+            (Source::Registry, format!("={VERSION}"), None),
+            (
+                Source::Checkout(PathBuf::from("/src/gluon")),
+                String::new(),
+                Some("/src/gluon/crates/gluon-config"),
+            ),
+        ];
+        for (source, version, path) in cases {
+            let doc: toml::Value = toml::from_str(&cargo_toml(&source)).expect("valid TOML");
+            let dep = &doc["dependencies"]["gluon-config"];
+            match path {
+                None => assert_eq!(dep.as_str(), Some(version.as_str())),
+                Some(p) => assert_eq!(dep["path"].as_str(), Some(p)),
+            }
+            assert!(doc.get("workspace").is_some(), "{source:?}");
+        }
+    }
+
+    fn checkout() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
     #[test]
     fn cache_key_is_deterministic_across_calls() {
         // Smoke test: hashing the same workspace twice must produce the
-        // same key. Real correctness comes from the integration test;
-        // this just guards against accidental nondeterminism (HashMap
-        // iteration order, mtime peeking, etc.).
-        let workspace = workspace_dir().expect("workspace_dir");
-        let v = "rustc 1.85.0";
-        let k1 = compute_cache_key(&workspace, v, &mut memo()).expect("k1");
-        let k2 = compute_cache_key(&workspace, v, &mut memo()).expect("k2");
+        // same key. This guards against accidental nondeterminism
+        // (HashMap iteration order, mtime peeking, etc.).
+        let workspace = checkout();
+        let k1 = compute_cache_key(&workspace, "rustc-a", &mut memo()).expect("k1");
+        let k2 = compute_cache_key(&workspace, "rustc-a", &mut memo()).expect("k2");
         assert_eq!(k1, k2);
     }
 
     #[test]
-    fn cache_key_changes_with_rustc_version() {
-        let workspace = workspace_dir().expect("workspace_dir");
-        let k1 = compute_cache_key(&workspace, "rustc 1.85.0", &mut memo()).expect("k1");
-        let k2 = compute_cache_key(&workspace, "rustc 1.86.0", &mut memo()).expect("k2");
+    fn cache_key_changes_with_rustc() {
+        let workspace = checkout();
+        let k1 = compute_cache_key(&workspace, "rustc-a", &mut memo()).expect("k1");
+        let k2 = compute_cache_key(&workspace, "rustc-b", &mut memo()).expect("k2");
         assert_ne!(k1, k2);
     }
 

@@ -16,9 +16,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("vendor-cross-minimal", "0.1.0");
 
     let kernel = cfg.target("x86_64-unknown-none");
@@ -30,5 +28,5 @@ fn main() -> Result<()> {
 
     cfg.dependency("bitflags").version("2.11").target(kernel);
 
-    cfg.emit()
+    Ok(())
 }

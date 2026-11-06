@@ -10,9 +10,7 @@ with full type safety.
 ```rust
 use gluon_config::{Config, CrateType, ConfigValue, Expr, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("configurable_kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -53,7 +51,7 @@ fn main() -> Result<()> {
             .crate_type(CrateType::Bin)
             .root("src/main.rs");
 
-    cfg.emit()
+    Ok(())
 }
 ```
 

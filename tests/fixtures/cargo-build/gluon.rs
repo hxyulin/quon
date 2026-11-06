@@ -15,9 +15,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("cargo-build", "0.1.0");
     let target = cfg.target("x86_64-unknown-none");
     cfg.cargo_workspace(".");
@@ -33,5 +31,5 @@ fn main() -> Result<()> {
         .package("kernel")
         .linker_script("crates/kernel/kernel.ld");
 
-    cfg.emit()
+    Ok(())
 }

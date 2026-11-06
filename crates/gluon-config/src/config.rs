@@ -63,7 +63,8 @@ impl Config {
     }
 
     /// Serialise the underlying `RawBuildModel` as pretty-printed JSON to
-    /// stdout. Called from the user's `main()`.
+    /// stdout. Called by the `main` that gluon generates around the
+    /// user's `gluon.rs`, after its `config` function returns.
     ///
     /// Returns `Err(first)` if any diagnostics were accumulated — after
     /// printing all of them to stderr so the user sees the full picture.

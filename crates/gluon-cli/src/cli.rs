@@ -114,6 +114,14 @@ pub enum Command {
     Clean(CleanArgs),
     /// Generate `rust-project.json` for rust-analyzer.
     Configure(ConfigureArgs),
+    /// Build the gluon-config library that gluon.rs links against, for
+    /// the rustc in the current directory, and print its directory.
+    ///
+    /// The library is built once per gluon version and rustc into
+    /// `$GLUON_HOME` (default `~/.gluon`) and shared by every project.
+    /// Other commands build it on first use; `setup` does it ahead of
+    /// time, for example while a network is available.
+    Setup,
     /// Vendor external dependencies.
     ///
     /// For the Cargo workspace named by `cfg.cargo_workspace`, runs

@@ -120,6 +120,20 @@ gluon configure -o ./ide/rust-project.json
 See [rust-analyzer](../tooling/rust-analyzer.md) for details on editor
 integration.
 
+### `gluon setup`
+
+Build the gluon-config library that `gluon.rs` links against, for the
+rustc the current directory uses, and print the library's directory.
+The library is built once per Gluon version and rustc into
+`$GLUON_HOME` (default `~/.gluon`) and shared by every project. Other
+commands build it on first use, so `setup` is only needed to do that
+ahead of time, for example before going offline. See
+[the gluon-config library](../configuration/gluon-rs.md#the-gluon-config-library-and-gluon).
+
+```sh
+gluon setup
+```
+
 ### `gluon vendor [--check] [--force] [--offline]`
 
 Vendor external dependencies into the project.

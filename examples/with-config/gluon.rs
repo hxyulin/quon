@@ -15,9 +15,7 @@
 
 use gluon_config::{Config, ConfigValue, Expr, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("configurable_kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -104,5 +102,5 @@ fn main() -> Result<()> {
     // The .kconfig format supports menus, `depends on`, `source`,
     // and the full `||`/`&&`/`!` expression grammar.
 
-    cfg.emit()
+    Ok(())
 }

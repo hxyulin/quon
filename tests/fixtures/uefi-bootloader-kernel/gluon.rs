@@ -28,9 +28,7 @@
 
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("uefi-bootloader-kernel", "0.1.0");
 
     let target_none = cfg.target("x86_64-unknown-none");
@@ -84,5 +82,5 @@ fn main() -> Result<()> {
         .serial_stdio()
         .boot_mode("uefi");
 
-    cfg.emit()
+    Ok(())
 }

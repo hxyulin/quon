@@ -8,12 +8,12 @@
 //!         │
 //!         ▼
 //!   ┌─────────────────────┐
-//!   │ rlib::ensure_..()   │  build (or cache-hit) libgluon_config.rlib
+//!   │ rlib::ensure_..()   │  build (or find) libgluon_config.rlib in ~/.gluon
 //!   └─────────┬───────────┘
 //!             │
 //!             ▼
 //!   ┌─────────────────────┐
-//!   │ cache::ensure_..()  │  rustc the user's gluon.rs into a binary
+//!   │ cache::ensure_..()  │  rustc a generated main.rs that calls gluon.rs
 //!   └─────────┬───────────┘
 //!             │
 //!             ▼
@@ -31,29 +31,20 @@
 //!
 //! ## Why two cache layers
 //!
-//! The rlib build is *expensive* (~5 s cold) but rarely changes — it
-//! invalidates only on rustc upgrade or `gluon-config`/`gluon-model`
-//! source edits. The script binary is *cheap* (~1 s) but invalidates on
-//! every `gluon.rs` edit. Splitting them lets a normal "edit gluon.rs,
-//! re-run" loop avoid the rlib cost.
+//! The rlib build is *expensive* (~5 s cold) but rarely changes: it
+//! depends only on the gluon version and rustc, so one build in
+//! `$GLUON_HOME` serves every project (see [`rlib`]). The script binary
+//! is *cheap* (~1 s) but invalidates on every `gluon.rs` edit, and
+//! lives in the project's `build/script-runner/`. Splitting them lets a
+//! normal "edit gluon.rs, re-run" loop avoid the rlib cost.
 //!
-//! ## Stage 1 limitations
+//! ## Concurrency
 //!
-//! - **No advisory lock around the on-demand cargo build or script
-//!   compilation.** Two concurrent `gluon build` invocations may both
-//!   trigger `cargo build -p gluon-config` against the same `target/`
-//!   directory; cargo has its own `.cargo-lock`, so the cargo invocations
-//!   themselves serialise correctly, but they will both write to the
-//!   same script-runner cache directory. In the worst case this produces
-//!   a redundant rebuild rather than corruption (`std::fs::write` is
-//!   atomic on POSIX). Stage 1.7 follow-up may add explicit locking via
-//!   the existing `crate::cache::lock::CacheLock` infrastructure.
-//! - **`Cargo.lock` is hashed into the cache key but cargo's transitive
-//!   library files are not.** If a transitive rlib in a dep dir is replaced with
-//!   a different SVH that happens to compile cleanly against the
-//!   user's `gluon.rs`, the cache may serve a stale binary. In practice
-//!   cargo's incremental rebuild keeps the deps in sync — the only path
-//!   where this matters is hand-deletion of files under `target/`.
+//! The rlib build takes a lock on its entry in `$GLUON_HOME`, so
+//! concurrent gluon processes build it once. The script compile takes
+//! no lock: two concurrent runs in one project may both compile the
+//! script into the same entry directory, which costs a redundant
+//! compile.
 //!
 //! ## Error surface
 //!
@@ -111,8 +102,9 @@ pub fn compile_and_run_raw(
 
     let mut hashes =
         file_hashes::FileHashes::load(build_dir.join("script-runner").join("file-hashes.json"));
-    let rlib = rlib::ensure_gluon_config_rlib(build_dir, rustc_info, &mut hashes)?;
-    let bin = cache::ensure_script_binary(&script_path, build_dir, rustc_info, &rlib, &mut hashes)?;
+    let lib = rlib::ensure_gluon_config_rlib(rustc_info, &mut hashes)?;
+    let bin =
+        cache::ensure_script_binary(&script_path, build_dir, rustc_info, &lib.paths, &mut hashes)?;
     // A failed save only means the next run rehashes; it must not fail
     // a build that has everything it needs.
     let _ = hashes.save();
@@ -123,6 +115,16 @@ pub fn compile_and_run_raw(
             "gluon.rs stdout was not valid RawBuildModel JSON: {e}"
         ))
     })
+}
+
+/// Build the shared gluon-config library for `rustc_info` if it is
+/// missing, and return it. `gluon setup` calls this ahead of time;
+/// other commands build it on first use.
+pub fn ensure_config_lib(rustc_info: &RustcInfo) -> Result<rlib::ConfigLib> {
+    // No project, so no persistent memo: in checkout mode the source
+    // hashes are recomputed, which costs a few milliseconds.
+    let mut hashes = file_hashes::FileHashes::load(std::path::PathBuf::new());
+    rlib::ensure_gluon_config_rlib(rustc_info, &mut hashes)
 }
 
 /// Spawn the compiled script binary and capture its stdout. Stderr is
@@ -225,12 +227,11 @@ mod tests {
         // Mirror the body in the plan's Step 4 verbatim so the parity
         // test in Task 12 can reuse a structurally-identical script.
         let body = r#"
-fn main() -> gluon_config::Result<()> {
-    let mut cfg = gluon_config::Config::new();
+pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
     cfg.project("demo", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
     cfg.profile("dev").target(t).opt_level(0).debug_info(true);
-    cfg.emit()
+    Ok(())
 }
 "#;
         fs::write(dir.join("gluon.rs"), body).unwrap();

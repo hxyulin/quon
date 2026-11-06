@@ -8,9 +8,7 @@
 
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("multiprofile_test", "0.1.0")
         .default_profile("debug");
 
@@ -44,5 +42,5 @@ fn main() -> Result<()> {
         });
     drop(cross);
 
-    cfg.emit()
+    Ok(())
 }

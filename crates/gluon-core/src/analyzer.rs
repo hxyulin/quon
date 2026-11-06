@@ -328,8 +328,8 @@ fn unit_entry(input: &AnalyzerInput<'_>, id: UnitId, index_of: &BTreeMap<UnitId,
 /// `gluon_config_lib_rs` is the path to the bundled `gluon-config` crate's
 /// `lib.rs` source file so rust-analyzer can index it as a normal workspace
 /// dep (rather than pointing at a `.rlib`, which the schema does not
-/// support). Both paths come from the gluon workspace resolved via
-/// `script_runner::rlib::workspace_dir`.
+/// support). It comes from the manifest of the shared gluon-config
+/// library (`script_runner::rlib::RlibPaths::gluon_config_src`).
 ///
 /// When either argument is `None` the output is identical to
 /// [`generate_rust_project_json`].
@@ -377,7 +377,9 @@ pub fn generate_rust_project_json_with_script(
     // Append the gluon.rs build-script crate. Its only dep is the
     // gluon-config crate entry we just appended. The `source` block's
     // `include_dirs` covers the project root so rust-analyzer discovers
-    // any modules the script might declare.
+    // any modules the script might declare. `target_kind: lib` because
+    // gluon.rs has no `main`: gluon compiles it as a module of a
+    // generated crate root.
     let rs_parent = rs_path
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -395,6 +397,11 @@ pub fn generate_rust_project_json_with_script(
         "source": {
             "include_dirs": [rs_parent],
             "exclude_dirs": [layout.root().to_string_lossy()],
+        },
+        "build": {
+            "label": "gluon.rs",
+            "build_file": rs_path.to_string_lossy(),
+            "target_kind": "lib",
         },
     }));
 
@@ -1108,6 +1115,7 @@ mod tests {
             script_entry["is_workspace_member"], true,
             "gluon.rs entry must be a workspace member"
         );
+        assert_eq!(script_entry["build"]["target_kind"], "lib");
     }
 
     #[test]

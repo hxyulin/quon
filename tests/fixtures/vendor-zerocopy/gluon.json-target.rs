@@ -7,9 +7,7 @@
 
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("vendor-zerocopy", "0.1.0");
 
     // The test writes this spec from `rustc --print target-spec-json`.
@@ -31,5 +29,5 @@ fn main() -> Result<()> {
         .add("kernel", "crates/kernel")
         .dep("zerocopy", "zerocopy");
 
-    cfg.emit()
+    Ok(())
 }

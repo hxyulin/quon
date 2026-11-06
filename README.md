@@ -62,9 +62,7 @@ file by hand instead, start from this:
 ```rust
 use gluon_config::{Config, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
     let target = cfg.target("x86_64-unknown-none");
     cfg.cargo_workspace(".");
@@ -86,7 +84,7 @@ fn main() -> Result<()> {
         .cores(1)
         .serial_stdio();
 
-    cfg.emit()
+    Ok(())
 }
 ```
 
@@ -103,6 +101,7 @@ gluon run                # Build + launch QEMU
 gluon test               # Build + boot each integration test
 gluon check              # Metadata-only check pass
 gluon configure          # Generate rust-project.json for rust-analyzer
+gluon setup              # Build the gluon-config library gluon.rs links against
 ```
 
 ## Features

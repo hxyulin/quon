@@ -14,19 +14,12 @@ workspace = true
 
 [dependencies]
 gluon-model.workspace = true
-# Listed for two reasons:
-# 1. Editor tooling parity: the `analyzer` module emits `rust-project.json`
-#    entries that reference the `gluon-config` rlib, so it must be in the
-#    workspace's compile graph.
-# 2. The `script_runner` integration test compiles a `gluon.rs` that
-#    `use`s `gluon_config`; declaring the dep here ensures `cargo build`
-#    has produced the rlib under `target/release/` before the test
-#    spawns a fresh `cargo build -p gluon-config` (saving wall time and
-#    avoiding a cold compile in CI).
-#
-# Note: gluon-core does NOT `use gluon_config` itself — the on-demand
-# build path in `script_runner::rlib` shells out to cargo and feeds rustc
-# explicit `--extern` paths, so there is no link-time dependency.
+# Not used by gluon-core's code: gluon-core never `use`s gluon_config.
+# Listed so that `cargo install gluon-cli` downloads gluon-config's
+# sources (and its dependencies') into cargo's cache. An installed gluon
+# then builds the library that gluon.rs links against with `cargo build
+# --offline` (see `script_runner::rlib`). The `rust-project.json` that
+# `gluon configure` writes also points rust-analyzer at those sources.
 gluon-config.workspace = true
 fs2 = "0.4"
 # In-process FAT12/16/32 formatter + writer. Used by the `image()`

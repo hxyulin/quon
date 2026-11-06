@@ -7,9 +7,7 @@
 
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("raw-binary-minimal", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -27,5 +25,5 @@ fn main() -> Result<()> {
         .root("src/main.rs")
         .linker_script("crates/boot/boot.ld");
 
-    cfg.emit()
+    Ok(())
 }

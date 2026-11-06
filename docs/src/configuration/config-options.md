@@ -105,7 +105,7 @@ cfg.include_kconfig("./options.kconfig")?;
 ```
 
 The path is relative to the `gluon.rs` file. The `?` operator propagates errors
-to `main()`, which returns `Result<()>`.
+out of `config()`, which returns `Result<()>`.
 
 ### Supported Kconfig syntax
 

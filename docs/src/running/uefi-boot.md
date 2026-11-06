@@ -87,9 +87,7 @@ using `artifact_env`.
 ```rust
 use gluon_config::{Config, CrateType, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-os", "0.1.0")
         .default_profile("debug");
 
@@ -126,7 +124,7 @@ fn main() -> Result<()> {
         .serial_stdio()
         .boot_mode("uefi");
 
-    cfg.emit()
+    Ok(())
 }
 ```
 

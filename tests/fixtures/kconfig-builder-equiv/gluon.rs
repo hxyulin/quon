@@ -11,9 +11,7 @@
 
 use gluon_config::{Config, ConfigValue, Expr, Result};
 
-fn main() -> Result<()> {
-    let mut cfg = Config::new();
-
+pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("kconfig-minimal", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
@@ -45,5 +43,5 @@ fn main() -> Result<()> {
         .set("LOG_LEVEL", ConfigValue::U64(5))
         .set("DEBUG", ConfigValue::Bool(true));
 
-    cfg.emit()
+    Ok(())
 }

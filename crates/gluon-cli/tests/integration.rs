@@ -511,11 +511,11 @@ fn add_library_using_library(fixture: &Path) {
     let gluon_rs = fixture.join("gluon.rs");
     let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
     let script = script.replace(
-        "    cfg.emit()",
+        "    Ok(())",
         "    let mut libs = cfg.group(\"kernel_libs\").target(target).edition(\"2021\");\n    \
          libs.add(\"klib_base\", \"crates/klib_base\");\n    \
          libs.add(\"klib_top\", \"crates/klib_top\").dep(\"klib_base\", \"klib_base\");\n    \
-         drop(libs);\n\n    cfg.emit()",
+         drop(libs);\n\n    Ok(())",
     );
     // Only crates reachable from the kernel are part of the build.
     let script = script.replace(
@@ -942,4 +942,33 @@ fn legacy_cache_manifest_is_removed_once() {
         "migration note repeated:\n{second}"
     );
     assert_eq!(summary(&second).0, 0, "second build rebuilt:\n{second}");
+}
+
+/// `gluon setup` builds the shared gluon-config library under
+/// `GLUON_HOME` (the checkout's `target/` for tests, per
+/// `.cargo/config.toml`) and prints its directory.
+#[test]
+#[ignore = "requires rustc; spawns cargo"]
+fn setup_prints_the_shared_library_entry() {
+    if !rustc_available("setup_prints_the_shared_library_entry") {
+        return;
+    }
+    // The repository root, so rustup picks the toolchain the other
+    // tests use and the entry is shared with them.
+    let out = gluon(&support::repo_root())
+        .arg("setup")
+        .output()
+        .expect("spawn gluon");
+    assert!(
+        out.status.success(),
+        "gluon setup failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dir = PathBuf::from(String::from_utf8(out.stdout).expect("utf-8").trim());
+    assert!(
+        dir.join("manifest.json").is_file(),
+        "no manifest in {dir:?}"
+    );
+    let home = std::env::var_os("GLUON_HOME").expect("GLUON_HOME is set for tests");
+    assert!(dir.starts_with(&home), "{dir:?} is not under {home:?}");
 }
