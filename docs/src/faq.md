@@ -21,11 +21,15 @@ Rust 1.99 or later. Stable works for host builds and for built-in
 targets such as `x86_64-unknown-none`. A custom target-spec `.json`
 needs nightly, because rustc accepts one only with `-Zunstable-options`.
 
-Targets that Quon builds a sysroot for need the `rust-src` component.
-If your project includes a `rust-toolchain.toml`, rustup installs and
-uses the toolchain it names.
+A builtin target must be installed, since its crates link the
+toolchain's prebuilt standard library. Custom JSON targets and targets
+declared with `.build_std()` need the `rust-src` component instead,
+because Quon builds their sysroot. If your project includes a
+`rust-toolchain.toml`, rustup installs and uses the toolchain it names,
+with the targets and components it lists.
 
 ```sh
+rustup target add x86_64-unknown-none
 rustup component add rust-src
 ```
 

@@ -23,19 +23,27 @@ q.default_profile(&debug);
 
 ```rust,ignore
 let none = Target::builtin("x86_64-unknown-none");
+let firmware = Target::builtin("thumbv7em-none-eabihf").build_std();
 let custom = Target::spec("riscv64gc-custom", "targets/riscv64gc-custom.json");
 let host = Target::host();
 ```
 
 A `Target` is a plain value. Declaring one does nothing on its own:
 Quon registers it the first time a package, crate, dependency or
-`q.default_target` uses it, and builds a sysroot (`core`, `alloc`,
-`compiler_builtins`) for each registered target other than the host.
+`q.default_target` uses it.
 
 - `Target::builtin(triple)` is a target rustc knows, such as
-  `x86_64-unknown-none`.
+  `x86_64-unknown-none`. Its crates link the toolchain's prebuilt
+  `core`, `alloc` and `compiler_builtins`, as with Cargo, so the
+  target must be installed: `rustup target add <triple>`.
+- `.build_std()` on a builtin target makes Quon build those three
+  crates from the `rust-src` component instead. Use it for a target
+  rustup does not ship. It costs a one-time build (11s for
+  `thumbv7em-none-eabihf`), and no other crate of the target can start
+  before it ends.
 - `Target::spec(name, path)` is a custom target defined by the JSON
-  spec at `path`, relative to the project root. rustc accepts a JSON
+  spec at `path`, relative to the project root. It has no prebuilt
+  libraries, so Quon always builds its sysroot. rustc accepts a JSON
   spec only on nightly.
 - `Target::host()` is the machine Quon runs on. Crates built for it
   link the host's standard library, and Quon builds no sysroot for

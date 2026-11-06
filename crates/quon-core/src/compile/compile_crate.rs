@@ -495,8 +495,18 @@ mod tests {
             name: name.into(),
             spec: spec.into(),
             builtin,
+            build_std: false,
             panic_strategy: None,
             span: None,
+        }
+    }
+
+    /// A builtin target whose sysroot Quon builds, for tests of the
+    /// custom-sysroot flags.
+    fn build_std_target() -> TargetDef {
+        TargetDef {
+            build_std: true,
+            ..make_target("x86", "x86_64-unknown-none", true)
         }
     }
 
@@ -505,6 +515,7 @@ mod tests {
             name: name.into(),
             spec: spec.into(),
             builtin: true,
+            build_std: false,
             panic_strategy: Some(strategy),
             span: None,
         }
@@ -906,13 +917,55 @@ mod tests {
     }
 
     #[test]
+    fn a_prebuilt_sysroot_adds_no_sysroot_flags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
+        let sysroot_dir = tmp.path().join("toolchain");
+
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let ch = insert_crate(
+            &mut model,
+            CrateDef {
+                name: "kernel".into(),
+                path: "crates/kernel".into(),
+                edition: "2021".into(),
+                crate_type: CrateType::Lib,
+                ..test_crate_defaults()
+            },
+        );
+        let resolved = make_resolved(th, tmp.path().to_path_buf());
+        let crate_ref = cross_ref(ch, th);
+        let artifacts = ArtifactMap::new();
+        let input = CompileCrateInput {
+            model: &model,
+            resolved: &resolved,
+            crate_ref: &crate_ref,
+            artifacts: &artifacts,
+            sysroot_dir: Some(&sysroot_dir),
+        };
+
+        let (builder, _, _) = build_rustc_command(&ctx, &input).unwrap();
+        // rustc finds and injects its own prebuilt libraries, and the
+        // toolchain hash covers them, so nothing is declared.
+        assert!(dep_outputs(&ctx, &input).is_empty());
+        let args = args_as_strings(&builder);
+        assert!(!args.iter().any(|a| a == "--sysroot"), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("core=")), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == "--target=x86_64-unknown-none"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
     fn flag_assembly_cross_crate_has_sysroot_and_target() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
         let sysroot_dir = tmp.path().join("sysroot");
 
         let mut model = BuildModel::default();
-        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let th = insert_target(&mut model, build_std_target());
         let ch = insert_crate(
             &mut model,
             CrateDef {
@@ -2424,7 +2477,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
         let mut model = BuildModel::default();
-        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let th = insert_target(&mut model, build_std_target());
         let mut resolved = make_resolved(th, tmp.path().to_path_buf());
         resolved.profile.opt_level = 3;
         let cross = TargetSpec::Cross(th);

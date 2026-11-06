@@ -271,7 +271,6 @@ pub fn ensure_config_crate(
         .edition("2021")
         .input(&src_path)
         .target(&target.spec, target.builtin)
-        .sysroot(sysroot_dir)
         .out_dir(&out_dir)
         .emit_with_dep_info_path(&[Emit::Link, Emit::Metadata, Emit::DepInfo], &depfile_path)
         .incremental(&incremental_dir)
@@ -279,14 +278,18 @@ pub fn ensure_config_crate(
         .debug_info(resolved.profile.debug_info);
 
     // Inject implicit sysroot crates. Must match what build_sysroot_crate
-    // writes (sysroot crates keep the -quon-<name> extra-filename).
-    builder
-        .extern_crate("core", &sysroot_lib.join("libcore-quon-core.rlib"))
-        .extern_crate(
-            "compiler_builtins",
-            &sysroot_lib.join("libcompiler_builtins-quon-compiler_builtins.rlib"),
-        )
-        .extern_crate("alloc", &sysroot_lib.join("liballoc-quon-alloc.rlib"));
+    // writes (sysroot crates keep the -quon-<name> extra-filename). A
+    // prebuilt sysroot is rustc's own, which it injects itself.
+    if target.builds_sysroot() {
+        builder
+            .sysroot(sysroot_dir)
+            .extern_crate("core", &sysroot_lib.join("libcore-quon-core.rlib"))
+            .extern_crate(
+                "compiler_builtins",
+                &sysroot_lib.join("libcompiler_builtins-quon-compiler_builtins.rlib"),
+            )
+            .extern_crate("alloc", &sysroot_lib.join("liballoc-quon-alloc.rlib"));
+    }
 
     // Panic strategy — must match the sysroot and downstream crates.
     if let Some(s) = target.panic_strategy {

@@ -355,6 +355,7 @@ mod tests {
                 name: "x86_64-unknown-linux-gnu".into(),
                 spec: "x86_64-unknown-linux-gnu".into(),
                 builtin: true,
+                build_std: false,
                 panic_strategy: None,
                 span: None,
             },

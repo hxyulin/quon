@@ -55,6 +55,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Existing records are in the old format, so the first build after
   upgrading rebuilds everything.
 
+### Changed (prebuilt sysroots)
+
+- **Builtin targets link the toolchain's prebuilt `core`, `alloc` and
+  `compiler_builtins`**, as Cargo does, instead of building them from
+  `rust-src`. The target must be installed with
+  `rustup target add <triple>`, and Quon names that command when it is
+  not. Building them from source took 11s for
+  `thumbv7em-none-eabihf`, and no other crate of the target could start
+  before it ended.
+- **`Target::builtin(..).build_std()` builds them from source**, as
+  every builtin target did before. Custom JSON targets always do.
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the

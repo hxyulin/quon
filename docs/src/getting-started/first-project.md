@@ -42,7 +42,7 @@ pub fn config(q: &mut Quon) -> Result<()> {
 
 - **`q.default_target(&target)`** sets the target that crates build for
   when they name none. `Target::builtin(triple)` is a target rustc
-  knows. Quon compiles a custom sysroot for each target in use. A
+  knows; install it with `rustup target add <triple>`. A
   crate can name its own with `.target(&t)`, for example a bootloader
   next to the kernel.
 

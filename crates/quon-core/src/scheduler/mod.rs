@@ -662,16 +662,22 @@ pub fn execute_pipeline(
     let pool = WorkerPool::new(workers);
     pool.execute_with(&dag, &dispatcher, reporter)?;
 
-    Ok(summarize(&dag, &results))
+    Ok(summarize(&dag, &results, model))
 }
 
 /// Assemble the build summary from the result slots after the pool
-/// has joined. Rule nodes are not cacheable and are not counted.
-fn summarize(dag: &DagType, results: &[OnceLock<NodeResult>]) -> BuildSummary {
+/// has joined. Rule nodes are not cacheable and are not counted, and
+/// neither is a prebuilt sysroot, which Quon neither builds nor caches.
+fn summarize(dag: &DagType, results: &[OnceLock<NodeResult>], model: &BuildModel) -> BuildSummary {
     let mut summary = BuildSummary::default();
     for (node, slot) in dag.nodes.iter().zip(results) {
         let Some(result) = slot.get() else { continue };
-        if !matches!(node, DagNode::Rule(_)) {
+        let counted = match *node {
+            DagNode::Rule(_) => false,
+            DagNode::Sysroot(t) => model.targets.get(t).is_some_and(TargetDef::builds_sysroot),
+            _ => true,
+        };
+        if counted {
             if result.was_cached {
                 summary.cached += 1;
             } else {
@@ -740,6 +746,7 @@ mod tests {
             name: "x86_64-unknown-none".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            build_std: false,
             panic_strategy: Some(PanicStrategy::Abort),
             span: None,
         };
@@ -1258,6 +1265,7 @@ mod tests {
             name: "x86_64-unknown-none".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            build_std: false,
             panic_strategy: Some(PanicStrategy::Abort),
             span: None,
         };

@@ -1,3 +1,6 @@
 [toolchain]
 channel = "nightly"
 components = ["rustfmt", "clippy", "rust-analyzer", "rust-src"]
+# The builtin targets of the test fixtures and examples link the
+# prebuilt standard library.
+targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]

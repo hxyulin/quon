@@ -60,7 +60,8 @@ crates in flight, and `Finished` with the profile and cache counts.
 
 - Rust 1.99 or later. Stable works, except for custom `.json` targets,
   which need nightly.
-- The `rust-src` component, for targets Quon builds a sysroot for.
+- Each builtin target you build for (`rustup target add <triple>`),
+  and the `rust-src` component for targets Quon builds a sysroot for.
 - QEMU, only for a QEMU runner.
 
 **Install:**

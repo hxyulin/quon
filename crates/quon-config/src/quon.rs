@@ -616,35 +616,46 @@ impl Lowering {
     /// Register `t` in the model and return its name. A name declared
     /// twice with different definitions is an error; the first stays.
     fn target(&mut self, t: &Target) -> String {
-        let (spec, builtin) = match &t.0 {
-            TargetKind::Host => return HOST.into(),
+        let (spec, builtin) = match &t.kind {
+            TargetKind::Host => {
+                if t.build_std {
+                    self.error(
+                        "Target::host() cannot use build_std(): host crates link the \
+                         toolchain's standard library"
+                            .into(),
+                    );
+                }
+                return HOST.into();
+            }
             TargetKind::Builtin(triple) => (triple.clone(), true),
             TargetKind::Spec { path, .. } => (path.clone(), false),
         };
+        // A custom target always builds its sysroot, so the flag only
+        // tells builtin targets apart.
+        let build_std = builtin && t.build_std;
         let name = t.name().to_string();
         let def = TargetDef {
             name: name.clone(),
             spec: spec.clone(),
             builtin,
+            build_std,
             panic_strategy: None,
             span: None,
         };
         let (h, inserted) = self.raw.targets.insert(name.clone(), def);
         if !inserted
             && let Some(prev) = self.raw.targets.get(h)
-            && (prev.spec != spec || prev.builtin != builtin)
+            && (prev.spec != spec || prev.builtin != builtin || prev.build_std != build_std)
         {
-            let describe = |spec: &str, builtin: bool| {
-                if builtin {
-                    format!("builtin target \"{spec}\"")
-                } else {
-                    format!("custom spec \"{spec}\"")
-                }
+            let describe = |spec: &str, builtin: bool, build_std: bool| match (builtin, build_std) {
+                (true, true) => format!("builtin target \"{spec}\" with build_std()"),
+                (true, false) => format!("builtin target \"{spec}\""),
+                (false, _) => format!("custom spec \"{spec}\""),
             };
             let message = format!(
                 "target \"{name}\" is defined twice: as {} and as {}",
-                describe(&prev.spec, prev.builtin),
-                describe(&spec, builtin)
+                describe(&prev.spec, prev.builtin, prev.build_std),
+                describe(&spec, builtin, build_std)
             );
             self.error(message);
         }
@@ -1273,6 +1284,37 @@ mod tests {
         });
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains("target \"x\" is defined twice"));
+    }
+
+    #[test]
+    fn build_std_reaches_the_model_and_must_agree() {
+        let (raw, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&Target::builtin("x").build_std()));
+            q.add(Crate::lib("b", "b").target(&Target::builtin("y")));
+            q.default_target(&Target::builtin("y"));
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        let def = |name: &str| raw.targets.iter().find(|(_, t)| t.name == name).unwrap().1;
+        assert!(def("x").build_std);
+        assert!(!def("y").build_std);
+
+        let (_, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&Target::builtin("x").build_std()));
+            q.add(Crate::lib("b", "b").target(&Target::builtin("x")));
+        });
+        assert_eq!(
+            errors,
+            [
+                "target \"x\" is defined twice: as builtin target \"x\" with build_std() \
+                 and as builtin target \"x\""
+            ]
+        );
+
+        let (_, errors) = lower(|q| {
+            q.add(Crate::lib("a", "a").target(&Target::host().build_std()));
+        });
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("Target::host() cannot use build_std()"));
     }
 
     #[test]

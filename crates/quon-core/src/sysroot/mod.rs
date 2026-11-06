@@ -1,10 +1,20 @@
-//! Per-target custom sysroot builder.
+//! Per-target sysroot: prebuilt, or built from `rust-src`.
 //!
-//! [`ensure_sysroot`] builds `core`, `compiler_builtins`, and `alloc` from
-//! the host toolchain's `rust-src` component into a per-target sysroot
-//! directory owned by [`crate::compile::BuildLayout`]. The resulting layout
-//! is shaped so that a later `rustc --sysroot=<dir>` invocation for a
-//! cross-crate Just Works.
+//! A builtin target without `build_std` uses the toolchain's prebuilt
+//! `core`, `compiler_builtins` and `alloc`, as Cargo does. Building
+//! them from source took 11s for `thumbv7em-none-eabihf`, `core` alone
+//! 8.5s, and no other crate of the target can start before them.
+//! [`ensure_sysroot`] then only checks that rustup installed the target
+//! and returns the toolchain's sysroot. Nothing is recorded: the
+//! prebuilt libraries change only with the toolchain, and the
+//! toolchain hash is in every unit's record.
+//!
+//! Otherwise (a custom target, or `build_std`), [`ensure_sysroot`]
+//! builds `core`, `compiler_builtins`, and `alloc` from the host
+//! toolchain's `rust-src` component into a per-target sysroot
+//! directory owned by [`crate::compile::BuildLayout`]. The resulting
+//! layout is shaped so that a later `rustc --sysroot=<dir>` invocation
+//! for a cross-crate Just Works.
 //!
 //! ### Fast path vs slow path
 //!
@@ -80,6 +90,9 @@ pub fn ensure_sysroot(
     target: &TargetDef,
     stderr_sink: &mut Vec<u8>,
 ) -> Result<(PathBuf, bool)> {
+    if !target.builds_sysroot() {
+        return prebuilt_sysroot(ctx, target).map(|dir| (dir, true));
+    }
     let sysroot_dir = ctx.layout.sysroot_dir(target);
     let sysroot_lib_dir = ctx.layout.sysroot_lib_dir(target);
 
@@ -185,6 +198,42 @@ pub fn ensure_sysroot(
     })?;
 
     Ok((sysroot_dir, false))
+}
+
+/// The toolchain's sysroot, once it holds a prebuilt `core` for
+/// `target`. A missing one is an error that names both ways out, since
+/// building from source is a choice the project makes in `quon.rs`.
+fn prebuilt_sysroot(ctx: &CompileCtx, target: &TargetDef) -> Result<PathBuf> {
+    let sysroot = &ctx.rustc_info.sysroot;
+    let lib = sysroot
+        .join("lib")
+        .join("rustlib")
+        .join(&target.spec)
+        .join("lib");
+    let has_core = std::fs::read_dir(&lib).is_ok_and(|entries| {
+        entries.filter_map(|e| e.ok()).any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("libcore-") && name.ends_with(".rlib")
+        })
+    });
+    if has_core {
+        return Ok(sysroot.clone());
+    }
+    let triple = &target.spec;
+    Err(Error::Diagnostics(vec![
+        Diagnostic::error(format!(
+            "the toolchain has no prebuilt standard library for target \"{triple}\""
+        ))
+        .with_note(format!(
+            "install it: rustup target add {triple} --toolchain {}",
+            ctx.rustc_info.release
+        ))
+        .with_note(format!(
+            "or build it from rust-src: Target::builtin(\"{triple}\").build_std() in quon.rs"
+        ))
+        .with_note(format!("looked for libcore-*.rlib in {}", lib.display())),
+    ]))
 }
 
 /// Scheduler-side wrapper around [`ensure_sysroot`]. Looks up the
@@ -408,6 +457,8 @@ mod tests {
             name: "x86_64-unknown-none".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            // These tests are about the sysroot Quon builds.
+            build_std: true,
             panic_strategy: None,
             span: None,
         }
@@ -425,6 +476,47 @@ mod tests {
             rust_src,
             mtime_ns: 0,
         }
+    }
+
+    #[test]
+    fn a_builtin_target_uses_the_installed_prebuilt_sysroot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toolchain = tmp.path().join("toolchain");
+        let lib = toolchain.join("lib/rustlib/x86_64-unknown-none/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("libcore-0123abcd.rlib"), b"").unwrap();
+        let mut info = fake_rustc_info(PathBuf::from("/usr/bin/rustc"), None);
+        info.sysroot = toolchain.clone();
+        let ctx = CompileCtx::new(BuildLayout::new(tmp.path(), "prebuilt"), Arc::new(info));
+        let target = TargetDef {
+            build_std: false,
+            ..make_target()
+        };
+        let (dir, cached) = ensure_sysroot(&ctx, &target, &mut Vec::new()).expect("prebuilt");
+        assert_eq!(dir, toolchain);
+        assert!(cached);
+    }
+
+    #[test]
+    fn a_missing_prebuilt_sysroot_names_both_fixes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut info = fake_rustc_info(PathBuf::from("/usr/bin/rustc"), None);
+        info.sysroot = tmp.path().join("toolchain");
+        let ctx = CompileCtx::new(BuildLayout::new(tmp.path(), "prebuilt"), Arc::new(info));
+        let target = TargetDef {
+            build_std: false,
+            ..make_target()
+        };
+        let err = ensure_sysroot(&ctx, &target, &mut Vec::new()).expect_err("not installed");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("rustup target add x86_64-unknown-none"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Target::builtin(\"x86_64-unknown-none\").build_std()"),
+            "{rendered}"
+        );
     }
 
     #[test]

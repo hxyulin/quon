@@ -173,7 +173,10 @@ fn build_command(
         })?),
     };
 
-    if unit.sysroot {
+    // A prebuilt sysroot is rustc's own, which it finds and injects
+    // without flags, as under Cargo.
+    let custom_sysroot = unit.sysroot && target.is_some_and(TargetDef::builds_sysroot);
+    if custom_sysroot {
         let sysroot = input.sysroot_dir.ok_or_else(|| {
             Error::Compile(format!(
                 "unit '{}' links the sysroot but no sysroot_dir was provided \
@@ -190,7 +193,7 @@ fn build_command(
     }
     builder.out_dir(&paths.out_dir);
 
-    if let (true, Some(t)) = (unit.sysroot, target) {
+    if let (true, Some(t)) = (custom_sysroot, target) {
         // A custom sysroot means rustc does not inject these itself.
         // The file names match what `sysroot::build_sysroot_crate`
         // writes.

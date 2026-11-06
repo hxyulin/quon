@@ -64,7 +64,8 @@ fn embed_in_kernel(fixture: &Path, name: &str, value: &str) {
 }
 
 /// Cold build, then a second build that hits the cache. This is the one
-/// CLI test that builds the sysroot from scratch.
+/// CLI test that builds the sysroot from scratch, so it asks for
+/// `build_std()`.
 #[test]
 #[ignore]
 fn quon_build_cold_then_cache_hit() {
@@ -72,6 +73,14 @@ fn quon_build_cold_then_cache_hit() {
         return;
     }
     let (_tmp, fixture) = setup();
+    let script = fixture.join("quon.rs");
+    let text = fs::read_to_string(&script).expect("read quon.rs");
+    let edited = text.replace(
+        "Target::builtin(\"x86_64-unknown-none\")",
+        "Target::builtin(\"x86_64-unknown-none\").build_std()",
+    );
+    assert_ne!(text, edited, "fixture quon.rs changed shape");
+    fs::write(&script, edited).expect("write quon.rs");
 
     let first = quon_ok(&fixture, &["build"]);
     let (built, cached) = summary(&first);
@@ -676,9 +685,15 @@ fn unchanged_inputs_rebuild_nothing() {
 
     let (first, spawned) = s.ok("cold build", &["-j1", "build"], None);
     assert!(!spawned.is_empty(), "cold build spawned no rustc");
+    // The target is builtin, so rustc links the toolchain's prebuilt
+    // libraries and Quon builds no sysroot.
     assert!(
-        summary(&first).1 > 0,
-        "cold build rebuilt the seeded sysroot:\n{first}"
+        !spawned.contains("--crate-name core "),
+        "cold build compiled core:\n{spawned}"
+    );
+    assert!(
+        !s.path("build/sysroot").exists(),
+        "cold build wrote a sysroot"
     );
     assert!(
         first.contains("quon_test_never_called"),

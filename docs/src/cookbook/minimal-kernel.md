@@ -62,9 +62,9 @@ quon configure      # Generate rust-project.json for your editor
 
 ## What happens during `quon build`
 
-1. **Sysroot compilation** -- Quon compiles a custom sysroot (`core`, `alloc`,
-   `compiler_builtins`) for `x86_64-unknown-none`. This only happens on the
-   first build or when the sysroot is invalidated.
+1. **Sysroot** -- `x86_64-unknown-none` is a builtin target, so the kernel
+   links the toolchain's prebuilt `core`, `alloc` and `compiler_builtins`.
+   Install it once with `rustup target add x86_64-unknown-none`.
 2. **Crate compilation** -- The `kernel` crate is compiled as a binary with
    the linker script, the default edition (2024) and the `dev` profile's
    optimization level.

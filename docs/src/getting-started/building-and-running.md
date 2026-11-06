@@ -10,9 +10,10 @@ quon build
 ```
 
 Compiles every crate in your project. Quon drives `rustc` directly for each
-crate, assembling per-crate flags from your `quon.rs` configuration. Custom
-sysroots (`core`, `alloc`, `compiler_builtins`) are compiled automatically for
-each registered target triple.
+crate, assembling per-crate flags from your `quon.rs` configuration. Builtin
+targets link the toolchain's prebuilt `core`, `alloc` and `compiler_builtins`.
+Custom targets, and builtin ones declared with `.build_std()`, get a sysroot
+compiled from source.
 
 Build output goes to the `build/` directory at your project root.
 

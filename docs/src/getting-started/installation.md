@@ -4,9 +4,12 @@
 
 - **Rust 1.99 or later.** Stable works, except for custom target-spec
   `.json` files, which need nightly.
-- **The `rust-src` component**, for cross targets. Quon compiles their
-  sysroots (`core`, `alloc`, `compiler_builtins`) from source. Host builds
-  do not need it.
+- **Each builtin target you build for**, installed with
+  `rustup target add <triple>`. Quon links its prebuilt `core`,
+  `alloc` and `compiler_builtins`.
+- **The `rust-src` component**, for custom JSON targets and targets
+  declared with `.build_std()`. Quon compiles their sysroots from
+  source.
 - **Optional Rust components:** `clippy` (for `quon clippy`), `rustfmt` (for
   `quon fmt`), and `rust-analyzer` (for IDE integration via
   `quon configure`).

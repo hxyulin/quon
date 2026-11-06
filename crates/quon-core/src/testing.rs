@@ -39,6 +39,9 @@ pub fn seed_sysroots(build_root: &Path, model: &BuildModel, rustc: &OsStr) -> Re
         .map(|(_, t)| t)
         .filter(|t| t.builtin)
         .collect();
+    // A prebuilt sysroot has nothing to copy, and the build summary
+    // does not count it.
+    let targets: Vec<&TargetDef> = targets.into_iter().filter(|t| t.build_std).collect();
     if targets.is_empty() {
         return Ok(0);
     }

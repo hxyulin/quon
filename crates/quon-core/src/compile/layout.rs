@@ -354,6 +354,7 @@ mod tests {
             name: "x86_64-test".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            build_std: false,
             panic_strategy: None,
             span: None,
         }
@@ -592,6 +593,7 @@ mod tests {
             name: "x86_64-a".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            build_std: false,
             panic_strategy: None,
             span: None,
         };
@@ -599,6 +601,7 @@ mod tests {
             name: "x86_64-b".into(),
             spec: "x86_64-unknown-none".into(),
             builtin: true,
+            build_std: false,
             panic_strategy: None,
             span: None,
         };

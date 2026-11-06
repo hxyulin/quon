@@ -445,6 +445,7 @@ mod tests {
                 name: "x86_64-unknown-none".into(),
                 spec: "x86_64-unknown-none".into(),
                 builtin: true,
+                build_std: false,
                 panic_strategy: Some(PanicStrategy::Abort),
                 span: None,
             },

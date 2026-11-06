@@ -2,20 +2,27 @@
 
 ## What is a sysroot?
 
-Bare-metal targets (`#![no_std]`) cannot use pre-compiled standard library
-crates because those crates either do not exist for custom target triples
-or were compiled with flags that do not match the target's requirements.
-
-The **sysroot** is the directory where Rust looks for these foundational
-crates. For hosted targets (like `x86_64-unknown-linux-gnu`), rustup
-provides a pre-compiled sysroot. For bare-metal targets, the sysroot must
-be compiled from source.
+The **sysroot** is the directory where rustc looks for `core`, `alloc`
+and `compiler_builtins`. rustup ships them prebuilt for the targets it
+supports, bare-metal ones such as `x86_64-unknown-none` and
+`thumbv7em-none-eabihf` included. A custom target spec has no prebuilt
+libraries, so they must be compiled from source.
 
 ## How Quon handles sysroots
 
-Quon automatically compiles a custom sysroot for each target triple
-declared in your build model. No manual configuration is needed -- if your
-`quon.rs` declares a bare-metal target, Quon takes care of the rest.
+A builtin target links the toolchain's prebuilt libraries, as Cargo
+does. Quon only checks that the target is installed, and names
+`rustup target add <triple>` when it is not.
+
+Quon compiles a sysroot from the `rust-src` component for:
+
+- every custom target (`Target::spec`);
+- a builtin target declared with `.build_std()`, for a target rustup
+  does not ship.
+
+Building from source costs 11s once for `thumbv7em-none-eabihf`, and
+no other crate of the target starts before it ends, so Quon does it only
+when `quon.rs` asks.
 
 The compiled sysroot lives at:
 

@@ -23,9 +23,10 @@ apply.
 
 ### 3. Sysroot
 
-Bare-metal targets need `core`, `alloc`, and `compiler_builtins` compiled
-from source for the target triple. Quon checks whether a cached sysroot
-exists and is still fresh. If the sysroot is missing or stale, Quon
+Custom targets and targets declared with `.build_std()` need `core`,
+`alloc`, and `compiler_builtins` compiled from source. Other builtin
+targets use the toolchain's prebuilt ones. Quon checks whether a cached
+sysroot exists and is still fresh. If the sysroot is missing or stale, Quon
 compiles it before anything else. See [Custom Sysroots](./sysroots.md)
 for details.
 

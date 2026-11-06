@@ -505,6 +505,7 @@ mod tests {
                     name: name.into(),
                     spec: format!("{}-unknown-none", name),
                     builtin: true,
+                    build_std: false,
                     panic_strategy: None,
                     span: None,
                 },

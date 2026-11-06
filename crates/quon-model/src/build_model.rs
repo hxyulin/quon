@@ -213,6 +213,11 @@ pub struct TargetDef {
     /// If true, `spec` is a rustc builtin triple (not a file path).
     #[serde(default)]
     pub builtin: bool,
+    /// Build `core`, `compiler_builtins` and `alloc` from `rust-src`
+    /// for a builtin target, instead of using the toolchain's prebuilt
+    /// libraries. Custom targets always build them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_std: bool,
     /// The panic strategy rustc should use for this target. When `Some`,
     /// `-C panic=<strategy>` is passed to every rustc invocation that
     /// builds a crate for this target — including sysroot crates.
@@ -226,6 +231,16 @@ pub struct TargetDef {
     pub panic_strategy: Option<PanicStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span: Option<SourceSpan>,
+}
+
+impl TargetDef {
+    /// Whether Quon builds this target's sysroot from `rust-src`: a
+    /// custom target always, a builtin one when it asks to with
+    /// `build_std`. Otherwise rustc links the toolchain's prebuilt
+    /// libraries for the target, as Cargo does.
+    pub fn builds_sysroot(&self) -> bool {
+        !self.builtin || self.build_std
+    }
 }
 
 /// Crate output type.

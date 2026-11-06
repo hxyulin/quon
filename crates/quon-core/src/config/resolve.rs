@@ -974,6 +974,7 @@ mod tests {
                 name: "b".into(),
                 spec: "b.json".into(),
                 builtin: false,
+                build_std: false,
                 panic_strategy: None,
                 span: None,
             },

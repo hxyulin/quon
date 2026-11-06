@@ -158,6 +158,7 @@ mod tests {
                 name: name.into(),
                 spec: spec.into(),
                 builtin: true,
+                build_std: false,
                 panic_strategy: None,
                 span: None,
             },
