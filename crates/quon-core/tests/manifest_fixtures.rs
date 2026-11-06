@@ -100,6 +100,37 @@ fn cargo_error_fixtures() {
     }
 }
 
+/// A member manifest that is not valid TOML fails the load with its
+/// line and column. The workspace is written at test time: Cargo reads
+/// every `Cargo.toml` in a git checkout when quon is a git dependency,
+/// and a checked-in broken manifest makes it print an error to every
+/// project that depends on quon.
+#[test]
+fn a_member_manifest_with_a_toml_error_names_its_line_and_column() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"a\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("a")).unwrap();
+    std::fs::write(
+        dir.path().join("a/Cargo.toml"),
+        "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = 2021\n",
+    )
+    .unwrap();
+    let err = match load_workspace(dir.path(), &vendored(dir.path(), "vendor")) {
+        Ok(_) => panic!("a manifest with a TOML error loaded"),
+        Err(e) => e.to_string(),
+    };
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    assert_eq!(
+        err.replace(&format!("{}/", canonical.display()), ""),
+        "a/Cargo.toml:4:11: error: invalid manifest: \
+         data did not match any variant of untagged enum Inheritable"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Feature resolution
 // ---------------------------------------------------------------------
