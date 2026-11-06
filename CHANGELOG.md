@@ -105,6 +105,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `quon run` no longer swallows SIGINT and SIGTERM after its runner
   exits; they take their default action again.
 
+### Fixed (Cargo workspaces)
+
+- **A git dependency, or one from a registry other than crates.io, no
+  longer fails every build.** Quon reports it only when a build uses it,
+  so a workspace member that only Cargo builds, such as an `xtask`, can
+  depend on one.
+
 ### Fixed (fmt)
 
 - **`quon fmt` formats only declared crates and workspace members.**

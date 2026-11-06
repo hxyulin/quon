@@ -118,7 +118,7 @@ pub fn dump_packages(set: &PackageSet) -> String {
                 DepTarget::Unresolved(reason) => {
                     let req = match &d.source {
                         DepSource::Registry(r) => format!(" {r}"),
-                        DepSource::Path(..) => String::new(),
+                        DepSource::Path(..) | DepSource::Unsupported(_) => String::new(),
                     };
                     let reason = reason.replace(&format!("{}/", root.display()), "");
                     let _ = write!(line, " -> {}{req} unresolved: {reason}", d.package);

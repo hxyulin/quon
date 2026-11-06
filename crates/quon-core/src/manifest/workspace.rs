@@ -201,6 +201,11 @@ pub enum DepSource {
     /// version requirement that the path package must satisfy.
     Path(PathBuf, Option<VersionReq>),
     Registry(VersionReq),
+    /// A source Quon cannot build from, such as git, with the reason.
+    /// A workspace may still declare it: Cargo builds the packages that
+    /// use it, such as a repository's `xtask`, and the error comes only
+    /// if a build reaches the edge.
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -674,6 +679,7 @@ impl<'s> Loader<'s> {
                 Ok(t) => t,
                 Err(reason) => DepTarget::Unresolved(reason),
             },
+            DepSource::Unsupported(reason) => DepTarget::Unresolved(reason.clone()),
         }
     }
 
@@ -1273,19 +1279,26 @@ impl ManifestCx<'_> {
         platform: Option<&Platform>,
         dir: &Path,
     ) -> Option<Dependency> {
-        if d.git.is_some() {
-            self.error(
-                format!("git dependency `{key}` is not supported yet"),
-                Some(span),
-            );
-            return None;
-        }
-        if let Some(r) = &d.registry {
-            self.error(
-                format!("dependency `{key}` uses registry `{r}`; only crates.io is supported"),
-                Some(span),
-            );
-            return None;
+        let unsupported = if d.git.is_some() {
+            Some(format!("git dependency `{key}` is not supported yet"))
+        } else {
+            d.registry.as_ref().map(|r| {
+                format!("dependency `{key}` uses registry `{r}`; only crates.io is supported")
+            })
+        };
+        if let Some(reason) = unsupported {
+            return Some(Dependency {
+                name: key.to_string(),
+                package: d.package.clone().unwrap_or_else(|| key.to_string()),
+                kind,
+                platform: platform.cloned(),
+                optional: d.optional.unwrap_or(false),
+                default_features: d.default_features.unwrap_or(true),
+                features: d.features.clone().unwrap_or_default(),
+                source: DepSource::Unsupported(reason),
+                target: DepTarget::Unresolved("not yet mapped".into()),
+                span: Some(span),
+            });
         }
         let req = match d.version.as_deref().map(VersionReq::parse).transpose() {
             Ok(r) => r,

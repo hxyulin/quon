@@ -1642,6 +1642,40 @@ util [cargo:host-test] host Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
     );
 }
 
+/// A git dependency, here of the workspace's `tool` (the way a repository's
+/// `xtask` depends on its build tools), does not stop Quon building the other
+/// members. Building `tool` itself reports it.
+#[test]
+fn git_dependencies_matter_only_to_the_packages_that_are_built() {
+    let ws = workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"tool\"]\n\
+             [workspace.dependencies]\ngen = { git = \"https://example.com/gen\" }\n",
+        ),
+        ("a/Cargo.toml", &manifest("a", "")),
+        ("a/src/lib.rs", ""),
+        ("a/src/main.rs", ""),
+        (
+            "tool/Cargo.toml",
+            &manifest("tool", "[dependencies]\ngen = { workspace = true }\n"),
+        ),
+        ("tool/src/main.rs", ""),
+    ]);
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("a does not use the git dependency");
+
+    let mut raw = raw_model(|q, t| {
+        q.cargo_workspace(".");
+        q.add(Package::new("tool").target(t));
+    });
+    let err = expand_err(&mut raw, ws.path());
+    assert!(
+        err.contains("dependency `gen` of `tool`: git dependency `gen` is not supported yet"),
+        "{err}"
+    );
+}
+
 #[test]
 fn host_tests_need_a_workspace() {
     let mut raw = raw_model(|q, _| {
