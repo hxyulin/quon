@@ -1,26 +1,21 @@
 //! `gluon run` top-level entry.
 //!
-//! Wires together `build()`, resolve, OVMF resolution (when needed),
-//! argv assembly, and QEMU spawn.
+//! Wires together the runner's validation, `build()`, locating the run
+//! binary, the runner's command, and the spawn.
 //!
 //! Public surface: [`prepare`] and [`launch`] plus the [`RunOptions`]
-//! struct the CLI populates from its clap-parsed args. Keeping everything else in
-//! sibling submodules means the whole pipeline stays unit-testable in
-//! isolation: `qemu_cmd` is pure, `resolve` is pure, `ovmf` only
-//! touches the filesystem behind an injected context, and this file
-//! is the one spot where subprocesses get spawned.
+//! struct the CLI populates from its clap-parsed args. The command
+//! itself comes from the runner (see [`super::runner`]); this file is
+//! the one spot where subprocesses get spawned.
 
-use super::ovmf::{OvmfResolveCtx, resolve_ovmf};
-use super::qemu_cmd::build_qemu_command;
-use super::resolve::{resolve_disk_source, resolve_qemu};
-use super::runner::{Invocation, Runner, command_invocation, profile_runner};
+use super::runner::{Invocation, Runner, Runners, command_invocation, profile_runner};
+use crate::build_with_reporter;
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
+use crate::model::BootMode;
 use crate::scheduler::{BuildSummary, Reporter};
-use crate::{build_with_reporter, model::BootMode};
-use gluon_model::{
-    BuildModel, CrateDef, EspSource, Handle, QemuDef, ResolvedConfig, TargetDef, TargetSpec,
-};
+use gluon_model::{BuildModel, CrateDef, Handle, ResolvedConfig, TargetDef, TargetSpec};
+use gluon_runner::{Artifact, ArtifactKind, Context, PrepareRequest, TestBinary, ValidateResponse};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -29,12 +24,17 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::time::{Duration, Instant};
 
+/// How long one test may run when neither `--timeout`, the profile's
+/// `test_timeout` nor the runner (QEMU's `test_timeout(...)`) says. A
+/// kernel test that hangs would otherwise stop the run for good.
+const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Knobs passed into [`prepare`] by the CLI layer.
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
-    /// Forces `BootMode::Uefi` / `BootMode::Direct`, overriding whatever
-    /// the profile's `qemu().boot_mode(...)` declared. `None` means
-    /// "use the profile-level setting, or direct".
+    /// Forces a boot mode over whatever the profile or runner declared,
+    /// passed to a plugin runner as the `boot_mode` override. `None`
+    /// means "use the profile-level setting, or the runner's default".
     pub boot_mode_override: Option<BootMode>,
     /// Forces a wall-clock timeout, overriding any profile-level
     /// `test_timeout`. `None` means "inherit profile, or no timeout".
@@ -44,36 +44,31 @@ pub struct RunOptions {
     /// Worker count for the preceding `build()` step. `None` = auto.
     pub workers: Option<usize>,
     /// Skip the build and the ESP existence checks, so the caller can
-    /// print the assembled QEMU command without spawning it. Used by
+    /// print the assembled command without spawning it. Used by
     /// integration tests and for users sanity-checking a config.
     pub dry_run: bool,
-    /// Skip the implicit `build()` step and go straight to the QEMU
-    /// spawn. The user is asserting the run binary on disk is
-    /// already current; if it isn't, QEMU will report a clearer
-    /// "could not load kernel" error than gluon could fabricate from
-    /// the outside. Intended for tight edit/run loops where rerunning
+    /// Skip the implicit `build()` step and go straight to the spawn.
+    /// The user is asserting the run binary on disk is already
+    /// current; if it isn't, the runner will report a clearer "could
+    /// not load kernel" error than gluon could fabricate from the
+    /// outside. Intended for tight edit/run loops where rerunning
     /// gluon's fingerprint sweep is pure latency.
     ///
     /// Implied by `dry_run` (dry-run already skips the build).
     pub no_build: bool,
-    /// Start QEMU with a GDB server on :1234 and halt the CPU before
-    /// the first instruction (`-s -S`). The CLI prints a hint before
-    /// the spawn so the user knows where to point their debugger.
+    /// Ask the runner to start the binary halted for a debugger. QEMU
+    /// adds `-s -S` and returns a note saying where to connect.
     pub gdb: bool,
-    /// Emit an `-device isa-debug-exit,iobase=<port>,iosize=0x04`
-    /// entry in the QEMU argv so a guest can report an exit code
-    /// through an I/O port write. The port comes from
-    /// [`super::ResolvedQemu::test_exit_port`].
-    ///
-    /// Not wired to a CLI flag today. `gluon test` leaves it off:
-    /// projects such as Hadron add the device in
-    /// `qemu().extra_args(...)`, and a second device on the same port
-    /// would clash.
-    pub test_mode: bool,
+    /// Set by `gluon test`: the per-test timeout applies, and a plugin
+    /// runner is told it runs a test (QEMU then adds its
+    /// `test_extra_args(...)`).
+    pub test: bool,
+    /// The runner plugins built into the caller.
+    pub runners: Runners,
 }
 
-/// What [`prepare`] produced: the QEMU command, and the summary of the
-/// build that preceded it.
+/// What [`prepare`] produced: the command to run, and the summary of
+/// the build that preceded it.
 #[derive(Debug)]
 pub struct Prepared {
     pub invocation: Invocation,
@@ -81,27 +76,25 @@ pub struct Prepared {
     pub build: Option<BuildSummary>,
 }
 
-/// Build the project and assemble the QEMU command that runs it.
+/// Build the project and assemble the command that runs it.
 ///
 /// Steps, in order:
 ///
-/// 1. **Build.** Invokes [`build_with_reporter`] so `gluon run` is
+/// 1. **Check the runner.** [`RunnerSession::start`] finds the
+///    profile's runner and, for a plugin runner, validates its
+///    settings, so a bad setting fails before the build.
+/// 2. **Build.** Invokes [`build_with_reporter`] so `gluon run` is
 ///    idempotent with the current project state. A failed build
-///    short-circuits without touching QEMU.
-/// 2. **Locate run binary.** The resolved profile must have a
+///    short-circuits without starting anything.
+/// 3. **Locate run binary.** The resolved profile must have a
 ///    `run_binary` set; otherwise [`Error::NoRunBinary`] is
-///    returned. The binary path is
-///    `BuildLayout::cross_final_dir(target, profile).join(crate_name)`.
-/// 3. **Resolve QEMU.** [`resolve_qemu`] merges profile overrides and
-///    fills defaults.
-/// 4. **UEFI: resolve OVMF.** Only when `boot_mode == Uefi`. The
-///    writable-vars copy (when needed) lands under
-///    `build/ovmf_vars-<profile>.fd`.
-/// 5. **Build argv.** Pure [`build_qemu_command`] call.
+///    returned.
+/// 4. **Assemble the command.** [`RunnerSession::invocation`].
 ///
-/// The caller then prints what it wants (the command for a dry run, a
-/// GDB hint) and hands the invocation to [`launch`]. Splitting here
-/// lets the CLI put its own lines between the build and QEMU's output.
+/// The caller then prints what it wants (the command for a dry run,
+/// the runner's notes) and hands the invocation to [`launch`].
+/// Splitting here lets the CLI put its own lines between the build and
+/// the program's output.
 pub fn prepare(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -109,22 +102,22 @@ pub fn prepare(
     opts: &RunOptions,
     reporter: &mut dyn Reporter,
 ) -> Result<Prepared> {
-    // Step 1: build (skipped in dry-run or when --no-build is set).
+    let session = RunnerSession::start(ctx, model, resolved, opts)?;
+
+    // Step 2: build (skipped in dry-run or when --no-build is set).
     //
-    // Dry-run exists to let users sanity-check their QEMU
+    // Dry-run exists to let users sanity-check their runner
     // configuration without touching rustc, the cache, or the
     // filesystem. The assembled argv is entirely derivable from the
-    // resolved model and the `BuildLayout::cross_final_dir` helper,
-    // so we can skip the build wholesale and still produce the
-    // correct output. Integration tests rely on this.
+    // resolved model and the layout's path arithmetic, so we can skip
+    // the build wholesale and still produce the correct output.
+    // Integration tests rely on this.
     //
     // `--no-build` is the same skip without the spawn skip: the user
     // is telling us "I just rebuilt by hand, don't waste my time
     // re-checking timestamps". If the run binary actually is stale
-    // or missing, QEMU will fail at load time with a clearer
+    // or missing, the runner will fail at load time with a clearer
     // diagnostic than gluon would produce by trying to second-guess.
-    // Captured if we actually built — carries the ESP output paths
-    // used by Step 4 to auto-wire QEMU's `-drive fat:rw:` flag.
     let build_summary = if !opts.dry_run && !opts.no_build {
         let workers = opts.workers.unwrap_or_else(|| {
             std::thread::available_parallelism()
@@ -138,13 +131,13 @@ pub fn prepare(
         None
     };
 
-    // Step 2: locate run binary.
+    // Step 3: locate run binary.
     let profile = &resolved.profile;
     let boot_handle = profile.run_binary.ok_or_else(|| Error::NoRunBinary {
         profile: profile.name.clone(),
     })?;
     let kernel = final_binary(ctx, model, resolved, boot_handle)?;
-    let invocation = invocation(
+    let invocation = session.invocation(
         ctx,
         model,
         resolved,
@@ -200,7 +193,7 @@ pub(super) fn profile_target<'m>(
     let profile = &resolved.profile;
     let t = profile.cross_target().ok_or_else(|| {
         Error::Config(format!(
-            "profile '{}' builds for the host, and booting under QEMU needs a target; \
+            "profile '{}' builds for the host, and this needs a target; \
              use a profile with `.target(..)`",
             profile.name
         ))
@@ -213,222 +206,233 @@ pub(super) fn profile_target<'m>(
     })
 }
 
-/// Steps 3 to 5 of [`prepare`]: assemble the command that runs
-/// `kernel` with the profile's runner. For a QEMU runner that means
-/// resolving QEMU, the disk, the ESP and OVMF. `esp_override`, when
-/// set, is the ESP directory to mount in UEFI mode instead of the one
-/// the project declares; `gluon test` passes each test's copy.
-pub(super) fn invocation(
-    ctx: &CompileCtx,
-    model: &BuildModel,
-    resolved: &ResolvedConfig,
-    opts: &RunOptions,
-    kernel: &Path,
-    esp_override: Option<PathBuf>,
-    build_summary: Option<&BuildSummary>,
-) -> Result<Invocation> {
-    let runner = profile_runner(model, resolved)?;
-    runner.require_qemu(opts.gdb, "--gdb")?;
-    runner.require_qemu(opts.boot_mode_override.is_some(), "a boot mode flag")?;
-    match runner {
-        Runner::Qemu { name, def } => {
-            let mut inv = qemu_invocation(
-                ctx,
-                model,
-                resolved,
-                opts,
-                def,
-                kernel,
-                esp_override,
-                build_summary,
-            )?;
-            inv.runner = name.to_string();
-            inv.success_exit_code = def.success_exit_code;
-            Ok(inv)
+/// The profile's runner, checked against the options before the build.
+pub(super) struct RunnerSession<'m> {
+    runner: Runner<'m>,
+    /// For a plugin runner: the plugin, the context every call to it
+    /// carries, and its reply to `validate`.
+    plugin: Option<(Arc<dyn gluon_runner::Runner>, Context, ValidateResponse)>,
+}
+
+impl<'m> RunnerSession<'m> {
+    /// Find the profile's runner. A command or host runner refuses the
+    /// options only a plugin takes; a plugin runner is found and
+    /// validated.
+    pub(super) fn start(
+        ctx: &CompileCtx,
+        model: &'m BuildModel,
+        resolved: &ResolvedConfig,
+        opts: &RunOptions,
+    ) -> Result<Self> {
+        let runner = profile_runner(model, resolved)?;
+        runner.require_plugin(opts.gdb, "--gdb")?;
+        runner.require_plugin(opts.boot_mode_override.is_some(), "a boot mode flag")?;
+        let plugin = match &runner {
+            Runner::Plugin {
+                name,
+                plugin,
+                settings,
+                overrides,
+            } => {
+                let mut overrides = overrides.clone();
+                if let Some(mode) = opts.boot_mode_override {
+                    // The command line beats the profile.
+                    overrides.insert(
+                        "boot_mode".into(),
+                        serde_json::to_value(mode).expect("a boot mode serializes"),
+                    );
+                }
+                let target = resolved
+                    .profile
+                    .cross_target()
+                    .and_then(|t| model.targets.get(t))
+                    .map(|t| t.spec.clone());
+                let context = Context {
+                    runner: (*name).to_string(),
+                    profile: resolved.profile.name.clone(),
+                    target,
+                    build_dir: ctx.layout.root().to_path_buf(),
+                    settings: settings.clone(),
+                    overrides,
+                    test: opts.test,
+                };
+                let found = opts.runners.find(name, plugin)?;
+                let validated = found.validate(&context).map_err(Error::from)?;
+                Some((found, context, validated))
+            }
+            Runner::Command { .. } | Runner::Host => None,
+        };
+        Ok(Self { runner, plugin })
+    }
+
+    /// How `gluon test` boots an integration test's binary.
+    pub(super) fn test_binary(&self) -> TestBinary {
+        match &self.plugin {
+            Some((_, _, v)) => v.test_binary.clone(),
+            None => TestBinary::AsBinary,
         }
-        Runner::Command { name, def } => {
-            command_invocation(name, def, kernel, &opts.extra_args, opts.timeout_override)
+    }
+
+    /// The wall-clock limit for one run.
+    ///
+    /// Under `gluon test`: `--timeout`, then the profile's
+    /// `test_timeout`, then the runner's default, then
+    /// [`DEFAULT_TEST_TIMEOUT`]. Under `gluon run`: `--timeout`, and
+    /// for a plugin runner the profile's `test_timeout`, as the QEMU
+    /// runner always applied it.
+    pub(super) fn timeout(&self, opts: &RunOptions, resolved: &ResolvedConfig) -> Option<Duration> {
+        let profile = resolved
+            .profile
+            .test_timeout
+            .map(|s| Duration::from_secs(s.into()));
+        if opts.test {
+            let runner = self
+                .plugin
+                .as_ref()
+                .and_then(|(_, _, v)| v.test_timeout)
+                .map(Duration::from_secs);
+            return Some(
+                opts.timeout_override
+                    .or(profile)
+                    .or(runner)
+                    .unwrap_or(DEFAULT_TEST_TIMEOUT),
+            );
         }
-        Runner::Host => Ok(Invocation {
-            binary: kernel.to_string_lossy().into_owned(),
-            args: opts.extra_args.clone(),
-            timeout: opts.timeout_override,
-            runner: "host".into(),
-            success_exit_code: None,
-        }),
+        match self.runner {
+            Runner::Plugin { .. } => opts.timeout_override.or(profile),
+            Runner::Command { .. } | Runner::Host => opts.timeout_override,
+        }
+    }
+
+    /// The command that runs `kernel` with the profile's runner.
+    /// `boot_esp`, when set, is the ESP to boot instead of the one the
+    /// project declares; `gluon test` passes each test's copy.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn invocation(
+        &self,
+        ctx: &CompileCtx,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+        opts: &RunOptions,
+        kernel: &Path,
+        boot_esp: Option<PathBuf>,
+        build_summary: Option<&BuildSummary>,
+    ) -> Result<Invocation> {
+        let timeout = self.timeout(opts, resolved);
+        let (runner, context, _) = match (&self.runner, &self.plugin) {
+            (Runner::Plugin { .. }, Some(plugin)) => plugin,
+            (Runner::Command { name, def }, _) => {
+                return command_invocation(name, def, kernel, &opts.extra_args, timeout);
+            }
+            (Runner::Host, _) => {
+                return Ok(Invocation {
+                    binary: kernel.to_string_lossy().into_owned(),
+                    args: opts.extra_args.clone(),
+                    env: BTreeMap::new(),
+                    timeout,
+                    runner: "host".into(),
+                    success_exit_code: None,
+                    notes: Vec::new(),
+                });
+            }
+            (Runner::Plugin { .. }, None) => unreachable!("start() finds every plugin"),
+        };
+        let request = PrepareRequest {
+            context: context.clone(),
+            binary: kernel.to_path_buf(),
+            artifacts: artifacts(ctx, model, resolved, build_summary),
+            boot_esp,
+            // The protocol carries text; an argument that is not UTF-8
+            // cannot reach a plugin intact.
+            extra_args: opts
+                .extra_args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            gdb: opts.gdb,
+            built: !(opts.dry_run || opts.no_build),
+        };
+        let reply = runner.prepare(&request).map_err(Error::from)?;
+        Ok(Invocation {
+            binary: reply.program,
+            args: reply.args.into_iter().map(OsString::from).collect(),
+            env: reply.env,
+            timeout,
+            runner: context.runner.clone(),
+            success_exit_code: reply.success_exit_code,
+            notes: reply.notes,
+        })
     }
 }
 
-/// [`invocation`] for a QEMU runner.
-#[allow(clippy::too_many_arguments)]
-fn qemu_invocation(
+/// Every ESP, image and build step the project declares, with the path
+/// the build put it at. Without a build (dry-run / `--no-build`) the
+/// paths come from layout arithmetic, so a reference still resolves to
+/// a deterministic path; the file just may not exist. After a build,
+/// an image or build step the build did not produce has no path, and
+/// an ESP falls back to where the layout puts it.
+fn artifacts(
     ctx: &CompileCtx,
     model: &BuildModel,
     resolved: &ResolvedConfig,
-    opts: &RunOptions,
-    qemu_def: &QemuDef,
-    kernel: &Path,
-    esp_override: Option<PathBuf>,
-    build_summary: Option<&BuildSummary>,
-) -> Result<Invocation> {
-    let profile = &resolved.profile;
-    let target = profile_target(model, resolved)?;
-
-    // Step 3: resolve QEMU config.
-    //
-    // We pass the target's spec as the triple because for builtin
-    // targets it is the triple (`x86_64-unknown-none`), and for custom
-    // JSON specs it's the spec path — which users typically name with
-    // the arch prefix, so the arch-prefix match in
-    // `default_binary_for_target` still has a reasonable shot.
-    let mut resolved_qemu = resolve_qemu(
-        qemu_def,
-        profile,
-        &target.spec,
-        opts.boot_mode_override,
-        opts.timeout_override,
-    )?;
-
-    // Step 3a: resolve `qemu().disk_*(...)` to a concrete path.
-    //
-    // `disk_image("path")` is a host file the user manages directly.
-    // `disk_ref("name")` references an `image("name")` declared in the
-    // same script — we resolve through the build summary's
-    // `image_paths` map, falling back to `BuildLayout::image_path` in
-    // dry-run / `--no-build` modes (where the build didn't run, so the
-    // map is empty).
-    if let Some(disk_source) = qemu_def.disk.clone() {
-        let image_paths = match build_summary {
-            Some(s) => s.image_paths.clone(),
-            None => {
-                // Dry-run / no-build fallback: synthesise paths via
-                // layout arithmetic. Keeps `gluon run --dry-run` from
-                // failing at config-resolve time when the image hasn't
-                // been built yet.
-                let mut map: BTreeMap<_, _> = BTreeMap::new();
-                for (h, img) in model.images.iter() {
-                    map.insert(h, ctx.layout.image_path(&img.name));
-                }
-                map
-            }
-        };
-        // Build-step output paths follow the same pattern: take the
-        // post-build map, or synthesise from the layout in dry-run /
-        // --no-build mode so `disk_ref` to a build step's name still
-        // resolves to a deterministic path (the file just won't exist).
-        let build_step_paths = match build_summary {
-            Some(s) => s.build_step_paths.clone(),
-            None => {
-                let mut map: BTreeMap<_, _> = BTreeMap::new();
-                for (h, bs) in model.build_steps.iter() {
-                    map.insert(h, ctx.layout.build_step_dir(&bs.name).join(&bs.output));
-                }
-                map
-            }
-        };
-        let disk_path = resolve_disk_source(&disk_source, model, &image_paths, &build_step_paths)?;
-        resolved_qemu.disk = Some(disk_path);
-    }
-
-    // Step 3b: auto-wire the ESP directory for UEFI boot.
-    //
-    // If the final boot mode is UEFI, the user has NOT set an explicit
-    // `qemu().esp_dir()` / `esp_image()`, and the project declares
-    // exactly one `esp(...)` block, then point QEMU at the build-output
-    // ESP directory we just assembled (or, in dry-run / --no-build
-    // mode, at the path we *would* have assembled via pure path
-    // arithmetic). More than one declared ESP is an error: the user
-    // must pick explicitly because we can't guess. Zero declarations
-    // falls through — QEMU will simply have no ESP drive, same as
-    // before this feature existed.
-    if let Some(dir) = esp_override.filter(|_| resolved_qemu.boot_mode == BootMode::Uefi) {
-        resolved_qemu.esp = Some(EspSource::Dir(dir));
-    } else if resolved_qemu.boot_mode == BootMode::Uefi && resolved_qemu.esp.is_none() {
-        match model.esps.len() {
-            0 => { /* no automation requested */ }
-            1 => {
-                // Prefer the path the build actually produced, so a
-                // test-only run (without build) never disagrees with a
-                // real build. Fall back to path arithmetic when we
-                // didn't build (dry-run / --no-build).
-                let esp_handle = model
-                    .esps
-                    .iter()
-                    .next()
-                    .map(|(h, _)| h)
-                    .expect("model.esps.len() == 1");
-                let esp_def = model.esps.get(esp_handle).ok_or_else(|| {
-                    Error::Compile("internal: esp handle iterates but does not resolve".to_string())
-                })?;
-                let esp_path = build_summary
-                    .and_then(|s| s.esp_dirs.get(&esp_handle).cloned())
-                    .unwrap_or_else(|| ctx.layout.esp_dir(target, profile, &esp_def.name));
-                resolved_qemu.esp = Some(EspSource::Dir(esp_path));
-            }
-            n => {
-                return Err(Error::Compile(format!(
-                    "profile '{}' uses boot_mode('uefi') and the project declares {} esp(...) blocks; \
-                     gluon can't guess which one to mount. Set qemu().esp_dir(...) explicitly, \
-                     or remove the extra esp declarations.",
-                    profile.name, n
-                )));
-            }
+    summary: Option<&BuildSummary>,
+) -> Vec<Artifact> {
+    let mut out = Vec::new();
+    // ESPs live under the target's directory, so a host profile has
+    // none to offer.
+    if let Some(target) = resolved
+        .profile
+        .cross_target()
+        .and_then(|t| model.targets.get(t))
+    {
+        for (h, esp) in model.esps.iter() {
+            let path = summary
+                .and_then(|s| s.esp_dirs.get(&h).cloned())
+                .unwrap_or_else(|| ctx.layout.esp_dir(target, &resolved.profile, &esp.name));
+            out.push(Artifact {
+                name: esp.name.clone(),
+                kind: ArtifactKind::Esp,
+                path: Some(path),
+            });
         }
     }
-
-    // Step 4: OVMF (only when the final boot mode is UEFI).
-    let ovmf = if resolved_qemu.boot_mode == BootMode::Uefi {
-        let ovmf_ctx =
-            OvmfResolveCtx::from_env(ctx.layout.root(), &profile.name, &resolved_qemu.binary);
-        Some(resolve_ovmf(qemu_def, &ovmf_ctx)?)
-    } else {
-        None
-    };
-
-    // Step 5: assemble argv.
-    //
-    // `--gdb` is surfaced here by prepending `-s -S` to the CLI
-    // pass-through list. This keeps `build_qemu_command` pure — it
-    // doesn't need to know anything about gdb, just about argv
-    // ordering — and it places the gdb flags *after* the user's
-    // Rhai-level `extra_args`, so a user who wants to customize
-    // the gdb port (`-gdb tcp::9999`) can do it via their config
-    // without being clobbered.
-    let extra_args_with_gdb: Vec<OsString> = if opts.gdb {
-        let mut v = Vec::with_capacity(opts.extra_args.len() + 2);
-        v.push(OsString::from("-s"));
-        v.push(OsString::from("-S"));
-        v.extend(opts.extra_args.iter().cloned());
-        v
-    } else {
-        opts.extra_args.clone()
-    };
-    build_qemu_command(
-        &resolved_qemu,
-        kernel,
-        resolved_qemu.boot_mode,
-        ovmf.as_ref(),
-        &extra_args_with_gdb,
-        opts.test_mode,
-        // Skip ESP existence checks in dry-run / --no-build. In dry-run
-        // we haven't built anything, so the auto-wired ESP path does
-        // not exist on disk; in --no-build the user is asserting the
-        // build tree is already current, and QEMU will report a better
-        // error than we can if they're wrong.
-        opts.dry_run || opts.no_build,
-    )
+    for (h, img) in model.images.iter() {
+        let path = match summary {
+            Some(s) => s.image_paths.get(&h).cloned(),
+            None => Some(ctx.layout.image_path(&img.name)),
+        };
+        out.push(Artifact {
+            name: img.name.clone(),
+            kind: ArtifactKind::Image,
+            path,
+        });
+    }
+    for (h, bs) in model.build_steps.iter() {
+        let path = match summary {
+            Some(s) => s.build_step_paths.get(&h).cloned(),
+            None => Some(ctx.layout.build_step_dir(&bs.name).join(&bs.output)),
+        };
+        out.push(Artifact {
+            name: bs.name.clone(),
+            kind: ArtifactKind::BuildStep,
+            path,
+        });
+    }
+    out
 }
 
 impl Invocation {
     /// The command in a copy-pasteable form, for `--dry-run` and the
     /// CLI's `Running` line.
     pub fn command_line(&self) -> String {
-        let mut line = shell_quote(&self.binary);
-        for a in &self.args {
-            line.push(' ');
-            line.push_str(&shell_quote(&a.to_string_lossy()));
-        }
-        line
+        let mut words: Vec<String> = self
+            .env
+            .iter()
+            .map(|(k, v)| format!("{k}={}", shell_quote(v)))
+            .collect();
+        words.push(shell_quote(&self.binary));
+        words.extend(self.args.iter().map(|a| shell_quote(&a.to_string_lossy())));
+        words.join(" ")
     }
 }
 
@@ -487,6 +491,7 @@ fn shell_quote(s: &str) -> String {
 fn spawn_and_wait(invocation: Invocation) -> Result<ExitStatus> {
     let mut cmd = Command::new(&invocation.binary);
     cmd.args(&invocation.args);
+    cmd.envs(&invocation.env);
     cmd.stdin(Stdio::inherit());
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
@@ -596,13 +601,21 @@ mod tests {
         let inv = Invocation {
             binary: "qemu-system-x86_64".into(),
             args: vec!["-m".into(), "128M".into(), "-append".into(), "a b".into()],
+            env: BTreeMap::new(),
             timeout: None,
             runner: "qemu".into(),
             success_exit_code: None,
+            notes: Vec::new(),
         };
         assert_eq!(
             inv.command_line(),
             "qemu-system-x86_64 -m 128M -append 'a b'"
+        );
+        let mut inv = inv;
+        inv.env.insert("DEFMT_LOG".into(), "info trace".into());
+        assert_eq!(
+            inv.command_line(),
+            "DEFMT_LOG='info trace' qemu-system-x86_64 -m 128M -append 'a b'"
         );
     }
 

@@ -352,6 +352,7 @@ dependencies = [
  "anyhow",
  "clap",
  "gluon-core",
+ "gluon-runner-qemu",
  "serde_json",
  "tempfile",
  "terminal_size",
@@ -375,6 +376,7 @@ dependencies = [
  "glob",
  "gluon-config",
  "gluon-model",
+ "gluon-runner",
  "hadris-fat",
  "semver",
  "serde",
@@ -395,6 +397,26 @@ version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "gluon-runner"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gluon-runner-qemu"
+version = "0.1.1"
+dependencies = [
+ "gluon-model",
+ "gluon-runner",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

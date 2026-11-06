@@ -18,6 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 gluon-core.workspace = true
+# Built in as the `qemu` runner plugin, so a QEMU runner needs no
+# separate executable.
+gluon-runner-qemu.workspace = true
 clap = { version = "4", features = ["derive"] }
 # Colored stderr. Both are already in the tree through clap. `anstream`
 # strips escape codes when stderr is not a terminal or NO_COLOR is set.

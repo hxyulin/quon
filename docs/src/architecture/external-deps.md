@@ -75,8 +75,9 @@ parser does not silently fall through.
 
 ## QEMU CLI shape
 
-**Where:** `run::qemu_cmd` (argv builder), `run::boot_mode` (per-mode
-contributions), `run::ovmf` (firmware path resolution).
+**Where:** the `gluon-runner-qemu` crate: `qemu_cmd` (argv builder),
+`boot_mode` (per-mode contributions), `ovmf` (firmware path
+resolution).
 **What we depend on:** the QEMU command-line flag set, specifically
 the `-machine`, `-m`, `-smp`, `-display`, `-serial`, `-kernel`,
 `-drive`, `-device` flag families and their argument syntax.
@@ -97,7 +98,7 @@ mode-specific wiring delegated to `BootModeAssembler` impls:
 ```
 
 The token order is fixed but not checked at compile time; tests in
-`run::qemu_cmd::tests` pin specific argvs as goldens. If QEMU
+`qemu_cmd::tests` pin specific argvs as goldens. If QEMU
 deprecates a flag or changes its argument syntax, those goldens
 break first.
 
@@ -124,13 +125,13 @@ recipe.
 
 ### What breaks if QEMU changes
 
-Goldens in `run::qemu_cmd::tests` will diff. Bumping QEMU on the
+Goldens in `qemu_cmd::tests` will diff. Bumping QEMU on the
 host doesn't break gluon as long as the flag set is preserved;
 QEMU has historically been very conservative about removing flags.
 
 ## OVMF firmware paths
 
-**Where:** `run::ovmf::SYSTEM_PATHS` (probe table).
+**Where:** `gluon_runner_qemu::ovmf::SYSTEM_PATHS` (probe table).
 **What we depend on:** distro-specific OVMF install locations.
 
 Gluon does not ship OVMF. Users provide `OVMF_CODE.fd` and
@@ -298,8 +299,8 @@ not move, and the pinned hash catches a tag that does.
 |---|---|---|
 | rustc dep-info format | `cache::depinfo` | `Error::Config` parse failure |
 | rustc unstable bootstrap | `sysroot` | sysroot build fails |
-| QEMU flags | `run::qemu_cmd`, `run::boot_mode` | argv golden tests diff |
-| OVMF system paths | `run::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
+| QEMU flags | `gluon_runner_qemu::{qemu_cmd, boot_mode}` | argv golden tests diff |
+| OVMF system paths | `gluon_runner_qemu::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
 | hadris-fat API | `image::fat` | compile error or image-hash test diff |
 | curl, Limine binary tags | `download`, `Config::limine` | `Error::Download` with both hashes |
 | FAT32 size minimum | `image::mod::compute_size_bytes` | image refuses to mount |

@@ -2,10 +2,11 @@
 
 use crate::builders::QemuBuilder;
 use crate::config::Config;
-use gluon_model::{CommandRunnerDef, Handle, QemuDef, RawRunnerDef, RunnerKind};
+use gluon_model::{CommandRunnerDef, Handle, PluginRunnerDef, QemuDef, RawRunnerDef, RunnerKind};
 
 /// Chainable builder returned by [`Config::runner`]. Pick the kind with
-/// [`qemu`](Self::qemu) or [`command`](Self::command).
+/// [`qemu`](Self::qemu), [`command`](Self::command) or
+/// [`plugin`](Self::plugin).
 pub struct RunnerBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
     /// `None` for a repeated name.
@@ -49,6 +50,49 @@ impl<'cfg> RunnerBuilder<'cfg> {
             cfg: self.cfg,
             handle: self.handle,
         }
+    }
+
+    /// Hand the binary to the runner plugin `plugin`: one built into
+    /// Gluon, or `gluon-runner-<plugin>` on `$PATH`. Its settings are
+    /// set with [`PluginRunnerBuilder::setting`] and passed to the
+    /// plugin as JSON.
+    ///
+    /// ```rust,ignore
+    /// cfg.runner("board").plugin("probe-rs").setting("chip", "nRF52840_xxAA");
+    /// ```
+    pub fn plugin(mut self, plugin: &str) -> PluginRunnerBuilder<'cfg> {
+        self.set_kind(RunnerKind::Plugin(PluginRunnerDef {
+            plugin: plugin.into(),
+            settings: Default::default(),
+        }));
+        PluginRunnerBuilder {
+            cfg: self.cfg,
+            handle: self.handle,
+        }
+    }
+}
+
+/// Chainable builder returned by [`RunnerBuilder::plugin`].
+pub struct PluginRunnerBuilder<'cfg> {
+    pub(crate) cfg: &'cfg mut Config,
+    pub(crate) handle: Option<Handle<RawRunnerDef>>,
+}
+
+impl PluginRunnerBuilder<'_> {
+    /// Set the plugin setting `key`. A later call with the same key
+    /// replaces the value. What the keys mean is up to the plugin.
+    pub fn setting(self, key: &str, value: impl Into<serde_json::Value>) -> Self {
+        if let Some(h) = self.handle
+            && let Some(RunnerKind::Plugin(p)) = self
+                .cfg
+                .raw
+                .runners
+                .get_mut(h)
+                .and_then(|r| r.kind.as_mut())
+        {
+            p.settings.insert(key.into(), value.into());
+        }
+        self
     }
 }
 
@@ -99,5 +143,26 @@ mod tests {
             other => panic!("expected a command runner, got {other:?}"),
         }
         assert!(cfg.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn plugin_runner_records_its_settings() {
+        let mut cfg = Config::new();
+        cfg.runner("board")
+            .plugin("probe-rs")
+            .setting("chip", "nRF52840_xxAA")
+            .setting("speed", 4000)
+            .setting("speed", 8000);
+        let h = cfg.raw.runners.lookup("board").unwrap();
+        match &cfg.raw.runners.get(h).unwrap().kind {
+            Some(RunnerKind::Plugin(p)) => {
+                assert_eq!(p.plugin, "probe-rs");
+                assert_eq!(
+                    serde_json::to_value(&p.settings).unwrap(),
+                    serde_json::json!({"chip": "nRF52840_xxAA", "speed": 8000})
+                );
+            }
+            other => panic!("expected a plugin runner, got {other:?}"),
+        }
     }
 }

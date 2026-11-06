@@ -122,18 +122,26 @@ pub enum Error {
     )]
     RunnerProgramNotFound { runner: String, program: String },
 
-    #[error("runner '{runner}' is a {kind} runner; {option} needs a QEMU runner")]
+    #[error(
+        "runner '{runner}' is a {kind} runner; {option} needs a QEMU runner or another \
+         runner plugin"
+    )]
     QemuOnlyOption {
         runner: String,
         kind: &'static str,
         option: &'static str,
     },
 
-    #[error("no OVMF firmware found.\n{attempts}")]
-    OvmfNotFound { attempts: String },
+    #[error(
+        "runner '{runner}' uses the '{plugin}' runner plugin, which is not built into gluon, \
+         and `gluon-runner-{plugin}` is not on PATH"
+    )]
+    RunnerPluginNotFound { runner: String, plugin: String },
 
-    #[error("ESP source path does not exist: {path}")]
-    EspMissing { path: PathBuf },
+    /// An error a runner plugin reported. Its message is shown as it
+    /// is: the plugin words it for the user.
+    #[error("{0}")]
+    Runner(String),
 
     #[error("the run exceeded its timeout and was killed")]
     RunTimeout,
@@ -152,11 +160,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[error(
-        "cannot pick a default QEMU binary for target '{triple}': unknown architecture.\nSet one explicitly with `qemu(\"qemu-system-<arch>\")` in your gluon.rs."
-    )]
-    UnknownQemuTarget { triple: String },
-
     #[error("QEMU run killed by signal {signal} (cleanly torn down by gluon)")]
     KilledBySignal { signal: i32 },
 }
@@ -170,6 +173,12 @@ fn render_diagnostics(diags: &[Diagnostic]) -> String {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<gluon_runner::RunnerError> for Error {
+    fn from(e: gluon_runner::RunnerError) -> Self {
+        Error::Runner(e.0)
+    }
+}
 
 #[cfg(test)]
 mod tests {

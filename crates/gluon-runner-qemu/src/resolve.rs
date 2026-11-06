@@ -1,32 +1,47 @@
-//! Merge [`QemuDef`] + [`ResolvedProfile`] into a fully-defaulted
-//! [`ResolvedQemu`].
+//! Merge the runner's [`QemuDef`] settings and their [`Overrides`]
+//! into a fully-defaulted [`ResolvedQemu`].
 //!
 //! The `gluon.rs` schema lets users set `qemu(...)` knobs at the
 //! project level *and* override a subset of them per profile
 //! (`profile.qemu_memory(...)`, `.qemu_cores(...)`, `.qemu_extra_args(...)`,
-//! `.test_timeout(...)`). Resolving merges these two sources into a
-//! single flat record with every field populated.
+//! `.qemu_boot_mode(...)`). Gluon passes the profile's values, and a
+//! boot mode flag from the command line, as the request's overrides.
+//! Resolving merges the two into a single flat record with every field
+//! populated.
 //!
 //! Precedence, most specific first:
 //!
-//! 1. Profile-level override (`ResolvedProfile::qemu_memory` etc.)
-//! 2. Project-level `QemuDef` field
-//! 3. A hard-coded gluon default
+//! 1. An override (command line, then profile; Gluon merges those)
+//! 2. The runner-level `QemuDef` field
+//! 3. A hard-coded default
 //!
-//! Profile-level `qemu_extra_args` are *appended* to the project-level
+//! Override `extra_args` are *appended* to the runner-level
 //! `extra_args`, not replacing them. That matches how `extra_args`
 //! works everywhere else in gluon (additive rather than override).
 
 use crate::error::{Error, Result};
-use gluon_model::{
-    BootMode, BuildModel, BuildStepDef, DiskSource, DisplayMode, EspSource, Handle, ImageDef,
-    QemuDef, ResolvedProfile, SerialMode,
-};
-use std::collections::BTreeMap;
+use gluon_model::{BootMode, DiskSource, DisplayMode, EspSource, QemuDef, SerialMode};
+use gluon_runner::{Artifact, ArtifactKind};
+use serde::Deserialize;
 use std::path::PathBuf;
-use std::time::Duration;
 
-/// Fully-resolved QEMU configuration ready for [`super::build_qemu_command`].
+/// The settings a profile or the command line may override. Unknown
+/// keys are refused, so a misspelt override fails instead of being
+/// ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Overrides {
+    #[serde(default)]
+    pub memory_mb: Option<u32>,
+    #[serde(default)]
+    pub cores: Option<u32>,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    #[serde(default)]
+    pub boot_mode: Option<BootMode>,
+}
+
+/// Fully-resolved QEMU configuration ready for [`crate::build_qemu_command`].
 #[derive(Debug, Clone)]
 pub struct ResolvedQemu {
     pub binary: String,
@@ -49,15 +64,13 @@ pub struct ResolvedQemu {
     /// is the canonical raw image to attach as the first IDE drive in
     /// BIOS mode, or as a generic raw drive in UEFI mode.
     ///
-    /// `DiskSource::ImageRef("name")` is resolved to a path here via
-    /// the build summary's `image_paths` map. `DiskSource::Image(path)`
-    /// is passed through untouched. The lookup happens in `run::entry`
-    /// after the scheduler has produced the image, so this field is
-    /// always either `None` or a concrete path.
+    /// `DiskSource::ImageRef("name")` is resolved to a path through
+    /// the request's artifacts. `DiskSource::Image(path)` is passed
+    /// through untouched. The lookup happens in `prepare`, after the
+    /// build, so this field is always either `None` or a concrete path.
     pub disk: Option<PathBuf>,
     pub test_exit_port: u16,
     pub test_success_code: u8,
-    pub timeout: Option<Duration>,
 }
 
 impl ResolvedQemu {
@@ -109,27 +122,20 @@ pub fn default_binary_for_target(triple: &str) -> Result<String> {
     Ok(format!("qemu-system-{suffix}"))
 }
 
-/// Merge `qemu` + `profile` into a [`ResolvedQemu`] with defaults applied.
-///
-/// `boot_mode_override` lets the CLI force `--uefi` / `--direct` on top
-/// of whatever the profile declared. `target_triple` is used only as
-/// input to [`default_binary_for_target`] when the user didn't set
+/// Merge `qemu` + `overrides` into a [`ResolvedQemu`] with defaults
+/// applied. `target_triple` is used only as input to
+/// [`default_binary_for_target`] when the user didn't set
 /// `qemu("...")` explicitly.
 pub fn resolve_qemu(
     qemu: &QemuDef,
-    profile: &ResolvedProfile,
+    overrides: &Overrides,
     target_triple: &str,
-    boot_mode_override: Option<BootMode>,
-    timeout_override: Option<Duration>,
 ) -> Result<ResolvedQemu> {
-    // Start with project-level extra_args, then append profile-level.
+    // Start with runner-level extra_args, then append the overrides'.
     // The order matters for flags like `-display none` that the user
     // may want to override at the profile level.
     let mut extra_args = qemu.extra_args.clone();
-    extra_args.extend(profile.qemu_extra_args.iter().cloned());
-
-    let timeout =
-        timeout_override.or_else(|| profile.test_timeout.map(|s| Duration::from_secs(s as u64)));
+    extra_args.extend(overrides.extra_args.iter().cloned());
 
     let binary = match qemu.binary.clone() {
         Some(b) => b,
@@ -146,27 +152,26 @@ pub fn resolve_qemu(
             .machine
             .clone()
             .unwrap_or_else(|| ResolvedQemu::DEFAULT_MACHINE.to_string()),
-        memory_mb: profile
-            .qemu_memory
+        memory_mb: overrides
+            .memory_mb
             .or(qemu.memory_mb)
             .unwrap_or(ResolvedQemu::DEFAULT_MEMORY_MB),
-        cores: profile
-            .qemu_cores
+        cores: overrides
+            .cores
             .or(qemu.cores)
             .unwrap_or(ResolvedQemu::DEFAULT_CORES),
         serial: qemu.serial.clone().unwrap_or(SerialMode::Stdio),
         display: qemu.display.clone(),
         extra_args,
-        boot_mode: boot_mode_override
-            .or(profile.qemu_boot_mode)
+        boot_mode: overrides
+            .boot_mode
             .or(qemu.boot_mode)
             .unwrap_or(BootMode::Direct),
         ovmf_code: qemu.ovmf_code.clone(),
         ovmf_vars: qemu.ovmf_vars.clone(),
         esp: qemu.esp.clone(),
         // Disk is resolved separately via `resolve_disk_source` once
-        // the caller has the scheduler's `image_paths` in hand. We
-        // initialise to `None` here; `run::entry` fills it in.
+        // the caller has the artifacts in hand.
         disk: None,
         test_exit_port: qemu
             .test_exit_port
@@ -174,7 +179,6 @@ pub fn resolve_qemu(
         test_success_code: qemu
             .test_success_code
             .unwrap_or(ResolvedQemu::DEFAULT_TEST_SUCCESS_CODE),
-        timeout,
     })
 }
 
@@ -183,26 +187,18 @@ pub fn resolve_qemu(
 /// Two cases:
 ///
 /// - [`DiskSource::Image`] is a fixed path supplied by the user. We
-///   return it untouched. The runner checks the path exists at spawn
-///   time (via the existing `skip_path_checks` knob).
-/// - [`DiskSource::ImageRef(name)`] points at an `image("name")`
-///   declared in the same script. We look up the [`ImageDef`] handle
-///   in `model.images`, then look up that handle in `image_paths` (the
-///   scheduler's per-build output map). If the user named an image
-///   that doesn't exist, we error with the available names; if the
-///   image exists but the build summary doesn't have it, that's an
-///   ordering bug we surface loudly.
+///   return it untouched. The boot-mode assembler checks the path
+///   exists when the build ran.
+/// - [`DiskSource::ImageRef(name)`] points at an `image("name")` or a
+///   `build_step("name")` declared in the same script, and resolves
+///   through the request's artifacts. If the user named an artifact
+///   that doesn't exist, we error with the available names; if it
+///   exists but the build produced no path for it, that's an ordering
+///   bug we surface loudly.
 ///
-/// `image_paths` may be empty in dry-run / `--no-build` flows. In
-/// those modes we fall back to path arithmetic via
-/// `BuildLayout::image_path` (caller's responsibility — pass the
-/// fallback as `image_paths` populated from the layout).
-pub fn resolve_disk_source(
-    disk: &DiskSource,
-    model: &BuildModel,
-    image_paths: &BTreeMap<Handle<ImageDef>, PathBuf>,
-    build_step_paths: &BTreeMap<Handle<BuildStepDef>, PathBuf>,
-) -> Result<PathBuf> {
+/// Under `--dry-run` and `--no-build` Gluon passes the paths the build
+/// would use, so a reference still resolves.
+pub fn resolve_disk_source(disk: &DiskSource, artifacts: &[Artifact]) -> Result<PathBuf> {
     match disk {
         DiskSource::Image { path } => Ok(path.clone()),
         DiskSource::ImageRef { name } => {
@@ -211,8 +207,13 @@ pub fn resolve_disk_source(
             // output. Validate has rejected name collisions, so at
             // most one resolves. We try image first (the historical
             // case) and fall back to build step.
-            if let Some(handle) = model.images.lookup(name) {
-                return image_paths.get(&handle).cloned().ok_or_else(|| {
+            let find = |kind| {
+                artifacts
+                    .iter()
+                    .find(|a: &&Artifact| a.kind == kind && a.name == *name)
+            };
+            if let Some(a) = find(ArtifactKind::Image) {
+                return a.path.clone().ok_or_else(|| {
                     Error::Compile(format!(
                         "qemu.disk_ref(\"{name}\"): image is declared but the scheduler \
                          produced no output path for it. (This typically means a build \
@@ -220,8 +221,8 @@ pub fn resolve_disk_source(
                     ))
                 });
             }
-            if let Some(handle) = model.build_steps.lookup(name) {
-                return build_step_paths.get(&handle).cloned().ok_or_else(|| {
+            if let Some(a) = find(ArtifactKind::BuildStep) {
+                return a.path.clone().ok_or_else(|| {
                     Error::Compile(format!(
                         "qemu.disk_ref(\"{name}\"): build step is declared but the scheduler \
                          produced no output path for it. (This typically means a build \
@@ -230,14 +231,11 @@ pub fn resolve_disk_source(
                 });
             }
             // Neither namespace resolved.
-            let mut available: Vec<&str> = model
-                .images
+            let mut available: Vec<&str> = artifacts
                 .iter()
-                .map(|(_, i): (_, &ImageDef)| i.name.as_str())
+                .filter(|a| matches!(a.kind, ArtifactKind::Image | ArtifactKind::BuildStep))
+                .map(|a| a.name.as_str())
                 .collect();
-            for (_, bs) in model.build_steps.iter() {
-                available.push(bs.name.as_str());
-            }
             available.sort();
             Err(Error::Compile(format!(
                 "qemu.disk_ref(\"{name}\") references unknown artifact (no image or \
@@ -251,38 +249,16 @@ pub fn resolve_disk_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gluon_model::ImageDef;
-    use gluon_model::handle::Handle;
-
-    fn empty_profile() -> ResolvedProfile {
-        ResolvedProfile {
-            name: "dev".into(),
-            target: gluon_model::TargetSpec::Cross(Handle::new(0)),
-            opt_level: 0,
-            debug_info: false,
-            lto: None,
-            run_binary: None,
-            runner: None,
-            qemu_memory: None,
-            qemu_cores: None,
-            qemu_extra_args: Vec::new(),
-            qemu_boot_mode: None,
-            test_timeout: None,
-        }
-    }
 
     const X86_TRIPLE: &str = "x86_64-unknown-none";
 
+    fn none() -> Overrides {
+        Overrides::default()
+    }
+
     #[test]
     fn defaults_everywhere_when_unset() {
-        let r = resolve_qemu(
-            &QemuDef::default(),
-            &empty_profile(),
-            X86_TRIPLE,
-            None,
-            None,
-        )
-        .expect("resolve");
+        let r = resolve_qemu(&QemuDef::default(), &none(), X86_TRIPLE).expect("resolve");
         assert_eq!(r.binary, "qemu-system-x86_64");
         assert_eq!(r.machine, ResolvedQemu::DEFAULT_MACHINE);
         assert_eq!(r.memory_mb, ResolvedQemu::DEFAULT_MEMORY_MB);
@@ -295,23 +271,26 @@ mod tests {
         assert!(r.esp.is_none());
         assert_eq!(r.test_exit_port, 0xf4);
         assert_eq!(r.test_success_code, 0x10);
-        assert!(r.timeout.is_none());
     }
 
     #[test]
-    fn profile_override_beats_qemu_def() {
+    fn override_beats_qemu_def() {
         let qemu = QemuDef {
             memory_mb: Some(128),
             cores: Some(1),
+            boot_mode: Some(BootMode::Direct),
             ..Default::default()
         };
-        let mut prof = empty_profile();
-        prof.qemu_memory = Some(512);
-        prof.qemu_cores = Some(4);
-
-        let r = resolve_qemu(&qemu, &prof, X86_TRIPLE, None, None).expect("resolve");
+        let o = Overrides {
+            memory_mb: Some(512),
+            cores: Some(4),
+            boot_mode: Some(BootMode::Bios),
+            ..none()
+        };
+        let r = resolve_qemu(&qemu, &o, X86_TRIPLE).expect("resolve");
         assert_eq!(r.memory_mb, 512);
         assert_eq!(r.cores, 4);
+        assert_eq!(r.boot_mode, BootMode::Bios);
     }
 
     #[test]
@@ -320,57 +299,19 @@ mod tests {
             extra_args: vec!["-display".into(), "none".into()],
             ..Default::default()
         };
-        let mut prof = empty_profile();
-        prof.qemu_extra_args = vec!["-d".into(), "int".into()];
-
-        let r = resolve_qemu(&qemu, &prof, X86_TRIPLE, None, None).expect("resolve");
+        let o = Overrides {
+            extra_args: vec!["-d".into(), "int".into()],
+            ..none()
+        };
+        let r = resolve_qemu(&qemu, &o, X86_TRIPLE).expect("resolve");
         assert_eq!(r.extra_args, vec!["-display", "none", "-d", "int"]);
     }
 
     #[test]
-    fn profile_qemu_boot_mode_wins_over_qemu_def() {
-        let qemu = QemuDef {
-            boot_mode: Some(BootMode::Direct),
-            ..Default::default()
-        };
-        let mut prof = empty_profile();
-        prof.qemu_boot_mode = Some(BootMode::Bios);
-        let r = resolve_qemu(&qemu, &prof, X86_TRIPLE, None, None).unwrap();
-        assert_eq!(r.boot_mode, BootMode::Bios);
-    }
-
-    #[test]
-    fn cli_boot_mode_override_beats_profile_qemu_boot_mode() {
-        let mut prof = empty_profile();
-        prof.qemu_boot_mode = Some(BootMode::Bios);
-        let r = resolve_qemu(
-            &QemuDef::default(),
-            &prof,
-            X86_TRIPLE,
-            Some(BootMode::Uefi),
-            None,
-        )
-        .unwrap();
-        assert_eq!(r.boot_mode, BootMode::Uefi);
-    }
-
-    #[test]
-    fn timeout_cli_override_beats_profile_and_profile_is_the_fallback() {
-        let cases = [
-            ("cli override", Some(Duration::from_secs(60)), 60),
-            ("profile fallback", None, 30),
-        ];
-        for (name, cli, expected_secs) in cases {
-            let mut prof = empty_profile();
-            prof.test_timeout = Some(30);
-            let r =
-                resolve_qemu(&QemuDef::default(), &prof, X86_TRIPLE, None, cli).expect("resolve");
-            assert_eq!(
-                r.timeout,
-                Some(Duration::from_secs(expected_secs)),
-                "{name}"
-            );
-        }
+    fn overrides_refuse_unknown_keys() {
+        let err =
+            serde_json::from_value::<Overrides>(serde_json::json!({"memory": 1})).unwrap_err();
+        assert!(err.to_string().contains("unknown field `memory`"), "{err}");
     }
 
     // ---- default_binary_for_target ----------------------------------------
@@ -425,7 +366,7 @@ mod tests {
         };
         // sparc64 is unknown to default_binary_for_target, but since
         // the user set binary explicitly we should not call it.
-        let r = resolve_qemu(&qemu, &empty_profile(), "sparc64-unknown-none", None, None)
+        let r = resolve_qemu(&qemu, &none(), "sparc64-unknown-none")
             .expect("explicit binary should bypass target probe");
         assert_eq!(r.binary, "qemu-system-xtensa");
     }
@@ -434,125 +375,88 @@ mod tests {
     // resolve_disk_source
     // -----------------------------------------------------------------
 
+    fn artifact(name: &str, kind: ArtifactKind, path: Option<&str>) -> Artifact {
+        Artifact {
+            name: name.into(),
+            kind,
+            path: path.map(PathBuf::from),
+        }
+    }
+
     #[test]
     fn resolve_disk_image_returns_path_unchanged() {
-        let model = BuildModel::default();
-        let map: BTreeMap<Handle<ImageDef>, PathBuf> = BTreeMap::new();
-        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
         let disk = DiskSource::Image {
             path: PathBuf::from("/tmp/my.img"),
         };
-        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
+        let p = resolve_disk_source(&disk, &[]).unwrap();
         assert_eq!(p, PathBuf::from("/tmp/my.img"));
     }
 
     #[test]
     fn resolve_disk_ref_looks_up_image_path() {
-        let mut model = BuildModel::default();
-        let (h, _) = model.images.insert(
-            "boot-disk".into(),
-            ImageDef {
-                name: "boot-disk".into(),
-                ..Default::default()
-            },
-        );
-        let mut map = BTreeMap::new();
-        map.insert(h, PathBuf::from("/build/images/boot-disk.img"));
-        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
-
+        let artifacts = [artifact(
+            "boot-disk",
+            ArtifactKind::Image,
+            Some("/build/images/boot-disk.img"),
+        )];
         let disk = DiskSource::ImageRef {
             name: "boot-disk".into(),
         };
-        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
+        let p = resolve_disk_source(&disk, &artifacts).unwrap();
         assert_eq!(p, PathBuf::from("/build/images/boot-disk.img"));
     }
 
     #[test]
     fn resolve_disk_ref_looks_up_build_step_path() {
         // disk_ref to a build step's name resolves through the
-        // build_step_paths map. Uses the unified artifact namespace —
-        // user can boot directly from a build-step output without an
-        // intermediate image() wrapper.
-        //
-        // BuildStepDef.runner is now a non-optional Handle<CrateDef>, so
-        // we mint a real runner crate up front and refer to it by handle
-        // rather than name string.
-        let mut model = BuildModel::default();
-        let (group_h, _) = model
-            .groups
-            .insert("host".into(), gluon_model::GroupDef::default());
-        let (runner_h, _) = model.crates.insert(
-            "image-builder".into(),
-            gluon_model::CrateDef {
-                name: "image-builder".into(),
-                path: "tools/image-builder".into(),
-                edition: "2024".into(),
-                crate_type: gluon_model::CrateType::Bin,
-                target: gluon_model::TargetSpec::Host,
-                deps: BTreeMap::new(),
-                dev_deps: BTreeMap::new(),
-                features: Vec::new(),
-                root: None,
-                linker_script: None,
-                group: group_h,
-                is_project_crate: true,
-                cfg_flags: Vec::new(),
-                rustc_flags: Vec::new(),
-                requires_config: Vec::new(),
-                artifact_deps: Vec::new(),
-                artifact_env: BTreeMap::new(),
-                span: None,
-                cargo: None,
-            },
-        );
-        let (h, _) = model.build_steps.insert(
-            "disk-image".into(),
-            BuildStepDef {
-                name: "disk-image".into(),
-                runner: runner_h,
-                inputs: BTreeMap::new(),
-                env: BTreeMap::new(),
-                output: "disk.img".into(),
-                span: None,
-            },
-        );
-        let map: BTreeMap<Handle<ImageDef>, PathBuf> = BTreeMap::new();
-        let mut bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
-        bs_map.insert(h, PathBuf::from("/build/build-steps/disk-image/disk.img"));
-
+        // unified artifact namespace — the user can boot directly from
+        // a build-step output without an intermediate image() wrapper.
+        // An ESP of the same name is not a disk and is skipped.
+        let artifacts = [
+            artifact(
+                "disk-image",
+                ArtifactKind::Esp,
+                Some("/build/esp/disk-image"),
+            ),
+            artifact(
+                "disk-image",
+                ArtifactKind::BuildStep,
+                Some("/build/build-steps/disk-image/disk.img"),
+            ),
+        ];
         let disk = DiskSource::ImageRef {
             name: "disk-image".into(),
         };
-        let p = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap();
+        let p = resolve_disk_source(&disk, &artifacts).unwrap();
         assert_eq!(p, PathBuf::from("/build/build-steps/disk-image/disk.img"));
     }
 
     #[test]
-    fn resolve_disk_ref_unknown_image_lists_available() {
-        let mut model = BuildModel::default();
-        model.images.insert(
-            "alpha".into(),
-            ImageDef {
-                name: "alpha".into(),
-                ..Default::default()
-            },
-        );
-        model.images.insert(
-            "beta".into(),
-            ImageDef {
-                name: "beta".into(),
-                ..Default::default()
-            },
-        );
-        let map = BTreeMap::new();
-        let bs_map: BTreeMap<Handle<BuildStepDef>, PathBuf> = BTreeMap::new();
+    fn resolve_disk_ref_declared_but_unbuilt_is_an_ordering_error() {
+        let artifacts = [artifact("boot-disk", ArtifactKind::Image, None)];
+        let disk = DiskSource::ImageRef {
+            name: "boot-disk".into(),
+        };
+        let msg = resolve_disk_source(&disk, &artifacts)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("produced no output path"), "{msg}");
+    }
 
+    #[test]
+    fn resolve_disk_ref_unknown_image_lists_available() {
+        let artifacts = [
+            artifact("beta", ArtifactKind::Image, Some("/b")),
+            artifact("alpha", ArtifactKind::Image, Some("/a")),
+            artifact("esp", ArtifactKind::Esp, Some("/e")),
+        ];
         let disk = DiskSource::ImageRef {
             name: "gamma".into(),
         };
-        let err = resolve_disk_source(&disk, &model, &map, &bs_map).unwrap_err();
-        let msg = err.to_string();
+        let msg = resolve_disk_source(&disk, &artifacts)
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("gamma"));
-        assert!(msg.contains("alpha") && msg.contains("beta"));
+        assert!(msg.contains("available: [alpha, beta]"), "{msg}");
     }
 }

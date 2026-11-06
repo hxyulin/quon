@@ -15,12 +15,9 @@ use std::time::{Duration, Instant};
 
 /// Execute the `gluon run` pipeline against the prepared context.
 pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shell) -> Result<()> {
-    // Checked before the build, so a profile without a runner fails
-    // fast instead of after minutes of compiling.
-    let runner = gluon_core::run::profile_runner(&ctx.model, &ctx.resolved)?;
-
-    // CLI boot-mode override. The three flags are mutually exclusive
-    // in the clap schema; if none are set, we pass `None` so the
+    // CLI boot-mode override, passed to a plugin runner as its
+    // `boot_mode` override. The three flags are mutually exclusive in
+    // the clap schema; if none are set, we pass `None` so the
     // profile's own `qemu_boot_mode(...)` (or project-level
     // runner-level `.boot_mode(...)`) wins.
     let boot_mode_override = match (args.uefi, args.direct, args.bios) {
@@ -39,11 +36,13 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
         dry_run: args.dry_run,
         no_build: args.no_build,
         gdb: args.gdb,
-        // Not exposed to `gluon run` — reserved for the future
-        // `gluon test` subcommand.
-        test_mode: false,
+        test: false,
+        runners: super::runners(),
     };
 
+    // `prepare` checks the runner before the build, so a profile
+    // without one, or with bad runner settings, fails fast instead of
+    // after minutes of compiling.
     let mut reporter = BuildReporter::new(shell, ctx.ctx.driver());
     let prepared =
         gluon_core::run::prepare(&ctx.ctx, &ctx.model, &ctx.resolved, &opts, &mut reporter)?;
@@ -66,10 +65,11 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
             },
         );
     }
-    if args.gdb && runner.qemu().is_some() {
-        // Printed before the spawn: QEMU halts waiting for the
-        // debugger and prints nothing until one connects.
-        shell.note("QEMU halted for GDB on :1234; connect with `target remote :1234`");
+    // Printed before the spawn: a runner says, for example, that QEMU
+    // halts waiting for the debugger and prints nothing until one
+    // connects.
+    for note in &prepared.invocation.notes {
+        shell.note(note);
     }
     // The line marks where Gluon's output ends and the guest's starts.
     // Paths under the current directory are shown relative to it, as

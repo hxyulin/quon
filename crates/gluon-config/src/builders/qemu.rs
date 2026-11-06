@@ -26,7 +26,7 @@ impl<'cfg> QemuBuilder<'cfg> {
         let h = self.handle?;
         match self.cfg.raw.runners.get_mut(h)?.kind.as_mut()? {
             RunnerKind::Qemu(q) => Some(q.as_mut()),
-            RunnerKind::Command(_) => None,
+            RunnerKind::Command(_) | RunnerKind::Plugin(_) => None,
         }
     }
 

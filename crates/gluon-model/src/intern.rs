@@ -463,8 +463,8 @@ fn intern_runners(
         let Some(kind) = r.kind.clone() else {
             diags.push(
                 InternDiagnostic::error(format!(
-                    "runner(\"{}\") has no kind; add `.qemu(\"<program>\")` or \
-                     `.command([...])`",
+                    "runner(\"{}\") has no kind; add `.qemu(\"<program>\")`, \
+                     `.command([...])` or `.plugin(\"<name>\")`",
                     r.name
                 ))
                 .with_optional_span(r.span.clone()),
@@ -914,7 +914,7 @@ mod tests {
         assert_eq!(
             messages,
             [
-                "runner(\"empty\") has no kind; add `.qemu(\"<program>\")` or `.command([...])`",
+                "runner(\"empty\") has no kind; add `.qemu(\"<program>\")`, `.command([...])` or `.plugin(\"<name>\")`",
                 "profile 'other' references unknown runner 'missing'; declare it with \
                  `cfg.runner(\"missing\")`",
             ]

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (runner plugins)
+
+- **Runner plugins.** A runner can be served by a plugin:
+  `cfg.runner("board").plugin("probe-rs").setting("chip", "...")`.
+  Gluon looks the plugin up among the runners built into `gluon`, then
+  as `gluon-runner-<name>` on `$PATH`, and calls it over a JSON
+  protocol on stdin and stdout: `validate` before the build, `prepare`
+  after it. The new `gluon-runner` crate has the protocol types, the
+  `Runner` trait and `serve()` for a plugin's `main`.
+- **QEMU is a runner plugin.** The QEMU argv, boot mode, OVMF and disk
+  code moved from `gluon-core` to the new `gluon-runner-qemu` crate,
+  which `gluon` builds in as the `qemu` plugin and which also builds a
+  `gluon-runner-qemu` executable. `gluon.rs` is unchanged: the QEMU
+  builder's values become the plugin's settings, and the profile's
+  `qemu_*` values its overrides. The commands are the same as before.
+  `--uefi`, `--direct` and `--bios` reach a plugin as a `boot_mode`
+  override, and `--gdb` as a request field; the GDB note printed
+  before the run now comes from the runner.
+- A runner of another kind refuses `--gdb` and the boot mode flags
+  with "needs a QEMU runner or another runner plugin".
+
 ### Added (stable Rust and release profiles)
 
 - **Stable toolchains.** Gluon no longer passes `-Zbinary-dep-depinfo`.

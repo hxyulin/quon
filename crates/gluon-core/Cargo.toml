@@ -14,6 +14,9 @@ workspace = true
 
 [dependencies]
 gluon-model.workspace = true
+# The runner plugin protocol: `gluon run` and `gluon test` ask a runner
+# plugin, such as QEMU, for the command that starts a binary.
+gluon-runner.workspace = true
 fs2 = "0.4"
 # In-process FAT12/16/32 formatter + writer. Used by the `image()`
 # scheduler node to assemble bootable disk images from compiled
@@ -36,7 +39,7 @@ semver = "1"
 glob = "0.3"
 
 # Signal handling for `gluon run`: catches SIGINT/SIGTERM so the
-# spawned QEMU child can be killed cleanly instead of wedging. Used
+# spawned runner child can be killed cleanly instead of wedging. Used
 # only by the runner (`run::entry`); the rest of gluon-core does not
 # touch signals. Scoped to Unix because the runner's signal trapping
 # is a no-op on Windows (console Ctrl+C handling is a different

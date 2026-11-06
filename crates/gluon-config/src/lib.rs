@@ -6,6 +6,9 @@ pub mod error;
 
 pub use config::Config;
 pub use error::{ConfigError, Result};
+/// For runner plugin settings that are arrays or objects:
+/// `.setting("probe", gluon_config::serde_json::json!({"speed": 4000}))`.
+pub use serde_json;
 
 // Re-export model types the user references inside their `gluon.rs`.
 // Stage 4 will expand this list as typed enums (`BootloaderKind`, etc.)

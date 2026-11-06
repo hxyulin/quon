@@ -794,3 +794,123 @@ fn command_runner_exit_status_decides_the_run() {
         "{stderr}"
     );
 }
+
+/// Point the fixture's dev profile at a runner served by the `fake`
+/// plugin, declared next to its QEMU runner.
+fn use_plugin_runner(fixture: &Path) {
+    let rs_path = fixture.join("gluon.rs");
+    let original = fs::read_to_string(&rs_path).expect("read gluon.rs");
+    let rewritten = original
+        .replacen(
+            "        .runner(\"qemu\")\n",
+            "        .runner(\"board\")\n",
+            1,
+        )
+        .replacen(
+            "    cfg.runner(\"qemu\")",
+            "    cfg.runner(\"board\").plugin(\"fake\").setting(\"chip\", \"nrf\");\n    cfg.runner(\"qemu\")",
+            1,
+        );
+    assert_ne!(original, rewritten, "fixture shape drifted");
+    fs::write(&rs_path, rewritten).expect("write gluon.rs");
+}
+
+/// Write `gluon-runner-fake` into `dir`: it appends each request to
+/// `$FAKE_RUNNER_LOG`, one per line, and answers `validate` with the
+/// defaults and `prepare` with a fixed command.
+#[cfg(unix)]
+fn write_fake_runner(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("gluon-runner-fake");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+req=$(cat)
+printf '%s\n' "$req" >> "$FAKE_RUNNER_LOG"
+case "$req" in
+  *'"method":"validate"'*) printf '{"ok":{}}' ;;
+  *) printf '{"ok":{"program":"flash","args":["--chip","nrf"],"env":{"FAKE":"1"}}}' ;;
+esac
+"#,
+    )
+    .expect("write gluon-runner-fake");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// A runner plugin not built into gluon is found on `PATH` and asked
+/// over the JSON protocol: `validate` before the build, `prepare` with
+/// the binary after.
+#[cfg(unix)]
+#[test]
+fn an_external_runner_plugin_on_path_assembles_the_command() {
+    let (_tmp, fixture) = setup_fixture("minimal");
+    use_plugin_runner(&fixture);
+    let bin = fixture.join("plugin-bin");
+    fs::create_dir_all(&bin).unwrap();
+    write_fake_runner(&bin);
+    let log = fixture.join("fake-runner.log");
+    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+
+    let output = gluon_command(&fixture)
+        .env("PATH", &path)
+        .env("FAKE_RUNNER_LOG", &log)
+        .args(["run", "--dry-run", "--uefi", "--", "--speed", "4000"])
+        .output()
+        .expect("spawn gluon run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(line, "FAKE=1 flash --chip nrf");
+
+    let log = fs::read_to_string(&log).expect("the plugin ran");
+    let requests: Vec<serde_json::Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON request"))
+        .collect();
+    assert_eq!(requests.len(), 2, "{log}");
+    let validate = &requests[0];
+    assert_eq!(validate["protocol"], 1);
+    assert_eq!(validate["request"]["method"], "validate");
+    let params = &validate["request"]["params"];
+    assert_eq!(params["runner"], "board");
+    assert_eq!(params["target"], "x86_64-unknown-none");
+    assert_eq!(params["settings"], serde_json::json!({"chip": "nrf"}));
+    assert_eq!(
+        params["overrides"],
+        serde_json::json!({"boot_mode": "uefi"})
+    );
+    let prepare = &requests[1]["request"];
+    assert_eq!(prepare["method"], "prepare");
+    let params = &prepare["params"];
+    assert!(
+        params["binary"]
+            .as_str()
+            .unwrap()
+            .ends_with("cross/x86_64-unknown-none/dev/final/kernel"),
+        "{params}"
+    );
+    assert_eq!(params["extra_args"], serde_json::json!(["--speed", "4000"]));
+    assert_eq!(params["built"], false);
+}
+
+/// A runner plugin that is neither built in nor on `PATH` fails before
+/// the build and names the executable it looked for.
+#[test]
+fn a_missing_runner_plugin_names_the_executable() {
+    let (_tmp, fixture) = setup_fixture("minimal");
+    use_plugin_runner(&fixture);
+    let output = gluon_command(&fixture)
+        .args(["run", "--dry-run"])
+        .output()
+        .expect("spawn gluon run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("runner 'board' uses the 'fake' runner plugin")
+            && stderr.contains("`gluon-runner-fake` is not on PATH"),
+        "{stderr}"
+    );
+}

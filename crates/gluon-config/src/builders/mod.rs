@@ -36,7 +36,7 @@ pub use profile::ProfileBuilder;
 pub use project::ProjectBuilder;
 pub use qemu::QemuBuilder;
 pub use rule::RuleBuilder;
-pub use runner::{CommandRunnerBuilder, RunnerBuilder};
+pub use runner::{CommandRunnerBuilder, PluginRunnerBuilder, RunnerBuilder};
 pub use tests::{BootTestBuilder, HostTestsBuilder};
 
 use gluon_model::SourceSpan;

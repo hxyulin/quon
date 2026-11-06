@@ -1034,6 +1034,19 @@ pub enum RunnerKind {
     Qemu(Box<QemuDef>),
     /// Run a command: `cfg.runner(name).command([...])`.
     Command(CommandRunnerDef),
+    /// Hand the binary to a runner plugin: `cfg.runner(name).plugin(plugin)`.
+    Plugin(PluginRunnerDef),
+}
+
+/// A runner served by a plugin other than the QEMU one. Gluon looks the
+/// plugin up by name, among the built-in runners first and then as
+/// `gluon-runner-<plugin>` on `$PATH`, and passes it `settings`
+/// untouched.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PluginRunnerDef {
+    pub plugin: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, serde_json::Value>,
 }
 
 /// A command runner. Each `{binary}` in `argv` is replaced by the
@@ -1048,9 +1061,10 @@ pub struct CommandRunnerDef {
 
 /// QEMU configuration for `gluon run` and `gluon test`.
 ///
-/// All fields are optional at the model level — defaults are filled in by
-/// [`resolve_qemu`](../../gluon_core/run/resolve/fn.resolve_qemu.html) at
-/// runtime. Profile-level overrides (`ProfileDef::qemu_memory`,
+/// These are the settings of the built-in `qemu` runner plugin
+/// (`gluon-runner-qemu`), which reads them as JSON. All fields are
+/// optional at the model level; the plugin fills in defaults at run
+/// time. Profile-level overrides (`ProfileDef::qemu_memory`,
 /// `qemu_cores`, `qemu_extra_args`, `test_timeout`) take precedence over
 /// the values here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

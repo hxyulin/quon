@@ -1,6 +1,6 @@
 //! Pure data types for the Gluon build system.
 //!
-//! This crate is `serde`-only. No other dependencies. It is safe for
+//! This crate depends only on `serde` and `serde_json`. It is safe for
 //! embedders (e.g., future menuconfig binary, LSP plugin, CI validator)
 //! to depend on without dragging in the build engine.
 

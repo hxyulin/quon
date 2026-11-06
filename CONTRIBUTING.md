@@ -33,6 +33,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 | `gluon-config` | Rust API that `gluon.rs` build scripts use to declare a project |
 | `gluon-model` | Data types shared across the build pipeline |
 | `gluon-core` | Engine, compiler, scheduler, cache, vendor, kconfig |
+| `gluon-runner` | Runner plugin protocol: request and reply types, `serve()` |
+| `gluon-runner-qemu` | The QEMU runner plugin: argv, boot modes, OVMF |
 | `gluon-cli` | `clap`-based CLI (`gluon build`, `run`, `vendor`, ...) |
 
 ## Commit messages

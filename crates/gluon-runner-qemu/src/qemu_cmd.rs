@@ -2,7 +2,7 @@
 //!
 //! `build_qemu_command` is a deterministic, side-effect-free function
 //! that takes a [`ResolvedQemu`] plus the boot-mode inputs and produces
-//! an [`Invocation`] (binary + args + timeout). Keeping it pure
+//! a [`QemuCommand`] (binary + args). Keeping it pure
 //! means:
 //!
 //! - Unit tests for argv composition never need a real filesystem or a
@@ -12,17 +12,23 @@
 //! - `gluon test` reuses it for each test's argv while managing the
 //!   surrounding process lifecycle itself.
 //!
-//! All "live" work (resolving OVMF paths, copying a writable vars file,
-//! spawning) lives in [`super::ovmf`] and [`super`] respectively.
+//! All "live" work (resolving OVMF paths, copying a writable vars file)
+//! lives in [`crate::ovmf`]. Gluon spawns the command.
 
-use super::boot_mode;
-use super::ovmf::ResolvedOvmf;
-use super::resolve::ResolvedQemu;
-use super::runner::Invocation;
+use crate::boot_mode;
 use crate::error::{Error, Result};
+use crate::ovmf::ResolvedOvmf;
+use crate::resolve::ResolvedQemu;
 use gluon_model::{BootMode, DisplayMode, SerialMode};
 use std::ffi::OsString;
 use std::path::Path;
+
+/// The QEMU program and its arguments.
+#[derive(Debug, Clone)]
+pub struct QemuCommand {
+    pub binary: String,
+    pub args: Vec<OsString>,
+}
 
 /// Assemble the final QEMU argv.
 ///
@@ -32,7 +38,7 @@ use std::path::Path;
 ///
 /// `ovmf` **must** be `Some` when `mode == BootMode::Uefi` and `None`
 /// otherwise. The caller is responsible for running
-/// [`super::ovmf::resolve_ovmf`] and any vars-writability copy before
+/// [`crate::ovmf::resolve_ovmf`] and any vars-writability copy before
 /// calling this function.
 ///
 /// Errors:
@@ -49,7 +55,7 @@ pub fn build_qemu_command(
     extra_cli_args: &[OsString],
     test_mode: bool,
     skip_path_checks: bool,
-) -> Result<Invocation> {
+) -> Result<QemuCommand> {
     if mode == BootMode::Uefi && ovmf.is_none() {
         return Err(Error::Config(
             "internal: build_qemu_command(UEFI) called without a resolved OVMF firmware".into(),
@@ -151,13 +157,9 @@ pub fn build_qemu_command(
     // 9. CLI pass-through (`gluon run -- <extra>`).
     args.extend(extra_cli_args.iter().cloned());
 
-    Ok(Invocation {
+    Ok(QemuCommand {
         binary: resolved.binary.clone(),
         args,
-        timeout: resolved.timeout,
-        // The caller fills in the runner's name and success status.
-        runner: String::new(),
-        success_exit_code: None,
     })
 }
 
@@ -190,7 +192,6 @@ fn stub_resolved() -> ResolvedQemu {
         disk: None,
         test_exit_port: 0xf4,
         test_success_code: 0x10,
-        timeout: None,
     }
 }
 

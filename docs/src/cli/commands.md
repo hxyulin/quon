@@ -216,3 +216,7 @@ gluon foo bar
 
 This runs `gluon-foo bar`, passing all remaining arguments. This mechanism
 enables plugin development without modifying Gluon itself.
+
+Runners have their own plugins, `gluon-runner-<name>` binaries that
+`gluon run` and `gluon test` call. See
+[Runner plugins](../running/runners.md#runner-plugins).

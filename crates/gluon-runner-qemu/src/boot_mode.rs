@@ -3,9 +3,9 @@
 //! firmware (or lack thereof), kernel, and disk/ESP into the
 //! shared `args` vector.
 //!
-//! The coordinator (`run::qemu_cmd::build_qemu_command`) handles
+//! The coordinator (`qemu_cmd::build_qemu_command`) handles
 //! everything mode-agnostic (memory, cores, display, serial,
-//! timeout, test-mode exit, user extras). Mode-specific wiring
+//! test-mode exit, user extras). Mode-specific wiring
 //! lives here.
 //!
 //! Adding a new boot mode means: (1) implement the trait,
@@ -13,8 +13,8 @@
 //! untouched.
 
 use crate::error::{Error, Result};
-use crate::run::ovmf::ResolvedOvmf;
-use crate::run::resolve::ResolvedQemu;
+use crate::ovmf::ResolvedOvmf;
+use crate::resolve::ResolvedQemu;
 use gluon_model::{BootMode, EspSource};
 use std::ffi::OsString;
 use std::path::Path;
@@ -222,7 +222,7 @@ fn push_pflash(args: &mut Vec<OsString>, path: &Path, readonly: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::ovmf::ResolvedOvmf;
+    use crate::ovmf::ResolvedOvmf;
     use gluon_model::{BootMode, EspSource, SerialMode};
     use std::path::PathBuf;
 
@@ -248,7 +248,6 @@ mod tests {
             disk: None,
             test_exit_port: 0xf4,
             test_success_code: 0x10,
-            timeout: None,
         }
     }
 

@@ -28,7 +28,7 @@ and QEMU setup from `.cargo/config.toml`, `rust-toolchain.toml` and
 features, editions, lints and build scripts from the manifests on every
 build, and writes to `build/`, so `cargo build` keeps working beside it.
 
-Gluon builds itself this way: its [`gluon.rs`](gluon.rs) is 37 lines,
+Gluon builds itself this way: its [`gluon.rs`](gluon.rs) is 44 lines,
 and `gluon test` runs the same tests as `cargo test`.
 
 ## Why Gluon?
@@ -154,7 +154,8 @@ full API, including how to
 - **Pipelines and rules**: build stages with copy, mkimage and exec
   rules
 - **ESP assembly**: EFI System Partition layout for UEFI boot
-- **External plugins**: `gluon foo` runs `gluon-foo` from `$PATH`
+- **External plugins**: `gluon foo` runs `gluon-foo` from `$PATH`, and
+  a runner named `.plugin("x")` asks `gluon-runner-x` for its command
 
 ## Documentation
 

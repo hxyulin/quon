@@ -1,40 +1,27 @@
-//! `gluon run` — QEMU-based kernel launcher.
+//! `gluon run` and `gluon test`: start a built binary with the
+//! profile's runner.
 //!
-//! This module owns the runtime side of `gluon run`: resolving a
-//! [`gluon_model::QemuDef`] into a concrete QEMU invocation (with both
-//! direct-kernel and UEFI boot modes), spawning the process, and
-//! managing timeouts and serial forwarding.
+//! Gluon keeps the build, finding the binary, the per-test ESP copies,
+//! timeouts, spawning and signals. The command comes from the runner
+//! (see [`runner`]): a command runner's argv, the binary itself on the
+//! host, or a runner plugin such as QEMU, which is served by the
+//! `gluon-runner-qemu` crate over the [`gluon_runner`] protocol.
 //!
-//! Layering:
-//!
-//! - [`qemu_cmd`] assembles the QEMU argv as a pure function. No
-//!   filesystem or environment access — all inputs are explicit.
-//! - [`ovmf`] probes for OVMF firmware files (explicit → env → system)
-//!   and handles the writable-vars copy. Touches the filesystem.
-//! - [`resolve`] merges `QemuDef` + profile-level overrides into a
-//!   fully-defaulted [`resolve::ResolvedQemu`].
-//! - `entry` wires those three together behind the public [`prepare`]
-//!   and [`launch`] entry points.
-//!
-//! [`prepare_tests`] reuses the same steps through `entry`'s helpers, booting
-//! each integration-test binary in place of the run binary. [`host`]
-//! finds the host test executables, which run without QEMU.
+//! - `entry` holds [`prepare`] and [`launch`], and the session that
+//!   validates a plugin runner before the build and asks it for the
+//!   command after.
+//! - [`prepare_tests`] boots each integration-test binary in place of
+//!   the run binary. [`host`] finds the host test executables, which
+//!   run without a runner.
 
-pub mod boot_mode;
 mod entry;
 pub mod host;
-pub mod ovmf;
-pub mod qemu_cmd;
-pub mod resolve;
 pub mod runner;
 mod test;
 
 pub use entry::{Prepared, RunOptions, launch, prepare};
 pub use host::{HostTest, host_tests};
-pub use ovmf::{ResolvedOvmf, resolve_ovmf};
-pub use qemu_cmd::build_qemu_command;
-pub use resolve::{ResolvedQemu, resolve_qemu};
-pub use runner::{Invocation, Runner, profile_runner};
+pub use runner::{Invocation, QEMU_PLUGIN, Runner, Runners, profile_runner};
 pub use test::{
     PreparedTest, TestOptions, TestStatus, build_tests, integration_tests, prepare_tests, run_test,
 };

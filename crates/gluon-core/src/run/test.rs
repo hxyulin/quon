@@ -4,34 +4,30 @@
 //! root package, lowered to a crate with [`CrateDef::is_test`]. Each
 //! test binary is a whole kernel image, so it is booted on its own, the
 //! way [`super::prepare`] boots the profile's run binary, and passes
-//! when QEMU exits with the success status.
+//! when the runner exits with the success status.
 //!
-//! In UEFI mode a test needs an ESP. Gluon copies the built ESP that
-//! holds the run binary and replaces each entry whose source is the
-//! run binary with the test binary, so `gluon.rs` needs nothing beyond
-//! what `gluon run` uses. Direct boot passes the test binary as the
-//! kernel. BIOS boot reads a disk image Gluon cannot rewrite per test,
-//! so it is rejected.
+//! The runner says how a test binary takes the run binary's place
+//! ([`TestBinary`]). Under QEMU in UEFI mode a test needs an ESP: Gluon
+//! copies the built ESP that holds the run binary and replaces each
+//! entry whose source is the run binary with the test binary, so
+//! `gluon.rs` needs nothing beyond what `gluon run` uses. Direct boot
+//! passes the test binary as the kernel. BIOS boot reads a disk image
+//! Gluon cannot rewrite per test, so the QEMU runner rejects it.
 //!
 //! Tests run one at a time: they share the per-profile OVMF vars copy,
 //! and QEMU's serial output goes to the terminal.
 
-use super::entry::{RunOptions, final_binary, invocation, launch, profile_target};
-use super::runner::{Invocation, Runner, profile_runner};
+use super::entry::{RunOptions, RunnerSession, final_binary, launch, profile_target};
+use super::runner::{Invocation, Runners};
 use crate::build_tests_with_reporter;
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use crate::model::BootMode;
-use crate::run::resolve::resolve_qemu;
 use crate::scheduler::{BuildSummary, Reporter};
 use gluon_model::{BuildModel, CrateDef, EspDef, EspEntrySource, Handle, ResolvedConfig};
+use gluon_runner::TestBinary;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-/// How long one test may run when neither `--timeout`, the profile's
-/// `test_timeout` nor `qemu().test_timeout(...)` says. A kernel test
-/// that hangs would otherwise stop the run for good.
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Knobs passed into [`prepare_tests`] by the CLI layer.
 #[derive(Debug, Clone, Default)]
@@ -39,52 +35,37 @@ pub struct TestOptions {
     /// Same meaning as in [`RunOptions`].
     pub boot_mode_override: Option<BootMode>,
     /// Per-test timeout. Falls back to the profile's `test_timeout`,
-    /// then `qemu().test_timeout(...)`, then 60 seconds.
+    /// then the runner's (`qemu().test_timeout(...)`), then 60 seconds.
     pub timeout_override: Option<Duration>,
-    /// Extra QEMU arguments for every test.
+    /// Extra runner arguments for every test.
     pub extra_args: Vec<std::ffi::OsString>,
     pub workers: Option<usize>,
     /// Run only the tests whose name contains this string.
     pub filter: Option<String>,
     /// Skip the build and the ESP copies, so the caller can print each
-    /// test's QEMU command without booting it.
+    /// test's command without booting it.
     pub dry_run: bool,
     /// Skip the build, as `gluon run --no-build` does.
     pub no_build: bool,
+    /// The runner plugins built into the caller.
+    pub runners: Runners,
 }
 
 impl TestOptions {
-    /// The per-test timeout: `--timeout`, then the profile's
-    /// `test_timeout`, then the QEMU runner's `test_timeout(...)`, then
-    /// [`DEFAULT_TIMEOUT`].
-    pub fn timeout(&self, model: &BuildModel, resolved: &ResolvedConfig) -> Duration {
-        let qemu = profile_runner(model, resolved).ok().and_then(|r| r.qemu());
-        self.timeout_override
-            .or_else(|| {
-                resolved
-                    .profile
-                    .test_timeout
-                    .map(|s| Duration::from_secs(s.into()))
-            })
-            .or_else(|| {
-                qemu.and_then(|q| q.test_timeout)
-                    .map(|s| Duration::from_secs(s.into()))
-            })
-            .unwrap_or(DEFAULT_TIMEOUT)
-    }
-
-    /// The runner arguments for every test: a QEMU runner's
-    /// `test_extra_args(...)`, then the ones after `--`.
-    pub fn runner_args(
-        &self,
-        model: &BuildModel,
-        resolved: &ResolvedConfig,
-    ) -> Vec<std::ffi::OsString> {
-        let qemu = profile_runner(model, resolved).ok().and_then(|r| r.qemu());
-        qemu.into_iter()
-            .flat_map(|q| q.test_extra_args.iter().map(Into::into))
-            .chain(self.extra_args.iter().cloned())
-            .collect()
+    /// The options for one test run: the run options `gluon test` uses
+    /// for an integration test or a boot test.
+    pub fn run_options(&self) -> RunOptions {
+        RunOptions {
+            boot_mode_override: self.boot_mode_override,
+            timeout_override: self.timeout_override,
+            extra_args: self.extra_args.clone(),
+            workers: self.workers,
+            dry_run: self.dry_run,
+            no_build: self.no_build,
+            gdb: false,
+            test: true,
+            runners: self.runners.clone(),
+        }
     }
 }
 
@@ -145,7 +126,7 @@ pub fn build_tests(
     build_tests_with_reporter(ctx, model, resolved, workers, reporter)
 }
 
-/// Assemble the QEMU command for each integration test whose name
+/// Assemble the runner's command for each integration test whose name
 /// matches the filter. `summary` is the [`build_tests`] run, `None`
 /// when the build was skipped (`dry_run` or `no_build`). The caller
 /// boots each test with [`run_test`].
@@ -164,38 +145,15 @@ pub fn prepare_tests(
     let boot = profile.run_binary.ok_or_else(|| Error::NoRunBinary {
         profile: profile.name.clone(),
     })?;
-    // Under QEMU the boot mode decides how a test binary gets booted.
-    // Resolve it once, the same way `invocation` will. Other runners
-    // take the test binary as it is.
-    let esp = match profile_runner(model, resolved)? {
-        Runner::Qemu { def, .. } => {
-            let target = profile_target(model, resolved)?;
-            let boot_mode =
-                resolve_qemu(def, profile, &target.spec, opts.boot_mode_override, None)?.boot_mode;
-            match boot_mode {
-                BootMode::Uefi => Some(boot_esp(model, boot)?),
-                BootMode::Direct => None,
-                BootMode::Bios => {
-                    return Err(Error::Config(
-                        "gluon test boots each test through UEFI or direct boot; BIOS boot \
-                         reads a disk image gluon cannot rebuild per test"
-                            .into(),
-                    ));
-                }
-            }
-        }
-        Runner::Command { .. } | Runner::Host => None,
-    };
-
-    let run_opts = RunOptions {
-        boot_mode_override: opts.boot_mode_override,
-        timeout_override: Some(opts.timeout(model, resolved)),
-        extra_args: opts.runner_args(model, resolved),
-        workers: opts.workers,
-        dry_run: opts.dry_run,
-        no_build: opts.no_build,
-        gdb: false,
-        test_mode: false,
+    // The runner decides how a test binary takes the run binary's
+    // place: QEMU swaps it into a copy of the ESP for UEFI boot, and
+    // passes it as the kernel for direct boot.
+    let run_opts = opts.run_options();
+    let session = RunnerSession::start(ctx, model, resolved, &run_opts)?;
+    let esp = match session.test_binary() {
+        TestBinary::AsBinary => None,
+        TestBinary::EspCopy => Some(boot_esp(model, boot)?),
+        TestBinary::Unsupported { reason } => return Err(Error::Config(reason)),
     };
 
     let mut prepared = Vec::with_capacity(tests.len());
@@ -215,7 +173,8 @@ pub fn prepare_tests(
             )?),
             None => None,
         };
-        let invocation = invocation(ctx, model, resolved, &run_opts, &binary, esp_dir, summary)?;
+        let invocation =
+            session.invocation(ctx, model, resolved, &run_opts, &binary, esp_dir, summary)?;
         prepared.push(PreparedTest {
             name: krate.name.clone(),
             invocation,

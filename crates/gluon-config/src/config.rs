@@ -297,7 +297,8 @@ impl Config {
 
     /// Declare a runner: how `gluon run`, the integration tests and the
     /// boot tests execute a profile's run binary. Choose its kind with
-    /// [`RunnerBuilder::qemu`] or [`RunnerBuilder::command`], and attach
+    /// [`RunnerBuilder::qemu`], [`RunnerBuilder::command`] or
+    /// [`RunnerBuilder::plugin`], and attach
     /// it to a profile with `profile.runner(name)`.
     ///
     /// ```rust,ignore

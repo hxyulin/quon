@@ -84,6 +84,14 @@ pub struct CmdContext {
     pub overrides: BTreeMap<String, ConfigValue>,
 }
 
+/// The runner plugins built into the `gluon` binary. Any other plugin
+/// is found as `gluon-runner-<name>` on `$PATH`.
+pub fn runners() -> gluon_core::run::Runners {
+    let mut runners = gluon_core::run::Runners::default();
+    runners.register(gluon_core::run::QEMU_PLUGIN, gluon_runner_qemu::QemuRunner);
+    runners
+}
+
 /// Build a [`CmdContext`] by walking up from the host's current
 /// directory. Thin wrapper around [`build_context_at_for_driver`]; the resulting
 /// context uses [`DriverKind::Rustc`] (i.e. the historical `gluon build`

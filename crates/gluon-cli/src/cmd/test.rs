@@ -73,6 +73,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: TestArgs, shell: &mut She
         filter: args.filter,
         dry_run: args.dry_run,
         no_build: args.no_build,
+        runners: super::runners(),
     };
     let filter = opts.filter.as_deref();
 
@@ -223,14 +224,8 @@ fn run_boot_test(
     )
     .with_context(|| format!("boot test '{name}': failed to resolve profile '{profile}'"))?;
     let run_opts = gluon_core::RunOptions {
-        boot_mode_override: opts.boot_mode_override,
-        timeout_override: Some(opts.timeout(&ctx.model, &resolved)),
-        extra_args: opts.runner_args(&ctx.model, &resolved),
         workers: jobs,
-        dry_run: opts.dry_run,
-        no_build: opts.no_build,
-        gdb: false,
-        test_mode: false,
+        ..opts.run_options()
     };
     let mut reporter = BuildReporter::new(shell, ctx.ctx.driver());
     let prepared =

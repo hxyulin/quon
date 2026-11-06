@@ -5,6 +5,8 @@ members = [
     "crates/gluon-core",
     "crates/gluon-cli",
     "crates/gluon-config",
+    "crates/gluon-runner",
+    "crates/gluon-runner-qemu",
 ]
 default-members = ["crates/gluon-cli"]
 
@@ -24,3 +26,5 @@ unsafe_code = "warn"
 gluon-config = { path = "crates/gluon-config" }
 gluon-core = { path = "crates/gluon-core" }
 gluon-model = { path = "crates/gluon-model" }
+gluon-runner = { path = "crates/gluon-runner" }
+gluon-runner-qemu = { path = "crates/gluon-runner-qemu" }

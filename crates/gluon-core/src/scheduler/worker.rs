@@ -669,12 +669,11 @@ fn error_message(e: &Error) -> String {
         | Error::NoRunner { .. }
         | Error::RunnerProgramNotFound { .. }
         | Error::QemuOnlyOption { .. }
-        | Error::OvmfNotFound { .. }
-        | Error::EspMissing { .. }
+        | Error::RunnerPluginNotFound { .. }
+        | Error::Runner(_)
         | Error::RunTimeout
         | Error::QemuSpawnFailed { .. }
         | Error::ObjcopySpawnFailed { .. }
-        | Error::UnknownQemuTarget { .. }
         | Error::KilledBySignal { .. }) => other.to_string(),
     }
 }

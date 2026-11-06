@@ -13,7 +13,14 @@
 use gluon_config::{Config, Result};
 
 /// Workspace packages whose tests `gluon test` runs.
-const PACKAGES: &[&str] = &["gluon-model", "gluon-config", "gluon-core", "gluon-cli"];
+const PACKAGES: &[&str] = &[
+    "gluon-model",
+    "gluon-config",
+    "gluon-core",
+    "gluon-runner",
+    "gluon-runner-qemu",
+    "gluon-cli",
+];
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("gluon", "0.1.1");
