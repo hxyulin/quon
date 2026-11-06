@@ -18,8 +18,10 @@
 //!
 //! ### Freshness
 //!
-//! Each `(esp_name, dest_path)` pair has its own fingerprint record,
-//! keyed `esp:<esp_name>:<dest_path>`. The declared input is the
+//! Each entry has its own fingerprint record, keyed
+//! `esp:<target>/<profile>:<esp_name>:<dest_path>`. The ESP directory
+//! is per target and profile, so is the key: building two profiles in
+//! turn (as `gluon test` does for boot tests) finds each copy fresh. The declared input is the
 //! source file; the command hashes the ESP name, dest path and source
 //! kind tag, so a crate→file switch in `gluon.rs` invalidates. A host
 //! file's content is part of its declared-input fingerprint, so an
@@ -158,7 +160,10 @@ pub fn ensure_esp(
 
     for e in &entries {
         let dest_abs = esp_dir.join(e.dest_path);
-        let key = format!("esp:{}:{}", esp.name, e.dest_path);
+        let key = format!(
+            "esp:{}/{}:{}:{}",
+            target.name, profile.name, esp.name, e.dest_path
+        );
         // The command folds in the ESP name, dest path and source kind
         // tag, so a crate→file switch in gluon.rs invalidates even if
         // the on-disk source path happens to coincide.
@@ -482,7 +487,7 @@ mod tests {
         // Each entry has its own record, not a sidecar stamp file.
         assert!(
             ctx.store
-                .record_path("esp:default:EFI/BOOT/BOOTX64.EFI")
+                .record_path("esp:x86_64-uefi/dev:default:EFI/BOOT/BOOTX64.EFI")
                 .exists(),
             "the ESP entry must have its own record"
         );
