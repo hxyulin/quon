@@ -12,6 +12,7 @@ pub mod build_script;
 pub mod cache;
 pub mod compile;
 pub mod config;
+pub mod copies;
 pub mod download;
 pub mod error;
 pub mod fmt;
@@ -279,6 +280,34 @@ pub fn build_entries_with_reporter(
         )
         .collect();
     scheduler::execute_entries(ctx, &pipelines, &rules, workers, reporter)
+}
+
+/// The crates that building `entries` together would compile more than
+/// once, and why; see [`copies`]. Lowers each entry as
+/// [`build_entries_with_reporter`] would, and compiles nothing.
+pub fn find_copies(
+    ctx: &CompileCtx,
+    entries: &[(&str, &BuildModel, &ResolvedConfig)],
+) -> Result<Vec<copies::CopyGroup>> {
+    let lowered = entries
+        .iter()
+        .map(|&(_, model, resolved)| {
+            let resolved = without_tests(model, resolved);
+            let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(
+                model,
+                &ctx.layout,
+                &ctx.rustc_info,
+                &resolved.project_root,
+            )?;
+            unit::lower(model, &resolved, &vendor_ctx)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let units: Vec<copies::EntryUnits<'_>> = entries
+        .iter()
+        .zip(&lowered)
+        .map(|(&(name, model, _), units)| copies::EntryUnits { name, model, units })
+        .collect();
+    Ok(copies::find(&units))
 }
 
 /// Like [`build_with_reporter`], but also builds the integration

@@ -63,6 +63,31 @@ exclude each other, such as two chip features of a HAL. A crate that
 two entries build with different features builds once for each, and
 both builds stay cached.
 
+A feature one entry adds deep in its tree forks every crate above it,
+which `quon.rs` does not show. When a build of several entries
+compiles a crate more than once for one target, the `Finished` line
+says how many, and `quon explain copies` says why, without building:
+
+```text
+$ quon explain copies
+dm-mc02 0.1.0 (thumbv7em-none-eabihf): 3 copies
+  8 entries: engineer-lower, engineer-upper, hero-chassis, …
+  3 entries: hku-target-vehicle, sentry-chassis, sentry-gimbal
+    devices: features +defmt
+    embassy-time: features +defmt, +defmt-timestamp-uptime-us
+  1 entry: dm-mc02-bringup
+    embassy-time: features +defmt, +defmt-timestamp-uptime-us
+```
+
+Each crate lists its copies, the most-used first, with the entries
+that use each. Under every other copy are the crates where its
+difference starts: a crate whose features differ (`+` only in this
+copy, `-` only in the first), or a dependency only one copy has. Rustc
+flags never make a copy. Build scripts are left out, since their
+copies follow their package's. Crates of two
+[named targets](../configuration/projects-targets-profiles.md#flags-for-every-crate-of-a-target)
+are not copies of each other.
+
 Building every entry runs one schedule over all of them, so a crate
 one board adds compiles alongside another board's. A crate that two
 entries build the same way is one job: the first entry's build does

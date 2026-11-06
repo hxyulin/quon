@@ -162,6 +162,9 @@ pub enum Command {
     /// Inspect the Cargo workspace as Quon reads it. Debug output only.
     #[command(subcommand)]
     Manifest(ManifestCommand),
+    /// Explain how Quon builds the project, without building it.
+    #[command(subcommand)]
+    Explain(ExplainCommand),
     /// Dispatch to an external `quon-<name>` binary on `$PATH`.
     ///
     /// Clap's `external_subcommand` captures everything after the
@@ -385,6 +388,20 @@ pub struct VendorArgs {
     /// network access; expects the lockfile to already be up to date.
     #[arg(long)]
     pub offline: bool,
+}
+
+/// `quon explain` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ExplainCommand {
+    /// List the crates that building every run entry compiles more
+    /// than once for one target, which entries use each copy, and the
+    /// feature difference that makes it.
+    ///
+    /// Each entry resolves features on its own, so a crate two entries
+    /// reach with different features, or through dependencies with
+    /// different features, compiles once per variant. Build scripts are
+    /// left out; their copies follow their package's.
+    Copies,
 }
 
 /// `quon manifest` subcommands.

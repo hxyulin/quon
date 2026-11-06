@@ -164,13 +164,26 @@ fn run_cli(cli: cli::Cli, cwd: &Path, shell: &mut Shell) -> Result<()> {
     // A project with several run entries loads one model per entry, so
     // Cargo features resolve per entry; see `quon_core::config::select_run`.
     let unnamed = match &cli.command {
-        cli::Command::Build(_) | cli::Command::Check(_) | cli::Command::Clippy(_) => {
-            cmd::Unnamed::EachEntry
-        }
+        cli::Command::Build(_)
+        | cli::Command::Check(_)
+        | cli::Command::Clippy(_)
+        | cli::Command::Explain(_) => cmd::Unnamed::EachEntry,
         cli::Command::Test(_) => cmd::Unnamed::HostTestsOnly,
         _ => cmd::Unnamed::Only,
     };
     let selections = cmd::selections(cwd, cli.entry(), cli.config_file.as_deref(), unnamed)?;
+
+    if let cli::Command::Explain(cli::ExplainCommand::Copies) = &cli.command {
+        let ctxs = cmd::build_contexts_for_driver(
+            cwd,
+            cli.profile_name(),
+            cli.target.as_deref(),
+            cli.config_file.as_deref(),
+            quon_core::DriverKind::Rustc,
+            &selections,
+        )?;
+        return cmd::explain::copies(&ctxs, &selections);
+    }
 
     // `check` and `clippy` build a context whose layout is flavored
     // for the relevant driver — that's what routes user-crate output
@@ -246,6 +259,7 @@ fn run_cli(cli: cli::Cli, cwd: &Path, shell: &mut Shell) -> Result<()> {
         | cli::Command::Setup
         | cli::Command::Vendor(_)
         | cli::Command::Manifest(_)
+        | cli::Command::Explain(_)
         | cli::Command::External(_) => {
             unreachable!("handled above")
         }

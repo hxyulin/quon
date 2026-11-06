@@ -115,7 +115,22 @@ pub fn execute_entries(
     };
     WorkerPool::new(workers).execute_with(&dag, &merged, reporter)?;
 
-    let mut summary = BuildSummary::default();
+    // Entry names do not change the count, so indices stand in for them.
+    let names: Vec<String> = (0..entries.len()).map(|e| e.to_string()).collect();
+    let units: Vec<crate::copies::EntryUnits<'_>> = entries
+        .iter()
+        .zip(&prepared)
+        .zip(&names)
+        .map(|((e, p), name)| crate::copies::EntryUnits {
+            name,
+            model: e.model,
+            units: &p.units,
+        })
+        .collect();
+    let mut summary = BuildSummary {
+        crates_with_copies: crate::copies::find(&units).len(),
+        ..BuildSummary::default()
+    };
     for (group, members) in groups.iter().enumerate() {
         let (e, _) = members[0];
         if counted(dag.nodes[group], entries[e].model) {

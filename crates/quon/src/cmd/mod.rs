@@ -33,6 +33,7 @@ pub mod check;
 pub mod clean;
 pub mod clippy;
 pub mod configure;
+pub mod explain;
 pub mod external;
 pub mod fmt;
 pub mod init;

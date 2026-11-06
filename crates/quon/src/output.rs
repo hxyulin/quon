@@ -98,11 +98,19 @@ impl Shell {
             noun,
             built,
             cached,
+            copies,
         } = counts;
+        // Nothing else says that per-entry feature resolution forked a
+        // crate, so the line names the count and where to look.
+        let copies = match copies {
+            0 => String::new(),
+            1 => "; 1 crate has more than one copy (quon explain copies)".into(),
+            n => format!("; {n} crates have more than one copy (quon explain copies)"),
+        };
         self.status(
             "Finished",
             format_args!(
-                "`{}` profile [{opt}{debug}] target(s) in {} ({noun} {built}, cached {cached})",
+                "`{}` profile [{opt}{debug}] target(s) in {} ({noun} {built}, cached {cached}{copies})",
                 profile.name,
                 elapsed(self.started.elapsed()),
             ),
@@ -181,6 +189,8 @@ pub struct Counts {
     pub noun: &'static str,
     pub built: usize,
     pub cached: usize,
+    /// Crates compiled more than once across run entries.
+    pub copies: usize,
 }
 
 /// Cargo's duration format: `0.08s`, `16.40s`, `1m 05s`.

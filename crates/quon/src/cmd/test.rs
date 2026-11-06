@@ -125,6 +125,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: TestArgs, shell: &mut She
                 noun: "built",
                 built: summary.built,
                 cached: summary.cached,
+                copies: 0,
             },
         );
         Some(summary)
@@ -244,6 +245,7 @@ fn run_boot_test(
                 noun: "built",
                 built: summary.built,
                 cached: summary.cached,
+                copies: 0,
             },
         );
     }

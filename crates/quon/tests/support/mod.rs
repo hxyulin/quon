@@ -119,9 +119,11 @@ pub fn counts(stderr: &str, noun: &str) -> (usize, usize) {
         .find_map(|l| l.split_once(open.as_str()).map(|(_, rest)| rest))
         .unwrap_or_else(|| panic!("no `({noun} N, cached M)` summary in:\n{stderr}"));
     let (done, cached) = rest.split_once(", cached ").expect("summary format");
+    // A note on crates with several copies may follow the cached count.
+    let cached: String = cached.chars().take_while(char::is_ascii_digit).collect();
     (
         done.trim().parse().expect("count"),
-        cached.trim_end_matches(')').trim().parse().expect("count"),
+        cached.parse().expect("count"),
     )
 }
 

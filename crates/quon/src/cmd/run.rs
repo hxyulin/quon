@@ -68,6 +68,7 @@ pub fn run(
                 noun: "built",
                 built: summary.built,
                 cached: summary.cached,
+                copies: 0,
             },
         );
     }

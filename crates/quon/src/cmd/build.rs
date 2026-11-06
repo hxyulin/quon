@@ -40,6 +40,7 @@ pub fn run_entries(
             noun,
             built: summary.built,
             cached: summary.cached,
+            copies: summary.crates_with_copies,
         },
     );
     Ok(())
@@ -79,6 +80,7 @@ pub fn run_pipeline(
             noun,
             built: summary.built,
             cached: summary.cached,
+            copies: 0,
         },
     );
     Ok(summary)

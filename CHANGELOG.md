@@ -26,6 +26,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Profile::qemu_boot_mode` are removed. See
   [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
 
+### Added (`quon explain copies`)
+
+- **`quon explain copies`** lists the crates that building every run
+  entry compiles more than once for one target, the entries that use
+  each copy, and the feature difference behind it, traced down to the
+  crate where it starts. It builds nothing.
+- The `Finished` line of a multi-entry build says how many crates have
+  more than one copy.
+
 ### Added (target flags)
 
 - **`Target::rustc_flag(flag)`** passes a flag to every crate built for

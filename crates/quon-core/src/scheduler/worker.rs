@@ -116,6 +116,9 @@ pub struct BuildSummary {
         quon_model::Handle<quon_model::BuildStepDef>,
         std::path::PathBuf,
     >,
+    /// Crates a multi-entry build compiled more than once for one
+    /// target; see [`crate::copies`]. Zero for a single entry.
+    pub crates_with_copies: usize,
 }
 
 /// Per-node execution closure.
