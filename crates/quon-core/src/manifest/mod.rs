@@ -50,6 +50,7 @@ pub fn dump_packages(set: &PackageSet) -> String {
         let source = match &p.id.source {
             PackageSource::Path(d) => format!("path {}", rel(d)),
             PackageSource::Registry => "registry".into(),
+            PackageSource::Git(source) => source.clone(),
         };
         let member = if p.is_member { " member" } else { "" };
         let _ = writeln!(out, "{} {} ({source}){member}", p.id.name, p.id.version);
@@ -117,8 +118,12 @@ pub fn dump_packages(set: &PackageSet) -> String {
                 }
                 DepTarget::Unresolved(reason) => {
                     let req = match &d.source {
-                        DepSource::Registry(r) => format!(" {r}"),
-                        DepSource::Path(..) | DepSource::Unsupported(_) => String::new(),
+                        DepSource::Registry(r) | DepSource::Git { req: Some(r), .. } => {
+                            format!(" {r}")
+                        }
+                        DepSource::Path(..)
+                        | DepSource::Git { req: None, .. }
+                        | DepSource::Unsupported(_) => String::new(),
                     };
                     let reason = reason.replace(&format!("{}/", root.display()), "");
                     let _ = write!(line, " -> {}{req} unresolved: {reason}", d.package);

@@ -8,7 +8,10 @@
 //! - path dependencies load the manifest at the path;
 //! - registry dependencies are mapped through `Cargo.lock` to an exact
 //!   version, whose source directory comes from a [`RegistrySources`]
-//!   map supplied by the caller.
+//!   map supplied by the caller;
+//! - git dependencies are mapped through `Cargo.lock` to a commit,
+//!   whose checkout comes from the same map. A path dependency inside a
+//!   checkout keeps the checkout's git source.
 //!
 //! A registry edge that cannot be mapped (no `Cargo.lock`, no lock
 //! entry, missing source directory) does not fail the load. The edge
@@ -45,6 +48,11 @@ pub enum PackageSource {
     /// A crates.io package, read from Cargo's registry cache or a
     /// vendor directory.
     Registry,
+    /// A package from Cargo's checkout of a git repository, with the
+    /// `git+<url>?<reference>#<commit>` source `Cargo.lock` records.
+    /// Every package of one checkout, including path dependencies
+    /// between them, has this source, as in Cargo.
+    Git(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,6 +69,7 @@ impl std::fmt::Display for PackageId {
                 write!(f, "{} {} ({})", self.name, self.version, dir.display())
             }
             PackageSource::Registry => write!(f, "{} {} (registry)", self.name, self.version),
+            PackageSource::Git(source) => write!(f, "{} {} ({source})", self.name, self.version),
         }
     }
 }
@@ -201,6 +210,14 @@ pub enum DepSource {
     /// version requirement that the path package must satisfy.
     Path(PathBuf, Option<VersionReq>),
     Registry(VersionReq),
+    /// A git repository. `Cargo.lock` picks the commit; `reference` is
+    /// the manifest's `rev=`, `branch=` or `tag=` (empty for the
+    /// default branch), which the lock entry's source must carry.
+    Git {
+        url: String,
+        reference: String,
+        req: Option<VersionReq>,
+    },
     /// A source Quon cannot build from, such as git, with the reason.
     /// A workspace may still declare it: Cargo builds the packages that
     /// use it, such as a repository's `xtask`, and the error comes only
@@ -613,10 +630,11 @@ impl<'s> Loader<'s> {
     /// Load (or find) the path package in `dir`. Returns its index, or
     /// `None` after recording an error.
     fn load_path_package(&mut self, dir: &Path, listed_member: bool) -> Option<PackageIdx> {
-        if let Some((_, &idx)) = self
-            .by_id
+        let manifest = dir.join("Cargo.toml");
+        if let Some(idx) = self
+            .packages
             .iter()
-            .find(|(id, _)| id.source == PackageSource::Path(dir.to_path_buf()))
+            .position(|p| p.manifest_path == manifest)
         {
             return Some(idx);
         }
@@ -633,7 +651,13 @@ impl<'s> Loader<'s> {
         } else {
             self.outside_workspace(dir)?
         };
-        let source = PackageSource::Path(dir.to_path_buf());
+        // A directory inside a git checkout, reached by a git edge or by
+        // a path edge between that checkout's packages, has the
+        // checkout's source.
+        let source = match self.sources.git_source_of(dir) {
+            Some(git) => PackageSource::Git(git.to_owned()),
+            None => PackageSource::Path(dir.to_path_buf()),
+        };
         self.add_package(file, source, is_member, inherit)
     }
 
@@ -758,6 +782,14 @@ impl<'s> Loader<'s> {
                 Ok(t) => t,
                 Err(reason) => DepTarget::Unresolved(reason),
             },
+            DepSource::Git {
+                url,
+                reference,
+                req,
+            } => match self.map_git(parent, dep, url, reference, req.as_ref()) {
+                Ok(t) => t,
+                Err(reason) => DepTarget::Unresolved(reason),
+            },
             DepSource::Unsupported(reason) => DepTarget::Unresolved(reason.clone()),
         }
     }
@@ -775,6 +807,7 @@ impl<'s> Loader<'s> {
         let parent_entry = match &pid.source {
             PackageSource::Path(_) => lock.path_package(&pid.name, &pid.version),
             PackageSource::Registry => lock.registry_package(&pid.name, &pid.version),
+            PackageSource::Git(source) => lock.git_package(&pid.name, &pid.version, source),
         }
         .ok_or_else(|| {
             format!(
@@ -809,6 +842,86 @@ impl<'s> Loader<'s> {
             )),
             None => Err(format!("{} failed to load", manifest.display())),
         }
+    }
+
+    /// Map a git dependency through `Cargo.lock` to Cargo's checkout of
+    /// the locked commit. Like a registry edge, a failure is a reason
+    /// for the resolver to report if it activates the edge.
+    fn map_git(
+        &mut self,
+        parent: PackageIdx,
+        dep: &Dependency,
+        url: &str,
+        reference: &str,
+        req: Option<&VersionReq>,
+    ) -> std::result::Result<DepTarget, String> {
+        if self.sources.is_vendored() {
+            return Err(format!(
+                "git dependency `{}` cannot be built from a vendor directory; \
+                 Quon builds git dependencies from Cargo's checkouts only",
+                dep.name
+            ));
+        }
+        let Some(lock) = &self.lock else {
+            return Err(self.lock_error.clone().unwrap_or_default());
+        };
+        let pid = &self.packages[parent].id;
+        let parent_entry = match &pid.source {
+            PackageSource::Path(_) => lock.path_package(&pid.name, &pid.version),
+            PackageSource::Registry => lock.registry_package(&pid.name, &pid.version),
+            PackageSource::Git(source) => lock.git_package(&pid.name, &pid.version, source),
+        }
+        .ok_or_else(|| {
+            format!(
+                "Cargo.lock has no entry for `{} {}`; {}",
+                pid.name,
+                pid.version,
+                self.sources.lock_hint()
+            )
+        })?;
+        let locked = lock
+            .locked_git_dep(parent_entry, &dep.package, url)
+            .map_err(|m| format!("{m}; {}", self.sources.lock_hint()))?;
+        let source = locked.source.clone().unwrap_or_default();
+        // A lock written for another rev, branch or tag would build a
+        // commit the manifest no longer asks for; Cargo rejects it under
+        // `--locked`, and so does Quon.
+        let locked_reference = super::lock::git_reference(&source);
+        if locked_reference != reference {
+            return Err(format!(
+                "Cargo.lock locks `{}` for `{}` but the manifest asks for `{}`; {}",
+                dep.package,
+                if locked_reference.is_empty() {
+                    "the default branch"
+                } else {
+                    locked_reference
+                },
+                if reference.is_empty() {
+                    "the default branch"
+                } else {
+                    reference
+                },
+                self.sources.lock_hint()
+            ));
+        }
+        if let Some(req) = req
+            && !req.matches(&locked.version)
+        {
+            return Err(format!(
+                "Cargo.lock locks `{}` to {} but the manifest requires `{req}`; {}",
+                dep.package,
+                locked.version,
+                self.sources.lock_hint()
+            ));
+        }
+        let dir = self
+            .sources
+            .git_dir(&locked.name, &locked.version, &source)?
+            .to_path_buf();
+        let idx = self
+            .load_path_package(&dir, false)
+            .ok_or_else(|| format!("{} failed to load", dir.join("Cargo.toml").display()))?;
+        Ok(DepTarget::Resolved(idx))
     }
 
     /// Sort packages by id and remap every index.
@@ -1360,13 +1473,9 @@ impl ManifestCx<'_> {
         platform: Option<&Platform>,
         dir: &Path,
     ) -> Option<Dependency> {
-        let unsupported = if d.git.is_some() {
-            Some(format!("git dependency `{key}` is not supported yet"))
-        } else {
-            d.registry.as_ref().map(|r| {
-                format!("dependency `{key}` uses registry `{r}`; only crates.io is supported")
-            })
-        };
+        let unsupported = d.registry.as_ref().map(|r| {
+            format!("dependency `{key}` uses registry `{r}`; only crates.io is supported")
+        });
         if let Some(reason) = unsupported {
             return Some(Dependency {
                 name: key.to_string(),
@@ -1405,6 +1514,17 @@ impl ManifestCx<'_> {
                     }
                 }
             }
+            // Cargo also builds from `path` when a dependency names both.
+            (None, req) if d.git.is_some() => DepSource::Git {
+                url: d.git.clone().unwrap_or_default(),
+                reference: match (&d.rev, &d.branch, &d.tag) {
+                    (Some(r), _, _) => format!("rev={r}"),
+                    (None, Some(b), _) => format!("branch={b}"),
+                    (None, None, Some(t)) => format!("tag={t}"),
+                    (None, None, None) => String::new(),
+                },
+                req,
+            },
             (None, Some(req)) => DepSource::Registry(req),
             (None, None) => {
                 self.error(
@@ -1699,6 +1819,123 @@ mod tests {
     const WS: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n\
                       [workspace.dependencies]\nb = { path = \"b\" }\n";
     const B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\n";
+
+    const GEN_SOURCE: &str = "git+https://example.com/gen?rev=abc#abc0123";
+
+    /// A workspace whose `app` depends on `gen` from git with `rev`, a
+    /// checkout of that repository (its own workspace, where `gen`
+    /// depends on `gen-core` by path and inherits its version), and a
+    /// lock pinning both to [`GEN_SOURCE`].
+    fn git_workspace(rev: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+        let ws = tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n",
+            ),
+            (
+                "app/Cargo.toml",
+                &format!(
+                    "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+                     [dependencies]\ngen = {{ git = \"https://example.com/gen.git\", rev = \"{rev}\" }}\n"
+                ),
+            ),
+            ("app/src/lib.rs", ""),
+            (
+                "Cargo.lock",
+                &format!(
+                    "version = 4\n\
+                     [[package]]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"gen\"]\n\
+                     [[package]]\nname = \"gen\"\nversion = \"1.0.0\"\nsource = \"{GEN_SOURCE}\"\n\
+                     dependencies = [\"gen-core\"]\n\
+                     [[package]]\nname = \"gen-core\"\nversion = \"1.0.0\"\nsource = \"{GEN_SOURCE}\"\n"
+                ),
+            ),
+        ]);
+        let checkout = tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nmembers = [\"gen\", \"gen-core\"]\n\
+                 [workspace.package]\nversion = \"1.0.0\"\n",
+            ),
+            (
+                "gen/Cargo.toml",
+                "[package]\nname = \"gen\"\nversion.workspace = true\n\
+                 [dependencies]\ngen-core = { path = \"../gen-core\" }\n",
+            ),
+            ("gen/src/lib.rs", ""),
+            (
+                "gen-core/Cargo.toml",
+                "[package]\nname = \"gen-core\"\nversion.workspace = true\n",
+            ),
+            ("gen-core/src/lib.rs", ""),
+        ]);
+        (ws, checkout)
+    }
+
+    fn git_sources(checkout: &Path) -> RegistrySources {
+        let v = Version::new(1, 0, 0);
+        RegistrySources::default().with_git(BTreeMap::from([
+            (
+                ("gen".into(), v.clone(), GEN_SOURCE.into()),
+                checkout.join("gen"),
+            ),
+            (
+                ("gen-core".into(), v, GEN_SOURCE.into()),
+                checkout.join("gen-core"),
+            ),
+        ]))
+    }
+
+    /// A git edge maps through the lock to Cargo's checkout, and a path
+    /// edge between that checkout's packages keeps the git source, as
+    /// in Cargo. The checkout's own workspace supplies inherited fields.
+    #[test]
+    fn a_git_dependency_loads_from_the_checkout_with_its_lock_source() {
+        let (ws, checkout) = git_workspace("abc");
+        let set = load_workspace(ws.path(), &git_sources(checkout.path())).unwrap();
+        let app = &set.packages[set.member("app").unwrap()];
+        let DepTarget::Resolved(gen_idx) = app.deps[0].target else {
+            panic!("app -> gen unresolved: {:?}", app.deps[0].target);
+        };
+        let r#gen = &set.packages[gen_idx];
+        assert_eq!(r#gen.id.source, PackageSource::Git(GEN_SOURCE.into()));
+        let DepTarget::Resolved(core_idx) = r#gen.deps[0].target else {
+            panic!("gen -> gen-core unresolved: {:?}", r#gen.deps[0].target);
+        };
+        let core = &set.packages[core_idx];
+        assert_eq!(core.name(), "gen-core");
+        assert_eq!(core.id.version, Version::new(1, 0, 0));
+        assert_eq!(core.id.source, PackageSource::Git(GEN_SOURCE.into()));
+    }
+
+    /// A lock written for another rev names a commit the manifest no
+    /// longer asks for, and a vendor directory has no checkouts: both
+    /// leave the edge unresolved with the reason.
+    #[test]
+    fn a_git_dependency_needs_a_lock_for_its_rev_and_cargo_checkouts() {
+        let unresolved =
+            |set: &PackageSet| match &set.packages[set.member("app").unwrap()].deps[0].target {
+                DepTarget::Unresolved(reason) => reason.clone(),
+                DepTarget::Resolved(_) => panic!("app -> gen resolved"),
+            };
+        let (ws, checkout) = git_workspace("def");
+        let set = load_workspace(ws.path(), &git_sources(checkout.path())).unwrap();
+        let reason = unresolved(&set);
+        assert!(
+            reason.contains("locks `gen` for `rev=abc` but the manifest asks for `rev=def`"),
+            "{reason}"
+        );
+
+        let (ws, checkout) = git_workspace("abc");
+        let mut vendored = git_sources(checkout.path());
+        vendored.vendored = true;
+        let set = load_workspace(ws.path(), &vendored).unwrap();
+        let reason = unresolved(&set);
+        assert!(
+            reason.contains("cannot be built from a vendor directory"),
+            "{reason}"
+        );
+    }
 
     #[test]
     fn a_lone_package_is_its_own_workspace() {

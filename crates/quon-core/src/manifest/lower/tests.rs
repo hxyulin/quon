@@ -1669,9 +1669,11 @@ fn git_dependencies_matter_only_to_the_packages_that_are_built() {
         q.cargo_workspace(".");
         q.add(Package::new("tool").target(t));
     });
+    // Without a `Cargo.lock` there is no commit to build, which matters
+    // only once a built package reaches the edge.
     let err = expand_err(&mut raw, ws.path());
     assert!(
-        err.contains("dependency `gen` of `tool`: git dependency `gen` is not supported yet"),
+        err.contains("dependency `gen` of `tool`:") && err.contains("Cargo.lock is missing"),
         "{err}"
     );
 }

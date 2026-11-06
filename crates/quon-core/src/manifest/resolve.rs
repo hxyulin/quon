@@ -1159,6 +1159,10 @@ fn compute_hashes(set: &PackageSet, units: &mut [Unit]) -> Result<()> {
                 h.update(rel.as_os_str().as_encoded_bytes());
             }
             PackageSource::Registry => h.update(b"registry"),
+            PackageSource::Git(source) => {
+                h.update(b"git:");
+                h.update(source.as_bytes());
+            }
         }
         h.update(b"\0");
         h.update(u.kind.to_string().as_bytes());

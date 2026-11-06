@@ -46,6 +46,29 @@ impl LockPackage {
             .as_deref()
             .is_some_and(|s| s.starts_with("registry+") || s.starts_with("sparse+"))
     }
+
+    pub fn is_git(&self) -> bool {
+        self.source
+            .as_deref()
+            .is_some_and(|s| s.starts_with("git+"))
+    }
+}
+
+/// The repository URL of a `git+<url>?<reference>#<commit>` source or
+/// of a manifest's `git = "<url>"`, without the `.git` suffix or a
+/// trailing slash, so the two compare equal.
+pub fn git_repository(source: &str) -> &str {
+    let url = source.strip_prefix("git+").unwrap_or(source);
+    let url = url.split(['?', '#']).next().unwrap_or(url);
+    let url = url.trim_end_matches('/');
+    url.strip_suffix(".git").unwrap_or(url)
+}
+
+/// The reference part of a `git+<url>?<reference>#<commit>` source,
+/// such as `rev=abc` or `branch=main`; empty for the default branch.
+pub fn git_reference(source: &str) -> &str {
+    let before_commit = source.split('#').next().unwrap_or(source);
+    before_commit.split_once('?').map_or("", |(_, r)| r)
 }
 
 /// An entry of a package's `dependencies` list: `"name"`,
@@ -113,6 +136,45 @@ impl Lockfile {
         self.packages
             .iter()
             .find(|p| p.source.is_none() && p.name == name && &p.version == version)
+    }
+
+    /// The lock entry for the git package `name@version` from `source`.
+    pub fn git_package(&self, name: &str, version: &Version, source: &str) -> Option<&LockPackage> {
+        self.packages.iter().find(|p| {
+            p.name == name && &p.version == version && p.source.as_deref() == Some(source)
+        })
+    }
+
+    /// Find the git package that `parent`'s dependency on `name` from
+    /// the repository `url` locks to. `Err` carries a reason for the
+    /// diagnostic.
+    pub fn locked_git_dep(
+        &self,
+        parent: &LockPackage,
+        name: &str,
+        url: &str,
+    ) -> std::result::Result<&LockPackage, String> {
+        parent
+            .dependencies
+            .iter()
+            .filter(|d| d.name == name)
+            .flat_map(|d| {
+                self.packages.iter().filter(move |p| {
+                    p.is_git()
+                        && p.name == name
+                        && d.version.as_ref().is_none_or(|v| v == &p.version)
+                        && d.source
+                            .as_ref()
+                            .is_none_or(|s| Some(s) == p.source.as_ref())
+                })
+            })
+            .find(|p| git_repository(p.source.as_deref().unwrap_or("")) == git_repository(url))
+            .ok_or_else(|| {
+                format!(
+                    "Cargo.lock has no git entry for `{name}` from {url} under `{} {}`",
+                    parent.name, parent.version
+                )
+            })
     }
 
     /// The lock entry for registry package `name@version`.

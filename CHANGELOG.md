@@ -26,6 +26,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Profile::qemu_boot_mode` are removed. See
   [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
 
+### Added (git dependencies)
+
+- **Git dependencies build from Cargo's checkouts.** Quon maps a git
+  dependency through `Cargo.lock` to the locked commit's checkout,
+  found with `cargo metadata` like registry sources. A repository's
+  `xtask` that depends on a git crate can now be a host test, so
+  `quon test` and `quon clippy` cover it. A build from a vendor
+  directory still reports git dependencies.
+
 ### Added (`quon explain copies`)
 
 - **`quon explain copies`** lists the crates that building every run

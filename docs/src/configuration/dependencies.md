@@ -168,6 +168,30 @@ Their sources in Cargo's registry cache are never checked for edits.
 Sources in a vendor directory are checked like project sources, so a
 patched vendored crate rebuilds.
 
+### Git dependencies
+
+A git dependency in a `Cargo.toml` builds from Cargo's checkout of the
+commit `Cargo.lock` records, under `$CARGO_HOME/git/checkouts`. Quon
+finds the checkout the way it finds registry sources: `cargo fetch
+--locked`, then `cargo metadata --locked --offline`, cached in
+`build/cargo-sources.json`.
+
+- Every package of one checkout has the git source, including the path
+  dependencies between them, as in Cargo. They inherit `workspace =
+  true` fields from the checkout's own workspace root.
+- The lock entry must have been written for the manifest's `rev`,
+  `branch` or `tag`. After changing one, run `cargo update -p <name>`,
+  as Cargo's `--locked` also requires.
+- A git package's identity is its repository and commit, never a path,
+  so the build directory and the checkout can both move.
+- Quon compiles git packages with `--cap-lints allow`, as Cargo does,
+  and checks their sources for edits like project sources.
+- A vendor directory holds no git packages: a build with
+  `.vendored(..)` reports a git dependency it reaches.
+
+Like any dependency, a git dependency is an error only when a build
+reaches it.
+
 ### Path dependencies outside the workspace
 
 A path dependency outside the workspace, such as a crate in another

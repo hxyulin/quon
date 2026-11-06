@@ -160,6 +160,12 @@ pub struct DetailedDependency {
     pub version: Option<String>,
     pub path: Option<String>,
     pub git: Option<String>,
+    /// With `git`: the commit, branch or tag Cargo checks out. Quon
+    /// builds the commit `Cargo.lock` records, and checks that it was
+    /// locked for this reference.
+    pub rev: Option<String>,
+    pub branch: Option<String>,
+    pub tag: Option<String>,
     pub registry: Option<String>,
     pub package: Option<String>,
     pub workspace: Option<bool>,

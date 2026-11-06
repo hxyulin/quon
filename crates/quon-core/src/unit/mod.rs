@@ -144,6 +144,11 @@ pub enum PackageSource {
         /// `Dependency` crates and lock entries without one.
         checksum: Option<String>,
     },
+    /// A package from Cargo's checkout of a git repository.
+    Git {
+        /// The lock source, which names the repository and commit.
+        source: String,
+    },
 }
 
 /// The platform a unit is compiled for.
@@ -792,6 +797,9 @@ pub fn lower(
                         CargoPackageSource::Registry { checksum } => PackageSource::Registry {
                             checksum: checksum.clone(),
                         },
+                        CargoPackageSource::Git { source } => PackageSource::Git {
+                            source: source.clone(),
+                        },
                     },
                 },
             ),
@@ -807,7 +815,12 @@ pub fn lower(
 
         // As Cargo does for registry packages: their lints are not the
         // user's to fix.
-        let cap_lints = matches!(package.source, PackageSource::Registry { .. });
+        // Cargo caps lints for every package outside the workspace's
+        // paths: registry and git alike.
+        let cap_lints = matches!(
+            package.source,
+            PackageSource::Registry { .. } | PackageSource::Git { .. }
+        );
         units.push(BuildUnit {
             name: def.name.clone(),
             crate_name,

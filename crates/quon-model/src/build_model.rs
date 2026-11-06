@@ -659,6 +659,12 @@ pub enum CargoPackageSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         checksum: Option<String>,
     },
+    /// A package from Cargo's checkout of a git repository.
+    Git {
+        /// The `git+<url>?<reference>#<commit>` source from
+        /// `Cargo.lock`, which names the commit.
+        source: String,
+    },
 }
 
 impl CargoPackageSource {

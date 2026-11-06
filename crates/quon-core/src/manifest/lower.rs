@@ -392,8 +392,11 @@ pub fn expand_with(
         } else {
             None
         };
-        let source = match pkg.id.source {
+        let source = match &pkg.id.source {
             PackageSource::Path(_) => CargoPackageSource::Path,
+            PackageSource::Git(source) => CargoPackageSource::Git {
+                source: source.clone(),
+            },
             PackageSource::Registry => CargoPackageSource::Registry {
                 checksum: checksums
                     .get(&(pkg.name(), &pkg.id.version))

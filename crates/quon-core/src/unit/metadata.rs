@@ -12,8 +12,8 @@
 //! What goes in, in this order, each field length-prefixed:
 //!
 //! - package name, version, and source (path relative to the project
-//!   root, or `registry` plus the `Cargo.lock` checksum), so two
-//!   versions or two sources coexist;
+//!   root, `registry` plus the `Cargo.lock` checksum, or the git source
+//!   with its commit), so two versions or two sources coexist;
 //! - unit kind and crate name, so a lib and a bin of one package do;
 //! - platform: `host`, or the target name plus `builtin:<triple>` or
 //!   `spec:<path relative to the project root>`;
@@ -167,6 +167,9 @@ pub(crate) fn unit_metadata(
             }
             &mut h
         }
+        // The source names the repository and commit, never a path, so
+        // the build directory and Cargo's checkout can both move.
+        PackageSource::Git { source } => h.field(format!("git:{source}")),
     };
     h.field(kind_label(unit.kind)).field(&unit.crate_name);
     h.field(platform);

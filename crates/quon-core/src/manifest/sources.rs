@@ -19,6 +19,12 @@
 //!   by `quon vendor` ([`vendor`]). The build runs no Cargo command and
 //!   fails when `Cargo.lock` changed since the last `quon vendor`
 //!   ([`check_vendor_stamp`]).
+//!
+//! Git packages come from the same `cargo metadata` output: Cargo's
+//! checkout of the locked commit, under `$CARGO_HOME/git/checkouts`,
+//! keyed by name, version and the `git+<url>?<reference>#<commit>`
+//! source `Cargo.lock` records. A vendor directory has none; see
+//! [`RegistrySources::is_vendored`].
 
 use super::lock::Lockfile;
 use crate::cache::hash::sha256_bytes;
@@ -42,19 +48,72 @@ const VENDOR_HINT: &str = "run `quon vendor`";
 #[derive(Debug, Clone, Default)]
 pub struct RegistrySources {
     dirs: BTreeMap<(String, Version), PathBuf>,
+    /// Git checkouts by name, version and lock source. Canonical, so a
+    /// path dependency's canonical directory finds its source.
+    git: BTreeMap<(String, Version, String), PathBuf>,
     /// Appended to "source missing" diagnostics: what the user runs to
     /// fill the source location.
     hint: String,
-    vendored: bool,
+    pub(crate) vendored: bool,
 }
 
 impl RegistrySources {
     pub fn new(dirs: BTreeMap<(String, Version), PathBuf>, hint: impl Into<String>) -> Self {
         Self {
             dirs,
+            git: BTreeMap::new(),
             hint: hint.into(),
             vendored: false,
         }
+    }
+
+    /// Add git checkouts, by name, version and lock source.
+    #[must_use]
+    pub fn with_git(mut self, git: BTreeMap<(String, Version, String), PathBuf>) -> Self {
+        self.git = git
+            .into_iter()
+            .map(|(k, dir)| (k, std::fs::canonicalize(&dir).unwrap_or(dir)))
+            .collect();
+        self
+    }
+
+    /// Whether the sources come from a vendor directory, which holds no
+    /// git packages.
+    pub fn is_vendored(&self) -> bool {
+        self.vendored
+    }
+
+    /// The checkout of git package `name@version` from `source`, or the
+    /// reason there is none.
+    pub fn git_dir(
+        &self,
+        name: &str,
+        version: &Version,
+        source: &str,
+    ) -> std::result::Result<&Path, String> {
+        let dir = self
+            .git
+            .get(&(name.to_string(), version.clone(), source.to_string()))
+            .ok_or_else(|| {
+                format!("no checkout of `{name} {version}` from {source}; run `cargo fetch`")
+            })?;
+        if !dir.join("Cargo.toml").is_file() {
+            return Err(format!(
+                "checkout of `{name} {version}` is missing at {}; run `cargo fetch`",
+                dir.display()
+            ));
+        }
+        Ok(dir)
+    }
+
+    /// The lock source of the git package whose canonical directory is
+    /// `dir`: a path dependency inside a git checkout belongs to that
+    /// checkout's source, as in Cargo.
+    pub fn git_source_of(&self, dir: &Path) -> Option<&str> {
+        self.git
+            .iter()
+            .find(|(_, d)| d.as_path() == dir)
+            .map(|((_, _, source), _)| source.as_str())
     }
 
     /// What the user runs when `Cargo.lock` is missing or does not
@@ -101,17 +160,18 @@ impl RegistrySources {
             return Ok(Self::new(BTreeMap::new(), REGISTRY_HINT));
         };
         let lock = Lockfile::parse(&String::from_utf8_lossy(&bytes), &lock_path)?;
-        if !lock.packages.iter().any(|p| p.is_registry()) {
+        if !lock.packages.iter().any(|p| p.is_registry() || p.is_git()) {
             return Ok(Self::new(BTreeMap::new(), REGISTRY_HINT));
         }
         let key = SourceCacheKey {
+            format: SOURCE_CACHE_FORMAT,
             lock_sha256: hex(&sha256_bytes(&bytes)),
             cargo_home: cargo_home()
                 .map(|h| h.display().to_string())
                 .unwrap_or_default(),
         };
-        if let Some(dirs) = cache_file.and_then(|f| read_source_cache(f, &key)) {
-            return Ok(Self::new(dirs, REGISTRY_HINT));
+        if let Some(found) = cache_file.and_then(|f| read_source_cache(f, &key)) {
+            return Ok(Self::new(found.registry, REGISTRY_HINT).with_git(found.git));
         }
 
         run_cargo(workspace_root, &["fetch", "--locked"])?;
@@ -119,12 +179,12 @@ impl RegistrySources {
             workspace_root,
             &["metadata", "--format-version", "1", "--locked", "--offline"],
         )?;
-        let dirs = parse_metadata_sources(&out.stdout)?;
+        let found = parse_metadata_sources(&out.stdout)?;
         if let Some(f) = cache_file {
             // A failed write only means the next build asks Cargo again.
-            let _ = write_source_cache(f, &key, &dirs);
+            let _ = write_source_cache(f, &key, &found);
         }
-        Ok(Self::new(dirs, REGISTRY_HINT))
+        Ok(Self::new(found.registry, REGISTRY_HINT).with_git(found.git))
     }
 
     /// The source directory of `name@version`, or the reason there is
@@ -312,18 +372,25 @@ struct MetadataPackage {
     manifest_path: PathBuf,
 }
 
-/// The registry packages' source directories from `cargo metadata
-/// --format-version 1` output. Path and git packages are skipped.
-pub(crate) fn parse_metadata_sources(json: &[u8]) -> Result<BTreeMap<(String, Version), PathBuf>> {
+/// Source directories from `cargo metadata`: registry packages by name
+/// and version, git checkouts by name, version and source.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SourceDirs {
+    pub registry: BTreeMap<(String, Version), PathBuf>,
+    pub git: BTreeMap<(String, Version, String), PathBuf>,
+}
+
+/// The registry and git packages' source directories from `cargo
+/// metadata --format-version 1` output. Path packages are skipped.
+pub(crate) fn parse_metadata_sources(json: &[u8]) -> Result<SourceDirs> {
     let err = |m: String| Error::Config(format!("cannot read `cargo metadata` output: {m}"));
     let meta: Metadata = serde_json::from_slice(json).map_err(|e| err(e.to_string()))?;
-    let mut dirs = BTreeMap::new();
+    let mut found = SourceDirs::default();
     for p in meta.packages {
-        let registry = p
-            .source
-            .as_deref()
-            .is_some_and(|s| s.starts_with("registry+") || s.starts_with("sparse+"));
-        if !registry {
+        let Some(source) = p.source else { continue };
+        let registry = source.starts_with("registry+") || source.starts_with("sparse+");
+        let git = source.starts_with("git+");
+        if !registry && !git {
             continue;
         }
         let version = Version::parse(&p.version)
@@ -333,13 +400,24 @@ pub(crate) fn parse_metadata_sources(json: &[u8]) -> Result<BTreeMap<(String, Ve
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_default();
-        dirs.insert((p.name, version), dir);
+        if git {
+            found.git.insert((p.name, version, source), dir);
+        } else {
+            found.registry.insert((p.name, version), dir);
+        }
     }
-    Ok(dirs)
+    Ok(found)
 }
+
+/// Bumped when the cache file's meaning changes, so an older file is
+/// ignored instead of misread: format 2 added git checkouts, which a
+/// format 1 file for the same lock left out.
+const SOURCE_CACHE_FORMAT: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SourceCacheKey {
+    #[serde(default)]
+    format: u32,
     lock_sha256: String,
     cargo_home: String,
 }
@@ -356,43 +434,58 @@ struct CachedSource {
     name: String,
     version: String,
     dir: PathBuf,
+    /// The lock source of a git checkout; `None` for a registry package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 /// The cached map, if its key is `key` and every directory still holds
 /// a manifest.
-fn read_source_cache(
-    file: &Path,
-    key: &SourceCacheKey,
-) -> Option<BTreeMap<(String, Version), PathBuf>> {
+fn read_source_cache(file: &Path, key: &SourceCacheKey) -> Option<SourceDirs> {
     let cache: SourceCache = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
     if &cache.key != key {
         return None;
     }
-    let mut dirs = BTreeMap::new();
+    let mut found = SourceDirs::default();
     for p in cache.packages {
         if !p.dir.join("Cargo.toml").is_file() {
             return None;
         }
-        dirs.insert((p.name, Version::parse(&p.version).ok()?), p.dir);
+        let version = Version::parse(&p.version).ok()?;
+        match p.source {
+            Some(source) => found.git.insert((p.name, version, source), p.dir),
+            None => found.registry.insert((p.name, version), p.dir),
+        };
     }
-    Some(dirs)
+    Some(found)
 }
 
 fn write_source_cache(
     file: &Path,
     key: &SourceCacheKey,
-    dirs: &BTreeMap<(String, Version), PathBuf>,
+    found: &SourceDirs,
 ) -> std::io::Result<()> {
+    let registry = found
+        .registry
+        .iter()
+        .map(|((name, version), dir)| CachedSource {
+            name: name.clone(),
+            version: version.to_string(),
+            dir: dir.clone(),
+            source: None,
+        });
+    let git = found
+        .git
+        .iter()
+        .map(|((name, version, source), dir)| CachedSource {
+            name: name.clone(),
+            version: version.to_string(),
+            dir: dir.clone(),
+            source: Some(source.clone()),
+        });
     let cache = SourceCache {
         key: key.clone(),
-        packages: dirs
-            .iter()
-            .map(|((name, version), dir)| CachedSource {
-                name: name.clone(),
-                version: version.to_string(),
-                dir: dir.clone(),
-            })
-            .collect(),
+        packages: registry.chain(git).collect(),
     };
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -412,7 +505,7 @@ mod tests {
                         checksum = \"00\"\n";
 
     #[test]
-    fn metadata_keeps_registry_packages_only() {
+    fn metadata_keeps_registry_packages_by_version_and_git_checkouts_by_source() {
         let json = br#"{"packages": [
             {"name": "a", "version": "0.1.0", "source": null,
              "manifest_path": "/ws/a/Cargo.toml"},
@@ -424,8 +517,9 @@ mod tests {
             {"name": "g", "version": "0.1.0", "source": "git+https://example.com/g#abc",
              "manifest_path": "/c/g/Cargo.toml"}
         ]}"#;
-        let dirs = parse_metadata_sources(json).unwrap();
-        let got: Vec<String> = dirs
+        let found = parse_metadata_sources(json).unwrap();
+        let got: Vec<String> = found
+            .registry
             .iter()
             .map(|((n, v), d)| format!("{n} {v} {}", d.display()))
             .collect();
@@ -436,6 +530,12 @@ mod tests {
                 "sp 2.0.0-rc.1 /c/sp-2.0.0-rc.1",
             ]
         );
+        let git: Vec<String> = found
+            .git
+            .iter()
+            .map(|((n, v, s), d)| format!("{n} {v} {s} {}", d.display()))
+            .collect();
+        assert_eq!(git, ["g 0.1.0 git+https://example.com/g#abc /c/g"]);
     }
 
     #[test]
@@ -446,12 +546,31 @@ mod tests {
         std::fs::write(pkg.join("Cargo.toml"), "").unwrap();
         let file = tmp.path().join("build/cargo-sources.json");
         let key = SourceCacheKey {
+            format: SOURCE_CACHE_FORMAT,
             lock_sha256: "aa".into(),
             cargo_home: "/h".into(),
         };
-        let dirs = BTreeMap::from([(("reg".to_string(), Version::new(1, 0, 0)), pkg.clone())]);
+        let dirs = SourceDirs {
+            registry: BTreeMap::from([(("reg".to_string(), Version::new(1, 0, 0)), pkg.clone())]),
+            git: BTreeMap::from([(
+                (
+                    "g".to_string(),
+                    Version::new(0, 1, 0),
+                    "git+https://example.com/g#abc".to_string(),
+                ),
+                pkg.clone(),
+            )]),
+        };
         write_source_cache(&file, &key, &dirs).unwrap();
         assert_eq!(read_source_cache(&file, &key), Some(dirs));
+
+        // A file from before git checkouts were cached lacks them, so it
+        // must not be used.
+        let older = SourceCacheKey {
+            format: 0,
+            ..key.clone()
+        };
+        assert_eq!(read_source_cache(&file, &older), None);
 
         let other_home = SourceCacheKey {
             cargo_home: "/other".into(),
@@ -494,11 +613,15 @@ mod tests {
         std::fs::create_dir_all(&pkg).unwrap();
         std::fs::write(pkg.join("Cargo.toml"), "").unwrap();
         let key = SourceCacheKey {
+            format: SOURCE_CACHE_FORMAT,
             lock_sha256: lock_sha256(tmp.path()).unwrap().unwrap(),
             cargo_home: cargo_home().unwrap().display().to_string(),
         };
         let file = tmp.path().join("cargo-sources.json");
-        let dirs = BTreeMap::from([(("reg".to_string(), Version::new(1, 0, 0)), pkg.clone())]);
+        let dirs = SourceDirs {
+            registry: BTreeMap::from([(("reg".to_string(), Version::new(1, 0, 0)), pkg.clone())]),
+            git: BTreeMap::new(),
+        };
         write_source_cache(&file, &key, &dirs).unwrap();
         // The workspace has no Cargo.toml, so any Cargo command would
         // fail: a hit proves none ran.
