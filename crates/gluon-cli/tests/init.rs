@@ -47,7 +47,9 @@ fn init_writes_a_gluon_rs_that_builds_the_limine_example() {
     for line in [
         r#"cfg.project("limine-kernel", "0.1.0");"#,
         r#"let x86_64 = cfg.target("x86_64-unknown-none");"#,
-        r#".run_binary("kernel");"#,
+        r#".run_binary("kernel")"#,
+        r#".runner("qemu");"#,
+        r#"cfg.runner("qemu")"#,
         r#".linker_script("crates/kernel/kernel.ld")"#,
         r#".rustc_flag("-Crelocation-model=static");"#,
         r#".add_file("limine.conf", "limine.conf")"#,

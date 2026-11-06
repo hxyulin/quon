@@ -24,6 +24,7 @@ pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
     let target = cfg.target("x86_64-unknown-none");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -36,7 +37,8 @@ pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
             .crate_type(gluon_config::CrateType::Bin)
             .root("src/main.rs");
 
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu")
+        .qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(128)
         .cores(1)
@@ -85,8 +87,8 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
 
     let target = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(target).opt_level(0).debug_info(true);
-    cfg.qemu("qemu-system-x86_64").machine("q35").memory(128);
+    cfg.profile("dev").target(target).opt_level(0).debug_info(true).runner("qemu");
+    cfg.runner("qemu").qemu("qemu-system-x86_64").machine("q35").memory(128);
 
     shared::register(cfg)?;
     bootloader::register(cfg)?;
@@ -138,7 +140,7 @@ pub fn register(cfg: &mut Config) -> Result<()> {
 | `cfg.dependency(...)`| Root (shared across subsystems).     |
 | `cfg.profile(...)`   | Root (project-wide concept).         |
 | `cfg.image(...)`     | Root or subsystem (boot images often subsystem-owned). |
-| `cfg.qemu(...)`      | Root only.                           |
+| `cfg.runner(...)`    | Root only.                           |
 | `cfg.group(...)`     | Per-subsystem (the natural unit).    |
 | `cfg.build_step(...)`| Per-subsystem when local; root when cross-cutting. |
 

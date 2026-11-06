@@ -19,12 +19,14 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     let uefi_target = cfg.target("x86_64-unknown-uefi");
 
     cfg.profile("debug")
+        .runner("qemu")
         .target(uefi_target)
         .opt_level(0)
         .debug_info(true)
         .run_binary("bootloader");
 
     cfg.profile("release")
+        .runner("qemu")
         .target(uefi_target)
         .opt_level(2)
         .lto("thin")
@@ -54,7 +56,8 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
 
     // QEMU with UEFI boot (requires OVMF)
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu")
+        .qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(256)
         .cores(1)

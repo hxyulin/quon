@@ -71,17 +71,27 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ## Adding QEMU configuration
 
-If you want to launch your kernel in QEMU with `gluon run`, add a QEMU block:
+If you want to launch your kernel in QEMU with `gluon run`, declare a QEMU
+runner and name it in the profile:
 
-```rust
-cfg.qemu("qemu-system-x86_64")
+```rust,ignore
+cfg.runner("qemu")
+    .qemu("qemu-system-x86_64")
     .machine("q35")
     .memory(128)
     .cores(1)
     .serial_stdio();
+
+cfg.profile("dev")
+    .target(target)
+    .run_binary("kernel")
+    .runner("qemu");
 ```
 
-- **`qemu(binary)`** -- the QEMU system emulator binary to invoke.
+- **`runner(name)`** -- declares a [runner](../running/runners.md), the
+  thing that starts the built kernel. A profile picks one with
+  `.runner(name)`.
+- **`.qemu(binary)`** -- the QEMU system emulator binary to invoke.
 - **`.machine(type)`** -- the machine/board model (`q35`, `virt`, etc.).
 - **`.memory(mb)`** -- guest RAM in megabytes.
 - **`.cores(n)`** -- number of virtual CPU cores.

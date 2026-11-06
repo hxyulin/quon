@@ -11,13 +11,14 @@
 //! is the one spot where subprocesses get spawned.
 
 use super::ovmf::{OvmfResolveCtx, resolve_ovmf};
-use super::qemu_cmd::{QemuInvocation, build_qemu_command};
+use super::qemu_cmd::build_qemu_command;
 use super::resolve::{resolve_disk_source, resolve_qemu};
+use super::runner::{Invocation, Runner, command_invocation, profile_runner};
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
 use crate::scheduler::{BuildSummary, Reporter};
 use crate::{build_with_reporter, model::BootMode};
-use gluon_model::{BuildModel, CrateDef, EspSource, Handle, ResolvedConfig, TargetDef};
+use gluon_model::{BuildModel, CrateDef, EspSource, Handle, QemuDef, ResolvedConfig, TargetDef};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -73,7 +74,7 @@ pub struct RunOptions {
 /// build that preceded it.
 #[derive(Debug)]
 pub struct Prepared {
-    pub invocation: QemuInvocation,
+    pub invocation: Invocation,
     /// `None` when the build was skipped (`dry_run` or `no_build`).
     pub build: Option<BuildSummary>,
 }
@@ -191,10 +192,11 @@ pub(super) fn profile_target<'m>(
     })
 }
 
-/// Steps 3 to 5 of [`prepare`]: resolve QEMU, the disk, the ESP and
-/// OVMF, and assemble the command that boots `kernel`. `esp_override`,
-/// when set, is the ESP directory to mount in UEFI mode instead of the
-/// one the project declares; `gluon test` passes each test's copy.
+/// Steps 3 to 5 of [`prepare`]: assemble the command that runs
+/// `kernel` with the profile's runner. For a QEMU runner that means
+/// resolving QEMU, the disk, the ESP and OVMF. `esp_override`, when
+/// set, is the ESP directory to mount in UEFI mode instead of the one
+/// the project declares; `gluon test` passes each test's copy.
 pub(super) fn invocation(
     ctx: &CompileCtx,
     model: &BuildModel,
@@ -203,30 +205,54 @@ pub(super) fn invocation(
     kernel: &Path,
     esp_override: Option<PathBuf>,
     build_summary: Option<&BuildSummary>,
-) -> Result<QemuInvocation> {
+) -> Result<Invocation> {
+    let runner = profile_runner(model, resolved)?;
+    runner.require_qemu(opts.gdb, "--gdb")?;
+    runner.require_qemu(opts.boot_mode_override.is_some(), "a boot mode flag")?;
+    match runner {
+        Runner::Qemu { name, def } => {
+            let mut inv = qemu_invocation(
+                ctx,
+                model,
+                resolved,
+                opts,
+                def,
+                kernel,
+                esp_override,
+                build_summary,
+            )?;
+            inv.runner = name.to_string();
+            inv.success_exit_code = def.success_exit_code;
+            Ok(inv)
+        }
+        Runner::Command { name, def } => {
+            command_invocation(name, def, kernel, &opts.extra_args, opts.timeout_override)
+        }
+    }
+}
+
+/// [`invocation`] for a QEMU runner.
+#[allow(clippy::too_many_arguments)]
+fn qemu_invocation(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    opts: &RunOptions,
+    qemu_def: &QemuDef,
+    kernel: &Path,
+    esp_override: Option<PathBuf>,
+    build_summary: Option<&BuildSummary>,
+) -> Result<Invocation> {
     let profile = &resolved.profile;
     let target = profile_target(model, resolved)?;
 
     // Step 3: resolve QEMU config.
-    //
-    // `model.qemu` is `Option<QemuDef>` since Phase G of Stage 4: the CLI
-    // is responsible for rejecting an absent qemu block at the entry
-    // point with `Error::QemuNotConfigured`. By the time we reach `prepare`
-    // the field must be `Some` — `expect` documents that contract for
-    // future readers and produces a panic, not a silent default, if the
-    // CLI ever forgets the check. Refactoring the function signature to
-    // accept `&QemuDef` directly is the cleaner long-term shape, but
-    // that's a wider blast radius than this phase needs.
     //
     // We pass the target's spec as the triple because for builtin
     // targets it is the triple (`x86_64-unknown-none`), and for custom
     // JSON specs it's the spec path — which users typically name with
     // the arch prefix, so the arch-prefix match in
     // `default_binary_for_target` still has a reasonable shot.
-    let qemu_def = model
-        .qemu
-        .as_ref()
-        .expect("CLI rejects an absent qemu block before reaching run()");
     let mut resolved_qemu = resolve_qemu(
         qemu_def,
         profile,
@@ -365,7 +391,7 @@ pub(super) fn invocation(
     )
 }
 
-impl QemuInvocation {
+impl Invocation {
     /// The command in a copy-pasteable form, for `--dry-run` and the
     /// CLI's `Running` line.
     pub fn command_line(&self) -> String {
@@ -378,9 +404,9 @@ impl QemuInvocation {
     }
 }
 
-/// Spawn QEMU from `invocation` and wait for it; see
+/// Start `invocation`'s program and wait for it; see
 /// [`spawn_and_wait`] for the timeout and signal handling.
-pub fn launch(invocation: QemuInvocation) -> Result<ExitStatus> {
+pub fn launch(invocation: Invocation) -> Result<ExitStatus> {
     spawn_and_wait(invocation)
 }
 
@@ -408,7 +434,8 @@ fn shell_quote(s: &str) -> String {
     out
 }
 
-/// Spawn the QEMU binary and wait for it, enforcing `invocation.timeout`
+/// Spawn the program (QEMU, or a command runner's) and wait for it,
+/// enforcing `invocation.timeout`
 /// and a SIGINT/SIGTERM trap that forwards the signal to the child.
 ///
 /// Stdio is inherited so the user sees serial output live. If the
@@ -429,7 +456,7 @@ fn shell_quote(s: &str) -> String {
 /// uses `SetConsoleCtrlHandler` which is a different mechanism and
 /// the runner is Unix-centric today. Wiring it up can come later if
 /// someone needs it.
-fn spawn_and_wait(invocation: QemuInvocation) -> Result<ExitStatus> {
+fn spawn_and_wait(invocation: Invocation) -> Result<ExitStatus> {
     let mut cmd = Command::new(&invocation.binary);
     cmd.args(&invocation.args);
     cmd.stdin(Stdio::inherit());
@@ -438,8 +465,9 @@ fn spawn_and_wait(invocation: QemuInvocation) -> Result<ExitStatus> {
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            Error::QemuBinaryNotFound {
-                binary: invocation.binary.clone(),
+            Error::RunnerProgramNotFound {
+                runner: invocation.runner.clone(),
+                program: invocation.binary.clone(),
             }
         } else {
             Error::QemuSpawnFailed {
@@ -478,7 +506,7 @@ fn spawn_and_wait(invocation: QemuInvocation) -> Result<ExitStatus> {
                     // and the kill, which is harmless.
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(Error::QemuTimeout);
+                    return Err(Error::RunTimeout);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
@@ -537,10 +565,12 @@ mod tests {
 
     #[test]
     fn command_line_quotes_each_argument() {
-        let inv = QemuInvocation {
+        let inv = Invocation {
             binary: "qemu-system-x86_64".into(),
             args: vec!["-m".into(), "128M".into(), "-append".into(), "a b".into()],
             timeout: None,
+            runner: "qemu".into(),
+            success_exit_code: None,
         };
         assert_eq!(
             inv.command_line(),

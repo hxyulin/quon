@@ -487,9 +487,10 @@ fn add_release_profile(fixture: &Path) {
     let gluon_rs = fixture.join("gluon.rs");
     let script = fs::read_to_string(&gluon_rs).expect("read gluon.rs");
     let script = script.replace(
-        "    cfg.qemu(",
-        "    cfg.profile(\"release\")\n        .target(target)\n        .opt_level(3)\n        \
-         .debug_info(false)\n        .run_binary(\"kernel\");\n\n    cfg.qemu(",
+        "    cfg.runner(\"qemu\")",
+        "    cfg.profile(\"release\")\n        .runner(\"qemu\")\n        .target(target)\n        \
+         .opt_level(3)\n        .debug_info(false)\n        .run_binary(\"kernel\");\n\n    \
+         cfg.runner(\"qemu\")",
     );
     fs::write(&gluon_rs, script).expect("write gluon.rs");
 }

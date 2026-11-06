@@ -104,10 +104,10 @@ break first.
 
 `-display` is only emitted if the user hasn't passed their own:
 
-- `qemu().display(Default)` deliberately omits `-display` so QEMU
+- `.display(Default)` deliberately omits `-display` so QEMU
   picks its compiled-in backend (cocoa on macOS, gtk/sdl on Linux).
-- `qemu().display(None)` emits `-display none` for headless / CI.
-- `qemu().display(Spec("gtk"))` emits `-display gtk`.
+- `.display(None)` emits `-display none` for headless / CI.
+- `.display(Spec("gtk"))` emits `-display gtk`.
 - No `display(...)` call falls back to `-display none` — headless
   is the dominant CI case historically.
 
@@ -117,7 +117,7 @@ break first.
 ahead of user extras so `gluon test -- <extras>` doesn't clobber it
 by accident. The `iosize=0x04` is fixed because QEMU's
 `isa-debug-exit` device takes a 32-bit write at that offset; the
-`port` is configurable per `qemu().test_exit_port(...)`. The
+`port` is configurable per QEMU runner with `.test_exit_port(...)`. The
 convention follows the Rust embedonomicon's bare-metal test exit
 recipe.
 

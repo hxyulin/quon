@@ -6,19 +6,25 @@ the build model, so the run environment is versioned with your source code.
 
 ## Configuring QEMU
 
-Add a `cfg.qemu()` block to your `gluon.rs`:
+Declare a QEMU [runner](./runners.md) in your `gluon.rs`, and name it
+in the profile:
 
-```rust
-cfg.qemu("qemu-system-x86_64")
+```rust,ignore
+cfg.runner("qemu")
+    .qemu("qemu-system-x86_64")
     .machine("q35")
     .memory(256)
     .cores(2)
     .serial_stdio()
     .boot_mode("direct");
+
+cfg.profile("dev").target(x86_64).run_binary("kernel").runner("qemu");
 ```
 
-The first argument is the QEMU executable name. It must be on your `$PATH`
-or specified as an absolute path.
+The argument to `.qemu(...)` is the QEMU executable name. It must be on
+your `$PATH` or specified as an absolute path. A project can declare
+several QEMU runners, for example one per machine, and pick one per
+profile.
 
 ### Builder methods
 
@@ -39,8 +45,9 @@ QEMU through the `isa-debug-exit` device cannot produce 0: QEMU exits
 with `(value << 1) | 1`, where `value` is what the kernel wrote to the
 port. Set the status that means success:
 
-```rust
-cfg.qemu("qemu-system-x86_64")
+```rust,ignore
+cfg.runner("qemu")
+    .qemu("qemu-system-x86_64")
     .extra_args(&["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
     .success_exit_code(33); // the kernel writes 0x10
 ```
@@ -66,8 +73,9 @@ Gluon resolves the boot mode using the following precedence (highest to
 lowest):
 
 1. **CLI flags:** `--uefi` or `--direct`
-2. **Profile settings:** `cfg.qemu().boot_mode("uefi")` in `gluon.rs`
-3. **Default:** direct kernel boot
+2. **Profile settings:** `profile.qemu_boot_mode("uefi")`
+3. **Runner settings:** `.boot_mode("uefi")` on the QEMU runner
+4. **Default:** direct kernel boot
 
 ### Direct boot
 

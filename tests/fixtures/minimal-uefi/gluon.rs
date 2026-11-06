@@ -12,6 +12,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     let target = cfg.target("x86_64-unknown-none");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -36,7 +37,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     // UEFI boot mode: OVMF pflash + ESP directory mounted via VVFAT.
     // OVMF paths are left unset here — tests inject them via the
     // OVMF_CODE / OVMF_VARS env vars so the fixture stays hermetic.
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu").qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(512)
         .cores(2)

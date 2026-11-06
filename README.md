@@ -68,6 +68,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.cargo_workspace(".");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -78,7 +79,8 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .package("kernel")
         .linker_script("crates/kernel/kernel.ld");
 
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu")
+        .qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(128)
         .cores(1)

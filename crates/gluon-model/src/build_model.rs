@@ -81,15 +81,11 @@ pub struct BuildModel {
     /// other build-step inputs).
     #[serde(default)]
     pub build_steps: Arena<BuildStepDef>,
-    /// QEMU configuration. `None` when the `gluon.rs` did not declare a
-    /// `cfg.qemu(...)` block. `gluon run` requires this to be `Some`
-    /// — the CLI rejects an absent qemu block at the entry point with
-    /// `gluon_core::Error::QemuNotConfigured` so the diagnostic points
-    /// the user at the missing config rather than crashing deeper in
-    /// argv assembly. `gluon build` and other non-run subcommands work
-    /// fine with `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub qemu: Option<QemuDef>,
+    /// Runners (`cfg.runner(...)`): how `gluon run`, the integration
+    /// tests and the boot tests execute a profile's run binary. A
+    /// profile picks one with `.runner(name)`.
+    #[serde(default)]
+    pub runners: Arena<RunnerDef>,
     /// Pinned downloads (`cfg.download(...)`, `cfg.limine(...)`).
     /// ESP and image entries refer to them by name.
     #[serde(default)]
@@ -288,6 +284,9 @@ pub struct ProfileDef {
     /// Resolved run binary. `None` means "use the profile's preset/default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_binary: Option<Handle<CrateDef>>,
+    /// The runner that executes the run binary. `None` inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<Handle<RunnerDef>>,
     pub preset: Option<String>,
     pub config: BTreeMap<String, ConfigValue>,
     pub qemu_memory: Option<u32>,
@@ -995,6 +994,41 @@ impl Named for ImageDef {
     fn name(&self) -> &str {
         &self.name
     }
+}
+
+/// A runner: how a profile's run binary, and the integration tests
+/// built for its target, are executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerDef {
+    pub name: String,
+    pub kind: RunnerKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RunnerDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// What a runner does with the binary it is given.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RunnerKind {
+    /// Boot it under QEMU: `cfg.runner(name).qemu(program)`.
+    Qemu(Box<QemuDef>),
+    /// Run a command: `cfg.runner(name).command([...])`.
+    Command(CommandRunnerDef),
+}
+
+/// A command runner. Each `{binary}` in `argv` is replaced by the
+/// binary's path; `gluon run -- <args>` appends the extra arguments.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandRunnerDef {
+    pub argv: Vec<String>,
+    /// The exit status that counts as success. `None` means 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_exit_code: Option<i32>,
 }
 
 /// QEMU configuration for `gluon run` and `gluon test`.

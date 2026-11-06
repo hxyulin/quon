@@ -27,6 +27,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     let target = cfg.target("x86_64-unknown-none");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -34,7 +35,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
     // QEMU config used by `gluon run`. Direct-kernel boot by default;
     // integration tests override to UEFI via --uefi.
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu").qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(256)
         .cores(1)

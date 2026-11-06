@@ -733,6 +733,10 @@ pub fn render(plan: &Plan) -> String {
     if let Ok(k) = &plan.kernel {
         let _ = write!(o, "\n        .run_binary({:?})", k.bin);
     }
+    // `render_qemu` declares the runner exactly when this holds.
+    if plan.boot.is_some() && qemu_for(t.arch()).is_some() {
+        o.push_str("\n        .runner(\"qemu\")");
+    }
     o.push_str(";\n\n");
 
     // Kernel group.
@@ -911,22 +915,23 @@ fn render_qemu(o: &mut String, arch: &str) {
         let _ = writeln!(
             o,
             "    // TODO: no QEMU machine is known for `{arch}`. Declare QEMU to use\n\
-             \x20   // `gluon run`:\n\
-             \x20   // cfg.qemu(\"qemu-system-<arch>\").machine(\"<machine>\").boot_mode(\"uefi\");\n"
+             \x20   // `gluon run`, and add `.runner(\"qemu\")` to the dev profile:\n\
+             \x20   // cfg.runner(\"qemu\").qemu(\"qemu-system-<arch>\").machine(\"<machine>\").boot_mode(\"uefi\");\n"
         );
         return;
     };
     if program == "qemu-system-x86_64" || program == "qemu-system-i386" {
         o.push_str(
             "    // TODO: if the kernel exits QEMU through isa-debug-exit, add the device and\n\
-             \x20   // the status QEMU then exits with, (<value> << 1) | 1, to cfg.qemu:\n\
+             \x20   // the status QEMU then exits with, (<value> << 1) | 1, to the runner:\n\
              \x20   //     .extra_args(&[\"-device\", \"isa-debug-exit,iobase=0xf4,iosize=0x04\"])\n\
              \x20   //     .success_exit_code(<status>)\n",
         );
     }
     let _ = writeln!(
         o,
-        "    cfg.qemu({program:?})\n\
+        "    cfg.runner(\"qemu\")\n\
+         \x20       .qemu({program:?})\n\
          \x20       .machine({machine:?})\n\
          \x20       .memory(256)\n\
          \x20       .cores(1)\n\
@@ -940,8 +945,10 @@ fn render_qemu_commented(o: &mut String, arch: &str) {
     let _ = writeln!(
         o,
         "    // TODO: to boot the kernel with `gluon run`, uncomment this block, or run\n\
-         \x20   // `gluon init --force --bootloader limine` (or `uefi`) to boot through UEFI:\n\
-         \x20   // cfg.qemu({program:?})\n\
+         \x20   // `gluon init --force --bootloader limine` (or `uefi`) to boot through UEFI.\n\
+         \x20   // Add `.runner(\"qemu\")` to the dev profile too.\n\
+         \x20   // cfg.runner(\"qemu\")\n\
+         \x20   //     .qemu({program:?})\n\
          \x20   //     .machine({machine:?})\n\
          \x20   //     .memory(256)\n\
          \x20   //     .cores(1)\n\
@@ -1302,10 +1309,11 @@ mod tests {
         let ws = kernel_workspace(&[]);
         let text = render(&infer(ws.path(), &opts()).unwrap());
         assert!(
-            text.contains("    // cfg.qemu(\"qemu-system-x86_64\")"),
+            text.contains("    //     .qemu(\"qemu-system-x86_64\")"),
             "{text}"
         );
-        assert!(!text.contains("    cfg.qemu("));
+        assert!(!text.contains("    cfg.runner("));
+        assert!(!text.contains("        .runner(\"qemu\")"), "{text}");
         assert!(!text.contains("cfg.esp("));
     }
 

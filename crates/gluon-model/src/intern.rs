@@ -11,13 +11,13 @@
 use crate::build_model::{
     BootTestDef, BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef,
     DepResolution, DownloadDef, EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef,
-    PipelineStep, ProfileDef, TargetSpec,
+    PipelineStep, ProfileDef, RunnerDef, TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
 use crate::raw_defs::{
     RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef,
-    RawEspDef, RawEspSource, RawGroupDef, RawPipelineDef, RawProfileDef,
+    RawEspDef, RawEspSource, RawGroupDef, RawPipelineDef, RawProfileDef, RawRunnerDef,
 };
 use crate::source::SourceSpan;
 use std::collections::BTreeMap;
@@ -58,7 +58,6 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         images: raw.images,
         config_options: raw.config_options,
         presets: raw.presets,
-        qemu: raw.qemu,
         downloads: raw.downloads,
         ..Default::default()
     };
@@ -74,10 +73,12 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         &mut model.crates,
         &mut diags,
     );
+    intern_runners(&raw.runners, &mut model.runners, &mut diags);
     intern_profiles(
         &raw.profiles,
         &model.targets,
         &model.crates,
+        &model.runners,
         &mut model.profiles,
         &mut diags,
     );
@@ -326,6 +327,7 @@ fn intern_profiles(
     raw: &Arena<RawProfileDef>,
     targets: &Arena<crate::build_model::TargetDef>,
     crates: &Arena<CrateDef>,
+    runners: &Arena<RunnerDef>,
     out: &mut Arena<ProfileDef>,
     diags: &mut Vec<InternDiagnostic>,
 ) {
@@ -357,6 +359,20 @@ fn intern_profiles(
             }
             h
         });
+        let runner_handle = p.runner.as_deref().and_then(|name| {
+            let h = runners.lookup(name);
+            if h.is_none() {
+                diags.push(
+                    InternDiagnostic::error(format!(
+                        "profile '{}' references unknown runner '{name}'; declare it with \
+                         `cfg.runner(\"{name}\")`",
+                        p.name
+                    ))
+                    .with_optional_span(p.span.clone()),
+                );
+            }
+            h
+        });
         let _ = out.insert(
             p.name.clone(),
             ProfileDef {
@@ -367,6 +383,7 @@ fn intern_profiles(
                 debug_info: p.debug_info,
                 lto: p.lto.clone(),
                 run_binary: run_binary_handle,
+                runner: runner_handle,
                 preset: p.preset.clone(),
                 config: p.config.clone(),
                 qemu_memory: p.qemu_memory,
@@ -430,6 +447,34 @@ fn intern_bootloader(
         config_file: raw.config_file.clone(),
         extras: raw.extras.clone(),
         span: raw.span.clone(),
+    }
+}
+
+fn intern_runners(
+    raw: &Arena<RawRunnerDef>,
+    out: &mut Arena<RunnerDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, r) in raw.iter() {
+        let Some(kind) = r.kind.clone() else {
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "runner(\"{}\") has no kind; add `.qemu(\"<program>\")` or \
+                     `.command([...])`",
+                    r.name
+                ))
+                .with_optional_span(r.span.clone()),
+            );
+            continue;
+        };
+        out.insert(
+            r.name.clone(),
+            RunnerDef {
+                name: r.name.clone(),
+                kind,
+                span: r.span.clone(),
+            },
+        );
     }
 }
 
@@ -825,5 +870,56 @@ mod tests {
             .unwrap();
         assert_eq!(t.profile, model.profiles.lookup("dev").unwrap());
         assert_eq!(model.boot_tests.iter().count(), 1);
+    }
+
+    #[test]
+    fn intern_resolves_runners_and_profile_runners() {
+        use crate::build_model::{CommandRunnerDef, RunnerKind};
+        let mut raw = fixture_with_target_and_profile();
+        raw.runners.insert(
+            "board".into(),
+            RawRunnerDef {
+                name: "board".into(),
+                kind: Some(RunnerKind::Command(CommandRunnerDef {
+                    argv: vec!["flash".into(), "{binary}".into()],
+                    success_exit_code: None,
+                })),
+                span: None,
+            },
+        );
+        raw.runners.insert(
+            "empty".into(),
+            RawRunnerDef {
+                name: "empty".into(),
+                kind: None,
+                span: None,
+            },
+        );
+        let dev = raw.profiles.lookup("dev").unwrap();
+        raw.profiles.get_mut(dev).unwrap().runner = Some("board".into());
+        raw.profiles.insert(
+            "other".into(),
+            RawProfileDef {
+                name: "other".into(),
+                runner: Some("missing".into()),
+                ..Default::default()
+            },
+        );
+        let (model, diags) = intern(raw);
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "runner(\"empty\") has no kind; add `.qemu(\"<program>\")` or `.command([...])`",
+                "profile 'other' references unknown runner 'missing'; declare it with \
+                 `cfg.runner(\"missing\")`",
+            ]
+        );
+        let dev = model
+            .profiles
+            .get(model.profiles.lookup("dev").unwrap())
+            .unwrap();
+        assert_eq!(dev.runner, model.runners.lookup("board"));
+        assert_eq!(model.runners.iter().count(), 1);
     }
 }

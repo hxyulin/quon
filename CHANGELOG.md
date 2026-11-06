@@ -27,6 +27,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed (runners)
 
+- **Runners replace `cfg.qemu(...)`.** `cfg.runner(name)` declares how
+  a profile's run binary is started, and `profile.runner(name)` picks
+  one, inherited through `inherits`. `gluon run`, the integration tests
+  and the boot tests all go through the profile's runner. Kinds:
+  - `.qemu(program)`: the old `cfg.qemu(...)` builder, unchanged. A
+    project can now declare several.
+  - `.command(&[...])`: runs the argv with each `{binary}` replaced by
+    the binary's path, with `gluon run -- <args>` appended, and passes
+    on status 0 or `.success_exit_code(n)`.
+
+  Migrate with `cfg.runner("qemu").qemu("qemu-system-x86_64")...` and
+  `.runner("qemu")` on each root profile. `--gdb` and the boot mode
+  flags fail on a command runner.
+- `Error::QemuNotConfigured` is now `Error::NoRunner { profile }`,
+  `QemuBinaryNotFound` is `RunnerProgramNotFound`, and `QemuTimeout` is
+  `RunTimeout`. `run::QemuInvocation` is `run::Invocation`, which
+  carries the runner's name and success status; `run_test` takes only
+  the invocation, and `TestOptions::qemu_args` is `runner_args`.
+- Failure lines name the runner: `FAILED (runner 'qemu' exited with 1)`.
 - **`profile.boot_binary(...)` is now `profile.run_binary(...)`.** A
   profile's binary need not boot: a host tool's is run directly.
   `Error::NoBootBinary` is now `Error::NoRunBinary`.

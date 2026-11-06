@@ -209,7 +209,7 @@ fn limine_releases_boot_the_example_kernel() {
         "gluon run succeeded with the wrong status:\n{output}"
     );
     assert!(
-        output.contains("QEMU exited with status 33, expected success status 35"),
+        output.contains("runner 'qemu' exited with status 33, expected success status 35"),
         "{output}"
     );
 }

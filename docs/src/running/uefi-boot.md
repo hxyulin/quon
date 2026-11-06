@@ -56,7 +56,7 @@ input files change.
 
 Gluon probes for OVMF firmware in this order:
 
-1. **Explicit paths** from `qemu().ovmf_code(...)` and `.ovmf_vars(...)`
+1. **Explicit paths** from the QEMU runner's `.ovmf_code(...)` and `.ovmf_vars(...)`
 2. **Environment variables:** `OVMF_CODE` and `OVMF_VARS`
 3. **Firmware beside QEMU:** `share/qemu/edk2-x86_64-code.fd` and
    `edk2-i386-vars.fd` next to the `bin/` directory of the QEMU binary
@@ -95,6 +95,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     let uefi_target = cfg.target("x86_64-unknown-uefi");
 
     cfg.profile("debug")
+        .runner("qemu")
         .target(uefi_target)
         .opt_level(0)
         .run_binary("bootloader");
@@ -118,7 +119,8 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.esp("default")
         .add("bootloader", "EFI/BOOT/BOOTX64.EFI");
 
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu")
+        .qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(256)
         .serial_stdio()
@@ -150,5 +152,5 @@ gluon run
 
 This compiles the kernel, compiles the bootloader (with the kernel path
 injected), assembles the ESP, and launches QEMU with OVMF firmware.
-The boot mode is set to UEFI in the `qemu()` configuration, so no
+The boot mode is set to UEFI on the QEMU runner, so no
 additional flags are needed.

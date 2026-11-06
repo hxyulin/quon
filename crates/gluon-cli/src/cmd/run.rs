@@ -1,4 +1,5 @@
-//! `gluon run` subcommand — builds the project and launches QEMU.
+//! `gluon run` subcommand: builds the project and starts the profile's
+//! run binary with its runner.
 //!
 //! See [`mod@gluon_core::run`] for the actual pipeline; this module is a
 //! thin adapter between [`crate::cli::RunArgs`] and
@@ -8,21 +9,15 @@ use super::CmdContext;
 use crate::cli::RunArgs;
 use crate::output::{BuildReporter, Counts, Shell, elapsed};
 use anyhow::{Result, bail};
-use gluon_core::Error as CoreError;
 use gluon_core::model::BootMode;
 use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 /// Execute the `gluon run` pipeline against the prepared context.
 pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shell) -> Result<()> {
-    // Reject an absent qemu block at the CLI boundary so the user gets
-    // a targeted diagnostic ("you forgot a `cfg.qemu(...)` block")
-    // instead of a panic from inside `gluon_core::run`. `model.qemu`
-    // is `Option<QemuDef>` since Stage 4 Phase G — the runner inside
-    // gluon-core relies on the CLI to do this gating before calling in.
-    if ctx.model.qemu.is_none() {
-        return Err(CoreError::QemuNotConfigured.into());
-    }
+    // Checked before the build, so a profile without a runner fails
+    // fast instead of after minutes of compiling.
+    let runner = gluon_core::run::profile_runner(&ctx.model, &ctx.resolved)?;
 
     // CLI boot-mode override. The three flags are mutually exclusive
     // in the clap schema; if none are set, we pass `None` so the
@@ -71,7 +66,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
             },
         );
     }
-    if args.gdb {
+    if args.gdb && runner.qemu().is_some() {
         // Printed before the spawn: QEMU halts waiting for the
         // debugger and prints nothing until one connects.
         shell.note("QEMU halted for GDB on :1234; connect with `target remote :1234`");
@@ -79,15 +74,16 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
     // The line marks where Gluon's output ends and the guest's starts.
     shell.status("Running", format_args!("`{command}`"));
     let started = Instant::now();
+    let program = format!("runner '{}'", prepared.invocation.runner);
+    let success_exit_code = prepared.invocation.success_exit_code;
     let status = gluon_core::run::launch(prepared.invocation)?;
 
-    let success_exit_code = ctx.model.qemu.as_ref().and_then(|q| q.success_exit_code);
-    check_exit_status(status, success_exit_code)?;
+    check_exit_status(&program, status, success_exit_code)?;
     // A failure is reported by the error instead.
     shell.status(
         "Exited",
         format_args!(
-            "QEMU with status {} after {}",
+            "{program} with status {} after {}",
             status.code().unwrap_or(0),
             elapsed(started.elapsed())
         ),
@@ -95,13 +91,17 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: RunArgs, shell: &mut Shel
     Ok(())
 }
 
-/// Map QEMU's exit status to the result of `gluon run`.
+/// Map the runner's exit status to the result of `gluon run`.
 ///
 /// With `success_exit_code` unset, only status 0 succeeds. With it set,
 /// only that status succeeds, so a kernel that leaves through
 /// `isa-debug-exit` can report success and every other status,
 /// including a plain 0 from a guest power-off, is a failure.
-fn check_exit_status(status: ExitStatus, success_exit_code: Option<i32>) -> Result<()> {
+fn check_exit_status(
+    program: &str,
+    status: ExitStatus,
+    success_exit_code: Option<i32>,
+) -> Result<()> {
     // Distinguish three non-success cases so the user gets a
     // diagnostic that tells them what actually happened:
     //
@@ -117,7 +117,7 @@ fn check_exit_status(status: ExitStatus, success_exit_code: Option<i32>) -> Resu
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(sig) = status.signal() {
-            bail!("QEMU killed by signal {sig}");
+            bail!("{program} killed by signal {sig}");
         }
     }
     let code = status.code().unwrap_or(-1);
@@ -125,9 +125,9 @@ fn check_exit_status(status: ExitStatus, success_exit_code: Option<i32>) -> Resu
         None if code == 0 => Ok(()),
         Some(expected) if code == expected => Ok(()),
         Some(expected) => {
-            bail!("QEMU exited with status {code}, expected success status {expected}")
+            bail!("{program} exited with status {code}, expected success status {expected}")
         }
-        None => bail!("QEMU exited with status {code}"),
+        None => bail!("{program} exited with status {code}"),
     }
 }
 
@@ -144,38 +144,39 @@ mod tests {
 
     #[test]
     fn zero_succeeds_without_success_code() {
-        assert!(check_exit_status(exited(0), None).is_ok());
+        assert!(check_exit_status("runner 'qemu'", exited(0), None).is_ok());
     }
 
     #[test]
     fn nonzero_fails_without_success_code() {
-        let err = check_exit_status(exited(33), None).unwrap_err();
-        assert_eq!(err.to_string(), "QEMU exited with status 33");
+        let err = check_exit_status("runner 'qemu'", exited(33), None).unwrap_err();
+        assert_eq!(err.to_string(), "runner 'qemu' exited with status 33");
     }
 
     #[test]
     fn success_code_succeeds() {
-        assert!(check_exit_status(exited(33), Some(33)).is_ok());
+        assert!(check_exit_status("runner 'qemu'", exited(33), Some(33)).is_ok());
     }
 
     #[test]
     fn other_status_fails_with_success_code() {
-        let err = check_exit_status(exited(35), Some(33)).unwrap_err();
+        let err = check_exit_status("runner 'qemu'", exited(35), Some(33)).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "QEMU exited with status 35, expected success status 33"
+            "runner 'qemu' exited with status 35, expected success status 33"
         );
     }
 
     #[test]
     fn zero_fails_with_success_code() {
-        assert!(check_exit_status(exited(0), Some(33)).is_err());
+        assert!(check_exit_status("runner 'qemu'", exited(0), Some(33)).is_err());
     }
 
     #[test]
     fn signal_fails_with_success_code() {
         // SIGKILL: the low 7 bits of a raw wait status hold the signal.
-        let err = check_exit_status(ExitStatus::from_raw(9), Some(33)).unwrap_err();
-        assert_eq!(err.to_string(), "QEMU killed by signal 9");
+        let err =
+            check_exit_status("runner 'qemu'", ExitStatus::from_raw(9), Some(33)).unwrap_err();
+        assert_eq!(err.to_string(), "runner 'qemu' killed by signal 9");
     }
 }

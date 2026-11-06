@@ -2,7 +2,7 @@
 //!
 //! `build_qemu_command` is a deterministic, side-effect-free function
 //! that takes a [`ResolvedQemu`] plus the boot-mode inputs and produces
-//! a [`QemuInvocation`] (binary + args + timeout). Keeping it pure
+//! an [`Invocation`] (binary + args + timeout). Keeping it pure
 //! means:
 //!
 //! - Unit tests for argv composition never need a real filesystem or a
@@ -18,19 +18,11 @@
 use super::boot_mode;
 use super::ovmf::ResolvedOvmf;
 use super::resolve::ResolvedQemu;
+use super::runner::Invocation;
 use crate::error::{Error, Result};
 use gluon_model::{BootMode, DisplayMode, SerialMode};
 use std::ffi::OsString;
 use std::path::Path;
-use std::time::Duration;
-
-/// A complete QEMU command plus execution metadata.
-#[derive(Debug, Clone)]
-pub struct QemuInvocation {
-    pub binary: String,
-    pub args: Vec<OsString>,
-    pub timeout: Option<Duration>,
-}
 
 /// Assemble the final QEMU argv.
 ///
@@ -57,7 +49,7 @@ pub fn build_qemu_command(
     extra_cli_args: &[OsString],
     test_mode: bool,
     skip_path_checks: bool,
-) -> Result<QemuInvocation> {
+) -> Result<Invocation> {
     if mode == BootMode::Uefi && ovmf.is_none() {
         return Err(Error::Config(
             "internal: build_qemu_command(UEFI) called without a resolved OVMF firmware".into(),
@@ -159,10 +151,13 @@ pub fn build_qemu_command(
     // 9. CLI pass-through (`gluon run -- <extra>`).
     args.extend(extra_cli_args.iter().cloned());
 
-    Ok(QemuInvocation {
+    Ok(Invocation {
         binary: resolved.binary.clone(),
         args,
         timeout: resolved.timeout,
+        // The caller fills in the runner's name and success status.
+        runner: String::new(),
+        success_exit_code: None,
     })
 }
 

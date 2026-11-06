@@ -17,7 +17,7 @@
 //! and QEMU's serial output goes to the terminal.
 
 use super::entry::{RunOptions, final_binary, invocation, launch, profile_target};
-use super::qemu_cmd::QemuInvocation;
+use super::runner::{Invocation, Runner, profile_runner};
 use crate::build_tests_with_reporter;
 use crate::compile::CompileCtx;
 use crate::error::{Error, Result};
@@ -55,9 +55,10 @@ pub struct TestOptions {
 
 impl TestOptions {
     /// The per-test timeout: `--timeout`, then the profile's
-    /// `test_timeout`, then `qemu().test_timeout(...)`, then
+    /// `test_timeout`, then the QEMU runner's `test_timeout(...)`, then
     /// [`DEFAULT_TIMEOUT`].
     pub fn timeout(&self, model: &BuildModel, resolved: &ResolvedConfig) -> Duration {
+        let qemu = profile_runner(model, resolved).ok().and_then(|r| r.qemu());
         self.timeout_override
             .or_else(|| {
                 resolved
@@ -66,21 +67,21 @@ impl TestOptions {
                     .map(|s| Duration::from_secs(s.into()))
             })
             .or_else(|| {
-                model
-                    .qemu
-                    .as_ref()
-                    .and_then(|q| q.test_timeout)
+                qemu.and_then(|q| q.test_timeout)
                     .map(|s| Duration::from_secs(s.into()))
             })
             .unwrap_or(DEFAULT_TIMEOUT)
     }
 
-    /// The QEMU arguments for every test: `qemu().test_extra_args(...)`,
-    /// then the ones after `--`.
-    pub fn qemu_args(&self, model: &BuildModel) -> Vec<std::ffi::OsString> {
-        model
-            .qemu
-            .iter()
+    /// The runner arguments for every test: a QEMU runner's
+    /// `test_extra_args(...)`, then the ones after `--`.
+    pub fn runner_args(
+        &self,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+    ) -> Vec<std::ffi::OsString> {
+        let qemu = profile_runner(model, resolved).ok().and_then(|r| r.qemu());
+        qemu.into_iter()
             .flat_map(|q| q.test_extra_args.iter().map(Into::into))
             .chain(self.extra_args.iter().cloned())
             .collect()
@@ -105,7 +106,7 @@ pub struct PreparedTest {
     /// The test's crate name: the test target's name, with `@test`
     /// appended when it collides with another unit.
     pub name: String,
-    pub invocation: QemuInvocation,
+    pub invocation: Invocation,
 }
 
 /// The integration tests in `resolved` whose name matches the filter,
@@ -163,35 +164,33 @@ pub fn prepare_tests(
     let boot = profile.run_binary.ok_or_else(|| Error::NoRunBinary {
         profile: profile.name.clone(),
     })?;
-    let qemu_def = model.qemu.as_ref().ok_or(Error::QemuNotConfigured)?;
-
-    // The boot mode decides how a test binary gets booted. Resolve it
-    // once, the same way `invocation` will.
-    let target = profile_target(model, resolved)?;
-    let boot_mode = resolve_qemu(
-        qemu_def,
-        profile,
-        &target.spec,
-        opts.boot_mode_override,
-        None,
-    )?
-    .boot_mode;
-    let esp = match boot_mode {
-        BootMode::Uefi => Some(boot_esp(model, boot)?),
-        BootMode::Direct => None,
-        BootMode::Bios => {
-            return Err(Error::Config(
-                "gluon test boots each test through UEFI or direct boot; BIOS boot reads a \
-                 disk image gluon cannot rebuild per test"
-                    .into(),
-            ));
+    // Under QEMU the boot mode decides how a test binary gets booted.
+    // Resolve it once, the same way `invocation` will. Other runners
+    // take the test binary as it is.
+    let esp = match profile_runner(model, resolved)? {
+        Runner::Qemu { def, .. } => {
+            let target = profile_target(model, resolved)?;
+            let boot_mode =
+                resolve_qemu(def, profile, &target.spec, opts.boot_mode_override, None)?.boot_mode;
+            match boot_mode {
+                BootMode::Uefi => Some(boot_esp(model, boot)?),
+                BootMode::Direct => None,
+                BootMode::Bios => {
+                    return Err(Error::Config(
+                        "gluon test boots each test through UEFI or direct boot; BIOS boot \
+                         reads a disk image gluon cannot rebuild per test"
+                            .into(),
+                    ));
+                }
+            }
         }
+        Runner::Command { .. } => None,
     };
 
     let run_opts = RunOptions {
         boot_mode_override: opts.boot_mode_override,
         timeout_override: Some(opts.timeout(model, resolved)),
-        extra_args: opts.qemu_args(model),
+        extra_args: opts.runner_args(model, resolved),
         workers: opts.workers,
         dry_run: opts.dry_run,
         no_build: opts.no_build,
@@ -225,22 +224,18 @@ pub fn prepare_tests(
     Ok(prepared)
 }
 
-/// Boot one integration test or boot test suite and wait for it. It
-/// passes when QEMU exits with `qemu().success_exit_code(...)`, 0 by
-/// default. A signal to gluon (Ctrl-C) is an error, so the caller stops
-/// the whole run.
-pub fn run_test(model: &BuildModel, invocation: QemuInvocation) -> Result<TestStatus> {
-    let success_exit_code = model
-        .qemu
-        .as_ref()
-        .and_then(|q| q.success_exit_code)
-        .unwrap_or(0);
+/// Run one integration test or boot test suite and wait for it. It
+/// passes when the runner exits with its success status, 0 by default.
+/// A signal to gluon (Ctrl-C) is an error, so the caller stops the
+/// whole run.
+pub fn run_test(invocation: Invocation) -> Result<TestStatus> {
+    let success_exit_code = invocation.success_exit_code.unwrap_or(0);
     match launch(invocation) {
         Ok(status) if status.code() == Some(success_exit_code) => Ok(TestStatus::Passed),
         Ok(status) => Ok(TestStatus::Failed {
             code: status.code(),
         }),
-        Err(Error::QemuTimeout) => Ok(TestStatus::TimedOut),
+        Err(Error::RunTimeout) => Ok(TestStatus::TimedOut),
         Err(e) => Err(e),
     }
 }

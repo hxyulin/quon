@@ -17,6 +17,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
     // A profile controls optimization, debug info, and which target to use.
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -32,7 +33,8 @@ pub fn config(cfg: &mut Config) -> Result<()> {
             .linker_script("crates/kernel/kernel.ld");
 
     // Optional: configure QEMU for `gluon run`.
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu")
+        .qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(128)
         .cores(1)
@@ -78,7 +80,7 @@ gluon configure      # Generate rust-project.json for your editor
 ## What happens during `gluon run`
 
 After a successful build, Gluon launches QEMU with the configuration from the
-`cfg.qemu()` block. The `run_binary("kernel")` setting in the profile tells Gluon
+`qemu` runner, which the profile names with `.runner("qemu")`. The `run_binary("kernel")` setting in the profile tells Gluon
 which crate's output to pass to QEMU as the kernel image. Serial output is
 forwarded to your terminal via `.serial_stdio()`.
 

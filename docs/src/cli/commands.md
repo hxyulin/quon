@@ -151,10 +151,12 @@ gluon vendor --check
 gluon vendor --force
 ```
 
-### `gluon run [flags] [-- QEMU_ARGS...]`
+### `gluon run [flags] [-- RUNNER_ARGS...]`
 
-Build the project and launch it in QEMU. Arguments after `--` are passed
-directly to QEMU.
+Build the project and start the profile's run binary with its
+[runner](../running/runners.md). Arguments after `--` are appended to
+the runner's: QEMU's, or a command runner's argv. `--gdb`, `--uefi`,
+`--direct` and `--bios` need a QEMU runner.
 
 | Flag | Short | Description |
 |------|-------|-------------|
@@ -189,7 +191,7 @@ selects integration and boot tests by name. See
 | `--boot` | | Run the boot tests |
 | `--uefi` | | Force UEFI boot (conflicts with `--direct`) |
 | `--direct` | | Force direct kernel boot |
-| `--timeout <SECS>` | `-T` | Per-boot timeout (default: the profile's `test_timeout`, then `qemu().test_timeout(...)`, then 60) |
+| `--timeout <SECS>` | `-T` | Per-boot timeout (default: the profile's `test_timeout`, then the QEMU runner's `.test_timeout(...)`, then 60) |
 | `--dry-run` | | Print each test's command without building or running it |
 | `--no-build` | | Skip the build step (use existing artifacts) |
 

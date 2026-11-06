@@ -5,8 +5,8 @@
 | Kind | What Gluon builds | Where it runs | Passes when |
 |------|-------------------|---------------|-------------|
 | Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
-| Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | QEMU, one boot per test | QEMU exits with the success status |
-| Boot tests | The run binary of the profile a `cfg.boot_test(...)` names | QEMU, one boot per suite | QEMU exits with the success status |
+| Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | The profile's [runner](./runners.md), one run per test | The runner exits with its success status |
+| Boot tests | The run binary of the profile a `cfg.boot_test(...)` names | That profile's runner, one run per suite | The runner exits with its success status |
 
 Host tests run first because they are the fastest and need no QEMU.
 Every run happens even when an earlier one fails, and `gluon test` ends
@@ -79,9 +79,10 @@ failed.
 
 A kernel's integration test is a whole kernel image: its own entry point,
 its own panic handler, and the kernel library linked in. `gluon test`
-builds each one and boots it under QEMU on its own, so a test starts
-from a fresh machine and may end the run, for example by faulting on
-purpose.
+builds each one and runs it with the profile's runner on its own, so
+under QEMU a test starts from a fresh machine and may end the run, for
+example by faulting on purpose. Under a QEMU runner with UEFI boot, each
+test boots from its own copy of the ESP.
 
 ### Declaring a test
 
@@ -167,7 +168,7 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 - **Direct boot:** the test binary is passed as `-kernel`.
 - **BIOS boot** is not supported, since the disk image is built once.
 
-A test passes when QEMU exits with `qemu().success_exit_code(...)`, or 0
+A test passes when the runner exits with its `.success_exit_code(...)`, or 0
 when that is unset. A test that runs past its timeout fails. Tests run
 one at a time, since they share the profile's OVMF variables file.
 
@@ -186,8 +187,8 @@ cfg.boot_test("ktest").profile("test");
 ```
 
 `gluon test` builds the suite's profile and boots its run binary as
-`gluon run -p <profile>` would. The suite passes when QEMU exits with
-`qemu().success_exit_code(...)`, or 0 when that is unset, within the
+`gluon run -p <profile>` would. The suite passes when the runner exits with
+the runner's `.success_exit_code(...)`, or 0 when that is unset, within the
 timeout. Gluon reports the suite as one result; the kernel's own
 output shows which of its tests ran. The filter selects suites by name
 and does not reach the kernel.

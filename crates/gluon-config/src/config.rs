@@ -1,12 +1,12 @@
 use crate::builders::{
     BootloaderBuilder, BuildStepBuilder, BuilderState, ConfigOptionBuilder, EspBuilder,
-    GroupBuilder, ImageBuilder, PresetBuilder, ProfileBuilder, ProjectBuilder, QemuBuilder,
-    RuleBuilder,
+    GroupBuilder, ImageBuilder, PresetBuilder, ProfileBuilder, ProjectBuilder, RuleBuilder,
+    RunnerBuilder,
 };
 use crate::error::{ConfigError, Result};
 use gluon_model::{
     BootloaderKind, ConfigOptionDef, ConfigType, ConfigValue, Handle, ImageDef, PresetDef,
-    ProjectDef, QemuDef, RawBootloaderDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef,
+    ProjectDef, RawBootloaderDef, RawBuildModel, RawBuildStepDef, RawEspDef, RawGroupDef,
     RawProfileDef, RuleDef, RuleHandler, TargetDef, TristateVal,
 };
 
@@ -295,41 +295,35 @@ impl Config {
         ProfileBuilder { cfg: self, state }
     }
 
-    /// Configure the singleton QEMU runner. Returns a chainable
-    /// [`QemuBuilder`] that populates the project-level `QemuDef`.
+    /// Declare a runner: how `gluon run`, the integration tests and the
+    /// boot tests execute a profile's run binary. Choose its kind with
+    /// [`RunnerBuilder::qemu`] or [`RunnerBuilder::command`], and attach
+    /// it to a profile with `profile.runner(name)`.
     ///
-    /// `qemu` is a **singleton**: calling this more than once pushes a
-    /// [`ConfigError`] into `self.diagnostics` and returns a builder in the
-    /// `Duplicate` state — all chained methods on the second (and subsequent)
-    /// builder become no-ops so the first call's values are preserved.
+    /// ```rust,ignore
+    /// cfg.runner("qemu").qemu("qemu-system-x86_64").machine("q35");
+    /// cfg.profile("dev").target(t).run_binary("kernel").runner("qemu");
+    /// ```
     ///
-    /// This mirrors the engine's exact diagnostic string:
-    /// `"qemu is defined more than once"`.
-    pub fn qemu(&mut self, program: &str) -> QemuBuilder<'_> {
-        let state = if self.raw.qemu.is_some() {
-            // Mirror engine wording verbatim.
-            self.diagnostics.push(ConfigError::new(
-                "qemu is defined more than once".to_string(),
-            ));
-            BuilderState::Duplicate {
-                name: program.into(),
+    /// A repeated name is reported, and the builder's methods do nothing.
+    pub fn runner(&mut self, name: &str) -> RunnerBuilder<'_> {
+        let (handle, inserted) = self.raw.runners.insert(
+            name.into(),
+            gluon_model::RawRunnerDef {
+                name: name.into(),
+                kind: None,
                 span: None,
-            }
+            },
+        );
+        let handle = if inserted {
+            Some(handle)
         } else {
-            // Allocate the `Some(QemuDef)` payload here so the chained
-            // builder methods can `.as_mut().unwrap()` safely (only the
-            // `Valid` arm reaches them).
-            self.raw.qemu = Some(QemuDef {
-                binary: Some(program.into()),
-                ..Default::default()
-            });
-            BuilderState::Valid {
-                state: (),
-                name: program.into(),
-                span: None,
-            }
+            self.diagnostics.push(ConfigError::new(format!(
+                "runner(\"{name}\") is defined more than once"
+            )));
+            None
         };
-        QemuBuilder { cfg: self, state }
+        RunnerBuilder { cfg: self, handle }
     }
 
     /// Configure the singleton bootloader. Returns a chainable

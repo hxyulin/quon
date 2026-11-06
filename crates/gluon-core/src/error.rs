@@ -110,13 +110,24 @@ pub enum Error {
     #[error("profile '{profile}' has no run_binary set — required by `gluon run`")]
     NoRunBinary { profile: String },
 
-    #[error("`gluon run` requires a `cfg.qemu(...)` block in your `gluon.rs`; none was found")]
-    QemuNotConfigured,
+    #[error(
+        "profile '{profile}' has no runner; declare one with `cfg.runner(\"<name>\")` and add \
+         `.runner(\"<name>\")` to the profile"
+    )]
+    NoRunner { profile: String },
 
     #[error(
-        "QEMU binary '{binary}' not found on PATH — install QEMU or set a different binary via `qemu(\"<path>\")`"
+        "runner '{runner}': program '{program}' not found on PATH; install it or change the \
+         program in `cfg.runner(\"{runner}\")`"
     )]
-    QemuBinaryNotFound { binary: String },
+    RunnerProgramNotFound { runner: String, program: String },
+
+    #[error("runner '{runner}' is a {kind} runner; {option} needs a QEMU runner")]
+    QemuOnlyOption {
+        runner: String,
+        kind: &'static str,
+        option: &'static str,
+    },
 
     #[error("no OVMF firmware found.\n{attempts}")]
     OvmfNotFound { attempts: String },
@@ -124,10 +135,10 @@ pub enum Error {
     #[error("ESP source path does not exist: {path}")]
     EspMissing { path: PathBuf },
 
-    #[error("QEMU run exceeded timeout and was killed")]
-    QemuTimeout,
+    #[error("the run exceeded its timeout and was killed")]
+    RunTimeout,
 
-    #[error("failed to spawn QEMU binary '{binary}': {source}")]
+    #[error("failed to spawn '{binary}': {source}")]
     QemuSpawnFailed {
         binary: String,
         #[source]

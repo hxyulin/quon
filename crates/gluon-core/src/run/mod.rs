@@ -26,13 +26,15 @@ pub mod host;
 pub mod ovmf;
 pub mod qemu_cmd;
 pub mod resolve;
+pub mod runner;
 mod test;
 
 pub use entry::{Prepared, RunOptions, launch, prepare};
 pub use host::{HostTest, host_tests};
 pub use ovmf::{ResolvedOvmf, resolve_ovmf};
-pub use qemu_cmd::{QemuInvocation, build_qemu_command};
+pub use qemu_cmd::build_qemu_command;
 pub use resolve::{ResolvedQemu, resolve_qemu};
+pub use runner::{Invocation, Runner, profile_runner};
 pub use test::{
     PreparedTest, TestOptions, TestStatus, build_tests, integration_tests, prepare_tests, run_test,
 };

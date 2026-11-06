@@ -1,11 +1,9 @@
-use crate::build_model::{
-    DownloadDef, ExternalDepDef, ImageDef, ProjectDef, QemuDef, RuleDef, TargetDef,
-};
+use crate::build_model::{DownloadDef, ExternalDepDef, ImageDef, ProjectDef, RuleDef, TargetDef};
 use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
     RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawCargoWorkspace, RawCrateDef, RawEspDef,
-    RawGroupDef, RawPipelineDef, RawProfileDef,
+    RawGroupDef, RawPipelineDef, RawProfileDef, RawRunnerDef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -46,8 +44,8 @@ pub struct RawBuildModel {
     pub images: Arena<ImageDef>,
     #[serde(default)]
     pub build_steps: Arena<RawBuildStepDef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub qemu: Option<QemuDef>,
+    #[serde(default)]
+    pub runners: Arena<RawRunnerDef>,
     #[serde(default)]
     pub downloads: Arena<DownloadDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -72,18 +70,13 @@ mod tests {
 
     #[test]
     fn singleton_options_default_to_none() {
-        // Phase G of Stage 4: bootloader and qemu are `Option<...>` and
-        // their absence is communicated by `None`, not by sidecar
-        // `*_was_set` flags.  `skip_serializing_if = "Option::is_none"`
-        // keeps the wire format empty when nothing is configured.
+        // The bootloader is an `Option`, and its absence is communicated
+        // by `None`, not by a sidecar `*_was_set` flag.
+        // `skip_serializing_if = "Option::is_none"` keeps the wire format
+        // empty when nothing is configured.
         let raw = RawBuildModel::default();
         assert!(raw.bootloader.is_none());
-        assert!(raw.qemu.is_none());
         let json = serde_json::to_string(&raw).expect("serde");
-        assert!(
-            !json.contains("\"qemu\""),
-            "absent qemu must not be serialized, got: {json}"
-        );
         assert!(
             !json.contains("\"bootloader\""),
             "absent bootloader must not be serialized, got: {json}"
@@ -93,7 +86,7 @@ mod tests {
         let de: RawBuildModel = serde_json::from_str(&json).expect("de");
         assert!(de.project.is_none());
         assert!(de.bootloader.is_none());
-        assert!(de.qemu.is_none());
+        assert!(de.runners.is_empty());
         assert!(de.kconfig_includes.is_empty());
         assert!(de.cargo_workspace.is_none());
     }

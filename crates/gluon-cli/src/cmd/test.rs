@@ -13,9 +13,9 @@ use super::CmdContext;
 use crate::cli::TestArgs;
 use crate::output::{BuildReporter, Counts, Shell};
 use anyhow::{Context, Result, bail};
-use gluon_core::model::{BootMode, BuildModel, ResolvedConfig};
-use gluon_core::run::qemu_cmd::QemuInvocation;
-use gluon_core::{Error as CoreError, TestStatus};
+use gluon_core::TestStatus;
+use gluon_core::model::{BootMode, ResolvedConfig};
+use gluon_core::run::Invocation;
 use std::ffi::OsString;
 use std::time::Duration;
 
@@ -91,10 +91,10 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: TestArgs, shell: &mut She
     } else {
         Vec::new()
     };
-    // Declared QEMU tests that cannot boot must fail the run, not be
-    // skipped.
-    if ctx.model.qemu.is_none() && (has_integration || !suites.is_empty()) {
-        return Err(CoreError::QemuNotConfigured.into());
+    // Declared integration tests that cannot run must fail the run, not
+    // be skipped. Each boot test checks its own profile's runner.
+    if has_integration {
+        gluon_core::run::profile_runner(&ctx.model, &ctx.resolved)?;
     }
 
     // One build of the active profile serves the host and integration
@@ -136,8 +136,7 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: TestArgs, shell: &mut She
             summary.as_ref(),
         )?;
         for test in tests {
-            run_qemu(
-                &ctx.model,
+            run_invocation(
                 "integration",
                 test.name,
                 test.invocation,
@@ -223,7 +222,7 @@ fn run_boot_test(
     let run_opts = gluon_core::RunOptions {
         boot_mode_override: opts.boot_mode_override,
         timeout_override: Some(opts.timeout(&ctx.model, &resolved)),
-        extra_args: opts.qemu_args(&ctx.model),
+        extra_args: opts.runner_args(&ctx.model, &resolved),
         workers: jobs,
         dry_run: opts.dry_run,
         no_build: opts.no_build,
@@ -244,8 +243,7 @@ fn run_boot_test(
             },
         );
     }
-    run_qemu(
-        &ctx.model,
+    run_invocation(
         "boot",
         name.to_string(),
         prepared.invocation,
@@ -255,13 +253,12 @@ fn run_boot_test(
     )
 }
 
-/// Boot one integration test or boot test and record the result, or
-/// print its command under `--dry-run`.
-fn run_qemu(
-    model: &BuildModel,
+/// Run one integration test or boot test with its runner and record the
+/// result, or print its command under `--dry-run`.
+fn run_invocation(
     kind: &'static str,
     name: String,
-    invocation: QemuInvocation,
+    invocation: Invocation,
     opts: &gluon_core::TestOptions,
     shell: &mut Shell,
     results: &mut Results,
@@ -271,11 +268,14 @@ fn run_qemu(
         return Ok(());
     }
     shell.status("Running", format_args!("{kind} test {name}"));
-    let status = gluon_core::run::run_test(model, invocation)?;
+    let runner = invocation.runner.clone();
+    let status = gluon_core::run::run_test(invocation)?;
     let result = match status {
         TestStatus::Passed => "ok".to_string(),
-        TestStatus::Failed { code: Some(code) } => format!("FAILED (QEMU exited with {code})"),
-        TestStatus::Failed { code: None } => "FAILED (QEMU was killed)".to_string(),
+        TestStatus::Failed { code: Some(code) } => {
+            format!("FAILED (runner '{runner}' exited with {code})")
+        }
+        TestStatus::Failed { code: None } => format!("FAILED (runner '{runner}' was killed)"),
         TestStatus::TimedOut => "FAILED (timed out)".to_string(),
     };
     eprintln!("{kind} test {name} ... {result}");

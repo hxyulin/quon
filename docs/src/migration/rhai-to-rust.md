@@ -22,7 +22,7 @@ covers the mechanical translation. For the rationale, see the
 | `crate.deps(#{ ext: #{ crate: "c", features: ["x"] } })` | `crate.dep_with("ext", "c", \|b\| { b.features(&["x"]); })` |
 | `crate.cfg_flags(["a", "b"])`                 | `crate.cfg_flag("a").cfg_flag("b")`             |
 | `crate.artifact_env("K", "kernel")`           | `crate.artifact_env("K", "kernel")`             |
-| `qemu("qemu").boot_mode("uefi")`              | `cfg.qemu("qemu").boot_mode("uefi")`            |
+| `qemu("qemu").boot_mode("uefi")`              | `cfg.runner("qemu").qemu("qemu").boot_mode("uefi")`, plus `.runner("qemu")` on the profile |
 | `esp("default").add("bl", "EFI/BOOT/BOOTX64.EFI")` | `cfg.esp("default").add("bl", "EFI/BOOT/BOOTX64.EFI")` |
 | `dependency("d").path("../d")`                | `cfg.dependency("d").path("../d")`              |
 | `config_bool("F").default_value(true)`        | `cfg.config_bool("F").default_value(ConfigValue::Bool(true))` |

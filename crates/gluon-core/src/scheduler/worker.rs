@@ -666,11 +666,12 @@ fn error_message(e: &Error) -> String {
         // Run-path errors never reach the scheduler today; fall back to the
         // Display impl so they still render sensibly if they ever do.
         other @ (Error::NoRunBinary { .. }
-        | Error::QemuBinaryNotFound { .. }
-        | Error::QemuNotConfigured
+        | Error::NoRunner { .. }
+        | Error::RunnerProgramNotFound { .. }
+        | Error::QemuOnlyOption { .. }
         | Error::OvmfNotFound { .. }
         | Error::EspMissing { .. }
-        | Error::QemuTimeout
+        | Error::RunTimeout
         | Error::QemuSpawnFailed { .. }
         | Error::ObjcopySpawnFailed { .. }
         | Error::UnknownQemuTarget { .. }

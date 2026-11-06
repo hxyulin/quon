@@ -65,10 +65,20 @@ impl<'cfg> ProfileBuilder<'cfg> {
         self
     }
 
-    /// Set the name of the binary that is booted by this profile.
+    /// The binary `gluon run` starts with the profile's runner. With a
+    /// run binary set, the profile builds only the crates it reaches.
     pub fn run_binary(mut self, name: &str) -> Self {
         let n = name.to_string();
         self.modify(|p| p.run_binary = Some(n));
+        self
+    }
+
+    /// The runner, declared with `cfg.runner(name)`, that executes the
+    /// run binary, the integration tests and the boot tests. Inherited
+    /// through [`inherits`](Self::inherits).
+    pub fn runner(mut self, name: &str) -> Self {
+        let n = name.to_string();
+        self.modify(|p| p.runner = Some(n));
         self
     }
 

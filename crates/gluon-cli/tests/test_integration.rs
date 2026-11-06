@@ -105,7 +105,7 @@ fn reports_each_test_and_fails_when_one_fails() {
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("integration test boot ... ok"), "{err}");
     assert!(
-        err.contains("integration test fails ... FAILED (QEMU exited with 1)"),
+        err.contains("integration test fails ... FAILED (runner 'qemu' exited with 1)"),
         "{err}"
     );
     // A failure does not stop the later runs.

@@ -186,7 +186,7 @@ fn gluon_run_uefi_dry_run_against_minimal_uefi() {
 fn gluon_run_cli_uefi_flag_overrides_direct_profile() {
     // Start from the `minimal` fixture (direct mode) and force UEFI
     // via the CLI flag, supplying OVMF via env vars. Should produce
-    // a UEFI argv even though the fixture's qemu() block never
+    // a UEFI argv even though the fixture's QEMU runner never
     // called .boot_mode("uefi").
     let (_tmp, fixture) = setup_fixture("minimal");
     let code = fixture.join("OVMF_CODE.fd");
@@ -220,16 +220,14 @@ fn gluon_run_cli_uefi_flag_overrides_direct_profile() {
 }
 
 #[test]
-fn gluon_run_without_qemu_block_errors_clearly() {
-    // The `minimal` fixture declares a `cfg.qemu(...)` block; strip it
-    // and confirm `gluon run` rejects the config at the CLI boundary
-    // with the `QemuNotConfigured` diagnostic. We use `--dry-run` so
-    // the test is hermetic (no rustc/QEMU); the gating happens before
-    // any of that machinery anyway, but `--dry-run` is also the cheapest
-    // way to make sure a regression that moved the check past the
-    // build step would still fail this test.
+fn gluon_run_without_runner_errors_clearly() {
+    // The `minimal` fixture's dev profile names the `qemu` runner; drop
+    // that and confirm `gluon run` rejects the profile with the
+    // `NoRunner` diagnostic. `--dry-run` keeps the test hermetic, and
+    // would still catch a regression that moved the check past the
+    // build step.
     let (_tmp, fixture) = setup_fixture("minimal");
-    strip_qemu_block(&fixture);
+    strip_profile_runner(&fixture);
 
     let output = gluon_command(&fixture)
         .args(["run", "--dry-run"])
@@ -238,14 +236,14 @@ fn gluon_run_without_qemu_block_errors_clearly() {
 
     assert!(
         !output.status.success(),
-        "gluon run should fail when cfg.qemu(...) is missing, status={:?}, stdout=\n{}",
+        "gluon run should fail when the profile has no runner, status={:?}, stdout=\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("requires a `cfg.qemu(...)` block"),
-        "expected QemuNotConfigured wording in stderr, got: {stderr}"
+        stderr.contains("profile 'dev' has no runner"),
+        "expected NoRunner wording in stderr, got: {stderr}"
     );
 }
 
@@ -387,39 +385,15 @@ fn rewrite_qemu_binary(fixture: &Path, new_binary: &str) {
     fs::write(&rs_path, rewritten).expect("write gluon.rs");
 }
 
-/// Strip the entire `cfg.qemu(...)` chained call from the fixture's
-/// `gluon.rs`, returning a `gluon.rs` that builds and resolves but
-/// has no QEMU configuration. Used to exercise the
-/// `Error::QemuNotConfigured` CLI-boundary check.
-///
-/// The fixture's qemu chain spans multiple lines and ends with
-/// `.serial_stdio();`. Rather than fight with newline-sensitive regex,
-/// we slice between two known anchors (`cfg.qemu(` and the next
-/// semicolon at column zero or as the line's last non-whitespace char).
-/// The minimal fixture is shaped specifically to make this trivial.
-fn strip_qemu_block(fixture: &Path) {
+/// Drop `.runner("qemu")` from the fixture's dev profile, leaving the
+/// runner declared but unused, so the profile has no runner.
+fn strip_profile_runner(fixture: &Path) {
     let rs_path = fixture.join("gluon.rs");
     let original = fs::read_to_string(&rs_path).expect("read gluon.rs");
-    let start = original
-        .find("cfg.qemu(")
-        .expect("fixture must contain a `cfg.qemu(` call to strip");
-    // Find the first `;` after the `cfg.qemu(` opening. The chain
-    // ending in `;` terminates the statement; everything between is
-    // method calls + whitespace. Tolerant of multi-line chains.
-    let end_rel = original[start..]
-        .find(';')
-        .expect("cfg.qemu(...) statement must end with `;`");
-    let end = start + end_rel + 1; // include the `;`
-    let mut rewritten = String::with_capacity(original.len());
-    rewritten.push_str(&original[..start]);
-    rewritten.push_str(&original[end..]);
+    let rewritten = original.replacen("        .runner(\"qemu\")\n", "", 1);
     assert_ne!(
         original, rewritten,
-        "strip_qemu_block produced an unchanged file — fixture shape may have drifted"
-    );
-    assert!(
-        !rewritten.contains("cfg.qemu("),
-        "strip_qemu_block left a `cfg.qemu(` behind:\n{rewritten}"
+        "expected the fixture's profile to name the qemu runner"
     );
     fs::write(&rs_path, rewritten).expect("write gluon.rs");
 }
@@ -714,9 +688,109 @@ fn spawn_real_qemu_smoke() {
     assert!(!output.status.success(), "expected non-zero exit");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let is_timeout = stderr.to_lowercase().contains("timeout");
-    let is_qemu_load_error = stderr.contains("QEMU exited with status");
+    let is_qemu_load_error = stderr.contains("runner 'qemu' exited with status");
     assert!(
         is_timeout || is_qemu_load_error,
         "expected either a timeout or a QEMU load error in stderr, got: {stderr}"
+    );
+}
+
+/// Point the fixture's dev profile at a command runner declared next to
+/// its QEMU runner.
+fn use_command_runner(fixture: &Path, argv: &str) {
+    let rs_path = fixture.join("gluon.rs");
+    let original = fs::read_to_string(&rs_path).expect("read gluon.rs");
+    let rewritten = original
+        .replacen(
+            "        .runner(\"qemu\")\n",
+            "        .runner(\"board\")\n",
+            1,
+        )
+        .replacen(
+            "    cfg.runner(\"qemu\")",
+            &format!("    cfg.runner(\"board\").command(&{argv});\n    cfg.runner(\"qemu\")"),
+            1,
+        );
+    assert_ne!(original, rewritten, "fixture shape drifted");
+    fs::write(&rs_path, rewritten).expect("write gluon.rs");
+}
+
+/// A command runner runs its argv with `{binary}` filled in and the
+/// arguments after `--` appended. QEMU-only flags are refused.
+#[test]
+fn command_runner_runs_its_argv_with_the_binary() {
+    let (_tmp, fixture) = setup_fixture("minimal");
+    use_command_runner(&fixture, r#"["flash", "--image", "{binary}"]"#);
+
+    let output = gluon_command(&fixture)
+        .args(["run", "--dry-run", "--", "--speed", "4000"])
+        .output()
+        .expect("spawn gluon run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(line.starts_with("flash --image /"), "{line}");
+    assert!(line.ends_with("/kernel --speed 4000"), "{line}");
+
+    for flag in ["--gdb", "--uefi"] {
+        let output = gluon_command(&fixture)
+            .args(["run", "--dry-run", flag])
+            .output()
+            .expect("spawn gluon run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{flag} should fail");
+        assert!(
+            stderr.contains("runner 'board' is a command runner")
+                && stderr.contains("needs a QEMU runner"),
+            "{flag}: {stderr}"
+        );
+    }
+}
+
+/// `gluon run` judges a command runner by its exit status and its
+/// `success_exit_code`.
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn command_runner_exit_status_decides_the_run() {
+    if !rustc_available("command_runner_exit_status_decides_the_run") {
+        return;
+    }
+    let (_tmp, fixture) = setup_fixture("minimal");
+    seed_sysroot(&fixture);
+    use_command_runner(
+        &fixture,
+        // Exits 7 when the built binary exists, so a run that never
+        // built it, or passed the wrong path, fails differently.
+        r#"["sh", "-c", "test -f \"$0\" && exit 7", "{binary}"]"#,
+    );
+    let output = gluon_command(&fixture)
+        .args(["run"])
+        .output()
+        .expect("spawn gluon run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("runner 'board' exited with status 7"),
+        "{stderr}"
+    );
+
+    // Exit status 7 is the success status once the runner says so.
+    let rs_path = fixture.join("gluon.rs");
+    let text = fs::read_to_string(&rs_path).unwrap();
+    fs::write(
+        &rs_path,
+        text.replacen("\"{binary}\"]);", "\"{binary}\"]).success_exit_code(7);", 1),
+    )
+    .unwrap();
+    let output = gluon_command(&fixture)
+        .args(["run", "--no-build"])
+        .output()
+        .expect("spawn gluon run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("Exited runner 'board' with status 7"),
+        "{stderr}"
     );
 }

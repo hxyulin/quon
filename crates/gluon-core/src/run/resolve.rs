@@ -262,6 +262,7 @@ mod tests {
             debug_info: false,
             lto: None,
             run_binary: None,
+            runner: None,
             qemu_memory: None,
             qemu_cores: None,
             qemu_extra_args: Vec::new(),

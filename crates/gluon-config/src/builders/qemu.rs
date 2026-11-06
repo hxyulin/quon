@@ -1,38 +1,49 @@
-//! Chainable builder for the singleton `QemuDef`.
+//! Chainable builder for a QEMU runner, returned by
+//! [`crate::builders::RunnerBuilder::qemu`].
 
-use crate::builders::BuilderState;
 use crate::config::Config;
 use crate::error::ConfigError;
-use gluon_model::{BootMode, DiskSource, DisplayMode, EspSource, SerialMode};
+use gluon_model::{
+    BootMode, DiskSource, DisplayMode, EspSource, Handle, QemuDef, RawRunnerDef, RunnerKind,
+    SerialMode,
+};
 use std::path::PathBuf;
 
-/// Chainable builder returned by [`Config::qemu`].
-///
-/// There is no arena for the singleton `QemuDef`; the handle type
-/// parameter is `()`. All chained methods access `cfg.raw.qemu`
-/// directly via [`modify`].
+/// Chainable builder for the [`QemuDef`] of one runner. Its methods do
+/// nothing when the runner's name was a repeat, which
+/// [`Config::runner`] reports as a diagnostic.
 pub struct QemuBuilder<'cfg> {
     pub(crate) cfg: &'cfg mut Config,
-    /// Singleton: no arena handle to capture — `state` carries `()`.
-    pub(crate) state: BuilderState<()>,
+    /// `None` for a repeated runner name.
+    pub(crate) handle: Option<Handle<RawRunnerDef>>,
 }
 
 impl<'cfg> QemuBuilder<'cfg> {
-    /// Apply `f` to the `QemuDef` if this builder is `Valid`.
-    ///
-    /// Short-circuits silently when in `Duplicate` state so the first
-    /// call's values are never overwritten by a second call. The
-    /// `as_mut().unwrap()` is safe because `Config::qemu` populates
-    /// `Some(QemuDef)` before returning a `Valid` builder; `Duplicate`
-    /// short-circuits and never touches the field.
-    fn modify<F: FnOnce(&mut gluon_model::QemuDef)>(&mut self, f: F) {
-        if !self.state.is_duplicate() {
-            f(self
-                .cfg
-                .raw
-                .qemu
-                .as_mut()
-                .expect("Valid qemu builder always has Some(QemuDef)"));
+    /// The runner's `QemuDef`. `RunnerBuilder::qemu` sets the kind
+    /// before returning this builder, so it is `Some` whenever the
+    /// handle is.
+    fn qemu_mut(&mut self) -> Option<&mut QemuDef> {
+        let h = self.handle?;
+        match self.cfg.raw.runners.get_mut(h)?.kind.as_mut()? {
+            RunnerKind::Qemu(q) => Some(q.as_mut()),
+            RunnerKind::Command(_) => None,
+        }
+    }
+
+    fn modify<F: FnOnce(&mut QemuDef)>(&mut self, f: F) {
+        if let Some(q) = self.qemu_mut() {
+            f(q);
+        }
+    }
+
+    /// Set the ESP once; a second `esp_dir` or `esp_image` is reported.
+    fn set_esp(&mut self, esp: EspSource) {
+        match self.qemu_mut() {
+            Some(q) if q.esp.is_none() => q.esp = Some(esp),
+            Some(_) => self.cfg.diagnostics.push(ConfigError::new(
+                "qemu: esp_dir / esp_image may only be called once per runner".to_string(),
+            )),
+            None => {}
         }
     }
 
@@ -113,8 +124,8 @@ impl<'cfg> QemuBuilder<'cfg> {
                 // message regardless of whether they use the DSL or the Rust API.
                 // Diagnostic guard is manual here because `modify()` only gates the
                 // model write; pushing a diagnostic when the builder is Duplicate
-                // would falsely accuse the second `qemu()` caller of the parsing error.
-                if !self.state.is_duplicate() {
+                // would falsely accuse the second `runner()` caller of the parsing error.
+                if self.handle.is_some() {
                     self.cfg.diagnostics.push(ConfigError::new(format!(
                         "qemu.boot_mode: expected \"direct\", \"uefi\", or \"bios\", \
                          got \"{other}\""
@@ -147,36 +158,8 @@ impl<'cfg> QemuBuilder<'cfg> {
     ///
     /// Mutually exclusive with [`esp_image`]: the first call wins and the
     /// second pushes a diagnostic (mirroring the engine's behaviour).
-    pub fn esp_dir(self, path: impl Into<PathBuf>) -> Self {
-        if !self.state.is_duplicate() {
-            // `as_ref().unwrap()`: Valid builders always carry Some(QemuDef).
-            // We read `esp` first (immutable borrow), then drop that borrow
-            // before either pushing a diagnostic on `self.cfg.diagnostics`
-            // or mutating `self.cfg.raw.qemu`. Doing it in one expression
-            // would conflict because both targets sit under `self.cfg`.
-            let already_set = self
-                .cfg
-                .raw
-                .qemu
-                .as_ref()
-                .expect("Valid qemu builder always has Some(QemuDef)")
-                .esp
-                .is_some();
-            if already_set {
-                // Mirror engine wording verbatim.
-                self.cfg.diagnostics.push(ConfigError::new(
-                    "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
-                ));
-            } else {
-                let p = path.into();
-                self.cfg
-                    .raw
-                    .qemu
-                    .as_mut()
-                    .expect("Valid qemu builder always has Some(QemuDef)")
-                    .esp = Some(EspSource::Dir(p));
-            }
-        }
+    pub fn esp_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.set_esp(EspSource::Dir(path.into()));
         self
     }
 
@@ -184,31 +167,8 @@ impl<'cfg> QemuBuilder<'cfg> {
     ///
     /// Mutually exclusive with [`esp_dir`]: the first call wins and the
     /// second pushes a diagnostic.
-    pub fn esp_image(self, path: impl Into<PathBuf>) -> Self {
-        if !self.state.is_duplicate() {
-            let already_set = self
-                .cfg
-                .raw
-                .qemu
-                .as_ref()
-                .expect("Valid qemu builder always has Some(QemuDef)")
-                .esp
-                .is_some();
-            if already_set {
-                // Mirror engine wording verbatim.
-                self.cfg.diagnostics.push(ConfigError::new(
-                    "qemu: esp_dir / esp_image may only be called once per profile".to_string(),
-                ));
-            } else {
-                let p = path.into();
-                self.cfg
-                    .raw
-                    .qemu
-                    .as_mut()
-                    .expect("Valid qemu builder always has Some(QemuDef)")
-                    .esp = Some(EspSource::Image(p));
-            }
-        }
+    pub fn esp_image(mut self, path: impl Into<PathBuf>) -> Self {
+        self.set_esp(EspSource::Image(path.into()));
         self
     }
 
@@ -231,13 +191,22 @@ impl<'cfg> QemuBuilder<'cfg> {
 #[cfg(test)]
 mod tests {
     use crate::Config;
-    use gluon_model::{BootMode, EspSource, SerialMode};
+    use gluon_model::{BootMode, EspSource, QemuDef, RunnerKind, SerialMode};
     use std::path::PathBuf;
+
+    fn qemu<'a>(cfg: &'a Config, name: &str) -> &'a QemuDef {
+        let h = cfg.raw.runners.lookup(name).expect("runner declared");
+        match cfg.raw.runners.get(h).and_then(|r| r.kind.as_ref()) {
+            Some(RunnerKind::Qemu(q)) => q,
+            other => panic!("expected a QEMU runner, got {other:?}"),
+        }
+    }
 
     #[test]
     fn qemu_typed_setters_round_trip() {
         let mut cfg = Config::new();
-        cfg.qemu("qemu-system-x86_64")
+        cfg.runner("vm")
+            .qemu("qemu-system-x86_64")
             .machine("q35")
             .memory(512)
             .cores(4)
@@ -247,7 +216,7 @@ mod tests {
             .ovmf_vars("/opt/ovmf/VARS.fd")
             .esp_dir("./build/esp");
 
-        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
+        let q = qemu(&cfg, "vm");
         assert_eq!(q.binary.as_deref(), Some("qemu-system-x86_64"));
         assert_eq!(q.machine.as_deref(), Some("q35"));
         assert_eq!(q.memory_mb, Some(512));
@@ -263,22 +232,19 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_qemu_short_circuits_and_pushes_diagnostic() {
+    fn duplicate_runner_short_circuits_and_pushes_diagnostic() {
         let mut cfg = Config::new();
-        cfg.qemu("a").machine("q35");
-        cfg.qemu("b").machine("pc");
-        let q = cfg.raw.qemu.as_ref().expect("qemu populated");
-        assert_eq!(
-            q.binary.as_deref(),
-            Some("a"),
-            "first call's binary preserved"
-        );
+        cfg.runner("vm").qemu("a").machine("q35");
+        cfg.runner("vm").qemu("b").machine("pc").boot_mode("legacy");
+        let q = qemu(&cfg, "vm");
+        assert_eq!(q.binary.as_deref(), Some("a"), "first call's binary kept");
         assert_eq!(
             q.machine.as_deref(),
             Some("q35"),
             "second call's machine must NOT clobber the first"
         );
-        assert_eq!(cfg.diagnostics.len(), 1);
+        // Only the repeat is reported, not the repeat's bad boot mode.
+        assert_eq!(cfg.diagnostics.len(), 1, "{:?}", cfg.diagnostics);
         assert!(
             cfg.diagnostics[0]
                 .message
@@ -289,10 +255,10 @@ mod tests {
     #[test]
     fn qemu_boot_mode_unknown_pushes_diagnostic() {
         let mut cfg = Config::new();
-        cfg.qemu("a").boot_mode("legacy");
+        cfg.runner("vm").qemu("a").boot_mode("legacy");
         assert!(cfg.diagnostics.iter().any(|d| d.message.contains("legacy")));
         assert_eq!(
-            cfg.raw.qemu.as_ref().expect("qemu populated").boot_mode,
+            qemu(&cfg, "vm").boot_mode,
             None,
             "unknown boot_mode must NOT be silently ignored AND must not be set"
         );
@@ -301,9 +267,9 @@ mod tests {
     #[test]
     fn qemu_esp_mutually_exclusive() {
         let mut cfg = Config::new();
-        cfg.qemu("a").esp_dir("a").esp_image("b.img");
+        cfg.runner("vm").qemu("a").esp_dir("a").esp_image("b.img");
         // First call wins.
-        match &cfg.raw.qemu.as_ref().expect("qemu populated").esp {
+        match &qemu(&cfg, "vm").esp {
             Some(EspSource::Dir(p)) => assert_eq!(p, &PathBuf::from("a")),
             other => panic!("expected EspSource::Dir(\"a\"), got {other:?}"),
         }
@@ -317,11 +283,12 @@ mod tests {
     #[test]
     fn extra_args_appends_across_calls() {
         let mut cfg = Config::new();
-        cfg.qemu("q")
+        cfg.runner("vm")
+            .qemu("q")
             .extra_args(&["-display", "none"])
             .extra_args(&["-no-reboot"]);
         assert_eq!(
-            cfg.raw.qemu.as_ref().expect("qemu populated").extra_args,
+            qemu(&cfg, "vm").extra_args,
             vec![
                 "-display".to_string(),
                 "none".to_string(),

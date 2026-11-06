@@ -35,6 +35,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     let target_uefi = cfg.target("x86_64-unknown-uefi");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target_uefi)
         .opt_level(0)
         .debug_info(true)
@@ -75,7 +76,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     //
     // Note: no `.esp_dir(...)` — Step 5's auto-wire logic picks up the
     // single `esp("default")` declaration above.
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu").qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(256)
         .cores(1)

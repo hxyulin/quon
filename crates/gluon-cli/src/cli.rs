@@ -133,13 +133,14 @@ pub enum Command {
     /// result. `--check` verifies without touching disk; `--force`
     /// bypasses the fingerprint-match fast path.
     Vendor(VendorArgs),
-    /// Build the project and launch the run binary under QEMU.
+    /// Build the project and start the run binary with the profile's
+    /// runner.
     ///
-    /// Picks between direct-kernel boot (`-kernel <elf>`) and UEFI
-    /// (OVMF pflash). The boot mode is selected by (in precedence
-    /// order): `--uefi`/`--direct` CLI flags → the profile's
-    /// `qemu().boot_mode(...)` → direct. Extra arguments after `--`
-    /// are passed through to QEMU verbatim.
+    /// A QEMU runner picks between direct-kernel boot (`-kernel <elf>`)
+    /// and UEFI (OVMF pflash): `--uefi`/`--direct` flags, then the
+    /// profile's `qemu_boot_mode(...)`, then the runner's
+    /// `.boot_mode(...)`, then direct. A command runner runs its argv.
+    /// Extra arguments after `--` are appended to the runner's.
     Run(RunArgs),
     /// Build and run the tests: host tests, then integration tests,
     /// then boot tests.
@@ -149,8 +150,8 @@ pub enum Command {
     /// tests are the `harness = false` targets in `tests/` of packages
     /// named with `group.package(...)`; each boots the way `gluon run`
     /// boots the run binary, with the test binary in its place.
-    /// Boot tests (`cfg.boot_test(...)`) boot a profile's run binary.
-    /// QEMU runs pass when QEMU exits with the success status. Every
+    /// Boot tests (`cfg.boot_test(...)`) run a profile's run binary.
+    /// Both pass when the runner exits with its success status. Every
     /// run happens even when an earlier one fails.
     Test(TestArgs),
     /// Inspect the Cargo workspace as Gluon reads it. Debug output only.
@@ -265,22 +266,22 @@ pub struct RunArgs {
     /// `qemu().boot_mode(...)` setting.
     #[arg(long)]
     pub bios: bool,
-    /// Wall-clock timeout in seconds. QEMU is killed on expiry and
+    /// Wall-clock timeout in seconds. The runner is killed on expiry and
     /// gluon exits with a non-zero status. Overrides the profile's
     /// `test_timeout`.
     #[arg(short = 'T', long)]
     pub timeout: Option<u64>,
-    /// Do not spawn QEMU; print the assembled argv and exit 0.
+    /// Do not start the runner; print the assembled argv and exit 0.
     /// Useful for sanity-checking a config and for CI integration
     /// tests.
     #[arg(long)]
     pub dry_run: bool,
-    /// Skip the implicit build step. Spawns QEMU directly against
-    /// whatever run binary is currently on disk.
+    /// Skip the implicit build step. Starts the runner directly
+    /// against whatever run binary is currently on disk.
     ///
     /// Intended for tight edit/run loops where the user has just
     /// built by hand and wants to skip gluon's fingerprint sweep. If
-    /// the binary is stale or missing, QEMU itself will report a
+    /// the binary is stale or missing, the runner will report a
     /// clearer error than gluon could from the outside.
     #[arg(long)]
     pub no_build: bool,
@@ -291,7 +292,7 @@ pub struct RunArgs {
     /// pick it up too.
     #[arg(long)]
     pub gdb: bool,
-    /// Arguments after `--` are passed verbatim to QEMU as a suffix.
+    /// Arguments after `--` are appended verbatim to the runner's.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub extra: Vec<OsString>,
 }
@@ -319,7 +320,8 @@ pub struct TestArgs {
     #[arg(long)]
     pub direct: bool,
     /// Per-test timeout in seconds. Default: the profile's
-    /// `test_timeout`, then `qemu().test_timeout(...)`, then 60.
+    /// `test_timeout`, then the QEMU runner's `.test_timeout(...)`,
+    /// then 60.
     #[arg(short = 'T', long)]
     pub timeout: Option<u64>,
     /// Print each test's command instead of building and running it.
@@ -328,7 +330,7 @@ pub struct TestArgs {
     /// Skip the build and run the test binaries already on disk.
     #[arg(long)]
     pub no_build: bool,
-    /// Arguments after `--` are passed verbatim to QEMU for every test.
+    /// Arguments after `--` are appended to the runner's for every test.
     #[arg(last = true, allow_hyphen_values = true)]
     pub extra: Vec<OsString>,
 }

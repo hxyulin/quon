@@ -35,6 +35,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     // which target to build for. `run_binary` tells `gluon run`
     // which binary QEMU boots.
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -49,7 +50,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .linker_script("crates/kernel/kernel.ld");
 
     // ── QEMU ──────────────────────────────────────────────────────
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu").qemu("qemu-system-x86_64")
         .machine("q35")
         .memory(128)
         .cores(1)

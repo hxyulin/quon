@@ -56,6 +56,8 @@ pub struct RawProfileDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opt_level: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug_info: Option<bool>,
@@ -197,6 +199,24 @@ pub struct RawBootTestDef {
     pub span: Option<SourceSpan>,
 }
 
+/// Raw form of [`crate::build_model::RunnerDef`]. `kind` is `None`
+/// until `.qemu(..)` or `.command(..)` sets it; intern reports a runner
+/// left without one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RawRunnerDef {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::build_model::RunnerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawRunnerDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl Named for RawBootTestDef {
     fn name(&self) -> &str {
         &self.name
@@ -329,6 +349,7 @@ mod tests {
             inherits: Some("base".into()),
             target: Some("x86_64".into()),
             run_binary: Some("kernel".into()),
+            runner: Some("qemu".into()),
             opt_level: Some(0),
             debug_info: Some(true),
             lto: Some("off".into()),

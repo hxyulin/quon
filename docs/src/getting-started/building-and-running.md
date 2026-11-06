@@ -22,9 +22,10 @@ Build output goes to the `build/` directory at your project root.
 gluon run
 ```
 
-Builds the project (if needed) and launches QEMU using the configuration from
-the `qemu()` block in your `gluon.rs`. This command requires a `qemu()`
-declaration in your configuration file.
+Builds the project (if needed) and starts the profile's run binary with the
+profile's [runner](../running/runners.md), such as a QEMU runner declared
+with `cfg.runner("qemu").qemu(...)`. The profile must name a runner with
+`.runner(...)`.
 
 To pass extra arguments directly to QEMU, place them after `--`:
 

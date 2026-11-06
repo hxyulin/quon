@@ -13,6 +13,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.cargo_workspace(".");
 
     cfg.profile("dev")
+        .runner("qemu")
         .target(target)
         .opt_level(0)
         .debug_info(true)
@@ -26,7 +27,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .add_file("boot.conf", "boot.conf")
         .add("kernel", "boot/kernel");
 
-    cfg.qemu("qemu-system-x86_64")
+    cfg.runner("qemu").qemu("qemu-system-x86_64")
         .boot_mode("uefi")
         .success_exit_code(33);
 

@@ -34,6 +34,11 @@ pub struct ResolvedProfile {
     pub debug_info: bool,
     pub lto: Option<String>,
     pub run_binary: Option<Handle<CrateDef>>,
+    /// The runner that executes the run binary and the integration
+    /// tests, inherited through `inherits`. `None` when no profile in
+    /// the chain names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<Handle<crate::build_model::RunnerDef>>,
     /// Profile-level QEMU memory override (MiB). Takes precedence over
     /// `QemuDef::memory_mb` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +98,9 @@ impl ResolvedProfile {
         if self.run_binary.is_none() {
             self.run_binary = parent.run_binary;
         }
+        if self.runner.is_none() {
+            self.runner = parent.runner;
+        }
         if self.qemu_memory.is_none() {
             self.qemu_memory = parent.qemu_memory;
         }
@@ -141,6 +149,7 @@ mod tests {
             debug_info: false,
             lto: Some("fat".into()),
             run_binary: None,
+            runner: None,
             qemu_memory: Some(512),
             qemu_cores: Some(4),
             qemu_extra_args: vec!["-cpu".into(), "max".into()],
@@ -154,6 +163,7 @@ mod tests {
             debug_info: true,
             lto: None, // child inherits
             run_binary: None,
+            runner: None,
             qemu_memory: None, // child inherits
             qemu_cores: None,
             qemu_extra_args: vec![], // empty inherits
