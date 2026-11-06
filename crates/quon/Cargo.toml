@@ -39,3 +39,8 @@ toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+
+# The library test raises SIGINT in a child to check that `quon::run`
+# leaves the signal's default action in place.
+[target.'cfg(unix)'.dev-dependencies]
+signal-hook = "0.3"

@@ -13,12 +13,6 @@ use quon_core::manifest::workspace::{PackageSet, load_workspace};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// Run `quon init` in the current directory.
-pub fn run(args: &InitArgs) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    run_at(&cwd, args)
-}
-
 /// Run `quon init` against the workspace at `root`.
 pub fn run_at(root: &Path, args: &InitArgs) -> Result<()> {
     let out = root.join("quon.rs");
@@ -36,8 +30,7 @@ pub fn run_at(root: &Path, args: &InitArgs) -> Result<()> {
     }
     std::fs::write(&out, &text).with_context(|| format!("failed to write {}", out.display()))?;
     let todos = text.matches("// TODO:").count();
-    let cwd = std::env::current_dir().unwrap_or_default();
-    eprintln!("Wrote {}", out.strip_prefix(&cwd).unwrap_or(&out).display());
+    eprintln!("Wrote {}", out.strip_prefix(root).unwrap_or(&out).display());
     if todos > 0 {
         eprintln!("{todos} `// TODO:` comments name what quon init could not infer");
     }

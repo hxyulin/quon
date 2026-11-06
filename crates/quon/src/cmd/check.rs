@@ -2,7 +2,7 @@
 //! check driver (`--emit=metadata` only, no codegen).
 //!
 //! The caller (in `main.rs`) constructs the `CmdContext` via
-//! `build_context_for_driver(..., DriverKind::Check)` so the layout's
+//! `build_contexts_for_driver(..., DriverKind::Check)` so the layout's
 //! user-crate output dirs land under `tool/check/` instead of
 //! clobbering `quon build` artifacts. The `Finished` line counts
 //! "checked" crates so users can tell which command just ran.

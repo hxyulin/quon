@@ -41,6 +41,7 @@
 
 - [rust-analyzer](./tooling/rust-analyzer.md)
 - [Editor setup](./tooling/editor-setup.md)
+- [Quon as a library](./tooling/library.md)
 
 # Cookbook
 

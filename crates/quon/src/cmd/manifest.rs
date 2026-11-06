@@ -11,23 +11,23 @@ use quon_core::manifest::resolve::{Domain, Root, dump_units, resolve};
 use quon_core::manifest::sources::RegistrySources;
 use quon_core::manifest::workspace::{PackageSet, load_workspace};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn run(cmd: &ManifestCommand, target: Option<&str>) -> Result<()> {
+pub fn run(cmd: &ManifestCommand, target: Option<&str>, cwd: &Path) -> Result<()> {
     match cmd {
         ManifestCommand::Packages(args) => {
-            let set = load(args)?;
+            let set = load(args, cwd)?;
             print!("{}", dump_packages(&set));
             Ok(())
         }
-        ManifestCommand::Units(args) => units(args, target),
+        ManifestCommand::Units(args) => units(args, target, cwd),
     }
 }
 
-fn load(args: &ManifestArgs) -> Result<PackageSet> {
+fn load(args: &ManifestArgs, cwd: &Path) -> Result<PackageSet> {
     let root = match &args.workspace {
-        Some(dir) => dir.clone(),
-        None => std::env::current_dir().context("failed to read current directory")?,
+        Some(dir) => cwd.join(dir),
+        None => cwd.to_path_buf(),
     };
     // Builds read Cargo's registry cache unless quon.rs names a vendor
     // directory; this command does the same unless `--vendor-dir` does.
@@ -42,8 +42,8 @@ fn load(args: &ManifestArgs) -> Result<PackageSet> {
     Ok(set)
 }
 
-fn units(args: &ManifestUnitsArgs, target: Option<&str>) -> Result<()> {
-    let set = load(&args.workspace)?;
+fn units(args: &ManifestUnitsArgs, target: Option<&str>, cwd: &Path) -> Result<()> {
+    let set = load(&args.workspace, cwd)?;
     let info = RustcInfo::probe().context("failed to probe rustc")?;
     let host = platform::probe(&info, &ProbeTarget::Host, None)?;
     let mut platforms: BTreeMap<Domain, TargetPlatform> = BTreeMap::new();

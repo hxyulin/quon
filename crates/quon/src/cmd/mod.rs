@@ -24,8 +24,9 @@
 //!
 //! Both `_at` variants take the working directory explicitly so unit
 //! tests can exercise the full wiring against a tempdir without
-//! mutating process-wide `current_dir`. The public [`build_context`]
-//! wrapper reads the real cwd and delegates.
+//! mutating process-wide `current_dir`. Every builder takes the
+//! working directory from the caller (see [`crate::run`]), never from
+//! the process.
 
 pub mod build;
 pub mod check;
@@ -94,33 +95,24 @@ pub fn runners() -> quon_core::run::Runners {
     runners
 }
 
-/// Build a [`CmdContext`] by walking up from the host's current
-/// directory. Thin wrapper around [`build_context_at_for_driver`]; the resulting
-/// context uses [`DriverKind::Rustc`] (i.e. the historical `quon build`
-/// layout). For `quon check` / `quon clippy`, use
-/// [`build_context_for_driver`] instead.
+/// Build a [`CmdContext`] by walking up from `cwd`. Thin wrapper
+/// around [`build_context_at_for_driver`]; the resulting context uses
+/// [`DriverKind::Rustc`] (i.e. the historical `quon build` layout).
 pub fn build_context(
+    cwd: &Path,
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
     selection: &RunSelection,
 ) -> Result<CmdContext> {
-    build_context_for_driver(profile, target, config_file, DriverKind::Rustc, selection)
-}
-
-/// Build a [`CmdContext`] for an explicit driver. This is the entry
-/// point used by `quon check` and `quon clippy`: the driver
-/// determines whether the layout's user-crate output dirs land under
-/// the historical paths or under `tool/check/` / `tool/clippy/`.
-pub fn build_context_for_driver(
-    profile: Option<&str>,
-    target: Option<&str>,
-    config_file: Option<&Path>,
-    driver: DriverKind,
-    selection: &RunSelection,
-) -> Result<CmdContext> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    build_context_at_for_driver(&cwd, profile, target, config_file, driver, selection)
+    build_context_at_for_driver(
+        cwd,
+        profile,
+        target,
+        config_file,
+        DriverKind::Rustc,
+        selection,
+    )
 }
 
 /// Build a [`CmdContext`] starting the project-root search at `cwd`,
@@ -146,14 +138,14 @@ pub fn build_context_at_for_driver(
 /// builds them together. `quon.rs` runs and the workspace manifests are
 /// read once for all of them.
 pub fn build_contexts_for_driver(
+    cwd: &Path,
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
     driver: DriverKind,
     selections: &[RunSelection],
 ) -> Result<Vec<CmdContext>> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let project_root = find_project_root(&cwd)
+    let project_root = find_project_root(cwd)
         .context("could not find a quon.rs in the current directory or any parent")?;
     let models = quon_core::load_build_models_for(&project_root, selections)
         .context("failed to load build model")?;
@@ -167,7 +159,7 @@ pub fn build_contexts_for_driver(
                 ..LayoutContextOpts::default()
             };
             let layout_ctx =
-                build_layout_context_at_with_opts(&cwd, profile, target, config_file, opts)?;
+                build_layout_context_at_with_opts(cwd, profile, target, config_file, opts)?;
             context_for_driver(layout_ctx, target, driver)
         })
         .collect()
@@ -379,13 +371,13 @@ pub fn build_layout_context_at_with_opts(
 
 /// Thin wrapper around [`build_layout_context_at`] that reads cwd.
 pub fn build_layout_context(
+    cwd: &Path,
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
     selection: &RunSelection,
 ) -> Result<LayoutContext> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    build_layout_context_at(&cwd, profile, target, config_file, selection)
+    build_layout_context_at(cwd, profile, target, config_file, selection)
 }
 
 /// Per-checkout overrides: the file (`-C` names an explicit path,
@@ -442,12 +434,12 @@ pub enum Unnamed {
 /// The run entries a command loads the model for, one pass each, in
 /// declaration order. `entry` is the name given on the command line.
 pub fn selections(
+    cwd: &Path,
     entry: Option<&str>,
     config_file: Option<&Path>,
     unnamed: Unnamed,
 ) -> Result<Vec<RunSelection>> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let project_root = find_project_root(&cwd)
+    let project_root = find_project_root(cwd)
         .context("could not find a quon.rs in the current directory or any parent")?;
     let default = run_override(&load_overrides(&project_root, config_file)?)?;
     if let Some(name) = entry.map(str::to_owned).or(default) {

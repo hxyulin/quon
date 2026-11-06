@@ -95,6 +95,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   packages can enable features of one dependency that exclude each
   other, such as two chip features of a HAL.
 
+### Added (library)
+
+- **The `quon` crate is a library.** `quon::run(dir, args)` runs the
+  command line in-process, and `quon::Project` lists the run entries
+  and where each one's binary is written. A repository's `xtask` can
+  depend on Quon through its Cargo lock instead of an installed binary.
+  See [`docs/src/tooling/library.md`](docs/src/tooling/library.md).
+- `quon run` no longer swallows SIGINT and SIGTERM after its runner
+  exits; they take their default action again.
+
 ### Fixed (fmt)
 
 - **`quon fmt` formats only declared crates and workspace members.**

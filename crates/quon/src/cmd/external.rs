@@ -8,6 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use std::ffi::OsString;
+use std::path::Path;
 use std::process::Command;
 
 /// Dispatch an unknown subcommand to `quon-<name>` on `$PATH`.
@@ -15,7 +16,7 @@ use std::process::Command;
 /// `args` is the raw vector clap produced for the `external_subcommand`
 /// arm: the first element is the subcommand name, the rest are
 /// positional arguments to forward.
-pub fn run(args: Vec<OsString>) -> Result<()> {
+pub fn run(args: Vec<OsString>, cwd: &Path) -> Result<()> {
     let mut iter = args.into_iter();
     let subname = iter
         .next()
@@ -25,11 +26,17 @@ pub fn run(args: Vec<OsString>) -> Result<()> {
 
     let status = Command::new(&bin_name)
         .args(iter)
+        .current_dir(cwd)
         .status()
         .map_err(|e| anyhow!("failed to spawn `{}`: {e}", bin_name.to_string_lossy()))?;
 
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        // The plugin printed its own error; pass its status on.
+        let code = status
+            .code()
+            .and_then(|c| u8::try_from(c).ok())
+            .unwrap_or(1);
+        return Err(crate::Exit(code).into());
     }
     Ok(())
 }

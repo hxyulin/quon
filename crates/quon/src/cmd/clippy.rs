@@ -4,7 +4,7 @@
 //! Mirrors `cmd/check.rs` exactly except for two things:
 //!
 //! 1. The caller (in `main.rs`) constructs the `CmdContext` via
-//!    `build_context_for_driver(..., DriverKind::Clippy)`. The layout
+//!    `build_contexts_for_driver(..., DriverKind::Clippy)`. The layout
 //!    routes user-crate output under `tool/clippy/` (so clippy
 //!    artifacts cannot collide with build or check artifacts), and the
 //!    rustc command builder swaps in `clippy-driver` as the program

@@ -21,7 +21,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::AtomicI32;
 use std::time::{Duration, Instant};
 
 /// How long one test may run when neither `--timeout`, the profile's
@@ -151,6 +150,22 @@ pub fn prepare(
         invocation,
         build: build_summary,
     })
+}
+
+/// Where the build puts the profile's run binary, as `quon run` finds
+/// it. Nothing is built.
+pub fn run_binary_path(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+) -> Result<PathBuf> {
+    let handle = resolved
+        .profile
+        .run_binary
+        .ok_or_else(|| Error::NoRunBinary {
+            profile: resolved.profile.name.clone(),
+        })?;
+    final_binary(ctx, model, resolved, handle)
 }
 
 /// Where the build puts `krate`'s binary for the profile's target.
@@ -513,7 +528,7 @@ fn spawn_and_wait(invocation: Invocation) -> Result<ExitStatus> {
     // Install signal trap only after we have a live child — before
     // this point there's nothing to tear down if a signal arrives,
     // and the default signal disposition (exit) is fine.
-    let signal_flag = install_signal_trap();
+    let trap = SignalTrap::arm();
 
     let deadline = invocation.timeout.map(|d| Instant::now() + d);
     loop {
@@ -526,7 +541,7 @@ fn spawn_and_wait(invocation: Invocation) -> Result<ExitStatus> {
                 // Signal check first: a user hitting Ctrl-C expects
                 // immediate teardown, even if we're a few polls away
                 // from the timeout.
-                if let Some(sig) = check_signal(&signal_flag) {
+                if let Some(sig) = trap.received() {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(Error::KilledBySignal { signal: sig });
@@ -547,49 +562,98 @@ fn spawn_and_wait(invocation: Invocation) -> Result<ExitStatus> {
     }
 }
 
-/// Install a SIGINT + SIGTERM handler that stores the received signal
-/// number in a shared `AtomicI32`. Returns the shared flag — zero means
-/// "no signal yet", any other value is the received signal number.
+/// SIGINT and SIGTERM while a runner is up: the signal is recorded for
+/// [`spawn_and_wait`] to act on instead of ending the process. Outside
+/// a run they keep their default action.
 ///
-/// On non-Unix this is a no-op: the returned flag will always read 0,
-/// which means the runner falls back to its previous behaviour
-/// (timeout-only teardown).
+/// Quon is also a library (`quon::run`), so it must leave the host
+/// process as it found it. A signal handler cannot be removed again:
+/// once one is registered, unregistering it leaves the signal ignored
+/// rather than restoring the default. So the handlers are registered
+/// once per process, on the first run, and switch on a shared state:
+/// while no trap is armed they emulate the default action (terminate),
+/// and while one is, they store the signal number instead.
+///
+/// On non-Unix this is a no-op: [`SignalTrap::received`] always reads
+/// `None`, and the runner falls back to timeout-only teardown.
+struct SignalTrap;
+
 #[cfg(unix)]
-fn install_signal_trap() -> Arc<AtomicI32> {
-    let flag = Arc::new(AtomicI32::new(0));
-    // signal-hook's `low_level::register` installs a handler that
-    // runs async-signal-safe code (atomic store) — no allocation, no
-    // Rust panic unwinding through the signal frame. Ignore
-    // registration errors: if we can't install the handler (for
-    // example because one's already installed by the host program)
-    // we fall back to the default signal disposition, which is
-    // "exit the process" — no worse than the pre-signal-hook
-    // behaviour.
-    //
-    // SAFETY: signal-hook's `low_level::register` is `unsafe` because
-    // the closure runs in a signal context; we use only atomic stores
-    // (async-signal-safe) inside it and capture by `move`, satisfying
-    // the API's contract.
-    for &sig in &[signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
-        let flag_clone = flag.clone();
-        #[allow(unsafe_code)]
-        let _ = unsafe {
-            signal_hook::low_level::register(sig, move || {
-                flag_clone.store(sig, std::sync::atomic::Ordering::SeqCst);
-            })
-        };
+mod signal_state {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(super) struct State {
+        /// Set while no trap is armed: the signal takes its default
+        /// action.
+        pub idle: Arc<AtomicBool>,
+        /// The last signal received while armed, or 0.
+        pub received: Arc<AtomicUsize>,
+        /// Armed traps, so two runs on different threads keep the
+        /// handlers trapping until both end.
+        pub armed: Mutex<usize>,
     }
-    flag
+
+    pub(super) fn state() -> &'static State {
+        static STATE: OnceLock<State> = OnceLock::new();
+        STATE.get_or_init(|| {
+            let state = State {
+                idle: Arc::new(AtomicBool::new(true)),
+                received: Arc::new(AtomicUsize::new(0)),
+                armed: Mutex::new(0),
+            };
+            // Registration errors are ignored: the signal then keeps
+            // whatever disposition it had, which at worst ends the
+            // process as it did before the trap existed.
+            for sig in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+                let _ = signal_hook::flag::register_conditional_default(sig, state.idle.clone());
+                let _ = signal_hook::flag::register_usize(
+                    sig,
+                    state.received.clone(),
+                    usize::try_from(sig).unwrap_or(usize::MAX),
+                );
+            }
+            state
+        })
+    }
+
+    pub(super) fn set_armed(delta: isize) {
+        let s = state();
+        let mut armed = s.armed.lock().unwrap_or_else(|e| e.into_inner());
+        *armed = armed.saturating_add_signed(delta);
+        if *armed > 0 && delta > 0 {
+            s.received.store(0, Ordering::SeqCst);
+        }
+        s.idle.store(*armed == 0, Ordering::SeqCst);
+    }
 }
 
-#[cfg(not(unix))]
-fn install_signal_trap() -> Arc<AtomicI32> {
-    Arc::new(AtomicI32::new(0))
+impl SignalTrap {
+    fn arm() -> Self {
+        #[cfg(unix)]
+        signal_state::set_armed(1);
+        SignalTrap
+    }
+
+    fn received(&self) -> Option<i32> {
+        #[cfg(unix)]
+        {
+            let v = signal_state::state()
+                .received
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if v != 0 {
+                return Some(i32::try_from(v).unwrap_or(i32::MAX));
+            }
+        }
+        None
+    }
 }
 
-fn check_signal(flag: &Arc<AtomicI32>) -> Option<i32> {
-    let v = flag.load(std::sync::atomic::Ordering::SeqCst);
-    if v == 0 { None } else { Some(v) }
+impl Drop for SignalTrap {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        signal_state::set_armed(-1);
+    }
 }
 
 #[cfg(test)]

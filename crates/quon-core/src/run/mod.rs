@@ -19,7 +19,7 @@ pub mod host;
 pub mod runner;
 mod test;
 
-pub use entry::{Prepared, RunOptions, launch, prepare};
+pub use entry::{Prepared, RunOptions, launch, prepare, run_binary_path};
 pub use host::{HostTest, host_tests};
 pub use runner::{Invocation, QEMU_PLUGIN, Runner, Runners, profile_runner};
 pub use test::{

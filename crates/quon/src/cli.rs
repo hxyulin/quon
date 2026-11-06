@@ -431,6 +431,21 @@ pub struct ManifestArgs {
 }
 
 impl Cli {
+    /// The command line with its relative paths made absolute against
+    /// `dir`, the directory [`crate::run`] was given, so nothing below
+    /// depends on the process's current directory.
+    pub fn in_dir(mut self, dir: &std::path::Path) -> Self {
+        if let Some(p) = &mut self.config_file {
+            *p = dir.join(&*p);
+        }
+        if let Command::Configure(a) = &mut self.command
+            && let Some(p) = &mut a.output
+        {
+            *p = dir.join(&*p);
+        }
+        self
+    }
+
     /// The profile asked for on the command line, if any.
     pub fn profile_name(&self) -> Option<&str> {
         if self.release {

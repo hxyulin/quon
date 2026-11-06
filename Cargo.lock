@@ -645,6 +645,7 @@ dependencies = [
  "quon-core",
  "quon-runner-qemu",
  "serde_json",
+ "signal-hook",
  "tempfile",
  "terminal_size",
  "toml",

@@ -13,8 +13,7 @@
 //!   entry point,
 //! - printing human-friendly progress and summary lines,
 //! - translating a non-clean [`quon_core::vendor::VendorCheckReport`]
-//!   into a non-zero process exit code via
-//!   [`std::process::exit`].
+//!   into a non-zero exit code via [`crate::Exit`].
 //!
 //! The `Dependency` pipeline uses the lighter-weight
 //! [`super::LayoutContext`] (no rustc probe) with
@@ -109,13 +108,12 @@ fn run_dependencies(
             println!("vendor state is up to date");
             return Ok(());
         }
-        // Non-clean: print every diagnostic and exit 1. We use
-        // `process::exit` rather than returning an error so the CLI
-        // doesn't double-print via the top-level `Error:` prefix.
+        // Non-clean: print every diagnostic and exit 1, through
+        // `Exit` so the CLI doesn't print an `error:` line on top.
         for diag in report.to_diagnostics() {
             eprintln!("{diag}");
         }
-        std::process::exit(1);
+        return Err(crate::Exit(1).into());
     }
 
     let opts = VendorOptions { force, offline };
