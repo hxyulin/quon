@@ -43,6 +43,20 @@
 //! platform directory lets rustc find every transitive crate: it looks
 //! them up by name and checks the hash recorded in the dependent. See
 //! [`crate::unit::UnitGraph::search_dirs`].
+//!
+//! ### Dependency inputs
+//!
+//! Every crate file rustc may load for a unit is a declared freshness
+//! input: the direct deps' outputs, the outputs of every unit and
+//! prebuilt artifact reachable through them, and a custom sysroot's
+//! rlibs. Output paths carry no per-build hash, so a rebuilt
+//! dependency does not change the argv; its file must be tracked
+//! instead. Gluon declares them itself, as Cargo does, rather than
+//! reading them from a `-Zbinary-dep-depinfo` depfile, so stable rustc
+//! works. The prebuilt toolchain sysroot is covered by the toolchain
+//! hash. A cargo-built prebuilt's own deps are not in the unit graph;
+//! a change there rebuilds the prebuilt, whose rlib records their
+//! crate hashes and so changes too.
 
 use super::compile_crate::CompileUnitInput;
 use super::{
@@ -69,11 +83,9 @@ pub(crate) struct UnitCommand {
     /// load) and executables write nothing, so their depfile stands
     /// in.
     pub(crate) output_path: PathBuf,
-    /// Files passed with `--extern` for direct deps and the config
-    /// crate. They are declared freshness inputs: a dep rebuilt with
-    /// different content reruns this unit, even where its path and so
-    /// this command are unchanged (cross executables, prebuilt
-    /// artifacts).
+    /// Every crate file rustc may load: the `--extern` files, the
+    /// outputs of the deps' closure and a custom sysroot's rlibs. They
+    /// are declared freshness inputs (see the module docs).
     pub(crate) dep_outputs: Vec<PathBuf>,
 }
 
@@ -183,13 +195,18 @@ fn build_command(
         // The file names match what `sysroot::build_sysroot_crate`
         // writes.
         let sysroot_lib = layout.sysroot_lib_dir(t);
-        builder
-            .extern_crate("core", &sysroot_lib.join("libcore-gluon-core.rlib"))
-            .extern_crate(
+        for (name, file) in [
+            ("core", "libcore-gluon-core.rlib"),
+            (
                 "compiler_builtins",
-                &sysroot_lib.join("libcompiler_builtins-gluon-compiler_builtins.rlib"),
-            )
-            .extern_crate("alloc", &sysroot_lib.join("liballoc-gluon-alloc.rlib"));
+                "libcompiler_builtins-gluon-compiler_builtins.rlib",
+            ),
+            ("alloc", "liballoc-gluon-alloc.rlib"),
+        ] {
+            let rlib = sysroot_lib.join(file);
+            builder.extern_crate(name, &rlib);
+            dep_outputs.push(rlib);
+        }
     }
     if let (true, Platform::Cross(t)) = (unit.config_crate, unit.platform)
         && let Some(config_path) = artifacts.config_crate(t)
@@ -262,7 +279,7 @@ fn build_command(
             }
         }
     }
-    collect_prebuilt_dirs(input, unit, &mut search_dirs);
+    collect_dep_closure(input, unit, &mut search_dirs, &mut dep_outputs)?;
     for dir in &search_dirs {
         builder.library_search_dependency(dir);
     }
@@ -501,19 +518,21 @@ fn push_cargo_settings(builder: &mut RustcCommandBuilder, cargo: &CargoSettings,
     }
 }
 
-/// Add the search directories of every cargo-built prebuilt artifact
-/// reachable through `unit`'s deps. Prebuilt artifacts live outside the
-/// unit layout, so the platform `deps/` directories do not cover their
-/// own deps.
+/// Walk the units reachable through `unit`'s deps. Each one's output
+/// goes into `outputs`, as does each reachable prebuilt artifact (see
+/// the module docs). The search directories of each prebuilt artifact
+/// go into `dirs`: prebuilt artifacts live outside the unit layout, so
+/// the platform `deps/` directories do not cover their own deps.
 ///
 /// The walk does not descend into a proc macro's deps: those are linked
 /// into the proc-macro dylib, and they are host artifacts, whose
 /// directories must not appear on a cross unit's search path.
-fn collect_prebuilt_dirs(
+fn collect_dep_closure(
     input: &CompileUnitInput<'_>,
     unit: &BuildUnit,
     dirs: &mut BTreeSet<PathBuf>,
-) {
+    outputs: &mut Vec<PathBuf>,
+) -> Result<()> {
     let units = input.units;
     let mut seen = BTreeSet::new();
     let mut stack: Vec<_> = unit
@@ -529,6 +548,14 @@ fn collect_prebuilt_dirs(
             continue;
         }
         let dep = units.get(id);
+        let path = input.artifacts.unit(id).ok_or_else(|| {
+            Error::Compile(format!(
+                "{} depends on {} through its deps, but its artifact is not available \
+                 yet (scheduler bug: a dep must be built before its dependent)",
+                unit.name, dep.name,
+            ))
+        })?;
+        outputs.push(path.to_path_buf());
         if dep.kind == CrateType::ProcMacro {
             continue;
         }
@@ -536,10 +563,19 @@ fn collect_prebuilt_dirs(
             match &d.target {
                 DepTarget::Unit(u) => stack.push(*u),
                 DepTarget::Prebuilt {
-                    search_dirs: more, ..
-                } => dirs.extend(more.iter().cloned()),
+                    path,
+                    search_dirs: more,
+                } => {
+                    outputs.push(path.clone());
+                    let rmeta = path.with_extension("rmeta");
+                    if rmeta.is_file() {
+                        outputs.push(rmeta);
+                    }
+                    dirs.extend(more.iter().cloned());
+                }
                 DepTarget::Missing { .. } => {}
             }
         }
     }
+    Ok(())
 }

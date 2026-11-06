@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 /// Contents of a rustc dep-info file that matter for freshness.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DepInfo {
-    /// Prereq paths from the first target-line: sources, plus every
-    /// rlib/rmeta/dylib rustc loaded when `-Zbinary-dep-depinfo` is set.
+    /// Prereq paths from the first target-line: the source files rustc
+    /// read. With `-Zbinary-dep-depinfo`, which Gluon does not pass,
+    /// they would also include every crate file rustc loaded.
     pub files: Vec<PathBuf>,
     /// Environment variables the crate read through `env!`,
     /// `option_env!` or tracked proc-macro env access, from the

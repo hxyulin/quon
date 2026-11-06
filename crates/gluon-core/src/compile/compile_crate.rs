@@ -68,12 +68,6 @@ pub(crate) fn collect_artifact_env_sources(
     Ok(out)
 }
 
-/// Compile one unit. Returns the path dependents use and whether the
-/// cache short-circuited rustc.
-///
-/// Freshness is checked and recorded by `compile_and_cache`. The
-/// declared inputs are the direct deps' outputs and the `artifact_env`
-/// artifacts.
 /// The doctest command of a host-test lib test unit, or `None` for any
 /// other unit, for a lib with `doctest = false`, and under `gluon check`
 /// and `gluon clippy`, which build no test binaries.
@@ -135,6 +129,12 @@ fn doctest_command(
     }))
 }
 
+/// Compile one unit. Returns the path dependents use and whether the
+/// cache short-circuited rustc.
+///
+/// Freshness is checked and recorded by `compile_and_cache`. The
+/// declared inputs are the dependency files rustc may load (see
+/// `command_builder`) and the `artifact_env` artifacts.
 pub fn compile(
     ctx: &CompileCtx,
     input: CompileUnitInput<'_>,
@@ -391,6 +391,26 @@ mod tests {
             },
         )?;
         Ok((cmd.builder, cmd.output_path, cmd.paths.depfile_path))
+    }
+
+    /// The declared dependency inputs of `input`'s unit, sorted.
+    fn dep_outputs(ctx: &CompileCtx, input: &CompileCrateInput<'_>) -> Vec<PathBuf> {
+        let (resolved, units, artifacts) = lower_for(input);
+        let cmd = build_unit_command(
+            ctx,
+            &CompileUnitInput {
+                model: input.model,
+                resolved: &resolved,
+                units: &units,
+                unit: units.unit_of(input.crate_ref.handle).expect("unit"),
+                artifacts: &artifacts,
+                sysroot_dir: input.sysroot_dir,
+            },
+        )
+        .expect("build command");
+        let mut out = cmd.dep_outputs;
+        out.sort();
+        out
     }
 
     fn compile(
@@ -906,18 +926,27 @@ mod tests {
         let resolved = make_resolved(th, tmp.path().to_path_buf());
         let crate_ref = cross_ref(ch, th);
         let artifacts = ArtifactMap::new();
+        let input = CompileCrateInput {
+            model: &model,
+            resolved: &resolved,
+            crate_ref: &crate_ref,
+            artifacts: &artifacts,
+            sysroot_dir: Some(&sysroot_dir),
+        };
 
-        let (builder, _, _) = build_rustc_command(
-            &ctx,
-            &CompileCrateInput {
-                model: &model,
-                resolved: &resolved,
-                crate_ref: &crate_ref,
-                artifacts: &artifacts,
-                sysroot_dir: Some(&sysroot_dir),
-            },
-        )
-        .unwrap();
+        let (builder, _, _) = build_rustc_command(&ctx, &input).unwrap();
+        // The sysroot rlibs are declared inputs: a rebuilt sysroot keeps
+        // its paths, so this argv does not change.
+        let sysroot_lib = ctx.layout.sysroot_lib_dir(model.targets.get(th).unwrap());
+        assert_eq!(
+            dep_outputs(&ctx, &input),
+            [
+                "liballoc-gluon-alloc.rlib",
+                "libcompiler_builtins-gluon-compiler_builtins.rlib",
+                "libcore-gluon-core.rlib",
+            ]
+            .map(|f| sysroot_lib.join(f))
+        );
 
         let args = args_as_strings(&builder);
         assert!(
@@ -1066,6 +1095,82 @@ mod tests {
             extern_val,
             Some("myutil=/build/libmyutil-gluon-myutil.rlib"),
             "--extern myutil=... must be present, got: {args:?}"
+        );
+    }
+
+    /// rustc loads the crates behind a dep too, and their paths are
+    /// fixed, so a rebuilt transitive dep changes no argv: its output
+    /// must be a declared input of every crate that reaches it.
+    #[test]
+    fn transitive_dep_outputs_are_declared_inputs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = make_ctx(tmp.path(), "/usr/bin/rustc");
+
+        let mut model = BuildModel::default();
+        let th = insert_target(&mut model, make_target("x86", "x86_64-unknown-none", true));
+        let dep_on = |h: Handle<CrateDef>, name: &str| {
+            std::collections::BTreeMap::from([(
+                name.to_string(),
+                DepDef {
+                    resolution: DepResolution::Project(h),
+                    features: Vec::new(),
+                    version: None,
+                    optional: false,
+                    default_features: true,
+                    span: None,
+                },
+            )])
+        };
+        let lib = |name: &str| CrateDef {
+            name: name.into(),
+            path: format!("crates/{name}"),
+            edition: "2021".into(),
+            crate_type: CrateType::Lib,
+            ..test_crate_defaults()
+        };
+        let base = insert_crate(&mut model, lib("base"));
+        let mid = insert_crate(
+            &mut model,
+            CrateDef {
+                deps: dep_on(base, "base"),
+                ..lib("mid")
+            },
+        );
+        let top = insert_crate(
+            &mut model,
+            CrateDef {
+                deps: dep_on(mid, "mid"),
+                crate_type: CrateType::Bin,
+                ..lib("top")
+            },
+        );
+
+        let resolved = make_resolved(th, tmp.path().to_path_buf());
+        let crate_ref = host_ref(top, th);
+        let mut artifacts = ArtifactMap::new();
+        artifacts.insert(base, PathBuf::from("/build/libbase.rlib"));
+        artifacts.insert(mid, PathBuf::from("/build/libmid.rlib"));
+
+        // `mid` twice: once as the `--extern`, once from the walk.
+        // `compile_and_cache` dedups the declared set.
+        let declared = dep_outputs(
+            &ctx,
+            &CompileCrateInput {
+                model: &model,
+                resolved: &resolved,
+                crate_ref: &crate_ref,
+                artifacts: &artifacts,
+                sysroot_dir: None,
+            },
+        );
+        assert_eq!(
+            declared,
+            [
+                "/build/libbase.rlib",
+                "/build/libmid.rlib",
+                "/build/libmid.rlib"
+            ]
+            .map(PathBuf::from)
         );
     }
 

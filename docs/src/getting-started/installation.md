@@ -2,9 +2,11 @@
 
 ## Requirements
 
-- **Rust nightly toolchain (1.85+)** with the `rust-src` component. Gluon
-  compiles custom sysroots (`core`, `alloc`, `compiler_builtins`) from source,
-  so `rust-src` is required.
+- **Rust 1.99 or later.** Stable works, except for custom target-spec
+  `.json` files, which need nightly.
+- **The `rust-src` component**, for cross targets. Gluon compiles their
+  sysroots (`core`, `alloc`, `compiler_builtins`) from source. Host builds
+  do not need it.
 - **Optional Rust components:** `clippy` (for `gluon clippy`), `rustfmt` (for
   `gluon fmt`), and `rust-analyzer` (for IDE integration via
   `gluon configure`).
@@ -23,9 +25,9 @@ cd gluon
 cargo install --path crates/gluon-cli
 ```
 
-The repository includes a `rust-toolchain.toml` that pins the required nightly
-toolchain. Cargo will automatically download and use it when you run
-`cargo install` inside the repo.
+The repository's `rust-toolchain.toml` pins the nightly toolchain used
+to develop Gluon, so `cargo install` inside the clone uses it. Gluon
+itself builds on stable too.
 
 The installed `gluon` carries the sources that `gluon.rs` scripts link
 against, so you can delete or move the clone afterwards. Installing

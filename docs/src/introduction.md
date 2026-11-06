@@ -26,8 +26,8 @@ project, and `cargo build` keeps working beside it.
 kernels, hypervisors, bootloaders and firmware, and also host tools and
 libraries that want one command to build, run and test. Gluon builds
 and tests itself from its own `gluon.rs`. It is kernel-agnostic: it
-assumes no target triple, bootloader or boot protocol. It needs a
-nightly toolchain. The project is under active development; expect
+assumes no target triple, bootloader or boot protocol. It works on
+stable Rust; only custom `.json` targets need nightly. The project is under active development; expect
 rough edges and API changes.
 
 Ready to try it? Head to [Installation](./getting-started/installation.md)

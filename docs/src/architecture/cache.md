@@ -36,9 +36,11 @@ pub struct FreshnessQuery<'a> {
   `rustc -vV`'s version, commit and host. Every node passes it. It is
   not part of any metadata hash, so a toolchain change rebuilds in
   place under the same file names.
-- **`declared`** are inputs known before the run: direct deps' outputs
-  (the files passed with `--extern`, including the config crate and
-  cargo-built prebuilt artifacts), `artifact_env` artifacts, the linker
+- **`declared`** are inputs known before the run: every dependency
+  file rustc may load (the files passed with `--extern`, including the
+  config crate and cargo-built prebuilt artifacts, the outputs of every
+  unit and prebuilt artifact reachable through them, and a custom
+  sysroot's rlibs), `artifact_env` artifacts, the linker
   script and custom target spec, the generated config-crate source, the
   rustc binary for the sysroot, an image's entry files, a build step's
   runner and inputs.
@@ -47,9 +49,12 @@ pub struct FreshnessQuery<'a> {
 - **`command_env`** is the environment the node sets on its child.
 
 Discovered inputs are not in the query. They come from the record: the
-previous run's depfile (sources plus, with `-Zbinary-dep-depinfo`, every
-rlib, rmeta and proc-macro dylib rustc loaded) and its `# env-dep:`
-lines. A fresh check therefore reads one record file and stats the
+previous run's depfile (the source files rustc read) and its
+`# env-dep:` lines. Gluon does not pass `-Zbinary-dep-depinfo`, which
+would also list the crate files rustc loaded: it declares those itself,
+as Cargo does, so builds work on stable rustc. A cargo-built prebuilt's
+own deps are not in the unit graph, but a change there rebuilds the
+prebuilt, whose rlib records their crate hashes and so changes too. A fresh check therefore reads one record file and stats the
 inputs; it does not parse a depfile.
 
 ## The rule

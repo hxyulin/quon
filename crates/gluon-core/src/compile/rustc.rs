@@ -225,15 +225,10 @@ impl RustcCommandBuilder {
                 _ => s.push(k.as_str()),
             }
         }
+        // No `-Zbinary-dep-depinfo`: the dependency files rustc loads are
+        // declared inputs instead (see `compile::command_builder`), so
+        // stable rustc works.
         self.args.push(s);
-        // List every rlib, rmeta and proc-macro dylib rustc loads in the
-        // depfile, sysroot crates included. Output paths are fixed (no
-        // per-build hash in the filename), so a rebuilt dependency does
-        // not change this crate's argv; its file must be a tracked input
-        // instead. Gluon requires nightly, so the `-Z` flag is available.
-        if kinds.contains(&Emit::DepInfo) {
-            self.args.push(OsString::from("-Zbinary-dep-depinfo"));
-        }
         self
     }
 
@@ -513,20 +508,7 @@ mod tests {
     fn emit_comma_joins_in_slice_order() {
         let mut bld = b("/usr/bin/rustc");
         bld.emit(&[Emit::Link, Emit::DepInfo, Emit::Metadata]);
-        assert_eq!(
-            bld.args(),
-            &[
-                os("--emit=link,dep-info,metadata"),
-                os("-Zbinary-dep-depinfo")
-            ]
-        );
-    }
-
-    #[test]
-    fn emit_without_dep_info_omits_binary_dep_depinfo() {
-        let mut bld = b("/usr/bin/rustc");
-        bld.emit(&[Emit::Link, Emit::Metadata]);
-        assert_eq!(bld.args(), &[os("--emit=link,metadata")]);
+        assert_eq!(bld.args(), &[os("--emit=link,dep-info,metadata")]);
     }
 
     #[test]
@@ -538,10 +520,7 @@ mod tests {
         );
         assert_eq!(
             bld.args(),
-            &[
-                os("--emit=link,metadata,dep-info=/tmp/out/crate.d"),
-                os("-Zbinary-dep-depinfo")
-            ]
+            &[os("--emit=link,metadata,dep-info=/tmp/out/crate.d")]
         );
     }
 

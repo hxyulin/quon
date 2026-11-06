@@ -16,8 +16,9 @@ cfg.config_crate_name("my_kernel_config");
 - **`cfg.project(name, version)`** -- the name and version are required. They are
   used in build output paths and diagnostics. Returns a `ProjectBuilder` for
   chaining `.default_profile()`.
-- **`.default_profile(name)`** -- the profile used when no `-p` flag is passed
-  to the CLI. If omitted, Gluon requires an explicit profile selection.
+- **`.default_profile(name)`** -- the profile used when neither `-p` nor `-r`
+  is passed to the CLI. If omitted, Gluon uses the first profile in
+  alphabetical order.
 - **`cfg.config_crate_name(name)`** -- overrides the name of the auto-generated
   config crate. The default is `<project>_config` (e.g., `my_kernel_config`
   for a project named `my-kernel`). See
@@ -37,7 +38,8 @@ let t3 = cfg.target_spec("riscv64gc-custom", "./targets/riscv64gc-custom.json");
   `compiler_builtins`) for each registered target.
 - **`cfg.target_spec(name, path)`** -- like `target()`, but the second argument
   is a path to a custom target-spec JSON file, relative to `gluon.rs`. Use this
-  for targets that are not built into rustc.
+  for targets that are not built into rustc. rustc accepts a JSON spec only
+  on nightly.
 - **`.panic_strategy("abort")`** -- sets the panic strategy for bare-metal
   targets. Common values are `"abort"` and `"unwind"`.
 

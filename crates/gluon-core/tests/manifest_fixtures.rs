@@ -175,6 +175,20 @@ struct Resolved {
     _spec_dir: Option<tempfile::TempDir>,
 }
 
+/// Whether `c` can run with this rustc: a generated spec needs
+/// `--print target-spec-json`, which only nightly accepts.
+fn runs_here(info: &RustcInfo, c: &Case) -> bool {
+    let nightly = info.release.contains("nightly") || info.release.contains("dev");
+    if !nightly && matches!(c.target, Target::GeneratedSpec(_)) {
+        eprintln!(
+            "skipping {} {}: custom target specs need nightly",
+            c.fixture, c.label
+        );
+        return false;
+    }
+    true
+}
+
 fn resolve_case(info: &RustcInfo, c: &Case) -> Resolved {
     let dir = fixtures().join(c.fixture);
     let set = load_workspace(&dir, &vendored(&dir, "vendor")).expect("load");
@@ -222,7 +236,7 @@ fn resolver_fixtures() {
         eprintln!("skipping: no rustc");
         return;
     };
-    for c in CASES {
+    for c in CASES.iter().filter(|c| runs_here(&info, c)) {
         let r = resolve_case(&info, c);
         let path = fixtures()
             .join(c.fixture)
@@ -236,7 +250,7 @@ fn resolution_is_deterministic() {
     let Ok(info) = RustcInfo::probe() else {
         return;
     };
-    for c in CASES {
+    for c in CASES.iter().filter(|c| runs_here(&info, c)) {
         let a = dump_units(&resolve_case(&info, c).graph);
         let b = dump_units(&resolve_case(&info, c).graph);
         assert_eq!(a, b, "{} {}", c.fixture, c.label);

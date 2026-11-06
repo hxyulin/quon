@@ -17,9 +17,13 @@ For a project that needs none of this, Cargo is enough.
 
 ## What Rust toolchain do I need?
 
-A nightly toolchain with the `rust-src` component. Gluon requires Rust 1.85 or
-later. If your project includes a `rust-toolchain.toml`, rustup will
-automatically install and use the correct version.
+Rust 1.99 or later. Stable works for host builds and for built-in
+targets such as `x86_64-unknown-none`. A custom target-spec `.json`
+needs nightly, because rustc accepts one only with `-Zunstable-options`.
+
+Targets that Gluon builds a sysroot for need the `rust-src` component.
+If your project includes a `rust-toolchain.toml`, rustup installs and
+uses the toolchain it names.
 
 ```sh
 rustup component add rust-src

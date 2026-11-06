@@ -79,7 +79,6 @@ pub(crate) fn rustdoc_args(rustc_args: &[OsString], lib: &str, lib_path: &Path) 
             "--out-dir" | "-o" => {
                 args.next();
             }
-            "-Zbinary-dep-depinfo" => {}
             "-C" => {
                 let Some(value) = args.next() else { break };
                 if !output_codegen_option(&value.to_string_lossy()) {
