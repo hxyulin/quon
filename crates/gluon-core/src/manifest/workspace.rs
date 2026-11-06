@@ -24,7 +24,7 @@
 use super::lock::Lockfile;
 use super::schema::{
     DepTable, DetailedDependency, Inheritable, TomlBuild, TomlDependency, TomlLib, TomlLint,
-    TomlManifest, TomlReadme, TomlWorkspacePackage,
+    TomlManifest, TomlReadme, TomlWorkspace, TomlWorkspacePackage,
 };
 use super::sources::RegistrySources;
 use crate::error::{Diagnostic, Error, Result};
@@ -294,6 +294,25 @@ pub fn load_workspace(root: &Path, sources: &RegistrySources) -> Result<PackageS
     loader.finish()
 }
 
+/// The nearest parent directory whose `Cargo.toml` has a `[workspace]`
+/// table that does not exclude `dir`, which is where Cargo would look
+/// for the workspace of a package in `dir`.
+fn enclosing_workspace(dir: &Path) -> Result<Option<PathBuf>> {
+    for parent in dir.ancestors().skip(1) {
+        let path = parent.join("Cargo.toml");
+        if !path.is_file() {
+            continue;
+        }
+        let file = SourceFile::read(&path)?;
+        let manifest = file.parse().map_err(|d| Error::Diagnostics(vec![d]))?;
+        if let Some(ws) = manifest.workspace {
+            let excluded = ws.exclude.iter().any(|e| dir.starts_with(parent.join(e)));
+            return Ok((!excluded).then(|| parent.to_path_buf()));
+        }
+    }
+    Ok(None)
+}
+
 /// Source text of one manifest, for turning byte ranges into positions.
 struct SourceFile {
     path: PathBuf,
@@ -364,12 +383,33 @@ impl<'s> Loader<'s> {
         })?;
         let root_file = SourceFile::read(&root.join("Cargo.toml"))?;
         let manifest = root_file.parse().map_err(|d| Error::Diagnostics(vec![d]))?;
-        let Some(ws) = &manifest.workspace else {
-            return Err(Error::Diagnostics(vec![
-                Diagnostic::error("manifest has no `[workspace]` table")
-                    .with_note(format!("in {}", root_file.path.display()))
-                    .with_note("the Cargo workspace directory must hold the workspace root"),
-            ]));
+        // A package without a `[workspace]` table is, to Cargo, a workspace
+        // whose only member is that package, unless a parent directory
+        // holds a workspace. Then Cargo either builds it as part of that
+        // workspace (with that workspace's lockfile and inherited fields)
+        // or refuses, so loading it alone would build different code.
+        let lone = TomlWorkspace::default();
+        let ws = match (&manifest.workspace, &manifest.package) {
+            (Some(ws), _) => ws,
+            (None, Some(_)) => {
+                if let Some(parent) = enclosing_workspace(&root)? {
+                    return Err(Error::Diagnostics(vec![
+                        Diagnostic::error(
+                            "this package is inside a Cargo workspace; point Gluon at the \
+                             workspace root",
+                        )
+                        .with_note(format!("in {}", root_file.path.display()))
+                        .with_note(format!("workspace root: {}", parent.display())),
+                    ]));
+                }
+                &lone
+            }
+            (None, None) => {
+                return Err(Error::Diagnostics(vec![
+                    Diagnostic::error("manifest has neither `[package]` nor `[workspace]`")
+                        .with_note(format!("in {}", root_file.path.display())),
+                ]));
+            }
         };
         let excluded = ws.exclude.iter().map(|e| root.join(e)).collect();
         let mut errors = Vec::new();
@@ -1552,6 +1592,55 @@ mod tests {
     const WS: &str = "[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n\
                       [workspace.dependencies]\nb = { path = \"b\" }\n";
     const B: &str = "[package]\nname = \"b\"\nversion = \"0.1.0\"\n";
+
+    #[test]
+    fn a_lone_package_is_its_own_workspace() {
+        let tmp = tree(&[
+            (
+                "Cargo.toml",
+                "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("src/main.rs", "fn main() {}\n"),
+        ]);
+        let set = load(&tmp).unwrap();
+        let solo = &set.packages[set.member("solo").unwrap()];
+        assert_eq!(solo.name(), "solo");
+    }
+
+    #[test]
+    fn a_package_inside_a_workspace_must_load_from_its_root() {
+        let tmp = tree(&[
+            ("Cargo.toml", WS),
+            (
+                "a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+            ),
+            ("a/src/lib.rs", ""),
+            ("b/Cargo.toml", B),
+            ("b/src/lib.rs", ""),
+        ]);
+        let err = load_workspace(&tmp.path().join("a"), &RegistrySources::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("point Gluon at the workspace root"), "{err}");
+    }
+
+    #[test]
+    fn a_package_excluded_from_the_parent_workspace_loads_alone() {
+        let tmp = tree(&[
+            (
+                "Cargo.toml",
+                "[workspace]\nresolver = \"2\"\nmembers = []\nexclude = [\"solo\"]\n",
+            ),
+            (
+                "solo/Cargo.toml",
+                "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            ("solo/src/lib.rs", ""),
+        ]);
+        let set = load_workspace(&tmp.path().join("solo"), &RegistrySources::default()).unwrap();
+        assert!(set.member("solo").is_some());
+    }
 
     #[test]
     fn tests_are_discovered_like_cargo() {
