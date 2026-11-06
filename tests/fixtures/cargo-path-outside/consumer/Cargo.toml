@@ -1,0 +1,8 @@
+# `app` depends on `lib`, which lives in another workspace and inherits
+# from that workspace's root, as Cargo inherits for path dependencies.
+[workspace]
+resolver = "2"
+members = ["app"]
+
+[workspace.package]
+version = "9.9.9"

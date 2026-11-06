@@ -168,6 +168,20 @@ Their sources in Cargo's registry cache are never checked for edits.
 Sources in a vendor directory are checked like project sources, so a
 patched vendored crate rebuilds.
 
+### Path dependencies outside the workspace
+
+A path dependency outside the workspace, such as a crate in another
+repository's workspace, inherits `workspace = true` fields from its own
+workspace root, as under Cargo. That root is the nearest directory at or
+above the package whose `Cargo.toml` has a `[workspace]` table. Its
+`[workspace.package]`, `[workspace.dependencies]` and `[workspace.lints]`
+apply; its `Cargo.lock`, resolver and `[patch]` do not. Registry versions
+come from your workspace's `Cargo.lock`. A path package with no
+enclosing workspace cannot use `workspace = true`.
+
+Quon passes a path package's `[lints]` to rustc, as Cargo does, and does
+not cap them.
+
 ### Build scripts and proc macros of workspace packages
 
 Quon runs the build scripts of workspace packages and of their registry

@@ -112,6 +112,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so a workspace member that only Cargo builds, such as an `xtask`, can
   depend on one.
 
+### Fixed (path dependencies)
+
+- **A path dependency in another workspace can use `workspace = true`.**
+  It inherits `[workspace.package]` fields, `[workspace.dependencies]`
+  entries and `[workspace.lints]` from its own workspace root, as under
+  Cargo. Before, every such field was an error.
+- **The `[lints]` of path dependencies outside the workspace apply.**
+  Cargo passes them to rustc; Quon dropped them, so a crate with
+  `unsafe_code = "forbid"` could build under Quon and fail under Cargo.
+
 ### Fixed (images)
 
 - **Quon no longer depends on GPL-3.0 code.** hadris-fat 1.x, the FAT

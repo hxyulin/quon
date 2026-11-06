@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2021"
+
+[workspace.dependencies]
+helper = { path = "crates/helper", features = ["extra"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

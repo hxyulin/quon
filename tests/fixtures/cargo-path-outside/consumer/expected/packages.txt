@@ -1,0 +1,13 @@
+app 0.1.0 (path app) member
+  edition 2021
+  bin app src/main.rs
+  dep normal lib -> lib 0.3.0
+helper 0.3.0 (path <other>/crates/helper)
+  edition 2021
+  lib helper src/lib.rs (lib, edition 2021)
+  feature extra = []
+lib 0.3.0 (path <other>/crates/lib)
+  edition 2021
+  lib lib src/lib.rs (lib, edition 2021)
+  dep normal helper -> helper 0.3.0 features=extra
+  lint rust::unsafe_code forbid priority 0

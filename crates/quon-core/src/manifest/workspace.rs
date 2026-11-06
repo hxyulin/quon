@@ -366,7 +366,9 @@ impl SourceFile {
     }
 }
 
-/// What a member may inherit from the workspace root.
+/// What a package may inherit from its workspace root: the loaded
+/// workspace for members, or another workspace for a path dependency
+/// that lives in one.
 struct WorkspaceCtx {
     root_file: SourceFile,
     package: TomlWorkspacePackage,
@@ -374,10 +376,37 @@ struct WorkspaceCtx {
     lints: BTreeMap<String, BTreeMap<String, TomlLint>>,
 }
 
+impl WorkspaceCtx {
+    fn new(root_file: SourceFile, ws: &TomlWorkspace) -> Self {
+        Self {
+            package: ws.package.clone().unwrap_or_default(),
+            dependencies: ws.dependencies.clone(),
+            lints: ws.lints.clone().unwrap_or_default(),
+            root_file,
+        }
+    }
+}
+
+/// Which workspace a package inherits `workspace = true` fields from.
+enum Inherit {
+    /// The loaded workspace, for its members.
+    Member,
+    /// The workspace rooted at this directory, in `Loader::outside`.
+    Outside(PathBuf),
+    /// None: registry packages are published with inherited fields
+    /// filled in, and a path package may have no workspace.
+    Nothing,
+}
+
 struct Loader<'s> {
     root: PathBuf,
     sources: &'s RegistrySources,
     ws: WorkspaceCtx,
+    /// Workspaces of path dependencies outside the loaded one, by root.
+    /// Cargo inherits a package's `workspace = true` fields from its own
+    /// workspace, never from the workspace that depends on it; the
+    /// lock, resolver and `[patch]` still come from the loaded one.
+    outside: BTreeMap<PathBuf, WorkspaceCtx>,
     excluded: Vec<PathBuf>,
     lock: Option<Lockfile>,
     lock_error: Option<String>,
@@ -460,12 +489,7 @@ impl<'s> Loader<'s> {
                 .with_note(format!("in {}", root_file.path.display())),
             ),
         }
-        let ws_ctx = WorkspaceCtx {
-            package: ws.package.clone().unwrap_or_default(),
-            dependencies: ws.dependencies.clone(),
-            lints: ws.lints.clone().unwrap_or_default(),
-            root_file,
-        };
+        let ws_ctx = WorkspaceCtx::new(root_file, ws);
 
         let lock_path = root.join("Cargo.lock");
         let (lock, lock_error) = if lock_path.exists() {
@@ -485,6 +509,7 @@ impl<'s> Loader<'s> {
             root,
             sources,
             ws: ws_ctx,
+            outside: BTreeMap::new(),
             excluded,
             lock,
             lock_error,
@@ -603,8 +628,57 @@ impl<'s> Loader<'s> {
                 return None;
             }
         };
+        let inherit = if is_member {
+            Inherit::Member
+        } else {
+            self.outside_workspace(dir)?
+        };
         let source = PackageSource::Path(dir.to_path_buf());
-        self.add_package(file, source, is_member)
+        self.add_package(file, source, is_member, inherit)
+    }
+
+    /// The workspace that the path package in `dir`, not a member of
+    /// the loaded workspace, inherits from, loading its root manifest
+    /// the first time. `None` after recording an error.
+    fn outside_workspace(&mut self, dir: &Path) -> Option<Inherit> {
+        // A package whose own manifest has a `[workspace]` table is the
+        // root of its workspace; otherwise Cargo looks in the parents.
+        let own_root = SourceFile::read(&dir.join("Cargo.toml"))
+            .ok()
+            .and_then(|f| f.parse().ok())
+            .is_some_and(|m| m.workspace.is_some());
+        let found = if own_root {
+            Ok(Some(dir.to_path_buf()))
+        } else {
+            enclosing_workspace(dir)
+        };
+        let root = match found {
+            Ok(Some(root)) => root,
+            Ok(None) => return Some(Inherit::Nothing),
+            Err(e) => {
+                self.errors.push(Diagnostic::error(e.to_string()));
+                return None;
+            }
+        };
+        if !self.outside.contains_key(&root) {
+            // enclosing_workspace parsed this manifest already, so
+            // reading and parsing it again only fails on a race.
+            let ctx = SourceFile::read(&root.join("Cargo.toml")).and_then(|file| {
+                let manifest = file.parse().map_err(|d| Error::Diagnostics(vec![d]))?;
+                let ws = manifest.workspace.unwrap_or_default();
+                Ok(WorkspaceCtx::new(file, &ws))
+            });
+            match ctx {
+                Ok(ctx) => {
+                    self.outside.insert(root.clone(), ctx);
+                }
+                Err(e) => {
+                    self.errors.push(Diagnostic::error(e.to_string()));
+                    return None;
+                }
+            }
+        }
+        Some(Inherit::Outside(root))
     }
 
     fn add_package(
@@ -612,6 +686,7 @@ impl<'s> Loader<'s> {
         file: SourceFile,
         source: PackageSource,
         is_member: bool,
+        inherit: Inherit,
     ) -> Option<PackageIdx> {
         let manifest = match file.parse() {
             Ok(m) => m,
@@ -622,7 +697,11 @@ impl<'s> Loader<'s> {
         };
         let mut cx = ManifestCx {
             file: &file,
-            ws: is_member.then_some(&self.ws),
+            ws: match &inherit {
+                Inherit::Member => Some(&self.ws),
+                Inherit::Outside(root) => self.outside.get(root),
+                Inherit::Nothing => None,
+            },
             errors: Vec::new(),
             warnings: Vec::new(),
         };
@@ -718,7 +797,7 @@ impl<'s> Loader<'s> {
         }
         let manifest = self.sources.dir(&id.name, &id.version)?.join("Cargo.toml");
         let file = SourceFile::read(&manifest).map_err(|e| e.to_string())?;
-        match self.add_package(file, PackageSource::Registry, false) {
+        match self.add_package(file, PackageSource::Registry, false, Inherit::Nothing) {
             Some(idx) if self.packages[idx].id == id => Ok(DepTarget::Resolved(idx)),
             Some(idx) => Err(format!(
                 "{} holds `{} {}`, expected `{} {}`",
@@ -790,7 +869,7 @@ pub(crate) fn sort_diagnostics(diags: &mut [Diagnostic]) {
 /// dependencies, collecting diagnostics.
 struct ManifestCx<'a> {
     file: &'a SourceFile,
-    /// Present for workspace members, which may inherit.
+    /// The workspace this package inherits from, if it has one.
     ws: Option<&'a WorkspaceCtx>,
     errors: Vec<Diagnostic>,
     warnings: Vec<Diagnostic>,
@@ -828,8 +907,8 @@ impl ManifestCx<'_> {
                 let Some(ws) = self.ws else {
                     self.error(
                         format!(
-                            "`{field}.workspace = true` in a package outside the workspace \
-                             is not supported"
+                            "`{field}.workspace = true`, but this package is not in a \
+                             Cargo workspace"
                         ),
                         None,
                     );
@@ -988,7 +1067,9 @@ impl ManifestCx<'_> {
                 .collect()
         };
         let features = self.lower_features(m, &deps, &dropped_dev);
-        let lints = if is_member {
+        // Cargo passes `[lints]` for every path package and caps the
+        // lints of registry packages, so registry lints never matter.
+        let lints = if matches!(source, PackageSource::Path(_)) {
             self.lower_lints(m)
         } else {
             BTreeMap::new()
@@ -1358,9 +1439,7 @@ impl ManifestCx<'_> {
     ) -> Option<Dependency> {
         let Some(ws) = self.ws else {
             self.error(
-                format!(
-                    "`{key}.workspace = true` in a package outside the workspace is not supported"
-                ),
+                format!("`{key}.workspace = true`, but this package is not in a Cargo workspace"),
                 Some(span),
             );
             return None;
@@ -1651,6 +1730,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("point Quon at the workspace root"), "{err}");
+    }
+
+    /// A consumer workspace in `ws/` whose member depends on the path
+    /// package in `dep/`, which the caller writes.
+    fn consumer_of_dep(dep: &[(&str, &str)]) -> tempfile::TempDir {
+        let mut files = vec![
+            (
+                "ws/Cargo.toml",
+                "[workspace]\nresolver = \"2\"\nmembers = [\"a\"]\n\
+                 [workspace.package]\nversion = \"9.9.9\"\n",
+            ),
+            (
+                "ws/a/Cargo.toml",
+                "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\
+                 [dependencies]\ndep = { path = \"../../dep\" }\n",
+            ),
+            ("ws/a/src/lib.rs", ""),
+            ("dep/src/lib.rs", ""),
+        ];
+        files.extend_from_slice(dep);
+        tree(&files)
+    }
+
+    #[test]
+    fn a_path_dependency_outside_any_workspace_cannot_inherit() {
+        let tmp = consumer_of_dep(&[(
+            "dep/Cargo.toml",
+            "[package]\nname = \"dep\"\nversion.workspace = true\n",
+        )]);
+        let err = load_workspace(&tmp.path().join("ws"), &RegistrySources::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(
+                "`version.workspace = true`, but this package is not in a Cargo workspace"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_path_dependency_that_is_its_own_workspace_root_inherits_from_itself() {
+        let tmp = consumer_of_dep(&[(
+            "dep/Cargo.toml",
+            "[workspace]\n[workspace.package]\nversion = \"0.4.0\"\n\
+             [package]\nname = \"dep\"\nversion.workspace = true\n",
+        )]);
+        let set = load_workspace(&tmp.path().join("ws"), &RegistrySources::default()).unwrap();
+        let dep = set.packages.iter().find(|p| p.name() == "dep").unwrap();
+        assert_eq!(dep.id.version.to_string(), "0.4.0");
     }
 
     #[test]

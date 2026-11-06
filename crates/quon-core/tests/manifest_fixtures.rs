@@ -64,6 +64,17 @@ fn cargo_rename_packages() {
     packages_fixture("cargo-rename");
 }
 
+/// A path dependency in another workspace inherits `workspace = true`
+/// fields from that workspace's root, not from the loaded one.
+#[test]
+fn a_path_dependency_in_another_workspace_inherits_from_that_workspace() {
+    let dir = fixtures().join("cargo-path-outside/consumer");
+    let set = load_workspace(&dir, &vendored(&dir, "vendor")).expect("load");
+    let other = std::fs::canonicalize(dir.join("../other")).unwrap();
+    let out = dump_packages(&set).replace(&format!("{}/", other.display()), "<other>/");
+    check_expected(&dir.join("expected/packages.txt"), &out);
+}
+
 /// Missing vendor sources and a stale lock do not fail the load; the
 /// edges are recorded as unresolved for the resolver to report.
 #[test]

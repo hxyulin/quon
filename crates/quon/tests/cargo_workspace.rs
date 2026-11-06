@@ -104,6 +104,20 @@ fn fmt_leaves_dependencies_outside_the_workspace_alone() {
     assert!(stderr.contains("  - util"), "{stderr}");
 }
 
+/// A path dependency in another workspace builds with what it inherits
+/// from that workspace: `app` prints 42 only if `lib`'s
+/// `helper.workspace = true` brought in `helper`'s `extra` feature.
+#[test]
+#[ignore]
+fn a_path_dependency_in_another_workspace_builds_with_its_inherited_fields() {
+    if !rustc_available("a_path_dependency_in_another_workspace_builds_with_its_inherited_fields") {
+        return;
+    }
+    let (_tmp, fixture) = setup("tests/fixtures/cargo-path-outside");
+    let (stdout, stderr) = quon_ok(&fixture.join("consumer"), &["run"], &[]);
+    assert_eq!(stdout.trim(), "42", "{stderr}");
+}
+
 /// `example` builds from a clean tree. One test per example, so they
 /// build in parallel.
 fn example_builds(example: &str) {
