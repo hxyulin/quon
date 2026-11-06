@@ -16,6 +16,11 @@ cargo test --workspace
 # Also run the end-to-end tests, which spawn rustc
 cargo test --workspace -- --include-ignored
 
+# The same with cargo-nextest, which runs test binaries in parallel
+# (`cargo install cargo-nextest`). nextest skips doctests.
+cargo nextest run --workspace --run-ignored all
+cargo test --workspace --doc
+
 # Run fmt and clippy (CI enforces both)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,7 +45,9 @@ The `commit-msg` hook checks the format.
 
 Tests that spawn rustc are `#[ignore]`d, so `cargo test --workspace`
 finishes in seconds. `-- --include-ignored` runs them too and needs the
-`rust-src` component. Most of them copy a prebuilt sysroot into their
+`rust-src` component. `cargo test` runs one test binary at a time, so
+the end-to-end binaries wait on each other; `cargo nextest run` runs
+every test as its own process and takes about half as long. Most of them copy a prebuilt sysroot into their
 fixture instead of building `core`, `compiler_builtins` and `alloc`
 each time (see `crates/gluon-core/src/testing.rs`). The prebuilt
 sysroots live in `$TMPDIR/gluon-test-sysroots/`, about 120 MB per target
