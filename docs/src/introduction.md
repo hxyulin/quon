@@ -1,27 +1,34 @@
 # Introduction
 
-Gluon is a build system for bare-metal Rust kernels and firmware. It bypasses
-Cargo entirely, driving `rustc` directly with per-crate flag assembly,
-compiling custom sysroots (`core`, `alloc`, `compiler_builtins`) for arbitrary
-target triples, and orchestrating the full pipeline from configuration through
-compilation to bootable artifacts and QEMU runs. The entire build is declared
-in a single Rust build script, `gluon.rs`.
+Gluon is a declarative build system for Rust. It reads a Cargo
+workspace, drives `rustc` directly with per-crate flags, and carries a
+project from configuration through compilation to the binary running:
+on the host, through a command, or under QEMU. The build is declared in
+one Rust file, `gluon.rs`, next to the workspace's `Cargo.toml`.
 
-**Why not Cargo?** Cargo is an excellent tool for userland Rust, but bare-metal
-kernels push it past its comfort zone. Custom sysroot compilation requires
-unstable `-Zbuild-std` flags and fragile workarounds. Multiple target triples
-in a single workspace need separate build directories and manual coordination.
-Linker scripts, post-build pipelines (objcopy, image assembly, ESP layout),
-QEMU integration, and Kconfig-style configuration options all live outside
-Cargo's model and end up duct-taped together in Makefiles or shell scripts.
-Gluon replaces that entire stack with a single, purpose-built tool that
-understands the bare-metal build from end to end.
+![A clean gluon build and gluon test of the Hadron kernel](images/hadron-build.gif)
 
-**Who is Gluon for?** Anyone building a bare-metal Rust kernel, microkernel,
-hypervisor, or firmware image. Gluon is kernel-agnostic -- it does not assume a
-particular target triple, bootloader, or boot protocol. It is a host-side
-userland tool, not a runtime dependency. The project is functional and actively
-developed; expect rough edges and evolving APIs.
+**What does it add to Cargo?** Cargo builds one target per invocation
+and stops at the compiled binary. Gluon builds several targets in one
+graph, compiles sysroots (`core`, `alloc`, `compiler_builtins`) for
+targets that have none, and runs the steps after compiling: linker
+scripts, file copies, image tools, ESP layout and QEMU runs. It also
+has Kconfig-style typed config options, which Cargo features cannot
+express.
 
-Ready to try it? Head to [Installation](./getting-started/installation.md) to
-get started.
+**Does it replace Cargo.toml?** No. Gluon reads dependencies, features,
+editions, lints and build scripts from the manifests on every build.
+`gluon.rs` only says what Cargo cannot: targets, profiles, groups,
+runners and post-build steps. `gluon init` writes one for an existing
+project, and `cargo build` keeps working beside it.
+
+**Who is it for?** Projects whose build goes past `cargo build`:
+kernels, hypervisors, bootloaders and firmware, and also host tools and
+libraries that want one command to build, run and test. Gluon builds
+and tests itself from its own `gluon.rs`. It is kernel-agnostic: it
+assumes no target triple, bootloader or boot protocol. It needs a
+nightly toolchain. The project is under active development; expect
+rough edges and API changes.
+
+Ready to try it? Head to [Installation](./getting-started/installation.md)
+or [Generating gluon.rs](./getting-started/init.md).

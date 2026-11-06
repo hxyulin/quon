@@ -1,8 +1,10 @@
 # Working on Gluon
 
-Gluon is a build system for bare-metal Rust. It drives `rustc` directly,
-builds sysroots for custom targets, and takes a project from its `gluon.rs`
-configuration to bootable images and QEMU runs. It is a host tool, so it
+Gluon is a declarative build system for Rust. It reads Cargo workspaces,
+drives `rustc` directly, builds sysroots for custom targets, and takes a
+project from its `gluon.rs` configuration to a running binary: on the
+host, through a command, or as a bootable image under QEMU. Bare-metal
+projects are the main use, not the only one. It is a host tool, so it
 has no `no_std` or dependency-count constraints.
 
 ## How to collaborate

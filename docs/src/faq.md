@@ -2,21 +2,18 @@
 
 ## Why not just use Cargo?
 
-Cargo is excellent for most Rust projects, but bare-metal kernel development
-pushes against several of its assumptions:
+Gluon works with Cargo rather than around it: it reads the Cargo
+manifests on every build. It adds what Cargo leaves to scripts:
 
-- **Custom sysroot compilation** requires the unstable `-Zbuild-std` flag with
-  limited control over compiler flags.
-- **Multiple target triples** in one project require separate Cargo invocations
-  or workspace hacks.
-- **Per-crate compiler flags** (different optimization levels, `cfg` flags, or
-  linker scripts for different crates) are difficult to express in Cargo.
-- **Linker scripts, post-build artifact assembly, and QEMU integration** need
-  external scripting.
+- **Several targets in one build**, each group of crates for its own
+  triple.
+- **Custom sysroot compilation** without the unstable `-Zbuild-std`
+  flag, with control over the flags.
+- **Per-crate compiler flags** and linker scripts.
+- **Post-build steps and runners**: image assembly, ESP layout, and
+  `gluon run`/`gluon test` on the host, through a command or in QEMU.
 
-Gluon handles all of this in a single tool with a declarative configuration
-file. It invokes `rustc` directly with per-crate flag assembly, giving you full
-control over every aspect of the compilation pipeline.
+For a project that needs none of this, Cargo is enough.
 
 ## What Rust toolchain do I need?
 
@@ -55,19 +52,20 @@ In the `build/` directory under your project root:
 | `build/tool/check/` | `gluon check` output |
 | `build/tool/clippy/` | `gluon clippy` output |
 
-## How do I use Gluon with an existing kernel project?
+## How do I use Gluon with an existing project?
 
-Create a `gluon.rs` file in your project root. Declare your existing crates,
-targets, and dependencies. Gluon does not require any changes to your Rust
-source code -- it only needs to know where your crates are and how to compile
-them. You can migrate incrementally: start with one crate and expand from
-there.
+Run `gluon init` in the directory with the root `Cargo.toml`. It
+writes a `gluon.rs` from the manifests and toolchain files: a host
+build when no target is set, a kernel build otherwise. See
+[Generating gluon.rs](./getting-started/init.md). Gluon needs no
+changes to your Rust source code.
 
-## Can I use Gluon for non-kernel bare-metal projects?
+## Can I use Gluon for projects that are not kernels?
 
-Yes. Gluon is kernel-agnostic. It works for any bare-metal Rust project:
-firmware, bootloaders, embedded systems, or anything that needs custom sysroots
-and direct `rustc` control.
+Yes. A profile with `.target_host()` builds for the build machine, and
+`gluon run` runs the binary directly. Gluon's own repository builds
+this way. For bare-metal projects other than kernels (firmware,
+bootloaders, embedded images), declare their targets as for a kernel.
 
 ## How do I integrate with CI?
 

@@ -1,63 +1,96 @@
 # Gluon
 
-Gluon is a build system for bare-metal Rust kernels. It bypasses Cargo,
-drives `rustc` directly, builds custom sysroots, and orchestrates the full
-pipeline from configuration through compilation to bootable artifacts and
-QEMU runs.
+Gluon is a declarative build system for Rust. It reads your Cargo
+workspace, drives `rustc` directly, and handles the parts Cargo leaves
+to shell scripts: several targets in one build, custom targets and
+sysroots, linker scripts, post-build steps, and runners such as QEMU.
+The whole build is described in `gluon.rs`, a Rust file that lives next
+to your `Cargo.toml`.
+
+![A clean gluon build and gluon test of the Hadron kernel](docs/src/images/hadron-build.gif)
+
+<sub>A clean build of [Hadron](https://github.com/asterism-labs/hadron),
+an x86_64 kernel: proc macros for the host, a sysroot and the kernel for
+`x86_64-unknown-none`, and an ESP with Limine. `gluon test` then runs
+the host unit tests and boots the kernel in QEMU twice. Played at 2x.</sub>
+
+## Drop it into a Cargo project
+
+![gluon init, gluon run and gluon test in a new Cargo project](docs/src/images/cargo-project.svg)
+
+`gluon init` reads the manifests and writes a `gluon.rs`. A project
+with no target builds for the host, so `gluon run` and `gluon test`
+work straight away. A kernel workspace gets its target, linker script
+and QEMU setup from `.cargo/config.toml`, `rust-toolchain.toml` and
+`limine.conf`.
+
+`Cargo.toml` stays the source of truth. Gluon reads dependencies,
+features, editions, lints and build scripts from the manifests on every
+build, and writes to `build/`, so `cargo build` keeps working beside it.
+
+Gluon builds itself this way: its [`gluon.rs`](gluon.rs) is 37 lines,
+and `gluon test` runs the same tests as `cargo test`.
 
 ## Why Gluon?
 
-Cargo is excellent for most Rust projects, but bare-metal kernel development
-pushes against its assumptions:
+Cargo builds one target per invocation and stops at the compiled
+binary. Gluon covers what comes before and after:
 
-- **Custom sysroots.** Bare-metal targets need `core`, `alloc`, and
-  `compiler_builtins` compiled from source with specific flags. Cargo's
-  `-Zbuild-std` is unstable and gives limited control over sysroot
-  compilation flags.
-- **Multiple targets in one project.** A UEFI bootloader and a bare-metal
-  kernel live in the same repo but compile for different triples. Cargo
-  workspaces do not natively support per-crate target overrides.
-- **Linker scripts and post-build steps.** Kernels need custom linker
-  scripts, binary transformations, and ESP assembly. Cargo has no built-in
-  mechanism for these; projects resort to fragile `build.rs` scripts and
-  shell wrappers.
-- **QEMU integration.** The edit-compile-boot loop is the inner loop of
-  kernel development. Gluon makes `gluon run` a single command that
-  builds, assembles boot artifacts, and launches QEMU.
-- **Compile-time configuration.** Kernels need Kconfig-style option systems
-  for conditional compilation across hundreds of features. Cargo features
-  are flat and boolean; Gluon provides typed options with dependencies,
-  ranges, presets, and override layers.
+- **Several targets in one build.** A UEFI bootloader, a kernel and the
+  host tools they need build together, each group for its own target.
+- **Custom sysroots.** For a target with no prebuilt standard library,
+  Gluon builds `core`, `alloc` and `compiler_builtins` from source with
+  the flags you choose, without `-Zbuild-std`.
+- **Steps after compiling.** Linker scripts, file copies, image tools
+  and EFI System Partition layout are declared next to the crates they
+  use.
+- **Runners.** `gluon run` and `gluon test` start the binary on the
+  host, through any command, or under QEMU with UEFI, direct-kernel or
+  BIOS boot.
+- **Typed config options.** Kconfig-style booleans, numbers, strings
+  and choices, with dependencies, ranges and presets, become `cfg`
+  flags and a generated config crate.
 
-Gluon replaces this patchwork with a single tool driven by a declarative
-Rust build script.
+The output looks like Cargo's: `Compiling`, a progress bar for the
+crates in flight, and `Finished` with the profile and cache counts.
 
-## Quick Start
+## Quick start
 
 **Requirements:**
 
-- Rust nightly toolchain (1.99+) with the `rust-src` component
-- QEMU (for `gluon run`; not needed for just building)
+- A nightly Rust toolchain. Gluon passes `-Z` flags to `rustc` on every
+  build, host builds included.
+- The `rust-src` component, for targets Gluon builds a sysroot for.
+- QEMU, only for a QEMU runner.
 
 **Install:**
 
 ```sh
-git clone https://github.com/hxyulin/gluon.git
-cd gluon
-cargo install --path crates/gluon-cli
+cargo install --git https://github.com/hxyulin/gluon.git gluon-cli
 ```
 
-**Generate `gluon.rs` from your Cargo workspace:**
+**Generate `gluon.rs`:**
 
 ```sh
-cd my-kernel             # the directory with the workspace Cargo.toml
-gluon init --bootloader limine --limine 11.4.1
+cd my-project            # the directory with the root Cargo.toml
+gluon init               # a host build, or a kernel build if a target is set
+gluon init --target x86_64-unknown-none --bootloader limine --limine 11.4.1
 ```
 
-`gluon init` reads the target, kernel package and linker script from the
-workspace and leaves a `// TODO:` comment for each setting it cannot find.
-See [Generating gluon.rs](docs/src/getting-started/init.md). To write the
-file by hand instead, start from this:
+`gluon init` leaves a `// TODO:` comment for each setting it cannot
+find. See [Generating gluon.rs](docs/src/getting-started/init.md).
+
+**Build and run:**
+
+```sh
+gluon build              # compile everything
+gluon run -- <args>      # build, then start the run binary through its runner
+gluon test               # host unit tests, tests/, doctests, QEMU tests
+gluon check              # metadata-only check pass
+gluon configure          # write rust-project.json for rust-analyzer
+```
+
+## A kernel `gluon.rs`
 
 ```rust
 use gluon_config::{Config, Result};
@@ -90,42 +123,42 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 }
 ```
 
-See [the gluon.rs guide](docs/src/configuration/gluon-rs.md) for details on
-the build script API, including how to
-[split config across multiple files](docs/src/configuration/gluon-rs.md#splitting-config-across-files)
-in larger projects.
-
-**Build and run:**
-
-```sh
-gluon build              # Compile everything
-gluon run                # Build + launch QEMU
-gluon test               # Run host, integration and boot tests
-gluon check              # Metadata-only check pass
-gluon configure          # Generate rust-project.json for rust-analyzer
-gluon setup              # Build the gluon-config library gluon.rs links against
-```
+See [the gluon.rs guide](docs/src/configuration/gluon-rs.md) for the
+full API, including how to
+[split config across files](docs/src/configuration/gluon-rs.md#splitting-config-across-files).
 
 ## Features
 
-- **Direct rustc invocation** -- per-crate flag assembly, no Cargo overhead
-- **Custom sysroot compilation** -- `core`, `alloc`, `compiler_builtins` built for your target
-- **Rust build script** -- type-safe `gluon.rs` with projects, targets, profiles, groups, and crates
-- **Kconfig-style options** -- typed config options with defaults, ranges, dependencies, and presets
-- **Configuration overrides** -- `gluon.rs` defaults, `.gluon-config` file, and `GLUON_*` environment variables
-- **Hybrid build cache** -- two-tier mtime + SHA-256 freshness checking
-- **Parallel DAG scheduler** -- dependency-aware build graph with worker pool
-- **Dependency vendoring** -- `gluon vendor` with lockfile and fingerprinting
-- **QEMU orchestration** -- direct boot, UEFI boot (OVMF), GDB server, timeouts
-- **Testing** -- `gluon test` runs host unit tests, QEMU integration tests and boot test suites
-- **rust-analyzer integration** -- `gluon configure` generates `rust-project.json`
-- **Pipeline and rule system** -- user-defined build stages with copy, mkimage, and exec rules
-- **ESP assembly** -- automatic EFI System Partition layout for UEFI boot
-- **External plugins** -- `gluon foo` dispatches to `gluon-foo` on `$PATH`
+- **Direct `rustc` invocation**: per-crate flag assembly from the Cargo
+  manifests
+- **Host and cross profiles**: `profile.target_host()` for tools,
+  declared or `.json` targets for everything else
+- **Custom sysroot compilation**: `core`, `alloc` and
+  `compiler_builtins` built for your target
+- **Kconfig-style options**: typed options with defaults, ranges,
+  dependencies and presets
+- **Configuration overrides**: `gluon.rs` defaults, a `.gluon-config`
+  file and `GLUON_*` environment variables
+- **Build cache**: mtime and SHA-256 freshness checks, rebuilt when the
+  toolchain changes
+- **Parallel scheduler**: a dependency graph run by a worker pool
+- **Dependency vendoring**: `gluon vendor` with a lockfile and
+  fingerprints
+- **Runners**: the host, a command, or QEMU with OVMF, a GDB server and
+  timeouts
+- **Testing**: unit tests, `tests/`, doctests, QEMU integration tests
+  and boot tests from one `gluon test`
+- **rust-analyzer integration**: `gluon configure` writes
+  `rust-project.json`
+- **Pipelines and rules**: build stages with copy, mkimage and exec
+  rules
+- **ESP assembly**: EFI System Partition layout for UEFI boot
+- **External plugins**: `gluon foo` runs `gluon-foo` from `$PATH`
 
 ## Documentation
 
-Full documentation is available in [`docs/`](docs/) (built with [mdbook](https://rust-lang.github.io/mdBook/)).
+The full documentation is in [`docs/`](docs/), built with
+[mdbook](https://rust-lang.github.io/mdBook/):
 
 ```sh
 cd docs && mdbook serve
