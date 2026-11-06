@@ -22,8 +22,8 @@ fs2 = "0.4"
 # scheduler node to assemble bootable disk images from compiled
 # artifacts without shelling out to mtools / mkfs.fat. Synchronous,
 # `no_std`-compatible upstream but we use the `std` paths.
-# Pinned to 1.x; the API has stabilised since 1.0.
-hadris-fat = "1.1"
+# 2.x, because 1.x pulled in noalloc, which is GPL-3.0.
+hadris-fat = "2.5"
 # `rc` serialises the `Arc`s in `NodeData`, which fingerprint records store.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

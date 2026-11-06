@@ -112,6 +112,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   so a workspace member that only Cargo builds, such as an `xtask`, can
   depend on one.
 
+### Fixed (images)
+
+- **Quon no longer depends on GPL-3.0 code.** hadris-fat 1.x, the FAT
+  writer behind `image()`, pulled in noalloc, which is GPL-3.0. Quon
+  now uses hadris-fat 2.5, which does not.
+- **Upgrading hadris-fat rebuilds every image.** The image cache key
+  was meant to hold the hadris-fat version but always held "unknown",
+  so an image written by an older FAT writer could be reused.
+
 ### Fixed (fmt)
 
 - **`quon fmt` formats only declared crates and workspace members.**

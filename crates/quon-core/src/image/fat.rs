@@ -10,9 +10,9 @@
 //! than a filesystem path. Today we work directly on a `File`.
 
 use crate::error::{Error, Result};
-use hadris_fat::format::{FatVolumeFormatter, FormatOptions};
-use hadris_fat::sync::FatFs;
-use hadris_fat::sync::write::FatFsWriteExt;
+use hadris_fat::sync::FatVolume;
+use hadris_fat::sync::format::{FatFormatOptions, FatVolumeFormatter};
+use hadris_fat::sync::write::FatVolumeWriteExt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -92,7 +92,7 @@ where
     // label. Users who want a custom label can override via a future
     // `image().volume_label("...")` builder once the collision-free
     // listing API exists.
-    let options = FormatOptions::new(size_bytes).with_label("QUON");
+    let options = FatFormatOptions::new(size_bytes).volume_label("QUON");
 
     let fs = FatVolumeFormatter::format(data, options).map_err(|e| {
         Error::Compile(format!(
@@ -120,7 +120,11 @@ where
     Ok(())
 }
 
-fn write_one_entry<DATA>(fs: &FatFs<DATA>, entry: &ResolvedEntry, image_name: &str) -> Result<()>
+fn write_one_entry<DATA>(
+    fs: &FatVolume<DATA>,
+    entry: &ResolvedEntry,
+    image_name: &str,
+) -> Result<()>
 where
     DATA: hadris_fat::sync::Read + hadris_fat::sync::Write + hadris_fat::sync::Seek,
 {
@@ -148,7 +152,7 @@ where
 }
 
 fn walk_and_write<DATA>(
-    fs: &FatFs<DATA>,
+    fs: &FatVolume<DATA>,
     src_root: &Path,
     dest_prefix: &str,
     image_name: &str,
@@ -186,7 +190,7 @@ where
 /// Create any missing intermediate directories in `dest_path`, then
 /// create the final file and write `bytes`.
 fn write_file_at_path<DATA>(
-    fs: &FatFs<DATA>,
+    fs: &FatVolume<DATA>,
     dest_path: &str,
     bytes: &[u8],
     image_name: &str,
@@ -289,7 +293,7 @@ fn describe_source(s: &StampSource) -> String {
     }
 }
 
-fn fat_to_compile(image_name: &str, dest_path: &str, err: hadris_fat::FatError) -> Error {
+fn fat_to_compile(image_name: &str, dest_path: &str, err: hadris_fat::error::Error) -> Error {
     Error::Compile(format!(
         "image('{}') FAT write to '{}': {err}",
         image_name, dest_path

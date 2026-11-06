@@ -873,17 +873,12 @@ fn sum_dir_bytes(dir: &Path) -> Result<u64> {
     Ok(total)
 }
 
-/// hadris-fat compile-time version, used as a cache-key input so that
-/// upgrading the FAT writer transparently invalidates every image
-/// (a new hadris release might write the same logical image with a
-/// slightly different byte layout — e.g. fixed boot-sector reserved
-/// area, free-space hint — and we want determinism across builds, not
-/// across hadris versions).
+/// hadris-fat version, used as a cache-key input so that upgrading
+/// the FAT writer invalidates every image: a new hadris release might
+/// write the same logical image with a different byte layout. build.rs
+/// reads it from Cargo.lock.
 fn hadris_fat_version() -> &'static str {
-    // Read from the `hadris-fat` Cargo.toml at compile time. If
-    // hadris-fat ever exposes a `pub const VERSION` we should switch
-    // to that; for now this env var is set by Cargo and is stable.
-    option_env!("DEP_HADRIS_FAT_VERSION").unwrap_or("unknown")
+    env!("QUON_HADRIS_FAT_VERSION")
 }
 
 #[allow(unused)]
@@ -894,6 +889,16 @@ fn _writeln_progress(stdout: &mut Vec<u8>, msg: impl AsRef<str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_image_cache_key_holds_the_locked_hadris_fat_version() {
+        let lock = include_str!("../../../../Cargo.lock");
+        let entry = format!(
+            "name = \"hadris-fat\"\nversion = \"{}\"",
+            hadris_fat_version()
+        );
+        assert!(lock.contains(&entry), "{entry} is not in Cargo.lock");
+    }
     use crate::compile::{ArtifactMap, BuildLayout, RustcInfo};
     use quon_model::{
         BuildModel, ImageEntry, ImageSource, PanicStrategy, ProjectDef, ResolvedConfig,

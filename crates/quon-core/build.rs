@@ -59,9 +59,19 @@ fn main() {
 
     let lock = root.join("Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock.display());
+    let mut hadris_fat = None;
     if lock.is_file() {
+        hadris_fat = locked_version(&lock, "hadris-fat");
         files.push(("Cargo.lock".into(), lock));
     }
+    // Cargo sets DEP_<crate>_VERSION only for crates with a `links`
+    // key, which hadris-fat lacks, so the image cache key takes the
+    // version from the lock. Without a lock it stays "unknown", as
+    // before.
+    println!(
+        "cargo:rustc-env=QUON_HADRIS_FAT_VERSION={}",
+        hadris_fat.as_deref().unwrap_or("unknown")
+    );
 
     let root_manifest = root.join("Cargo.toml");
     println!("cargo:rerun-if-changed={}", root_manifest.display());
@@ -99,6 +109,22 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// The version of package `name` in the lock at `path`, if it is there once.
+fn locked_version(path: &Path, name: &str) -> Option<String> {
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let lock: toml::Table =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let mut versions = lock
+        .get("package")?
+        .as_array()?
+        .iter()
+        .filter(|p| p.get("name").and_then(toml::Value::as_str) == Some(name))
+        .filter_map(|p| p.get("version")?.as_str());
+    let version = versions.next()?;
+    versions.next().is_none().then(|| version.to_owned())
 }
 
 /// A workspace manifest with only [`CRATES`] as members. The member
