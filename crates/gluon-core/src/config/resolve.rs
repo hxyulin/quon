@@ -500,12 +500,21 @@ fn reachable_crates(
         }
     }
 
-    // Host-test seed: the host test executables (`cfg.host_tests()`).
-    // Nothing depends on them, and they build for the host whatever
-    // the profile's target is.
+    // Host-test seed: the host test executables (`cfg.host_tests()`),
+    // and the plain libs their doctests link. Nothing depends on them,
+    // and they build for the host whatever the profile's target is.
     for (h, krate) in model.crates.iter() {
-        if krate.crate_type == CrateType::Test && visited.insert(h) {
+        if krate.crate_type != CrateType::Test {
+            continue;
+        }
+        if visited.insert(h) {
             queue.push_back(h);
+        }
+        let lib = krate.cargo.as_ref().and_then(|c| c.doctest_lib.as_deref());
+        if let Some(l) = lib.and_then(|n| model.crates.lookup(n))
+            && visited.insert(l)
+        {
+            queue.push_back(l);
         }
     }
 

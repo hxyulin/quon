@@ -356,8 +356,14 @@ pub fn expand_with(
             .build_script
             .as_ref()
             .map(|run| build_script_def(&graph, run.script, &names));
+        let doctest_lib = u.doctest_lib.map(|l| names[l].clone());
         match lower_unit(u, pkg, source, &names, root, project_root, script) {
-            Ok(def) => lowered.push(def),
+            Ok(mut def) => {
+                if let Some(c) = def.cargo.as_mut() {
+                    c.doctest_lib = doctest_lib;
+                }
+                lowered.push(def)
+            }
             Err(d) => errors.push(d),
         }
     }
@@ -777,6 +783,8 @@ fn lower_unit(
             is_test: matches!(u.kind, UnitKind::Test(_)),
             test_only: u.test_only,
             host_test: u.domain == Domain::HostTest,
+            // Filled in by the caller, which sees the other units.
+            doctest_lib: None,
         }),
         ..Default::default()
     };

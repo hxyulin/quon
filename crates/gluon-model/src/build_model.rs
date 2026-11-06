@@ -487,6 +487,11 @@ pub struct CargoUnitDef {
     /// package, even when their features and deps match.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub host_test: bool,
+    /// On a host-test package's lib test: the crate name of the same
+    /// package's plain lib, which its doctests link as `--extern`. Set
+    /// unless the lib says `doctest = false`. See `compile::doctest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doctest_lib: Option<String>,
 }
 
 impl CrateDef {

@@ -169,6 +169,23 @@ fn run_host_tests(
     for test in tests {
         let name = format!("{} ({})", test.package, test.source);
         let mut cmd = test.command(&libtest_args);
+        if test.unbuilt {
+            if opts.dry_run {
+                // A comment, so a script running the lines skips it.
+                println!(
+                    "# {name}: rustdoc --test, with the command the build stores in {}",
+                    test.program.display()
+                );
+                continue;
+            }
+            shell.error(&anyhow::anyhow!(
+                "host test {name}: the build stored no doctest command in {}; \
+                 run `gluon test` without --no-build",
+                test.program.display()
+            ));
+            results.record("host", name, false);
+            continue;
+        }
         if opts.dry_run {
             // stdout, so scripts and tests can capture the commands alone.
             println!("{}", command_line(&cmd));
@@ -177,7 +194,7 @@ fn run_host_tests(
         shell.status("Running", format_args!("host test {name}"));
         let status = cmd
             .status()
-            .with_context(|| format!("failed to run {}", test.binary.display()))?;
+            .with_context(|| format!("failed to run {}", test.program.display()))?;
         results.record("host", name, status.success());
     }
     Ok(())

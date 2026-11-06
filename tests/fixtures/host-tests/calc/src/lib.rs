@@ -1,5 +1,12 @@
 #![cfg_attr(not(test), no_std)]
 
+/// Adds two numbers. The doctest links the plain lib and the
+/// dev-dependency, and fails when CALC_FAIL is set.
+///
+/// ```
+/// assert_eq!(calc::add(2, 2), helper::four());
+/// assert!(std::env::var_os("CALC_FAIL").is_none(), "CALC_FAIL is set");
+/// ```
 pub fn add(a: u32, b: u32) -> u32 {
     a + b
 }

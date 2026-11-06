@@ -14,7 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   run them from the package directory. They resolve features in their
   own domain, so neither the kernel's features nor those of build
   scripts and proc macros reach them. `gluon build` builds none of
-  them. Proc-macro packages and doctests are not supported yet.
+  them. Proc-macro packages are not supported yet.
+- **Doctests.** Host-test packages also run their doctests with
+  `rustdoc --test`, linking the lib and its dev-dependencies, with the
+  lib's features and build-script output. `doctest = false` turns them
+  off. They are reported as `host test <package> (doctests)`.
 - **Boot tests.** `cfg.boot_test("name").profile("test")` makes
   `gluon test` build that profile and boot its boot binary, passing when
   QEMU exits with the success status. This runs a kernel's own test

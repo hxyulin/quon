@@ -59,15 +59,21 @@ fn host_tests_build_and_run_on_the_host() {
         stderr.contains("Running host test calc (tests/api.rs)"),
         "{stderr}"
     );
+    assert!(
+        stderr.contains("Running host test calc (doctests)"),
+        "{stderr}"
+    );
     for t in [
         "tests::adds",
         "tests::runs_in_the_package_directory",
         "api_adds",
+        // Named relative to the package directory.
+        "src/lib.rs - add (line 6)",
     ] {
         assert!(stdout.contains(&format!("test {t} ... ok")), "{stdout}");
     }
     assert!(
-        stderr.contains("test result: ok. passed: host 2 of 2"),
+        stderr.contains("test result: ok. passed: host 3 of 3"),
         "{stderr}"
     );
 
@@ -80,13 +86,16 @@ fn host_tests_build_and_run_on_the_host() {
         "{stdout}"
     );
 
-    // A failing executable fails the run, after the others ran.
+    // A failing executable fails the run, after the others ran. The
+    // unit tests and the doctest both check CALC_FAIL, and the doctests
+    // run from the command the earlier build stored.
     let (ok, stdout, stderr) = run(&fixture, &["test", "--no-build"], true);
     assert!(!ok, "{stderr}");
     assert!(stdout.contains("test api_adds ... ok"), "{stdout}");
     assert!(stderr.contains("host test calc (src/lib.rs)"), "{stderr}");
+    assert!(stderr.contains("host test calc (doctests)"), "{stderr}");
     assert!(
-        stderr.contains("1 of 2 test runs failed (passed: host 1 of 2)"),
+        stderr.contains("2 of 3 test runs failed (passed: host 1 of 3)"),
         "{stderr}"
     );
 }
@@ -97,7 +106,7 @@ fn dry_run_prints_each_host_test() {
     let (ok, stdout, stderr) = run(&fixture, &["test", "--dry-run", "adds"], false);
     assert!(ok, "{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 2, "{stdout}");
+    assert_eq!(lines.len(), 3, "{stdout}");
     assert!(
         lines[0].contains("/host/profile/dev/deps/calc-"),
         "{}",
@@ -108,5 +117,11 @@ fn dry_run_prints_each_host_test() {
         lines[1].contains("/host/profile/dev/deps/api-"),
         "{}",
         lines[1]
+    );
+    // Nothing is built, so the doctest command is not known yet.
+    assert!(
+        lines[2].starts_with("# calc (doctests): ") && lines[2].ends_with(".doctest.json"),
+        "{}",
+        lines[2]
     );
 }

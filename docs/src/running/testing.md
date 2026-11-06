@@ -4,7 +4,7 @@
 
 | Kind | What Gluon builds | Where it runs | Passes when |
 |------|-------------------|---------------|-------------|
-| Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test` | On the host | The libtest executable exits with 0 |
+| Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
 | Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | QEMU, one boot per test | QEMU exits with the success status |
 | Boot tests | The boot binary of the profile a `cfg.boot_test(...)` names | QEMU, one boot per suite | QEMU exits with the success status |
 
@@ -54,8 +54,26 @@ scripts run, as under Cargo.
 
 Each executable runs from its package's directory, with the
 `CARGO_PKG_*` and `CARGO_MANIFEST_DIR` variables Cargo sets, and its
-output passes through. Gluon does not run doctests, and cannot run the
-tests of a proc-macro package yet.
+output passes through. Gluon cannot run the tests of a proc-macro
+package yet.
+
+### Doctests
+
+After a package's other host tests, Gluon runs its doctests with
+`rustdoc --test`, from the package directory. They link the package's
+lib and its dev-dependencies, and see the same features, build-script
+output and `OUT_DIR` as the lib, as under `cargo test`. The filter goes
+to them too. A lib with `doctest = false` in its `[lib]` table gets no
+doctest run. Each doctest is named by its file relative to the package,
+as in `src/lib.rs - add (line 6)`.
+
+rustdoc compiles and runs the doctests in one step, so they are not
+cached: every `gluon test` compiles them again, as `cargo test` does.
+The build writes the rustdoc command next to the unit-test executable,
+because the command depends on build-script output. `gluon test
+--dry-run` therefore prints a comment line in place of the doctest
+command, and `--no-build` before any build reports the doctests as
+failed.
 
 ## Integration tests
 

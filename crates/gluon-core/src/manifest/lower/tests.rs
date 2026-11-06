@@ -1407,7 +1407,10 @@ fn host_tests_need_no_group() {
     expand_at(&mut raw, ws.path()).expect("expand");
     assert_eq!(
         dump(&raw),
-        "util [cargo:host-test] host Test util/src/lib.rs 2021 f=[] d=[] rustc=util\n"
+        "\
+util [cargo:host-test] host Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
+util@test [cargo:host-test] host Test util/src/lib.rs 2021 f=[] d=[] rustc=util
+"
     );
 }
 
@@ -1477,6 +1480,49 @@ fn host_test_copies_never_share_an_output_with_the_build() {
     let test = unit_named(&units, "util@host-test");
     assert_eq!(build.features, test.features);
     assert_ne!(build.metadata, test.metadata);
+}
+
+/// A host-test lib test names the plain lib its doctests link, in the
+/// host-test domain, unless the lib says `doctest = false`. The plain
+/// lib is lowered even when no `tests/` file links it.
+#[test]
+fn host_test_lib_tests_name_their_doctest_lib() {
+    let doctest_lib = |raw: &RawBuildModel| -> Vec<(String, Option<String>)> {
+        raw.crates
+            .iter()
+            .filter_map(|(_, c)| {
+                let cargo = c.cargo.as_ref()?;
+                (c.crate_type == CrateType::Test)
+                    .then(|| (c.name.clone(), cargo.doctest_lib.clone()))
+            })
+            .collect()
+    };
+    let ws = host_test_workspace();
+    let mut raw = root_a_with_host_tests();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        doctest_lib(&raw),
+        [
+            ("a@test".to_string(), Some("a@host-test".to_string())),
+            ("api".to_string(), None),
+        ]
+    );
+
+    std::fs::remove_file(ws.path().join("a/tests/api.rs")).unwrap();
+    let mut raw = root_a_with_host_tests();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        doctest_lib(&raw),
+        [("a@test".to_string(), Some("a@host-test".to_string()))]
+    );
+    assert!(raw.crates.iter().any(|(_, c)| c.name == "a@host-test"));
+
+    let manifest_path = ws.path().join("a/Cargo.toml");
+    let text = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(&manifest_path, format!("{text}[lib]\ndoctest = false\n")).unwrap();
+    let mut raw = root_a_with_host_tests();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(doctest_lib(&raw), [("a@test".to_string(), None)]);
 }
 
 /// With a boot binary, a profile builds what the target's crates reach,

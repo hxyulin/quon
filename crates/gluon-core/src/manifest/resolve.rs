@@ -144,6 +144,11 @@ pub struct Unit {
     /// build unit equals (a dev-dependency, or a copy whose features or
     /// deps grew). See the module docs.
     pub test_only: bool,
+    /// On a [`UnitKind::LibTest`]: the package's plain lib unit in the
+    /// same domain, which its doctests link. Not a dep, since the lib
+    /// test is that lib, built with `--test`. `None` when the lib says
+    /// `doctest = false`.
+    pub doctest_lib: Option<UnitId>,
 }
 
 #[derive(Debug, Clone)]
@@ -913,6 +918,12 @@ fn build_units(
             build_script,
             is_root: d.is_root,
             test_only: d.kind.is_test(),
+            doctest_lib: match (&d.kind, &pkg.lib) {
+                (UnitKind::LibTest, Some(lib)) if lib.doctest => {
+                    lib_unit.get(&(d.package, d.domain.clone())).copied()
+                }
+                _ => None,
+            },
         });
     }
     for u in &mut units {
@@ -953,6 +964,9 @@ fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
         }
         stack.extend(u.deps.iter().map(|d| d.unit));
         stack.extend(u.build_script.as_ref().map(|b| b.script));
+        // Nothing else links the plain lib when the package has no
+        // `tests/` files.
+        stack.extend(u.doctest_lib);
     }
 
     let mut merged: Vec<(bool, &Unit)> = build.iter().map(|u| (false, u)).collect();
@@ -1003,6 +1017,7 @@ fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
             if let Some(b) = &mut u.build_script {
                 b.script = ids[b.script];
             }
+            u.doctest_lib = u.doctest_lib.map(|l| ids[l]);
             u
         })
         .collect()

@@ -74,6 +74,67 @@ pub(crate) fn collect_artifact_env_sources(
 /// Freshness is checked and recorded by `compile_and_cache`. The
 /// declared inputs are the direct deps' outputs and the `artifact_env`
 /// artifacts.
+/// The doctest command of a host-test lib test unit, or `None` for any
+/// other unit, for a lib with `doctest = false`, and under `gluon check`
+/// and `gluon clippy`, which build no test binaries.
+fn doctest_command(
+    ctx: &CompileCtx,
+    input: &CompileUnitInput<'_>,
+    builder: &super::RustcCommandBuilder,
+) -> Result<Option<super::doctest::DoctestCommand>> {
+    let unit = input.units.get(input.unit);
+    if ctx.layout.driver() != super::DriverKind::Rustc || unit.kind != CrateType::Test {
+        return Ok(None);
+    }
+    let UnitOrigin::Crate(h) = unit.origin else {
+        return Ok(None);
+    };
+    let Some(def) = input.model.crates.get(h) else {
+        return Ok(None);
+    };
+    let Some(lib_name) = def.cargo.as_ref().and_then(|c| c.doctest_lib.as_deref()) else {
+        return Ok(None);
+    };
+    let lib = input
+        .model
+        .crates
+        .lookup(lib_name)
+        .and_then(|l| input.units.unit_of(l))
+        .ok_or_else(|| {
+            Error::Compile(format!(
+                "crate '{}': its doctests link '{lib_name}', which is not in this build \
+                 (lowering bug)",
+                unit.name
+            ))
+        })?;
+    let lib_path = input
+        .units
+        .paths(lib, &ctx.layout, input.model, input.resolved)?
+        .output_path;
+    let mut args = super::doctest::rustdoc_args(builder.args(), &unit.crate_name, &lib_path);
+    // The doctests run from the package directory (see `run::host`).
+    // A relative input names them `src/lib.rs - add (line 6)` instead
+    // of by absolute path. Cargo runs rustdoc from the workspace root,
+    // so its names start at the workspace root instead.
+    let package_dir = input.resolved.project_root.join(&def.path);
+    if let Some(first) = args.first_mut()
+        && Path::new(first) == unit.src
+        && let Ok(rel) = unit.src.strip_prefix(&package_dir)
+    {
+        *first = rel.as_os_str().to_os_string();
+    }
+    let exe = std::env::consts::EXE_SUFFIX;
+    Ok(Some(super::doctest::DoctestCommand {
+        program: ctx
+            .rustc_info
+            .sysroot
+            .join("bin")
+            .join(format!("rustdoc{exe}")),
+        args,
+        env: builder.envs().clone().into_iter().collect(),
+    }))
+}
+
 pub fn compile(
     ctx: &CompileCtx,
     input: CompileUnitInput<'_>,
@@ -158,6 +219,9 @@ pub fn compile(
     let lint = super::command_builder::needs_lint_pass(ctx, unit)
         .then(|| super::command_builder::build_lint_command(ctx, &input))
         .transpose()?;
+    // Taken from the argv before the job consumes it; written once the
+    // unit succeeds. See `compile::doctest`.
+    let doctest = doctest_command(ctx, &input, &cmd.builder)?;
 
     let (output_path, was_cached) = crate::compile::run_compile_and_cache(
         ctx,
@@ -176,6 +240,9 @@ pub fn compile(
         },
         stderr_sink,
     )?;
+    if let Some(doctest) = doctest {
+        super::doctest::write_command(&output_path, &doctest)?;
+    }
 
     // The lint pass runs after the real compile, so a hard error is
     // reported once, by rustc, and the pass only adds clippy's lints.
