@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Dev-dependencies for integration tests)
+
+- **`harness = false` tests can use `[dev-dependencies]`.** When a root
+  package has tests, Gluon runs a second feature resolve for them, as
+  `cargo test` does: the package's dev-dependencies apply (with
+  `[target.'cfg(...)'.dev-dependencies]` keys matched against the
+  group's target), and their features unify with the normal ones. The
+  kernel's resolve still ignores dev-dependencies, so the kernel's
+  artifacts do not change when tests are added. A dependency whose
+  features a dev-dependency grows builds a second time for the tests,
+  under a `@test-pass` name. `gluon build` and `gluon run` leave the
+  dev-dependencies and those copies out. See
+  `docs/src/running/integration-tests.md`.
+
 ### Added (Modular workspace config)
 
 - **`gluon.rs` config can now be split across multiple files** using

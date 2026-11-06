@@ -691,6 +691,234 @@ fn build_skips_test_crates() {
     assert_eq!(names(&crate::without_tests(&model, &resolved)), ["a"]);
 }
 
+// ---------------------------------------------------------------------
+// Dev-dependencies
+// ---------------------------------------------------------------------
+
+/// `[package]` for `name`, then `rest`.
+fn manifest(name: &str, rest: &str) -> String {
+    format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{rest}")
+}
+
+/// Member `a` (lib, bin and the `harness = false` test `boot`) with
+/// `a_rest` appended to its manifest, plus `others`: `(dir, manifest
+/// rest)` for each lib package beside it.
+fn dev_workspace(a_rest: &str, others: &[(&str, &str)]) -> tempfile::TempDir {
+    let a = manifest(
+        "a",
+        &format!("[[test]]\nname = \"boot\"\nharness = false\n{a_rest}"),
+    );
+    let mut files: Vec<(String, String)> = vec![
+        ("Cargo.toml".into(), WS.into()),
+        ("a/Cargo.toml".into(), a),
+        ("a/src/lib.rs".into(), String::new()),
+        ("a/src/main.rs".into(), String::new()),
+        ("a/tests/boot.rs".into(), String::new()),
+    ];
+    for (name, rest) in others {
+        files.push((format!("{name}/Cargo.toml"), manifest(name, rest)));
+        files.push((format!("{name}/src/lib.rs"), String::new()));
+    }
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    workspace(&files)
+}
+
+/// The test-only crates of an expanded model, in arena order.
+fn test_only(raw: &RawBuildModel) -> Vec<String> {
+    raw.crates
+        .iter()
+        .filter(|(_, c)| c.cargo.as_ref().is_some_and(|c| c.test_only))
+        .map(|(_, c)| c.name.clone())
+        .collect()
+}
+
+/// A dev-dependency links into the tests only, and `gluon build` drops
+/// it along with the tests.
+#[test]
+fn dev_dependency_is_linked_by_tests_only() {
+    let ws = dev_workspace(
+        "[dev-dependencies]\nkit = { path = \"../kit\" }\n",
+        &[("kit", "")],
+    );
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        dump(&raw),
+        "\
+a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[] rustc=a
+a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib] rustc=a
+boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit] rustc=boot
+kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
+"
+    );
+    assert_eq!(test_only(&raw), ["boot", "kit"]);
+
+    let (model, diags) = gluon_model::intern(raw);
+    assert!(diags.is_empty(), "{diags:?}");
+    let resolved = crate::config::resolve(&model, "dev", None, ws.path(), None).unwrap();
+    let names: BTreeSet<String> = crate::without_tests(&model, &resolved)
+        .crates
+        .iter()
+        .map(|c| model.crates.get(c.handle).unwrap().name.clone())
+        .collect();
+    assert_eq!(names, BTreeSet::from(["a".into(), "a@lib".into()]));
+}
+
+/// A dev-dependency that turns on a feature of `util`, which the kernel
+/// also uses, gives the tests their own `util` and `a` lib. The
+/// kernel's units are the same as without the dev-dependency.
+#[test]
+fn dev_dependency_feature_copies_the_shared_dependency() {
+    let util = ("util", "[features]\nextra = []\n");
+    let kit = (
+        "kit",
+        "[dependencies]\nutil = { path = \"../util\", features = [\"extra\"] }\n",
+    );
+    let normal = "[dependencies]\nutil = { path = \"../util\" }\n";
+    let ws = dev_workspace(
+        &format!("{normal}[dev-dependencies]\nkit = {{ path = \"../kit\" }}\n"),
+        &[util, kit],
+    );
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        dump(&raw),
+        "\
+a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
+a@test-pass [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util@test-pass] rustc=a
+a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
+boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@test-pass,kit->kit,util->util@test-pass] rustc=boot
+kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[util->util@test-pass] rustc=kit
+util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
+util@test-pass [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=[extra] d=[] rustc=util
+"
+    );
+    assert_eq!(
+        test_only(&raw),
+        ["a@test-pass", "boot", "kit", "util@test-pass"]
+    );
+
+    let with_tests = units_at(root_a(), ws.path());
+    assert_ne!(
+        unit_named(&with_tests, "util").metadata,
+        unit_named(&with_tests, "util@test-pass").metadata
+    );
+    // The same workspace without the test and the dev-dependency.
+    std::fs::write(ws.path().join("a/Cargo.toml"), manifest("a", normal)).unwrap();
+    std::fs::remove_dir_all(ws.path().join("a/tests")).unwrap();
+    let without = units_at(root_a(), ws.path());
+    for name in ["a", "a@lib", "util"] {
+        assert_eq!(
+            unit_named(&with_tests, name).metadata,
+            unit_named(&without, name).metadata,
+            "{name}"
+        );
+    }
+}
+
+/// A `[target.'cfg(..)'.dev-dependencies]` key is matched against the
+/// root's target, as for normal dependencies.
+#[test]
+fn dev_dependency_platform_key_matches_the_root_target() {
+    let ws = dev_workspace(
+        "[target.'cfg(target_os = \"none\")'.dev-dependencies]\nkit = { path = \"../kit\" }\n\
+         [target.'cfg(unix)'.dev-dependencies]\nhosted = { path = \"../hosted\" }\n",
+        &[("kit", ""), ("hosted", "")],
+    );
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(test_only(&raw), ["boot", "kit"]);
+    let boot = raw.crates.get(raw.crates.lookup("boot").unwrap()).unwrap();
+    let deps: Vec<&str> = boot.deps.keys().map(String::as_str).collect();
+    assert_eq!(deps, ["a", "kit"]);
+}
+
+/// A proc-macro dev-dependency builds for the host.
+#[test]
+fn proc_macro_dev_dependency_builds_for_the_host() {
+    let ws = dev_workspace(
+        "[dev-dependencies]\nmac = { path = \"../mac\" }\n",
+        &[("mac", "[lib]\nproc-macro = true\n")],
+    );
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    let out = dump(&raw);
+    assert!(
+        out.contains("mac [cargo:host] host ProcMacro mac/src/lib.rs"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,mac->mac]"
+        ),
+        "{out}"
+    );
+    assert_eq!(test_only(&raw), ["boot", "mac"]);
+}
+
+/// Only the dev-dependencies of a root with tests apply: not those of
+/// another member it depends on, and not a registry package's, which
+/// loading drops.
+#[test]
+fn dev_dependencies_of_other_packages_never_apply() {
+    let ws = dev_workspace(
+        "[dependencies]\nutil = { path = \"../util\" }\n",
+        &[
+            (
+                "util",
+                "[dev-dependencies]\nghost = { path = \"../ghost\" }\n",
+            ),
+            ("ghost", ""),
+        ],
+    );
+    let mut raw = root_a();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert!(raw.crates.lookup("ghost").is_none());
+    assert_eq!(test_only(&raw), ["boot"]);
+
+    // `suite` is in no lock or vendor directory, so following the edge
+    // would fail.
+    let ws = vendored_workspace("abc");
+    let files = [
+        (
+            "a/Cargo.toml",
+            format!("{A_WITH_REGISTRY_DEP}[[test]]\nname = \"boot\"\nharness = false\n"),
+        ),
+        ("a/tests/boot.rs", String::new()),
+        (
+            "vendor/flags-1.2.0/Cargo.toml",
+            manifest("flags", "[dev-dependencies]\nsuite = \"1\"\n").replace("0.1.0", "1.2.0"),
+        ),
+    ];
+    for (path, contents) in files {
+        let p = ws.path().join(path);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, contents).unwrap();
+    }
+    crate::manifest::sources::write_vendor_stamp(ws.path(), &ws.path().join("vendor")).unwrap();
+    let mut raw = root_a_vendored();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(test_only(&raw), ["boot"]);
+}
+
+/// A dev-dependency that cannot be resolved fails the expansion when a
+/// test needs it, naming the package and the dev-dependency, and is
+/// ignored when the package has no tests.
+#[test]
+fn unresolved_dev_dependency_names_the_package() {
+    let dev = "[dev-dependencies]\nbitflags = \"2\"\n";
+    let ws = dev_workspace(dev, &[]);
+    let err = expand_err(&mut root_a(), ws.path());
+    assert!(err.contains("dev-dependency `bitflags` of `a`"), "{err}");
+
+    std::fs::write(ws.path().join("a/Cargo.toml"), manifest("a", dev)).unwrap();
+    std::fs::remove_dir_all(ws.path().join("a/tests")).unwrap();
+    expand_at(&mut root_a(), ws.path()).expect("expand without tests");
+}
+
 /// A path lib used by the kernel and by a proc macro is built twice:
 /// once per platform, with its own hash and paths. The unit table
 /// needs nothing special for it.

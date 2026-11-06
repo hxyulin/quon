@@ -1,9 +1,12 @@
 //! End-to-end CLI tests for `gluon test` against the `cargo-tests`
 //! fixture. `--dry-run` and `--no-build` skip the build, and a script
 //! stands in for QEMU, so these need neither a bare-metal toolchain nor
-//! QEMU. Stub OVMF files satisfy the UEFI firmware lookup.
+//! QEMU. Stub OVMF files satisfy the UEFI firmware lookup. The one
+//! test that builds is `#[ignore]`d, like the other build tests.
 
 #![cfg(unix)]
+
+mod support;
 
 use std::fs;
 use std::io;
@@ -130,6 +133,46 @@ fn direct_boot_passes_the_test_binary_as_the_kernel() {
         .map(|w| w[1])
         .expect("-kernel in direct mode");
     assert!(kernel.ends_with("/final/boot"), "{kernel}");
+}
+
+/// Whether any file under `dir` has `needle` in its name.
+fn has_file_named(dir: &Path, needle: &str) -> bool {
+    fs::read_dir(dir).unwrap().any(|e| {
+        let e = e.unwrap();
+        e.file_name().to_string_lossy().contains(needle)
+            || (e.file_type().unwrap().is_dir() && has_file_named(&e.path(), needle))
+    })
+}
+
+/// The `boot` test uses the kernel's dev-dependency `testkit`.
+/// `gluon build` leaves it out; `gluon test` builds it and links it
+/// into the test.
+#[test]
+#[ignore]
+fn test_links_a_dev_dependency_the_build_leaves_out() {
+    if !support::rustc_available("test_links_a_dev_dependency_the_build_leaves_out") {
+        return;
+    }
+    let (_tmp, fixture) = setup_fixture();
+    support::seed_sysroot(&fixture);
+    use_fake_qemu(&fixture);
+
+    let out = gluon(&fixture, &["build"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let build = fixture.join("build");
+    assert!(
+        !has_file_named(&build, "testkit"),
+        "gluon build built testkit"
+    );
+
+    let out = gluon(&fixture, &["test", "boot"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("test boot ... ok"), "{err}");
+    assert!(
+        has_file_named(&build, "testkit"),
+        "gluon test did not build testkit"
+    );
 }
 
 #[test]

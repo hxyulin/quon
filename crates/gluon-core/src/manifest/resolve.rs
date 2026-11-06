@@ -12,6 +12,18 @@
 //! depend on visit order. Unit generation then walks the active
 //! `(package, domain)` states in sorted order, so unit ids are stable for
 //! a given input.
+//!
+//! ### Dev-dependencies
+//!
+//! [`resolve`] runs the resolver up to twice, as `cargo build` and
+//! `cargo test` would. The build pass ignores dev edges and yields the
+//! libs, bins and build scripts. When a root package has
+//! `harness = false` tests, a test pass also follows the dev edges of
+//! those roots, so dev-dependency features unify with the normal ones,
+//! and yields the tests and what they link. A test-pass unit equal to a
+//! build unit merges into it; the others are marked
+//! [`Unit::test_only`]. Only workspace members keep their
+//! dev-dependencies (see [`super::workspace`]), so only theirs apply.
 
 use super::platform::TargetPlatform;
 use super::workspace::{
@@ -51,8 +63,6 @@ pub enum UnitKind {
     Bin(String),
     /// An integration test with `harness = false`, built like a bin.
     Test(String),
-    /// Stage 6.
-    LibTest,
     BuildScript,
 }
 
@@ -63,7 +73,6 @@ impl fmt::Display for UnitKind {
             UnitKind::ProcMacro => f.write_str("proc-macro"),
             UnitKind::Bin(n) => write!(f, "bin {n}"),
             UnitKind::Test(n) => write!(f, "test {n}"),
-            UnitKind::LibTest => f.write_str("lib-test"),
             UnitKind::BuildScript => f.write_str("build-script"),
         }
     }
@@ -98,14 +107,18 @@ pub struct Unit {
     /// Set on lib, proc-macro and bin units of a package with a build
     /// script.
     pub build_script: Option<BuildScriptRun>,
-    /// Lib and bin units of a root package in the root's domain.
+    /// Lib, bin and test units of a root package in the root's domain.
     pub is_root: bool,
+    /// Only `gluon test` needs the unit: a test, or a test-pass unit no
+    /// build unit equals (a dev-dependency, or a copy whose features or
+    /// deps grew). See the module docs.
+    pub test_only: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnitGraph {
     /// Indexed by [`UnitId`]. Sorted by (package id, domain, kind,
-    /// features).
+    /// features, test-only, unit hash).
     pub units: Vec<Unit>,
     pub packages: Vec<Package>,
     /// The cfg set per domain, in rustc's order.
@@ -124,7 +137,9 @@ impl UnitGraph {
     /// A unit is named after its package (lib, proc-macro), its bin or
     /// test, or `<package>@build-script`. When names collide, root units
     /// keep the plain name and the others get suffixes in this order:
-    /// `@test` for a test sharing a name with any other unit, `@lib` for
+    /// `@test` for a test sharing a name with any other unit,
+    /// `@test-pass` for another test-only unit sharing a name with a unit
+    /// the build uses, `@lib` for
     /// a lib sharing a name with a bin of its package, `@<domain>` for a
     /// copy outside the group's primary domain (the root's domain, else
     /// the first target, else host), `@<version>` for all but the newest
@@ -153,6 +168,19 @@ impl UnitGraph {
                     .iter()
                     .filter(|&&i| matches!(g.units[i].kind, UnitKind::Test(_)))
                     .map(|&i| (i, "@test".to_string()))
+                    .collect()
+            }),
+            // Likewise a test-only copy of a unit, so the build's names,
+            // and with them its artifacts, do not depend on the tests.
+            // Once renamed, no group mixes build and test-only units.
+            Box::new(|group, g| {
+                if group.iter().all(|&i| g.units[i].test_only) {
+                    return Vec::new();
+                }
+                group
+                    .iter()
+                    .filter(|&&i| g.units[i].test_only)
+                    .map(|&i| (i, "@test-pass".to_string()))
                     .collect()
             }),
             Box::new(|group, g| {
@@ -238,15 +266,53 @@ pub struct Root {
 
 /// Resolve features for `roots`. `platforms` must hold every root
 /// domain and [`Domain::Host`].
+///
+/// The build pass never sees dev edges, so the kernel's units, and so
+/// its artifacts, are the same whether or not tests or dev-dependencies
+/// are declared. The cost: a dependency whose features a dev-dependency
+/// grows builds twice, once per pass. One unified pass would build it
+/// once but let test-only features into the kernel.
 pub fn resolve(
     set: &PackageSet,
     roots: &[Root],
     platforms: &BTreeMap<Domain, TargetPlatform>,
     host_triple: &str,
 ) -> Result<UnitGraph> {
+    let states = run_resolver(set, roots, platforms, BTreeSet::new())?;
+    let mut units = build_units(set, roots, &states, platforms, host_triple, Pass::Build)?;
+    let test_roots: BTreeSet<Key> = roots
+        .iter()
+        .filter(|r| set.packages[r.package].tests.iter().any(|t| !t.harness))
+        .map(|r| (r.package, r.domain.clone()))
+        .collect();
+    if !test_roots.is_empty() {
+        let states = run_resolver(set, roots, platforms, test_roots)?;
+        let test = build_units(set, roots, &states, platforms, host_triple, Pass::Test)?;
+        units = merge_test_units(units, test);
+    }
+    Ok(UnitGraph {
+        units,
+        packages: set.packages.clone(),
+        cfgs: platforms
+            .iter()
+            .map(|(d, p)| (d.clone(), p.cfgs.clone()))
+            .collect(),
+        host_triple: host_triple.to_string(),
+    })
+}
+
+/// Run the resolver for `roots`, following the dev edges of the states
+/// in `dev_roots`.
+fn run_resolver(
+    set: &PackageSet,
+    roots: &[Root],
+    platforms: &BTreeMap<Domain, TargetPlatform>,
+    dev_roots: BTreeSet<Key>,
+) -> Result<BTreeMap<Key, State>> {
     let mut r = Resolver {
         set,
         platforms,
+        dev_roots,
         states: BTreeMap::new(),
         queue: VecDeque::new(),
         errors: Vec::new(),
@@ -282,8 +348,7 @@ pub fn resolve(
             .dedup_by(|a, b| a.message == b.message && a.span == b.span);
         return Err(Error::Diagnostics(r.errors));
     }
-    let states = r.states;
-    build_units(set, roots, &states, platforms, host_triple)
+    Ok(r.states)
 }
 
 type Key = (PackageIdx, Domain);
@@ -308,6 +373,9 @@ struct Request {
 struct Resolver<'a> {
     set: &'a PackageSet,
     platforms: &'a BTreeMap<Domain, TargetPlatform>,
+    /// States whose dev edges apply: in the test pass, the roots with
+    /// tests.
+    dev_roots: BTreeSet<Key>,
     states: BTreeMap<Key, State>,
     queue: VecDeque<Request>,
     errors: Vec<Diagnostic>,
@@ -341,16 +409,17 @@ impl Resolver<'_> {
         });
     }
 
-    /// Whether edge `i` of `p` applies in domain `d`: normal and build
-    /// edges only (dev edges are Stage 6), build edges only when `p` has
-    /// a build script (Cargo ignores them otherwise), and the platform
-    /// key matches the domain the edge is evaluated in (the host for
-    /// build edges).
+    /// Whether edge `i` of `p` applies in domain `d`: dev edges only from
+    /// a state in `dev_roots`, build edges only when `p` has a build
+    /// script (Cargo ignores them otherwise), and the platform key
+    /// matches the domain the edge is evaluated in (the host for build
+    /// edges, `d` for normal and dev edges).
     fn edge_applies(&self, p: PackageIdx, d: &Domain, i: usize) -> bool {
         let pkg = self.pkg(p);
         let dep = &pkg.deps[i];
         let eval = match dep.kind {
-            DepKind::Dev => return false,
+            DepKind::Dev if !self.dev_roots.contains(&(p, d.clone())) => return false,
+            DepKind::Dev => d,
             DepKind::Build if pkg.build_script.is_none() => return false,
             DepKind::Build => &Domain::Host,
             DepKind::Normal => d,
@@ -386,8 +455,12 @@ impl Resolver<'_> {
         let DepTarget::Unresolved(reason) = &dep.target else {
             return;
         };
+        let what = match dep.kind {
+            DepKind::Dev => "dev-dependency",
+            DepKind::Normal | DepKind::Build => "dependency",
+        };
         let diag = Diagnostic::error(format!(
-            "dependency `{}` of `{}`: {reason}",
+            "{what} `{}` of `{}`: {reason}",
             dep.name,
             self.pkg(p).name()
         ))
@@ -562,13 +635,24 @@ impl Resolver<'_> {
     }
 }
 
+/// Which resolver pass units come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Libs, bins and build scripts, without dev edges.
+    Build,
+    /// Libs, tests and build scripts, with the roots' dev edges.
+    Test,
+}
+
+/// The units of one pass, hashed, with ids local to the pass.
 fn build_units(
     set: &PackageSet,
     roots: &[Root],
     states: &BTreeMap<Key, State>,
     platforms: &BTreeMap<Domain, TargetPlatform>,
     host_triple: &str,
-) -> Result<UnitGraph> {
+    pass: Pass,
+) -> Result<Vec<Unit>> {
     let root_keys: BTreeSet<Key> = roots
         .iter()
         .map(|r| (r.package, r.domain.clone()))
@@ -602,7 +686,7 @@ fn build_units(
                 is_root,
             });
         }
-        if is_root {
+        if is_root && pass == Pass::Build {
             for b in &pkg.bins {
                 if b.required_features.iter().all(|f| st.features.contains(f)) {
                     drafts.push(Draft {
@@ -615,6 +699,8 @@ fn build_units(
                     });
                 }
             }
+        }
+        if is_root && pass == Pass::Test {
             // Tests that need libtest are left to `cargo test`;
             // expansion warns about them.
             for t in pkg.tests.iter().filter(|t| !t.harness) {
@@ -675,15 +761,17 @@ fn build_units(
     for (id, d) in drafts.iter().enumerate() {
         let pkg = &set.packages[d.package];
         let st = &states[&d.state];
-        let want = if d.kind == UnitKind::BuildScript {
-            DepKind::Build
-        } else {
-            DepKind::Normal
+        // Only tests link dev-dependencies, as in Cargo, so a
+        // dev-dependency that depends on the package's lib is no cycle.
+        let wants = |k: DepKind| match d.kind {
+            UnitKind::BuildScript => k == DepKind::Build,
+            UnitKind::Test(_) => k != DepKind::Build,
+            _ => k == DepKind::Normal,
         };
         let mut deps = BTreeSet::new();
         for &i in &st.edges {
             let dep = &pkg.deps[i];
-            if dep.kind != want {
+            if !wants(dep.kind) {
                 continue;
             }
             let DepTarget::Resolved(c) = dep.target else {
@@ -739,23 +827,100 @@ fn build_units(
             unit_hash: String::new(),
             build_script,
             is_root: d.is_root,
+            test_only: matches!(d.kind, UnitKind::Test(_)),
         });
     }
     for u in &mut units {
-        u.deps
-            .sort_by(|a, b| (&a.extern_name, a.unit).cmp(&(&b.extern_name, b.unit)));
+        sort_deps(&mut u.deps);
     }
     compute_hashes(set, &mut units)?;
+    Ok(units)
+}
 
-    Ok(UnitGraph {
-        units,
-        packages: set.packages.clone(),
-        cfgs: platforms
-            .iter()
-            .map(|(d, p)| (d.clone(), p.cfgs.clone()))
-            .collect(),
-        host_triple: host_triple.to_string(),
-    })
+/// Sort by extern name and drop repeats of one extern and unit: a
+/// test's dev-dependency on its own package names the lib the test
+/// already links.
+fn sort_deps(deps: &mut Vec<UnitDep>) {
+    deps.sort_by(|a, b| (&a.extern_name, a.unit).cmp(&(&b.extern_name, b.unit)));
+    deps.dedup_by(|a, b| a.extern_name == b.extern_name && a.unit == b.unit);
+}
+
+/// Add to the build pass's units the tests and every test-pass unit
+/// they reach that no build unit equals. Equal means equal hash, which
+/// covers package, kind, domain, features and the deps' hashes, so a
+/// dependency the dev edges leave alone builds once. Ids follow the
+/// sort order, which keeps the build units in their relative order.
+fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
+    let in_build: BTreeMap<&str, UnitId> =
+        build.iter().map(|u| (u.unit_hash.as_str(), u.id)).collect();
+    // The deps of a unit equal to a build unit are equal to build units
+    // too, so the walk stops there.
+    let mut needed = BTreeSet::new();
+    let mut stack: Vec<UnitId> = test
+        .iter()
+        .filter(|u| matches!(u.kind, UnitKind::Test(_)))
+        .map(|u| u.id)
+        .collect();
+    while let Some(id) = stack.pop() {
+        let u = &test[id];
+        if in_build.contains_key(u.unit_hash.as_str()) || !needed.insert(id) {
+            continue;
+        }
+        stack.extend(u.deps.iter().map(|d| d.unit));
+        stack.extend(u.build_script.as_ref().map(|b| b.script));
+    }
+
+    let mut merged: Vec<(bool, &Unit)> = build.iter().map(|u| (false, u)).collect();
+    merged.extend(
+        test.iter()
+            .filter(|u| needed.contains(&u.id))
+            .map(|u| (true, u)),
+    );
+    merged.sort_by(|&(at, a), &(bt, b)| {
+        (a.package, &a.domain, &a.kind, &a.features, at, &a.unit_hash).cmp(&(
+            b.package,
+            &b.domain,
+            &b.kind,
+            &b.features,
+            bt,
+            &b.unit_hash,
+        ))
+    });
+
+    let mut build_ids = vec![0; build.len()];
+    let mut test_ids = vec![0; test.len()];
+    for (new, &(from_test, u)) in merged.iter().enumerate() {
+        if from_test {
+            test_ids[u.id] = new;
+        } else {
+            build_ids[u.id] = new;
+        }
+    }
+    // A test-pass unit left out above equals a build unit: point at it.
+    for u in test.iter().filter(|u| !needed.contains(&u.id)) {
+        if let Some(&b) = in_build.get(u.unit_hash.as_str()) {
+            test_ids[u.id] = build_ids[b];
+        }
+    }
+
+    merged
+        .iter()
+        .enumerate()
+        .map(|(new, &(from_test, u))| {
+            let ids = if from_test { &test_ids } else { &build_ids };
+            let mut u = u.clone();
+            u.id = new;
+            u.test_only |= from_test;
+            for d in &mut u.deps {
+                d.unit = ids[d.unit];
+            }
+            sort_deps(&mut u.deps);
+            if let Some(b) = &mut u.build_script {
+                b.script = ids[b.script];
+            }
+            u
+        })
+        .collect()
 }
 
 /// SHA-256 over the package id, unit kind, domain, sorted features and

@@ -157,7 +157,8 @@ pub fn build_with_workers(
 /// `reporter` instead of writing them to the process's stdout and
 /// stderr. The CLI uses this to draw status lines.
 ///
-/// A normal build leaves out the integration tests. Check and clippy
+/// A normal build leaves out the integration tests and what only they
+/// link. Check and clippy
 /// keep them, as `cargo clippy --all-targets` does, so test code is
 /// linted.
 pub fn build_with_reporter(
@@ -192,14 +193,15 @@ pub fn build_tests_with_reporter(
     execute(ctx, model, resolved, workers, reporter)
 }
 
-/// `resolved` without the integration-test crates. Nothing depends on
-/// a test binary, so dropping them leaves every other crate's inputs
-/// intact.
+/// `resolved` without the test-only crates: the integration tests and
+/// what only they link. No other crate depends on those (the build's
+/// own resolve never reaches them), so dropping them leaves every other
+/// crate's inputs intact.
 fn without_tests(model: &BuildModel, resolved: &ResolvedConfig) -> ResolvedConfig {
     let mut resolved = resolved.clone();
     resolved
         .crates
-        .retain(|c| !model.crates.get(c.handle).is_some_and(|k| k.is_test()));
+        .retain(|c| !model.crates.get(c.handle).is_some_and(|k| k.is_test_only()));
     resolved
 }
 
