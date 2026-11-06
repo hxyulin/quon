@@ -115,7 +115,10 @@ pub fn execute_entries(
     };
     WorkerPool::new(workers).execute_with(&dag, &merged, reporter)?;
 
-    // Entry names do not change the count, so indices stand in for them.
+    // Only a build counts copies: `check` and `clippy` also lower the
+    // host tests, whose packages resolve features one by one on
+    // purpose, and `quon explain copies` explains a build. Entry names
+    // do not change the count, so indices stand in for them.
     let names: Vec<String> = (0..entries.len()).map(|e| e.to_string()).collect();
     let units: Vec<crate::copies::EntryUnits<'_>> = entries
         .iter()
@@ -127,8 +130,13 @@ pub fn execute_entries(
             units: &p.units,
         })
         .collect();
+    let crates_with_copies = if ctx.driver() == crate::compile::DriverKind::Rustc {
+        crate::copies::find(&units).len()
+    } else {
+        0
+    };
     let mut summary = BuildSummary {
-        crates_with_copies: crate::copies::find(&units).len(),
+        crates_with_copies,
         ..BuildSummary::default()
     };
     for (group, members) in groups.iter().enumerate() {
