@@ -331,7 +331,7 @@ fn dispatch_run_build_script(
         dep_metadata.push((links, out.metadata.clone()));
     }
     let cargo = crate::vendor::cargo_cmd::resolve_cargo();
-    let env = script_env(&ScriptEnvInput {
+    let mut env = script_env(&ScriptEnvInput {
         package: &run.package,
         features: &owner.features,
         platform,
@@ -346,6 +346,11 @@ fn dispatch_run_build_script(
         target_rustflags: &target_rustflags,
         dep_metadata: &dep_metadata,
     });
+    // `q.env(..)`, as Cargo's `[env]` reaches build scripts. What Quon
+    // sets for the script keeps Quon's value.
+    for (k, v) in &model.env {
+        env.entry(k.clone()).or_insert_with(|| v.into());
+    }
     let (out, was_cached) = crate::build_script::run::run_build_script(
         ctx,
         crate::build_script::run::RunInput {

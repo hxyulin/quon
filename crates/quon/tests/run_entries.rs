@@ -114,4 +114,20 @@ fn each_entry_resolves_its_own_features() {
         String::from_utf8_lossy(&out.stdout).contains("has_a_name ... ok"),
         "step 6: the host test did not run:\n{err}"
     );
+
+    // Step 7: a changed `q.env` value reaches rustc and rebuilds
+    // `common`, whose `env!` reads it.
+    let script = fixture.join("quon.rs");
+    let text = fs::read_to_string(&script).expect("read quon.rs");
+    let edited = text.replace("\"hello\"", "\"goodbye\"");
+    assert_ne!(text, edited, "fixture quon.rs changed shape");
+    fs::write(&script, edited).expect("write quon.rs");
+    let out = quon_out(&fixture, &["build"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "step 7: build failed:\n{err}");
+    assert!(
+        err.lines()
+            .any(|l| l.trim_start().starts_with("Compiling common ")),
+        "step 7: common did not rebuild:\n{err}"
+    );
 }

@@ -93,6 +93,10 @@ pub struct BuildModel {
     /// Boot test suites (`BootTest::new(..)`), run by `quon test`.
     #[serde(default)]
     pub boot_tests: Arena<BootTestDef>,
+    /// Environment of every rustc and build-script run (`q.env(..)`), as
+    /// Cargo's `[env]`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Environment of every host test run (`q.host_tests().env(..)`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub host_test_env: BTreeMap<String, HostTestEnv>,

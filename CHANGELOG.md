@@ -76,6 +76,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   commonly builds its release profile with `"s"` to fit in flash. A
   build script sees the level in `OPT_LEVEL`, as under Cargo.
 
+### Added (compile-time environment)
+
+- **`q.env(key, value)` sets a variable for every rustc run and build
+  script**, as Cargo's `[env]` does, for variables crates read while
+  they compile, such as `DEFMT_LOG`. The value is part of every crate's
+  command, so changing it rebuilds every crate.
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the

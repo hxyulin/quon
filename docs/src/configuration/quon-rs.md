@@ -80,12 +80,21 @@ The other methods on `Quon` set what a project has one of:
 | `q.default_profile(&profile)` | The profile used without `-p` or `-r` (`dev` if unset) |
 | `q.run(&artifact)` | What `quon run` starts, with `.runner(&runner)` how and `.name(..)` which entry it is; see [Several run entries](../running/runners.md#several-run-entries) |
 | `q.host_tests()` | The packages whose tests `quon test` runs on the host |
+| `q.env(key, value)` | A variable of every rustc run and build script, as Cargo's `[env]` |
 | `q.include_kconfig(path)` | A `.kconfig` file to read options and presets from |
 | `q.profile(name)` | A `ProfileRef` to a profile by name, such as the built-in `dev` |
 
 `q.cargo_workspace` is an error when called twice. A second
 `q.project` replaces the first. Each `q.run` call adds a run entry, and
 a project with more than one names each.
+
+`q.env` is for a variable crates read while they compile, such as
+`DEFMT_LOG`, which defmt's macros read to choose the log levels they
+keep. Its value is part of every crate's command, so changing it
+rebuilds every crate. A variable Quon sets for a crate itself, such as
+`CARGO_PKG_NAME` or `OUT_DIR`, keeps Quon's value. Setting one name to
+two values is an error. Programs that `quon run` and `quon test` start
+do not get it.
 
 A `Target` is a plain value, not an item: `Target::builtin(triple)`,
 `Target::spec(name, path)` or `Target::host()`. Quon registers it the

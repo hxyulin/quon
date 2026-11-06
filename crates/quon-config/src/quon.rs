@@ -84,6 +84,8 @@ pub struct Quon {
     workspace: Option<CargoWorkspace>,
     runs: Vec<Run>,
     host_tests: HostTests,
+    /// `q.env(..)`: variables of every rustc and build-script run.
+    env: BTreeMap<String, String>,
     kconfig: Vec<PathBuf>,
     crates: Vec<CrateDecl>,
     deps: Vec<Dependency>,
@@ -202,6 +204,42 @@ impl Quon {
             dir,
             vendored: None,
         }))
+    }
+
+    /// Set `key` to `value` in the environment of every rustc run and
+    /// every build script, as Cargo's `[env]` table does. Use it for a
+    /// variable a crate reads while it compiles, such as `DEFMT_LOG`,
+    /// which defmt's macros read to decide which log levels to keep.
+    ///
+    /// The value is part of every crate's command, so changing it
+    /// rebuilds every crate, the only safe choice when a proc macro
+    /// reads it. A variable Quon itself sets for a crate, such as
+    /// `CARGO_PKG_NAME` or `OUT_DIR`, keeps Quon's value.
+    ///
+    /// ```
+    /// # use quon_config::prelude::*;
+    /// # let mut q = Quon::new();
+    /// q.env("DEFMT_LOG", "info");
+    /// ```
+    pub fn env(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        let key = key.into();
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            self.errors.push(ConfigError::new(format!(
+                "q.env: \"{key}\" is not a variable name (it must be non-empty, without '=' or NUL)"
+            )));
+            return self;
+        }
+        let value = value.into();
+        if let Some(prev) = self.env.get(&key)
+            && *prev != value
+        {
+            self.errors.push(ConfigError::new(format!(
+                "q.env: {key} is set twice (\"{prev}\" and \"{value}\")"
+            )));
+            return self;
+        }
+        self.env.insert(key, value);
+        self
     }
 
     /// The workspace packages whose tests `quon test` runs on the host.
@@ -491,6 +529,7 @@ impl Quon {
         l.raw.cargo_workspace = self.workspace.map(|w| w.0);
         l.raw.host_tests = self.host_tests.packages;
         l.raw.host_test_env = self.host_tests.env;
+        l.raw.env = self.env;
         l.raw.kconfig_includes = self.kconfig;
         l.raw.runs = runs;
         (l.raw, l.errors)
@@ -1349,6 +1388,29 @@ mod tests {
             [
                 "profile 'a': opt_level 4 is not 0, 1, 2, 3, \"s\" or \"z\"",
                 "profile 'b': opt_level \"x\" is not 0, 1, 2, 3, \"s\" or \"z\""
+            ]
+        );
+    }
+
+    #[test]
+    fn env_reaches_the_model_once_per_name() {
+        let (raw, errors) = lower(|q| {
+            q.env("DEFMT_LOG", "info");
+            q.env("DEFMT_LOG", "info");
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(raw.env["DEFMT_LOG"], "info");
+
+        let (_, errors) = lower(|q| {
+            q.env("DEFMT_LOG", "info");
+            q.env("DEFMT_LOG", "debug");
+            q.env("A=B", "x");
+        });
+        assert_eq!(
+            errors,
+            [
+                "q.env: DEFMT_LOG is set twice (\"info\" and \"debug\")",
+                "q.env: \"A=B\" is not a variable name (it must be non-empty, without '=' or NUL)"
             ]
         );
     }

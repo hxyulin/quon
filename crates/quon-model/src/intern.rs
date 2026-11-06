@@ -60,6 +60,7 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         presets: raw.presets,
         downloads: raw.downloads,
         host_test_env: raw.host_test_env,
+        env: raw.env,
         ..Default::default()
     };
 

@@ -156,6 +156,13 @@ fn build_command(
     };
     let mut builder = RustcCommandBuilder::new(&program);
     let mut dep_outputs = Vec::new();
+    // `q.env(..)` first, so a variable Quon sets for the crate below
+    // (`CARGO_PKG_*`, `OUT_DIR`, `rustc-env`) replaces it. The env is
+    // in the command hash, so a changed value rebuilds every crate:
+    // a proc macro such as defmt's reads it without rustc tracking it.
+    for (k, v) in &model.env {
+        builder.env(k.as_str(), v.as_str());
+    }
 
     builder.input(&unit.src);
     builder
