@@ -1,4 +1,4 @@
-//! Persistent SHA-256 memo for the script runner's cache keys.
+//! Persistent content-hash memo for the script runner's cache keys.
 //!
 //! Every quon invocation recomputes the rlib cache key (all
 //! quon-config and quon-model sources plus `Cargo.lock`) and the
@@ -13,7 +13,7 @@
 //! that keeps both the nanosecond mtime and the size is not detected.
 //! A missing, unreadable or corrupt memo file is treated as empty.
 
-use crate::cache::{FileStamp, sha256_file};
+use crate::cache::{FileStamp, hash_file};
 use crate::error::{Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ impl FileHashes {
         }
     }
 
-    /// SHA-256 of `file`, from the memo when its mtime and size match.
+    /// Content hash of `file`, from the memo when its mtime and size match.
     pub(crate) fn hash(&mut self, file: &Path) -> Result<[u8; 32]> {
         let meta = std::fs::metadata(file).map_err(|e| Error::Io {
             path: file.to_path_buf(),
@@ -54,10 +54,10 @@ impl FileHashes {
             && fp.mtime_ns == mtime_ns
             && fp.size == meta.len()
         {
-            return Ok(fp.sha256);
+            return Ok(fp.hash);
         }
 
-        let sha = sha256_file(file).map_err(|e| match e {
+        let sha = hash_file(file).map_err(|e| match e {
             Error::Io { source, .. } => Error::Io {
                 path: file.to_path_buf(),
                 source,
@@ -72,7 +72,7 @@ impl FileHashes {
                 FileStamp {
                     mtime_ns,
                     size: meta.len(),
-                    sha256: sha,
+                    hash: sha,
                     dirty: false,
                 },
             );
@@ -132,7 +132,7 @@ mod tests {
         fs::write(&f, b"first").unwrap();
         let mut memo = FileHashes::load(tmp.path().join("memo.json"));
         let h1 = memo.hash(&f).unwrap();
-        assert_eq!(h1, sha256_file(&f).unwrap());
+        assert_eq!(h1, hash_file(&f).unwrap());
 
         // Same size, same mtime, different bytes: the memo must answer
         // from its record without reading the file.
@@ -157,7 +157,7 @@ mod tests {
         );
         let h2 = memo.hash(&f).unwrap();
         assert_ne!(h1, h2);
-        assert_eq!(h2, sha256_file(&f).unwrap());
+        assert_eq!(h2, hash_file(&f).unwrap());
     }
 
     #[test]

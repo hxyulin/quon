@@ -10,7 +10,7 @@ pub mod lock;
 pub mod store;
 
 pub use depinfo::{DepInfo, parse_depfile};
-pub use hash::{hash_argv, hash_parts, sha256_bytes, sha256_file};
+pub use hash::{hash_argv, hash_file, hash_parts, sha256_bytes};
 pub use lock::CacheLock;
 pub use store::{
     FileStamp, Fingerprint, FingerprintStore, Freshness, FreshnessQuery, RecordInput, StaleReason,

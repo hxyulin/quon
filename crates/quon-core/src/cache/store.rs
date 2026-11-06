@@ -20,15 +20,30 @@
 //! 4. its declared input set equals the query's;
 //! 5. every declared and discovered input exists, carries no dirty mark
 //!    (it was modified while the recorded run was in progress), and
-//!    either has the recorded mtime and size or the recorded SHA-256;
+//!    either has the recorded mtime and size or the recorded content
+//!    hash (BLAKE3, see [`crate::cache::hash`]);
 //! 6. every recorded environment variable has the value the next run
 //!    would see.
 //!
-//! The first failing step is the [`StaleReason`]. A SHA-256 match on a
+//! The first failing step is the [`StaleReason`]. A hash match on a
 //! changed mtime rewrites the record's stamp, so the next check takes
 //! the mtime path.
+//!
+//! ### Known hashes
+//!
+//! Writing a record stamps every input, and a unit's declared inputs
+//! include every rlib it can load: the whole dependency closure and the
+//! sysroot. Hashing them per record cost a fleet of firmware boards
+//! more CPU time than rustc did (18.7s of hashing in a 26s cold build).
+//! The store therefore keeps the hashes it has seen, keyed by path,
+//! and reuses one only while the file still has the mtime and size it
+//! had when hashed. That is the trust step 5 already gives a matching
+//! mtime and size, so freshness does not change. The known hashes come
+//! from inputs hashed or checked in this process, and from the previous
+//! record of the key being written, so an edited crate does not rehash
+//! its unchanged dependencies. Dirty stamps are never reused.
 
-use crate::cache::hash::{sha256_bytes, sha256_file};
+use crate::cache::hash::{hash_file, sha256_bytes};
 use crate::compile::BuildLayout;
 use crate::error::{Error, Result};
 use crate::scheduler::NodeData;
@@ -38,12 +53,13 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Version of the record layout. A record with another version is
 /// stale ([`StaleReason::FormatChanged`]); there is no converter, since
 /// one build refills the record.
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 
 /// Longest key prefix kept in a record's file name.
 const MAX_STEM: usize = 80;
@@ -53,8 +69,9 @@ const MAX_STEM: usize = 80;
 pub struct FileStamp {
     pub mtime_ns: u128,
     pub size: u64,
+    /// BLAKE3 of the contents.
     #[serde(with = "hex32")]
-    pub sha256: [u8; 32],
+    pub hash: [u8; 32],
     /// The file's mtime was at or after the start of the recorded run,
     /// so the run may have read an older version. A dirty stamp never
     /// matches.
@@ -184,6 +201,17 @@ pub struct FingerprintStore {
     /// in its key and command. Vendor directories are not immutable,
     /// because people patch vendored crates.
     immutable_roots: Vec<PathBuf>,
+    /// See "Known hashes" in the module docs. Shared by clones, so
+    /// every worker of a build sees every hash.
+    known: Arc<Mutex<BTreeMap<PathBuf, KnownHash>>>,
+}
+
+/// A content hash and the mtime and size the file had when hashed.
+#[derive(Debug, Clone, Copy)]
+struct KnownHash {
+    mtime_ns: u128,
+    size: u64,
+    hash: [u8; 32],
 }
 
 impl FingerprintStore {
@@ -193,6 +221,7 @@ impl FingerprintStore {
         Self {
             dir: layout.fingerprint_dir(),
             immutable_roots: cargo_registry_src().into_iter().collect(),
+            known: Arc::default(),
         }
     }
 
@@ -201,6 +230,7 @@ impl FingerprintStore {
         Self {
             dir: dir.into(),
             immutable_roots,
+            known: Arc::default(),
         }
     }
 
@@ -263,7 +293,7 @@ impl FingerprintStore {
         let mut refreshed = false;
         for stamps in [&mut fp.declared, &mut fp.discovered] {
             for (path, stamp) in stamps.iter_mut() {
-                refreshed |= check_stamp(path, stamp)?;
+                refreshed |= self.check_stamp(path, stamp)?;
             }
         }
         for (name, recorded) in &fp.env {
@@ -290,9 +320,10 @@ impl FingerprintStore {
     /// any) in place, which is stale for the new command, so the next
     /// build reruns the node.
     pub fn record(&self, r: RecordInput<'_>) -> Result<Fingerprint> {
+        self.learn_previous(r.key);
         let mut declared = BTreeMap::new();
         for p in r.declared {
-            declared.insert(p.clone(), stamp(p, r.started_at)?);
+            declared.insert(p.clone(), self.stamp(p, r.started_at)?);
         }
         let mut discovered = BTreeMap::new();
         for p in r.discovered {
@@ -302,7 +333,7 @@ impl FingerprintStore {
             {
                 continue;
             }
-            discovered.insert(p.clone(), stamp(p, r.started_at)?);
+            discovered.insert(p.clone(), self.stamp(p, r.started_at)?);
         }
         let fp = Fingerprint {
             format: FORMAT,
@@ -342,56 +373,128 @@ impl FingerprintStore {
         std::fs::read(self.stderr_path(&fp.key)).unwrap_or_default()
     }
 
+    /// Check one input against its stamp. `Ok(true)` when the content
+    /// matched by hash and the stamp was refreshed.
+    fn check_stamp(
+        &self,
+        path: &Path,
+        stamp: &mut FileStamp,
+    ) -> std::result::Result<bool, StaleReason> {
+        if stamp.dirty {
+            return Err(StaleReason::InputTouchedDuringBuild(path.to_path_buf()));
+        }
+        let meta =
+            std::fs::metadata(path).map_err(|_| StaleReason::InputMissing(path.to_path_buf()))?;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .ok_or_else(|| StaleReason::InputChanged(path.to_path_buf()))?;
+        if mtime_ns == stamp.mtime_ns && meta.len() == stamp.size {
+            self.remember(path, stamp);
+            return Ok(false);
+        }
+        // mtime alone moves on `touch`, checkout and editors that save
+        // without changes; the content decides.
+        match self.hash(path, mtime_ns, meta.len()) {
+            Ok(h) if h == stamp.hash => {
+                stamp.mtime_ns = mtime_ns;
+                stamp.size = meta.len();
+                Ok(true)
+            }
+            _ => Err(StaleReason::InputChanged(path.to_path_buf())),
+        }
+    }
+
+    /// Stamp `path` for a run that started at `started_at`.
+    fn stamp(&self, path: &Path, started_at: SystemTime) -> Result<FileStamp> {
+        let meta = std::fs::metadata(path).map_err(|e| io_err(path, e))?;
+        let mtime = meta.modified().map_err(|e| io_err(path, e))?;
+        let mtime_ns = nanos(mtime);
+        Ok(FileStamp {
+            mtime_ns,
+            size: meta.len(),
+            hash: self.hash(path, mtime_ns, meta.len())?,
+            // Cargo's rule too. A filesystem with coarse mtimes can round
+            // an edit made during the run down to before `started_at`;
+            // that window is not covered.
+            dirty: mtime >= started_at,
+        })
+    }
+
+    /// The content hash of `path`, whose metadata says `mtime_ns` and
+    /// `size`: a known hash taken at that mtime and size, or a fresh
+    /// one.
+    fn hash(&self, path: &Path, mtime_ns: u128, size: u64) -> Result<[u8; 32]> {
+        let known = self.known_hashes().get(path).copied();
+        if let Some(k) = known
+            && k.mtime_ns == mtime_ns
+            && k.size == size
+        {
+            return Ok(k.hash);
+        }
+        let hash = hash_file(path)?;
+        self.known_hashes().insert(
+            path.to_path_buf(),
+            KnownHash {
+                mtime_ns,
+                size,
+                hash,
+            },
+        );
+        Ok(hash)
+    }
+
+    /// Keep `stamp`'s hash for later records, unless it is dirty.
+    fn remember(&self, path: &Path, stamp: &FileStamp) {
+        if stamp.dirty {
+            return;
+        }
+        self.known_hashes().insert(
+            path.to_path_buf(),
+            KnownHash {
+                mtime_ns: stamp.mtime_ns,
+                size: stamp.size,
+                hash: stamp.hash,
+            },
+        );
+    }
+
+    /// Learn the hashes in `key`'s current record, if it has one. Called
+    /// before a node's new record is written: its unchanged inputs then
+    /// keep their hashes instead of being read again. A missing or
+    /// unreadable record only costs the reads.
+    fn learn_previous(&self, key: &str) {
+        let Ok(bytes) = std::fs::read(self.record_path(key)) else {
+            return;
+        };
+        let Ok(fp) = serde_json::from_slice::<Fingerprint>(&bytes) else {
+            return;
+        };
+        if fp.format != FORMAT || fp.key != key {
+            return;
+        }
+        for (path, stamp) in fp.declared.iter().chain(&fp.discovered) {
+            // Hashes learned in this process are newer than the record's.
+            if !self.known_hashes().contains_key(path) {
+                self.remember(path, stamp);
+            }
+        }
+    }
+
+    fn known_hashes(&self) -> std::sync::MutexGuard<'_, BTreeMap<PathBuf, KnownHash>> {
+        // The map holds only finished entries, so a panic elsewhere while
+        // the lock was held cannot leave a half-written one.
+        self.known.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn write_record(&self, fp: &Fingerprint) -> Result<()> {
         let path = self.record_path(&fp.key);
         let bytes = serde_json::to_vec_pretty(fp)
             .map_err(|e| Error::Config(format!("serialising record {}: {e}", fp.key)))?;
         write_atomic(&path, &bytes)
     }
-}
-
-/// Check one input against its stamp. `Ok(true)` when the content
-/// matched by hash and the stamp was refreshed.
-fn check_stamp(path: &Path, stamp: &mut FileStamp) -> std::result::Result<bool, StaleReason> {
-    if stamp.dirty {
-        return Err(StaleReason::InputTouchedDuringBuild(path.to_path_buf()));
-    }
-    let meta =
-        std::fs::metadata(path).map_err(|_| StaleReason::InputMissing(path.to_path_buf()))?;
-    let mtime_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .ok_or_else(|| StaleReason::InputChanged(path.to_path_buf()))?;
-    if mtime_ns == stamp.mtime_ns && meta.len() == stamp.size {
-        return Ok(false);
-    }
-    // mtime alone moves on `touch`, checkout and editors that save
-    // without changes; the content decides.
-    match sha256_file(path) {
-        Ok(h) if h == stamp.sha256 => {
-            stamp.mtime_ns = mtime_ns;
-            stamp.size = meta.len();
-            Ok(true)
-        }
-        _ => Err(StaleReason::InputChanged(path.to_path_buf())),
-    }
-}
-
-/// Stamp `path` for a run that started at `started_at`.
-fn stamp(path: &Path, started_at: SystemTime) -> Result<FileStamp> {
-    let meta = std::fs::metadata(path).map_err(|e| io_err(path, e))?;
-    let mtime = meta.modified().map_err(|e| io_err(path, e))?;
-    Ok(FileStamp {
-        mtime_ns: nanos(mtime),
-        size: meta.len(),
-        sha256: sha256_file(path)?,
-        // Cargo's rule too. A filesystem with coarse mtimes can round
-        // an edit made during the run down to before `started_at`;
-        // that window is not covered.
-        dirty: mtime >= started_at,
-    })
 }
 
 fn nanos(t: SystemTime) -> u128 {
@@ -633,7 +736,11 @@ mod tests {
         fx.record(&[], &[]);
         let path = fx.store.record_path("k");
         let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace("\"format\": 3", "\"format\": 2")).unwrap();
+        fs::write(
+            &path,
+            text.replace(&format!("\"format\": {FORMAT}"), "\"format\": 2"),
+        )
+        .unwrap();
         assert_eq!(stale(fx.check(&[])), StaleReason::FormatChanged);
         fs::write(&path, b"{not json").unwrap();
         assert_eq!(stale(fx.check(&[])), StaleReason::FormatChanged);
@@ -705,6 +812,99 @@ mod tests {
         let on_disk: Fingerprint =
             serde_json::from_slice(&fs::read(fx.store.record_path("k")).unwrap()).unwrap();
         assert_eq!(on_disk.discovered[&a].mtime_ns, nanos(later));
+    }
+
+    /// Rewrite `p` with `bytes` of the same length, then give it back
+    /// the mtime `mtime_ns`: a change the stamps cannot see, so a
+    /// recorded hash that equals the old content's proves it was reused
+    /// rather than read.
+    fn rewrite_unseen(p: &Path, bytes: &[u8], mtime_ns: u128) {
+        assert_eq!(fs::metadata(p).unwrap().len(), bytes.len() as u64);
+        fs::write(p, bytes).unwrap();
+        let t = UNIX_EPOCH + Duration::from_nanos(mtime_ns as u64);
+        set_mtime(p, t);
+    }
+
+    #[test]
+    fn a_new_store_reuses_the_previous_records_hashes() {
+        let fx = Fx::new();
+        let a = fx.file("a.rs", b"old");
+        fx.record(std::slice::from_ref(&a), &[]);
+        let before: Fingerprint =
+            serde_json::from_slice(&fs::read(fx.store.record_path("k")).unwrap()).unwrap();
+        let stamp = &before.declared[&a];
+        rewrite_unseen(&a, b"new", stamp.mtime_ns);
+
+        let store = FingerprintStore::new(fx.store.dir(), Vec::new());
+        let fp = store
+            .record(RecordInput {
+                key: "k",
+                command: [1; 32],
+                toolchain: [2; 32],
+                declared: std::slice::from_ref(&a),
+                discovered: &[],
+                env: BTreeMap::new(),
+                outputs: &fx.outputs(),
+                started_at: SystemTime::now(),
+                stderr: b"",
+                data: None,
+            })
+            .unwrap();
+        assert_eq!(fp.declared[&a].hash, stamp.hash);
+    }
+
+    #[test]
+    fn a_changed_input_is_hashed_again() {
+        let fx = Fx::new();
+        let a = fx.file("a.rs", b"old");
+        fx.record(std::slice::from_ref(&a), &[]);
+        fs::write(&a, b"newer").unwrap();
+        fx.record(std::slice::from_ref(&a), &[]);
+        let fp = fresh(fx.check(std::slice::from_ref(&a)));
+        assert_eq!(fp.declared[&a].hash, *blake3::hash(b"newer").as_bytes());
+    }
+
+    #[test]
+    fn a_dirty_stamps_hash_is_not_reused() {
+        let fx = Fx::new();
+        let a = fx.file("a.rs", b"old");
+        // The run started before the file's mtime, so the stamp is
+        // dirty.
+        let dirty = fx
+            .store
+            .record(RecordInput {
+                key: "k",
+                command: [1; 32],
+                toolchain: [2; 32],
+                declared: std::slice::from_ref(&a),
+                discovered: &[],
+                env: BTreeMap::new(),
+                outputs: &fx.outputs(),
+                started_at: SystemTime::now() - Duration::from_secs(10),
+                stderr: b"",
+                data: None,
+            })
+            .unwrap();
+        let stamp = dirty.declared[&a].clone();
+        assert!(stamp.dirty);
+        rewrite_unseen(&a, b"new", stamp.mtime_ns);
+
+        let store = FingerprintStore::new(fx.store.dir(), Vec::new());
+        let fp = store
+            .record(RecordInput {
+                key: "k",
+                command: [1; 32],
+                toolchain: [2; 32],
+                declared: std::slice::from_ref(&a),
+                discovered: &[],
+                env: BTreeMap::new(),
+                outputs: &fx.outputs(),
+                started_at: SystemTime::now() + Duration::from_secs(10),
+                stderr: b"",
+                data: None,
+            })
+            .unwrap();
+        assert_eq!(fp.declared[&a].hash, *blake3::hash(b"new").as_bytes());
     }
 
     #[test]

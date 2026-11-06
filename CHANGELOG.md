@@ -41,6 +41,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `quon run` takes runner arguments only after `--`, so
   `quon run <entry>` names an entry.
 
+### Changed (build speed)
+
+- **Each input file is hashed about once per build.** Writing a
+  record hashed every declared input again, including every
+  dependency rlib and the sysroot. For a set of 13 STM32 firmware
+  boards, hashing took 18.7s of CPU in a 26s cold build, and 0.45s
+  per crate after a one-line edit. The store now reuses a hash while
+  the file keeps the mtime and size it had when hashed. Rebuilding
+  one board after an edit went from 1.5s to 0.37s.
+- **File content hashes use BLAKE3 instead of SHA-256.** It hashes a
+  50 MB rlib 4.7 times faster and is also a cryptographic hash.
+  Existing records are in the old format, so the first build after
+  upgrading rebuilds everything.
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the

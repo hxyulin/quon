@@ -8,9 +8,10 @@
 //!
 //! ## Cache key
 //!
-//! `sha256(rustc_version || wrapper || sha256(quon.rs) ||
-//! sha256(quon_config_rlib) || sha256(quon_config_rmeta))`, the last
-//! only when cargo wrote one
+//! `sha256(rustc_version || wrapper || hash(quon.rs) ||
+//! hash(quon_config_rlib) || hash(quon_config_rmeta))`, the last
+//! only when cargo wrote one, where `hash` is the file content hash
+//! of [`crate::cache::hash_file`]
 //!
 //! - `rustc_version` covers "the user upgraded their toolchain".
 //! - `wrapper` is the generated `main.rs` (see [`wrapper_source`]), so a
@@ -173,7 +174,7 @@ const TRANSITIVE_FP_NAME: &str = "transitive-fingerprint.txt";
 /// ever changed, the consequence would be a spurious recompile (not a
 /// stale build), so we don't sort the list to harden against it.
 fn transitive_fingerprint(depfile: &Path) -> Result<String> {
-    use crate::cache::{parse_depfile, sha256_file};
+    use crate::cache::{hash_file, parse_depfile};
     use sha2::{Digest, Sha256};
 
     let sources = parse_depfile(depfile)?.files;
@@ -184,7 +185,7 @@ fn transitive_fingerprint(depfile: &Path) -> Result<String> {
         // "subsystem renamed but contents identical" cases.
         h.update(src.as_os_str().as_encoded_bytes());
         h.update(b"\0");
-        let bytes = sha256_file(src).map_err(|e| match e {
+        let bytes = hash_file(src).map_err(|e| match e {
             Error::Io { source, .. } => Error::Io {
                 path: src.clone(),
                 source,
