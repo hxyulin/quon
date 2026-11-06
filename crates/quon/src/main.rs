@@ -112,9 +112,14 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
             driver,
             &selections,
         )?;
+        let lint_args = match &cli.command {
+            cli::Command::Clippy(a) => a.lint_args.clone(),
+            _ => Vec::new(),
+        };
         for ctx in &mut ctxs {
             ctx.ctx.verbose = cli.verbose;
             ctx.ctx.color = shell.color();
+            ctx.ctx.lint_args.clone_from(&lint_args);
         }
         if ctxs.len() > 1 {
             // Several entries share one schedule; see

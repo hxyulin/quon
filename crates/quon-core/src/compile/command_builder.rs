@@ -22,7 +22,8 @@
 //! 8. opt-level, debuginfo, LTO
 //! 9. feature cfgs, then the unit's cfg flags, then for manifest units
 //!    `--check-cfg` declarations and lint levels
-//! 10. `--cap-lints`, panic strategy, the unit's raw rustc flags
+//! 10. under `quon clippy`, its lint arguments; `--cap-lints`, panic
+//!     strategy, the unit's raw rustc flags
 //! 11. build-script output: `--cfg`, `--check-cfg`, `-l`, link args,
 //!     then `-L` for the link-search paths of the unit's closure
 //! 12. incremental directory, linker script, `-o` for raw binaries
@@ -351,9 +352,18 @@ fn build_command(
     for flag in &unit.settings.cfg_flags {
         builder.cfg(flag);
     }
+    // True exactly when `program` is clippy-driver: a linted unit, or
+    // the lint pass of one built with plain rustc.
+    let clippy = driver == DriverKind::Clippy && (!unit.settings.always_rustc || lint);
     if let Some(cargo) = &unit.settings.cargo {
-        let clippy = driver == DriverKind::Clippy && !unit.settings.always_rustc;
         push_cargo_settings(&mut builder, cargo, clippy);
+    }
+    // Like `cargo clippy -- <args>`: every linted crate gets them, and
+    // `--cap-lints allow` below still silences vendored crates.
+    if clippy {
+        for arg in &ctx.lint_args {
+            builder.raw_arg(arg.as_str());
+        }
     }
     if unit.settings.cap_lints {
         builder.raw_arg("--cap-lints").raw_arg("allow");

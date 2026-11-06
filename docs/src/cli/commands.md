@@ -67,7 +67,7 @@ because it skips code generation. Output goes to `build/tool/check/`.
 quon check
 ```
 
-### `quon clippy [ENTRY]`
+### `quon clippy [ENTRY] [-- ARGS]`
 
 Run clippy over every crate. `ENTRY` works as for `quon build`. Uses `clippy-driver`, resolved in the following
 order:
@@ -76,10 +76,15 @@ order:
 2. A `clippy-driver` binary next to the active `rustc`
 3. `clippy-driver` on `$PATH`
 
-Output goes to `build/tool/clippy/`.
+Output goes to `build/tool/clippy/`. Arguments after `--` go to
+clippy for every linted crate, as with `cargo clippy`. Vendored crates
+still have their lints capped. The arguments are part of each crate's
+cache key, so a crate that linted with only warnings lints again once
+they are denied.
 
 ```sh
 quon clippy
+quon clippy -- -D warnings
 ```
 
 ### `quon fmt [--check]`

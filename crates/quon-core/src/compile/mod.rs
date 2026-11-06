@@ -75,6 +75,11 @@ pub struct CompileCtx {
     /// caller sets this when the stream the buffer ends up on takes
     /// color.
     pub color: bool,
+    /// Extra arguments for `clippy-driver`, such as `-D warnings`, from
+    /// `quon clippy -- <args>`. They are part of the argv, so of the
+    /// cache key: a crate linted clean with warnings allowed lints
+    /// again once they are denied.
+    pub lint_args: Vec<String>,
 }
 
 impl CompileCtx {
@@ -93,6 +98,7 @@ impl CompileCtx {
             store,
             verbose: false,
             color: false,
+            lint_args: Vec::new(),
         }
     }
 

@@ -269,6 +269,18 @@ fn quon_clippy_lints_every_crate() {
         "clippy writes build/tool/clippy/"
     );
 
+    // The lint arguments are in the cache key, so the crate cached as
+    // linted with only a warning lints again and fails.
+    let denied = quon(&fixture)
+        .args(["clippy", "--", "-D", "warnings"])
+        .output()
+        .expect("spawn quon");
+    let denied_err = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        !denied.status.success() && denied_err.contains("error: unneeded `return`"),
+        "clippy -- -D warnings should fail on the needless return:\n{denied_err}"
+    );
+
     quon_ok(&fixture, &["build"]);
     let host_deps = fixture.join("build/host/deps");
     let dylibs = fs::read_dir(&host_deps)

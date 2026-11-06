@@ -87,6 +87,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   build script sees `CARGO_CFG_DEBUG_ASSERTIONS` when the profile turns
   debug assertions on.
 
+### Added (clippy arguments)
+
+- **`quon clippy -- <args>`** passes `<args>` to clippy for every
+  linted crate, as `cargo clippy -- -D warnings` does. A proc macro's
+  lint pass now also gets the manifest's `[lints.clippy]` levels.
+
 ### Added (compile-time environment)
 
 - **`q.env(key, value)` sets a variable for every rustc run and build

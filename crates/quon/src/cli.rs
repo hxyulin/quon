@@ -192,6 +192,10 @@ pub struct CheckArgs {
 pub struct ClippyArgs {
     /// The run entry to lint. Default: as for `quon build`.
     pub entry: Option<String>,
+    /// Arguments after `--` go to clippy for every linted crate, as
+    /// with `cargo clippy -- -D warnings`.
+    #[arg(last = true)]
+    pub lint_args: Vec<String>,
 }
 
 /// Arguments for `quon fmt`.
