@@ -548,7 +548,7 @@ impl UnitGraph {
                 let out_dir = platform_dir.join("deps");
                 let stem = format!("{cn}-{h16}");
                 let output_path = match kind {
-                    CrateType::Bin | CrateType::RawBinary => out_dir.join(&stem),
+                    CrateType::Bin | CrateType::RawBinary | CrateType::Test => out_dir.join(&stem),
                     CrateType::ProcMacro => out_dir.join(proc_macro_file_name(&stem)),
                     _ => out_dir.join(format!("lib{stem}.rlib")),
                 };

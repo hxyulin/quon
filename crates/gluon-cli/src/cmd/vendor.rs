@@ -99,6 +99,7 @@ fn run_dependencies(
         resolved: _, // vendor doesn't need the resolved profile
         layout,
         project_root,
+        ..
     } = ctx;
 
     if check_mode {

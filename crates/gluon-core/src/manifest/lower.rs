@@ -26,6 +26,10 @@
 //! packages), declared features for `--check-cfg`, lints, the `CARGO_*`
 //! environment, and the build script that runs for the unit.
 //!
+//! Host-test units (see [`super::resolve`]) join the synthetic
+//! `cargo:host-test` group, which builds for the host. Their lib and
+//! `harness = true` tests become [`CrateType::Test`] crates.
+//!
 //! Units only the tests need (the tests, their dev-dependencies, and
 //! copies of dependencies the dev-dependencies change; see
 //! [`super::resolve`]) carry [`CargoUnitDef::test_only`], and
@@ -123,20 +127,25 @@ pub fn load(
         .filter(|c| c.manifest.is_some())
         .collect();
     let Some(ws) = &raw.cargo_workspace else {
-        if roots.is_empty() {
+        if roots.is_empty() && raw.host_tests.is_empty() {
             return Ok(None);
         }
+        let hint = "add `cfg.cargo_workspace(\"<dir>\")` to gluon.rs";
         return Err(Error::Diagnostics(
             roots
                 .iter()
                 .map(|c| {
                     Diagnostic::error(format!(
-                        "`package(\"{}\")` needs a Cargo workspace; add \
-                         `cfg.cargo_workspace(\"<dir>\")` to gluon.rs",
+                        "`package(\"{}\")` needs a Cargo workspace; {hint}",
                         c.name
                     ))
                     .with_optional_span(c.span.clone())
                 })
+                .chain(raw.host_tests.iter().map(|name| {
+                    Diagnostic::error(format!(
+                        "`host_tests().package(\"{name}\")` needs a Cargo workspace; {hint}"
+                    ))
+                }))
                 .collect(),
         ));
     };
@@ -241,8 +250,30 @@ pub fn expand_with(
             no_sysroot: group.no_sysroot,
         });
     }
+    let mut host_tests = Vec::new();
+    for name in &raw.host_tests {
+        match set.member(name) {
+            Some(p) if set.packages[p].is_proc_macro() => errors.push(Diagnostic::error(format!(
+                "`host_tests().package(\"{name}\")`: Gluon cannot run the tests of a \
+                 proc-macro package yet"
+            ))),
+            Some(p) => host_tests.push(p),
+            None => errors.push(Diagnostic::error(format!(
+                "`host_tests().package(\"{name}\")`: `{name}` is not a member of the Cargo \
+                 workspace at {}",
+                set.root.display()
+            ))),
+        }
+    }
     if !errors.is_empty() {
         return Err(Error::Diagnostics(errors));
+    }
+    // Host tests resolve in their own domain with the host's cfgs.
+    let mut platforms = platforms.clone();
+    if !host_tests.is_empty()
+        && let Some(host) = platforms.get(&Domain::Host).cloned()
+    {
+        platforms.insert(Domain::HostTest, host);
     }
 
     let resolver_roots: Vec<Root> = roots
@@ -257,7 +288,7 @@ pub fn expand_with(
             }
         })
         .collect();
-    let graph = resolve(&set, &resolver_roots, platforms, host_triple)?;
+    let graph = resolve(&set, &resolver_roots, &host_tests, &platforms, host_triple)?;
     let names = graph.unit_names();
     let checksums: BTreeMap<(&str, &Version), Option<&str>> = set
         .lock
@@ -268,7 +299,7 @@ pub fn expand_with(
         .collect();
 
     check_unsupported(&graph, &roots, &mut errors);
-    for r in &roots {
+    for r in roots.iter().filter(|r| !host_tests.contains(&r.package)) {
         let pkg = &graph.packages[r.package];
         for t in pkg.tests.iter().filter(|t| t.harness) {
             warnings.push(
@@ -278,9 +309,11 @@ pub fn expand_with(
                     pkg.name()
                 ))
                 .with_note(format!(
-                    "add `[[test]] name = \"{}\"` with `harness = false` to {}",
+                    "add `[[test]] name = \"{}\"` with `harness = false` to {} to boot it, \
+                     or `cfg.host_tests().package(\"{}\")` to gluon.rs to run it on the host",
                     t.name,
-                    pkg.manifest_path.display()
+                    pkg.manifest_path.display(),
+                    pkg.name()
                 )),
             );
         }
@@ -610,6 +643,33 @@ fn lower_unit(
             };
             (ty, &t.path, &t.edition, name.replace('-', "_"), None)
         }
+        UnitKind::LibTest => {
+            let lib = pkg
+                .lib
+                .as_ref()
+                .expect("lib-test units come from a lib target");
+            (
+                CrateType::Test,
+                &lib.path,
+                &lib.edition,
+                lib.name.replace('-', "_"),
+                None,
+            )
+        }
+        UnitKind::HarnessTest(name) => {
+            let t = pkg
+                .tests
+                .iter()
+                .find(|t| &t.name == name)
+                .expect("harness-test units come from a test target");
+            (
+                CrateType::Test,
+                &t.path,
+                &t.edition,
+                name.replace('-', "_"),
+                None,
+            )
+        }
         other => {
             // The caller skips build-script units.
             return Err(Diagnostic::error(format!(
@@ -657,7 +717,9 @@ fn lower_unit(
 
     let mut env = package_env(pkg);
     env.insert("CARGO_CRATE_NAME".into(), rustc_name.clone());
-    if u.is_root {
+    // Cargo sets it for the packages named on its command line, which
+    // a host-test root is.
+    if u.is_root || matches!(u.kind, UnitKind::LibTest | UnitKind::HarnessTest(_)) {
         env.insert("CARGO_PRIMARY_PACKAGE".into(), "1".into());
     }
     if let Some(bin) = bin {
@@ -671,7 +733,7 @@ fn lower_unit(
         .to_string_lossy()
         .into_owned();
     let target = match &u.domain {
-        Domain::Host => "host".to_string(),
+        Domain::Host | Domain::HostTest => "host".to_string(),
         Domain::Target(t) => t.clone(),
     };
     let deps = u

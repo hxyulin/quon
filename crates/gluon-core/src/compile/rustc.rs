@@ -113,7 +113,13 @@ impl RustcCommandBuilder {
 
     /// One-shot: calling more than once will cause rustc to reject the
     /// invocation.
+    /// `--test` for [`CrateType::Test`], which builds a libtest
+    /// harness executable and has no `--crate-type` value.
     pub fn crate_type(&mut self, kind: CrateType) -> &mut Self {
+        if kind == CrateType::Test {
+            self.args.push(OsString::from("--test"));
+            return self;
+        }
         self.args.push(OsString::from("--crate-type"));
         self.args.push(OsString::from(kind.as_str()));
         self
@@ -447,6 +453,13 @@ mod tests {
             bld.crate_type(kind);
             assert_eq!(bld.args(), &[os("--crate-type"), os(expected)]);
         }
+    }
+
+    #[test]
+    fn test_crate_type_is_the_test_flag() {
+        let mut bld = b("/usr/bin/rustc");
+        bld.crate_type(CrateType::Test);
+        assert_eq!(bld.args(), &[os("--test")]);
     }
 
     #[test]

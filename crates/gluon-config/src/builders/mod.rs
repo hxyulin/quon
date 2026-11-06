@@ -17,6 +17,7 @@ pub mod profile;
 pub mod project;
 pub mod qemu;
 pub mod rule;
+pub mod tests;
 pub use bootloader::BootloaderBuilder;
 pub use build_step::BuildStepBuilder;
 pub use cargo_workspace::CargoWorkspaceBuilder;
@@ -34,6 +35,7 @@ pub use profile::ProfileBuilder;
 pub use project::ProjectBuilder;
 pub use qemu::QemuBuilder;
 pub use rule::RuleBuilder;
+pub use tests::{BootTestBuilder, HostTestsBuilder};
 
 use gluon_model::SourceSpan;
 

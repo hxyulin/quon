@@ -98,7 +98,7 @@ in larger projects.
 ```sh
 gluon build              # Compile everything
 gluon run                # Build + launch QEMU
-gluon test               # Build + boot each integration test
+gluon test               # Run host, integration and boot tests
 gluon check              # Metadata-only check pass
 gluon configure          # Generate rust-project.json for rust-analyzer
 gluon setup              # Build the gluon-config library gluon.rs links against
@@ -115,6 +115,7 @@ gluon setup              # Build the gluon-config library gluon.rs links against
 - **Parallel DAG scheduler** -- dependency-aware build graph with worker pool
 - **Dependency vendoring** -- `gluon vendor` with lockfile and fingerprinting
 - **QEMU orchestration** -- direct boot, UEFI boot (OVMF), GDB server, timeouts
+- **Testing** -- `gluon test` runs host unit tests, QEMU integration tests and boot test suites
 - **rust-analyzer integration** -- `gluon configure` generates `rust-project.json`
 - **Pipeline and rule system** -- user-defined build stages with copy, mkimage, and exec rules
 - **ESP assembly** -- automatic EFI System Partition layout for UEFI boot

@@ -175,23 +175,30 @@ gluon run --dry-run
 
 ### `gluon test [flags] [FILTER] [-- QEMU_ARGS...]`
 
-Build the integration tests and boot each one under QEMU, one at a time,
-in name order. A test passes when QEMU exits with
-`qemu().success_exit_code(...)`, or 0 when that is unset. Only the tests
-whose name contains `FILTER` run. See
-[Integration Tests](../running/integration-tests.md).
+Build the active profile with its tests, then run the host tests, the
+integration tests and the boot tests, in that order. A failed run does
+not stop the others; the command fails at the end if any run failed.
+`FILTER` goes to each host test executable as libtest's filter, and
+selects integration and boot tests by name. See
+[Testing](../running/testing.md).
 
 | Flag | Short | Description |
 |------|-------|-------------|
+| `--host` | | Run the host tests |
+| `--integration` | | Run the integration tests |
+| `--boot` | | Run the boot tests |
 | `--uefi` | | Force UEFI boot (conflicts with `--direct`) |
 | `--direct` | | Force direct kernel boot |
-| `--timeout <SECS>` | `-T` | Per-test timeout (default: the profile's `test_timeout`, then `qemu().test_timeout(...)`, then 60) |
-| `--dry-run` | | Print each test's QEMU command without building or booting |
+| `--timeout <SECS>` | `-T` | Per-boot timeout (default: the profile's `test_timeout`, then `qemu().test_timeout(...)`, then 60) |
+| `--dry-run` | | Print each test's command without building or running it |
 | `--no-build` | | Skip the build step (use existing artifacts) |
+
+With none of `--host`, `--integration` and `--boot`, every kind runs.
+`QEMU_ARGS` apply to integration and boot tests.
 
 ```sh
 gluon test
-gluon test heap
+gluon test --host parse
 gluon test --timeout 120 -- -smp 4
 ```
 

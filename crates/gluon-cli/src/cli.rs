@@ -141,13 +141,17 @@ pub enum Command {
     /// `qemu().boot_mode(...)` → direct. Extra arguments after `--`
     /// are passed through to QEMU verbatim.
     Run(RunArgs),
-    /// Build the integration tests and boot each one under QEMU.
+    /// Build and run the tests: host tests, then integration tests,
+    /// then boot tests.
     ///
-    /// An integration test is a `harness = false` target in `tests/`
-    /// of a package named with `group.package(...)`. Each test boots
-    /// the way `gluon run` boots the boot binary, with the test binary
-    /// in its place, and passes when QEMU exits with the success
-    /// status. Tests run one at a time, in name order.
+    /// Host tests are the unit tests and `harness = true` tests of the
+    /// packages in `cfg.host_tests()`, run on the host. Integration
+    /// tests are the `harness = false` targets in `tests/` of packages
+    /// named with `group.package(...)`; each boots the way `gluon run`
+    /// boots the boot binary, with the test binary in its place.
+    /// Boot tests (`cfg.boot_test(...)`) boot a profile's boot binary.
+    /// QEMU runs pass when QEMU exits with the success status. Every
+    /// run happens even when an earlier one fails.
     Test(TestArgs),
     /// Inspect the Cargo workspace as Gluon reads it. Debug output only.
     #[command(subcommand)]
@@ -295,8 +299,19 @@ pub struct RunArgs {
 /// Arguments for `gluon test`.
 #[derive(clap::Args, Debug)]
 pub struct TestArgs {
-    /// Run only the tests whose name contains this string.
+    /// Passed to each host test as libtest's filter. Integration and
+    /// boot tests run only when their name contains it.
     pub filter: Option<String>,
+    /// Run the host tests. With none of `--host`, `--integration` and
+    /// `--boot`, every kind runs.
+    #[arg(long)]
+    pub host: bool,
+    /// Run the integration tests.
+    #[arg(long)]
+    pub integration: bool,
+    /// Run the boot tests.
+    #[arg(long)]
+    pub boot: bool,
     /// Force UEFI boot. Mutually exclusive with `--direct`.
     #[arg(long, conflicts_with = "direct")]
     pub uefi: bool,
@@ -307,10 +322,10 @@ pub struct TestArgs {
     /// `test_timeout`, then `qemu().test_timeout(...)`, then 60.
     #[arg(short = 'T', long)]
     pub timeout: Option<u64>,
-    /// Print each test's QEMU command instead of building and booting.
+    /// Print each test's command instead of building and running it.
     #[arg(long)]
     pub dry_run: bool,
-    /// Skip the build and boot the test binaries already on disk.
+    /// Skip the build and run the test binaries already on disk.
     #[arg(long)]
     pub no_build: bool,
     /// Arguments after `--` are passed verbatim to QEMU for every test.

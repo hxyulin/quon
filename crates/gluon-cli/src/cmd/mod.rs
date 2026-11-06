@@ -46,12 +46,13 @@ use gluon_core::config::{
     DEFAULT_ENV_PREFIX, DEFAULT_OVERRIDE_FILENAME, load_env_overrides, load_override_file,
     merge_overrides,
 };
-use gluon_core::model::{BuildModel, ResolvedConfig};
+use gluon_core::model::{BuildModel, ConfigValue, ResolvedConfig};
 use gluon_core::vendor as core_vendor;
 use gluon_core::{
     BuildLayout, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model,
     resolve_config,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -77,6 +78,10 @@ pub struct CmdContext {
     /// from cwd.
     #[allow(dead_code)]
     pub project_root: PathBuf,
+    /// The `-t` target and the config overrides `resolved` was resolved
+    /// with, so a command can resolve another profile the same way.
+    pub target: Option<String>,
+    pub overrides: BTreeMap<String, ConfigValue>,
 }
 
 /// Build a [`CmdContext`] by walking up from the host's current
@@ -125,6 +130,7 @@ pub fn build_context_at_for_driver(
         resolved,
         layout,
         project_root,
+        overrides,
     } = build_layout_context_at(cwd, profile, target, config_file)?;
 
     // Re-flavor the layout for the requested driver. The shared
@@ -150,6 +156,8 @@ pub fn build_context_at_for_driver(
         resolved,
         ctx,
         project_root,
+        target: target.map(str::to_owned),
+        overrides,
     })
 }
 
@@ -163,6 +171,8 @@ pub struct LayoutContext {
     pub resolved: ResolvedConfig,
     pub layout: BuildLayout,
     pub project_root: PathBuf,
+    /// The `.gluon-config` and `GLUON_*` overrides `resolved` used.
+    pub overrides: BTreeMap<String, ConfigValue>,
 }
 
 /// Build a [`LayoutContext`] (no rustc probe) starting at `cwd`.
@@ -314,6 +324,7 @@ pub fn build_layout_context_at_with_opts(
         resolved,
         layout,
         project_root,
+        overrides,
     })
 }
 

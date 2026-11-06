@@ -719,6 +719,51 @@ impl Config {
         crate::builders::CargoWorkspaceBuilder { cfg: self, active }
     }
 
+    /// Declare workspace packages whose unit tests `gluon test` builds
+    /// and runs on the host:
+    ///
+    /// ```ignore
+    /// cfg.host_tests().package("acpi").package("elf");
+    /// ```
+    ///
+    /// Each package's lib is compiled with `--test` against the host's
+    /// standard library, with the package's dev-dependencies. Its
+    /// `harness = true` tests in `tests/` are built the same way.
+    /// Group settings (linker scripts, rustc flags, the config crate)
+    /// do not apply. Needs [`Config::cargo_workspace`].
+    pub fn host_tests(&mut self) -> crate::builders::HostTestsBuilder<'_> {
+        crate::builders::HostTestsBuilder { cfg: self }
+    }
+
+    /// Declare a boot test suite: `gluon test` builds the profile named
+    /// by `.profile(...)`, boots its boot binary in QEMU, and passes
+    /// the suite when QEMU exits with `qemu().success_exit_code(...)`.
+    /// The kernel decides what to run once booted, typically from a
+    /// config option that the profile's preset sets.
+    ///
+    /// ```ignore
+    /// cfg.boot_test("ktest").profile("test");
+    /// ```
+    pub fn boot_test(&mut self, name: &str) -> crate::builders::BootTestBuilder<'_> {
+        let (handle, inserted) = self.raw.boot_tests.insert(
+            name.into(),
+            gluon_model::RawBootTestDef {
+                name: name.into(),
+                profile: None,
+                span: None,
+            },
+        );
+        let handle = if inserted {
+            Some(handle)
+        } else {
+            self.diagnostics.push(ConfigError::new(format!(
+                "boot_test(\"{name}\") is defined more than once"
+            )));
+            None
+        };
+        crate::builders::BootTestBuilder { cfg: self, handle }
+    }
+
     /// Record a `.kconfig` file path for host-side parsing.
     ///
     /// The file is **not parsed here** — `gluon-config` cannot depend on

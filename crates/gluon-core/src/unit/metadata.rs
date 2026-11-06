@@ -140,6 +140,7 @@ fn kind_label(kind: CrateType) -> &'static str {
         CrateType::ProcMacro => "proc-macro",
         CrateType::StaticLib => "staticlib",
         CrateType::RawBinary => "raw-binary",
+        CrateType::Test => "test",
     }
 }
 

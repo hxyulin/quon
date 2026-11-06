@@ -1281,3 +1281,199 @@ fn cfg_flags_are_declared_to_check_cfg() {
         "{decls:?}"
     );
 }
+
+/// Member `a` (lib, bin, the `harness = false` test `boot` and the
+/// libtest test `api`) depending on `util`, with the dev-dependency
+/// `kit`. `util` has the feature `extra`, which `a`'s build script
+/// turns on through its build-dependency.
+fn host_test_workspace() -> tempfile::TempDir {
+    let a = manifest(
+        "a",
+        "build = \"build.rs\"\n\
+         [[test]]\nname = \"boot\"\nharness = false\n\
+         [dependencies]\nutil = { path = \"../util\" }\n\
+         [build-dependencies]\nutil = { path = \"../util\", features = [\"extra\"] }\n\
+         [dev-dependencies]\nkit = { path = \"../kit\" }\n",
+    );
+    let files = [
+        ("Cargo.toml", WS.to_string()),
+        ("a/Cargo.toml", a),
+        ("a/build.rs", "fn main() {}".into()),
+        ("a/src/lib.rs", String::new()),
+        ("a/src/main.rs", String::new()),
+        ("a/tests/boot.rs", String::new()),
+        ("a/tests/api.rs", String::new()),
+        (
+            "util/Cargo.toml",
+            manifest("util", "[features]\nextra = []\n"),
+        ),
+        ("util/src/lib.rs", String::new()),
+        ("kit/Cargo.toml", manifest("kit", "")),
+        ("kit/src/lib.rs", String::new()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+    workspace(&files)
+}
+
+fn root_a_with_host_tests() -> RawBuildModel {
+    raw_model(|cfg, t| {
+        cfg.cargo_workspace(".");
+        cfg.group("k").target(t).package("a");
+        cfg.host_tests().package("a");
+    })
+}
+
+/// A host-test package's lib and libtest tests build for the host
+/// with `--test`, with its dev-dependencies, in the `cargo:host-test`
+/// group. Their `util` is not the build script's: the host-test
+/// domain does not take the build-dependency's `extra` feature. Every
+/// host-test unit is test-only, and the target units are unchanged.
+#[test]
+fn host_tests_build_for_the_host_in_their_own_domain() {
+    let ws = host_test_workspace();
+    let mut raw = root_a_with_host_tests();
+    let warnings = expand_at(&mut raw, ws.path()).expect("expand");
+    assert!(
+        warnings.iter().all(|w| !w.message.contains("libtest")),
+        "{warnings:?}"
+    );
+    assert_eq!(
+        dump(&raw),
+        "\
+a@host-test [cargo:host-test] host Lib a/src/lib.rs 2021 f=[] d=[util->util@host-test] rustc=a
+a@test [cargo:host-test] host Test a/src/lib.rs 2021 f=[] d=[kit->kit@host-test,util->util@host-test] rustc=a
+api [cargo:host-test] host Test a/tests/api.rs 2021 f=[] d=[a->a@host-test,kit->kit@host-test,util->util@host-test] rustc=api
+a@lib [k] x86_64-unknown-none Lib a/src/lib.rs 2021 f=[] d=[util->util] rustc=a
+a [k] x86_64-unknown-none Bin a/src/main.rs 2021 f=[] d=[a->a@lib,util->util] rustc=a
+boot [k] x86_64-unknown-none Bin a/tests/boot.rs 2021 f=[] d=[a->a@lib,kit->kit,util->util] rustc=boot
+kit@host-test [cargo:host-test] host Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
+kit [cargo:x86_64-unknown-none] x86_64-unknown-none Lib kit/src/lib.rs 2021 f=[] d=[] rustc=kit
+util@host [cargo:host] host Lib util/src/lib.rs 2021 f=[extra] d=[] rustc=util
+util@host-test [cargo:host-test] host Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
+util [cargo:x86_64-unknown-none] x86_64-unknown-none Lib util/src/lib.rs 2021 f=[] d=[] rustc=util
+"
+    );
+    assert_eq!(
+        test_only(&raw),
+        [
+            "a@host-test",
+            "a@test",
+            "api",
+            "boot",
+            "kit@host-test",
+            "kit",
+            "util@host-test"
+        ]
+    );
+    // The build script runs for the unit tests too, as under `cargo test`.
+    let lib_test = raw
+        .crates
+        .iter()
+        .find(|(_, c)| c.name == "a@test")
+        .unwrap()
+        .1;
+    let cargo = lib_test.cargo.as_ref().unwrap();
+    assert!(cargo.build_script.is_some());
+    assert_eq!(
+        cargo.env.get("CARGO_PRIMARY_PACKAGE").map(String::as_str),
+        Some("1")
+    );
+    assert!(!cargo.is_test, "host tests do not boot");
+
+    // Listing the package changes none of the target units.
+    let with = units_at(root_a_with_host_tests(), ws.path());
+    let without = units_at(root_a(), ws.path());
+    for name in ["a", "a@lib", "util", "boot", "kit", "util@host"] {
+        assert_eq!(
+            unit_named(&with, name).metadata,
+            unit_named(&without, name).metadata,
+            "{name}"
+        );
+    }
+    let lib_test = unit_named(&with, "a@test");
+    assert_eq!(lib_test.kind, CrateType::Test);
+    assert_eq!(lib_test.platform, crate::unit::Platform::Host);
+    assert!(!lib_test.sysroot && !lib_test.config_crate);
+}
+
+/// A package needs no target group to have host tests.
+#[test]
+fn host_tests_need_no_group() {
+    let ws = host_test_workspace();
+    let mut raw = raw_model(|cfg, _| {
+        cfg.cargo_workspace(".");
+        cfg.host_tests().package("util");
+    });
+    expand_at(&mut raw, ws.path()).expect("expand");
+    assert_eq!(
+        dump(&raw),
+        "util [cargo:host-test] host Test util/src/lib.rs 2021 f=[] d=[] rustc=util\n"
+    );
+}
+
+#[test]
+fn host_tests_reject_unknown_and_proc_macro_packages() {
+    let ws = workspace(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"2\"\nmembers = [\"m\"]\n",
+        ),
+        ("m/Cargo.toml", &manifest("m", "[lib]\nproc-macro = true\n")),
+        ("m/src/lib.rs", ""),
+    ]);
+    let mut raw = raw_model(|cfg, _| {
+        cfg.cargo_workspace(".");
+        cfg.host_tests().package("m").package("nope");
+    });
+    let err = expand_err(&mut raw, ws.path());
+    assert!(
+        err.contains("cannot run the tests of a proc-macro package"),
+        "{err}"
+    );
+    assert!(err.contains("`nope` is not a member"), "{err}");
+}
+
+#[test]
+fn host_tests_need_a_workspace() {
+    let mut raw = raw_model(|cfg, _| {
+        cfg.host_tests().package("a");
+    });
+    let err = expand_err(&mut raw, Path::new("/nonexistent"));
+    assert!(
+        err.contains("`host_tests().package(\"a\")` needs a Cargo workspace"),
+        "{err}"
+    );
+}
+
+/// With a boot binary, a profile builds what the target's crates reach,
+/// and the host tests too, which nothing reaches.
+#[test]
+fn host_tests_build_under_a_boot_binary() {
+    let ws = host_test_workspace();
+    let mut cfg = Config::new();
+    cfg.project("demo", "0.1.0");
+    let t = cfg.target("x86_64-unknown-none");
+    cfg.profile("dev").target(t).boot_binary("a");
+    cfg.cargo_workspace(".");
+    cfg.group("k").target(t).package("a");
+    cfg.host_tests().package("a");
+    let mut raw = cfg.into_raw();
+    expand_at(&mut raw, ws.path()).expect("expand");
+    let (model, diags) = gluon_model::intern(raw);
+    assert!(diags.is_empty(), "{diags:?}");
+    let resolved = crate::config::resolve(&model, "dev", None, ws.path(), None).unwrap();
+    let names: BTreeSet<String> = resolved
+        .crates
+        .iter()
+        .map(|c| model.crates.get(c.handle).unwrap().name.clone())
+        .collect();
+    for name in [
+        "a@test",
+        "api",
+        "a@host-test",
+        "kit@host-test",
+        "util@host-test",
+    ] {
+        assert!(names.contains(name), "{name} missing from {names:?}");
+    }
+}

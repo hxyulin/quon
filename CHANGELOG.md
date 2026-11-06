@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (host tests and boot tests)
+
+- **Host tests.** `cfg.host_tests().package("name")` makes `gluon test`
+  build the package's lib and its `harness = true` tests with
+  `rustc --test` for the host, with the package's dev-dependencies, and
+  run them from the package directory. They resolve features in their
+  own domain, so neither the kernel's features nor those of build
+  scripts and proc macros reach them. `gluon build` builds none of
+  them. Proc-macro packages and doctests are not supported yet.
+- **Boot tests.** `cfg.boot_test("name").profile("test")` makes
+  `gluon test` build that profile and boot its boot binary, passing when
+  QEMU exits with the success status. This runs a kernel's own test
+  runner, such as one a config option turns on.
+- **`CrateType::Test`**, a libtest executable built with `--test`.
+
+### Changed (`gluon test`)
+
+- **`gluon test` runs host tests, then integration tests, then boot
+  tests**, and prints one summary. A failed run no longer hides the
+  results of the others. `--host`, `--integration` and `--boot` select
+  kinds. The filter goes to host tests as libtest's filter. The result
+  lines read `integration test <name> ... ok`.
+- **A project without `qemu(...)` can run `gluon test`** when it has
+  only host tests.
+- `gluon_core::run::prepare_tests` no longer builds; call
+  `run::build_tests` first and pass its summary. `run_test` takes the
+  model and a `QemuInvocation`.
+
 ### Changed (gluon.rs entry point and `~/.gluon`)
 
 - **`gluon.rs` now defines `pub fn config(cfg: &mut Config) -> Result<()>`

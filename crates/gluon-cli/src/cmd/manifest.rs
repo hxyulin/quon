@@ -88,7 +88,7 @@ fn units(args: &ManifestUnitsArgs, target: Option<&str>) -> Result<()> {
             default_features: !args.no_default_features,
         });
     }
-    let graph = resolve(&set, &roots, &platforms, &info.host_triple)?;
+    let graph = resolve(&set, &roots, &[], &platforms, &info.host_triple)?;
     print!("{}", dump_units(&graph));
     Ok(())
 }

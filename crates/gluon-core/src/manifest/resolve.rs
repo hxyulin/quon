@@ -24,6 +24,17 @@
 //! build unit merges into it; the others are marked
 //! [`Unit::test_only`]. Only workspace members keep their
 //! dev-dependencies (see [`super::workspace`]), so only theirs apply.
+//!
+//! ### Host tests
+//!
+//! Packages listed in `cfg.host_tests()` join the test pass as roots in
+//! [`Domain::HostTest`], with their dev edges. That domain has the
+//! host's cfgs but its own feature sets: Cargo does not unify the
+//! features of normal dependencies with those of build-dependencies and
+//! proc macros, and `Domain::Host` holds the latter. Each such root
+//! yields a [`UnitKind::LibTest`] (its lib built with `--test`) and a
+//! [`UnitKind::HarnessTest`] per `harness = true` test in `tests/`.
+//! Its units are not root units: they take none of a group's settings.
 
 use super::platform::TargetPlatform;
 use super::workspace::{
@@ -41,6 +52,9 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Domain {
     Host,
+    /// The host, for the unit tests of `cfg.host_tests()` packages and
+    /// what they link. See the module docs.
+    HostTest,
     /// A Gluon target, by name.
     Target(String),
 }
@@ -49,6 +63,7 @@ impl fmt::Display for Domain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Domain::Host => f.write_str("host"),
+            Domain::HostTest => f.write_str("host-test"),
             Domain::Target(t) => f.write_str(t),
         }
     }
@@ -63,7 +78,21 @@ pub enum UnitKind {
     Bin(String),
     /// An integration test with `harness = false`, built like a bin.
     Test(String),
+    /// The lib of a host-test root, built with `--test`.
+    LibTest,
+    /// A `harness = true` test of a host-test root, built with `--test`.
+    HarnessTest(String),
     BuildScript,
+}
+
+impl UnitKind {
+    /// Whether only `gluon test` runs the unit.
+    pub fn is_test(&self) -> bool {
+        matches!(
+            self,
+            UnitKind::Test(_) | UnitKind::LibTest | UnitKind::HarnessTest(_)
+        )
+    }
 }
 
 impl fmt::Display for UnitKind {
@@ -73,6 +102,8 @@ impl fmt::Display for UnitKind {
             UnitKind::ProcMacro => f.write_str("proc-macro"),
             UnitKind::Bin(n) => write!(f, "bin {n}"),
             UnitKind::Test(n) => write!(f, "test {n}"),
+            UnitKind::LibTest => f.write_str("lib-test"),
+            UnitKind::HarnessTest(n) => write!(f, "harness-test {n}"),
             UnitKind::BuildScript => f.write_str("build-script"),
         }
     }
@@ -138,6 +169,8 @@ impl UnitGraph {
     /// test, or `<package>@build-script`. When names collide, root units
     /// keep the plain name and the others get suffixes in this order:
     /// `@test` for a test sharing a name with any other unit,
+    /// `@host-test` for a [`Domain::HostTest`] unit sharing a name with a
+    /// unit of another domain,
     /// `@test-pass` for another test-only unit sharing a name with a unit
     /// the build uses, `@lib` for
     /// a lib sharing a name with a bin of its package, `@<domain>` for a
@@ -152,7 +185,7 @@ impl UnitGraph {
             .map(|u| {
                 let pkg = &self.packages[u.package];
                 match &u.kind {
-                    UnitKind::Bin(n) | UnitKind::Test(n) => n.clone(),
+                    UnitKind::Bin(n) | UnitKind::Test(n) | UnitKind::HarnessTest(n) => n.clone(),
                     UnitKind::BuildScript => format!("{}@build-script", pkg.name()),
                     _ => pkg.name().to_string(),
                 }
@@ -166,8 +199,20 @@ impl UnitGraph {
             Box::new(|group, g| {
                 group
                     .iter()
-                    .filter(|&&i| matches!(g.units[i].kind, UnitKind::Test(_)))
+                    .filter(|&&i| g.units[i].kind.is_test())
                     .map(|&i| (i, "@test".to_string()))
+                    .collect()
+            }),
+            // Host-test copies always take the same suffix, whether or
+            // not the build or a target's tests use the package too.
+            Box::new(|group, g| {
+                if group.iter().all(|&i| g.units[i].domain == Domain::HostTest) {
+                    return Vec::new();
+                }
+                group
+                    .iter()
+                    .filter(|&&i| g.units[i].domain == Domain::HostTest)
+                    .map(|&i| (i, "@host-test".to_string()))
                     .collect()
             }),
             // Likewise a test-only copy of a unit, so the build's names,
@@ -264,8 +309,9 @@ pub struct Root {
     pub default_features: bool,
 }
 
-/// Resolve features for `roots`. `platforms` must hold every root
-/// domain and [`Domain::Host`].
+/// Resolve features for `roots`, and for `host_tests` in the test pass.
+/// `platforms` must hold every root domain and [`Domain::Host`], and
+/// [`Domain::HostTest`] when `host_tests` is not empty.
 ///
 /// The build pass never sees dev edges, so the kernel's units, and so
 /// its artifacts, are the same whether or not tests or dev-dependencies
@@ -275,19 +321,32 @@ pub struct Root {
 pub fn resolve(
     set: &PackageSet,
     roots: &[Root],
+    host_tests: &[PackageIdx],
     platforms: &BTreeMap<Domain, TargetPlatform>,
     host_triple: &str,
 ) -> Result<UnitGraph> {
     let states = run_resolver(set, roots, platforms, BTreeSet::new())?;
     let mut units = build_units(set, roots, &states, platforms, host_triple, Pass::Build)?;
-    let test_roots: BTreeSet<Key> = roots
+    let mut test_roots: BTreeSet<Key> = roots
         .iter()
         .filter(|r| set.packages[r.package].tests.iter().any(|t| !t.harness))
         .map(|r| (r.package, r.domain.clone()))
         .collect();
+    // The build pass never sees the host-test roots, so `gluon build`
+    // builds none of their units.
+    let mut all_roots = roots.to_vec();
+    for &p in host_tests {
+        test_roots.insert((p, Domain::HostTest));
+        all_roots.push(Root {
+            package: p,
+            domain: Domain::HostTest,
+            features: Vec::new(),
+            default_features: true,
+        });
+    }
     if !test_roots.is_empty() {
-        let states = run_resolver(set, roots, platforms, test_roots)?;
-        let test = build_units(set, roots, &states, platforms, host_triple, Pass::Test)?;
+        let states = run_resolver(set, &all_roots, platforms, test_roots)?;
+        let test = build_units(set, &all_roots, &states, platforms, host_triple, Pass::Test)?;
         units = merge_test_units(units, test);
     }
     Ok(UnitGraph {
@@ -629,6 +688,7 @@ impl Resolver<'_> {
         chain.reverse();
         let place = match &key.1 {
             Domain::Host => "the host".to_string(),
+            Domain::HostTest => "the host tests".to_string(),
             Domain::Target(t) => format!("target {t}"),
         };
         diag.with_note(format!("required by {} in {place}", chain.join(" -> ")))
@@ -640,7 +700,8 @@ impl Resolver<'_> {
 enum Pass {
     /// Libs, bins and build scripts, without dev edges.
     Build,
-    /// Libs, tests and build scripts, with the roots' dev edges.
+    /// Libs, tests and build scripts, with the roots' dev edges, plus
+    /// the host-test roots.
     Test,
 }
 
@@ -671,7 +732,10 @@ fn build_units(
     let mut drafts = Vec::new();
     for (key, st) in states {
         let pkg = &set.packages[key.0];
-        let is_root = root_keys.contains(key);
+        // Host-test roots are not root units: they join no group. See
+        // the module docs.
+        let host_test_root = key.1 == Domain::HostTest && root_keys.contains(key);
+        let is_root = !host_test_root && root_keys.contains(key);
         if let Some(lib) = &pkg.lib {
             drafts.push(Draft {
                 package: key.0,
@@ -713,6 +777,26 @@ fn build_units(
                         state: key.clone(),
                         is_root,
                     });
+                }
+            }
+        }
+        if host_test_root {
+            let draft = |kind| Draft {
+                package: key.0,
+                kind,
+                domain: key.1.clone(),
+                features: st.features.clone(),
+                state: key.clone(),
+                is_root: false,
+            };
+            if pkg.lib.as_ref().is_some_and(|l| !l.proc_macro) {
+                drafts.push(draft(UnitKind::LibTest));
+            }
+            // `harness = false` tests are QEMU tests; they build only
+            // for the package's target roots.
+            for t in pkg.tests.iter().filter(|t| t.harness) {
+                if t.required_features.iter().all(|f| st.features.contains(f)) {
+                    drafts.push(draft(UnitKind::HarnessTest(t.name.clone())));
                 }
             }
         }
@@ -765,7 +849,7 @@ fn build_units(
         // dev-dependency that depends on the package's lib is no cycle.
         let wants = |k: DepKind| match d.kind {
             UnitKind::BuildScript => k == DepKind::Build,
-            UnitKind::Test(_) => k != DepKind::Build,
+            ref kind if kind.is_test() => k != DepKind::Build,
             _ => k == DepKind::Normal,
         };
         let mut deps = BTreeSet::new();
@@ -798,7 +882,8 @@ fn build_units(
                 kind: dep.kind,
             });
         }
-        if let (UnitKind::Bin(_) | UnitKind::Test(_), Some(lib)) = (&d.kind, &pkg.lib)
+        if let (UnitKind::Bin(_) | UnitKind::Test(_) | UnitKind::HarnessTest(_), Some(lib)) =
+            (&d.kind, &pkg.lib)
             && let Some(&unit) = lib_unit.get(&(d.package, d.domain.clone()))
         {
             deps.insert(UnitDep {
@@ -827,7 +912,7 @@ fn build_units(
             unit_hash: String::new(),
             build_script,
             is_root: d.is_root,
-            test_only: matches!(d.kind, UnitKind::Test(_)),
+            test_only: d.kind.is_test(),
         });
     }
     for u in &mut units {
@@ -858,7 +943,7 @@ fn merge_test_units(build: Vec<Unit>, test: Vec<Unit>) -> Vec<Unit> {
     let mut needed = BTreeSet::new();
     let mut stack: Vec<UnitId> = test
         .iter()
-        .filter(|u| matches!(u.kind, UnitKind::Test(_)))
+        .filter(|u| u.kind.is_test())
         .map(|u| u.id)
         .collect();
     while let Some(id) = stack.pop() {

@@ -3,9 +3,9 @@
 use crate::config::interpolate::interpolate;
 use crate::error::{Diagnostic, Error, Result};
 use gluon_model::{
-    BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, DepResolution,
-    Expr, Handle, ImageSource, ProfileDef, RawSource, ResolvedConfig, ResolvedCrateRef,
-    ResolvedProfile, ResolvedValue, TargetDef, TargetSpec, TristateVal,
+    BuildModel, BuildStepInput, ConfigOptionDef, ConfigType, ConfigValue, CrateDef, CrateType,
+    DepResolution, Expr, Handle, ImageSource, ProfileDef, RawSource, ResolvedConfig,
+    ResolvedCrateRef, ResolvedProfile, ResolvedValue, TargetDef, TargetSpec, TristateVal,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::path::Path;
@@ -313,7 +313,8 @@ pub fn resolve(
 
     // 10. Resolve crate list. When boot_binary is set, include the crates
     //     of the profile's target and everything reachable from them and
-    //     from the boot binary via deps + artifact_deps closure. This
+    //     from the boot binary via deps + artifact_deps closure, plus the
+    //     host test executables and their deps. This
     //     prevents wasteful compilation: a project with profile("x86")
     //     and profile("arm") will not compile the arm crates for the x86
     //     profile, but every crate declared for x86 still builds.
@@ -495,6 +496,15 @@ fn reachable_crates(
             .get(krate.group)
             .is_some_and(|g| !matches!(g.target, TargetSpec::Host));
         if cross && krate.target == TargetSpec::Cross(target) && visited.insert(h) {
+            queue.push_back(h);
+        }
+    }
+
+    // Host-test seed: the host test executables (`cfg.host_tests()`).
+    // Nothing depends on them, and they build for the host whatever
+    // the profile's target is.
+    for (h, krate) in model.crates.iter() {
+        if krate.crate_type == CrateType::Test && visited.insert(h) {
             queue.push_back(h);
         }
     }

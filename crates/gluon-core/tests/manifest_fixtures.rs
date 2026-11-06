@@ -208,7 +208,7 @@ fn resolve_case(info: &RustcInfo, c: &Case) -> Resolved {
             default_features: !c.no_default_features,
         })
         .collect();
-    let graph = resolve(&set, &roots, &platforms, &info.host_triple).expect("resolve");
+    let graph = resolve(&set, &roots, &[], &platforms, &info.host_triple).expect("resolve");
     Resolved {
         graph,
         target_arg,
@@ -265,7 +265,7 @@ fn unknown_root_feature_is_reported() {
         features: vec!["nope".into(), "lib/missing".into()],
         default_features: true,
     };
-    let err = resolve(&set, &[root], &platforms, &info.host_triple)
+    let err = resolve(&set, &[root], &[], &platforms, &info.host_triple)
         .unwrap_err()
         .to_string();
     assert!(
@@ -296,7 +296,7 @@ fn activated_unresolved_edge_is_reported() {
         features: vec![],
         default_features: true,
     };
-    let err = resolve(&set, &[root], &platforms, &info.host_triple)
+    let err = resolve(&set, &[root], &[], &platforms, &info.host_triple)
         .unwrap_err()
         .to_string();
     assert!(err.contains("dependency `fake1` of `app`"), "{err}");

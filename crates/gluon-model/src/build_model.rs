@@ -94,6 +94,26 @@ pub struct BuildModel {
     /// ESP and image entries refer to them by name.
     #[serde(default)]
     pub downloads: Arena<DownloadDef>,
+    /// Boot test suites (`cfg.boot_test(...)`), run by `gluon test`.
+    #[serde(default)]
+    pub boot_tests: Arena<BootTestDef>,
+}
+
+/// A boot test suite: `gluon test` builds `profile`, boots its boot
+/// binary, and passes the suite when QEMU exits with the success exit
+/// code. What the kernel runs once booted is up to the project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootTestDef {
+    pub name: String,
+    pub profile: Handle<ProfileDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for BootTestDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// A file fetched over HTTPS and checked against a pinned SHA-256.
@@ -218,6 +238,11 @@ pub enum CrateType {
     /// binaries have no PT_LOAD-driven layout to fall back on).
     #[serde(rename = "raw-binary")]
     RawBinary,
+    /// A libtest harness executable: rustc `--test` instead of
+    /// `--crate-type`. Manifest expansion lowers host unit tests and
+    /// `harness = true` integration tests of `cfg.host_tests()`
+    /// packages to it.
+    Test,
 }
 
 impl CrateType {
@@ -232,6 +257,9 @@ impl CrateType {
             Self::ProcMacro => "proc-macro",
             Self::StaticLib => "staticlib",
             Self::RawBinary => "bin",
+            // Not a `--crate-type` value; `RustcCommandBuilder` passes
+            // `--test` instead.
+            Self::Test => "test",
         }
     }
 
@@ -239,7 +267,7 @@ impl CrateType {
     /// Used by the rustc command builder to decide whether linker
     /// scripts and binary-output conventions apply.
     pub fn is_executable(&self) -> bool {
-        matches!(self, Self::Bin | Self::RawBinary)
+        matches!(self, Self::Bin | Self::RawBinary | Self::Test)
     }
 }
 
@@ -442,8 +470,9 @@ pub struct CargoUnitDef {
     /// The package's build script, which runs for this unit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_script: Option<CargoBuildScriptDef>,
-    /// The unit is an integration test. `gluon build` and `gluon run`
-    /// skip it; `gluon test` builds and boots it.
+    /// The unit is an integration test for a Gluon target. `gluon
+    /// build` and `gluon run` skip it; `gluon test` builds and boots
+    /// it. Host tests are [`CrateType::Test`] crates instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_test: bool,
     /// Only `gluon test` builds the unit: an integration test, a
@@ -454,7 +483,8 @@ pub struct CargoUnitDef {
 }
 
 impl CrateDef {
-    /// Whether the crate is an integration test lowered from `tests/`.
+    /// Whether the crate is an integration test lowered from `tests/`
+    /// that boots in QEMU.
     pub fn is_test(&self) -> bool {
         self.cargo.as_ref().is_some_and(|c| c.is_test)
     }

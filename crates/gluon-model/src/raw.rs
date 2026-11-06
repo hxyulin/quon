@@ -4,11 +4,11 @@ use crate::build_model::{
 use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
-    RawBootloaderDef, RawBuildStepDef, RawCargoWorkspace, RawCrateDef, RawEspDef, RawGroupDef,
-    RawPipelineDef, RawProfileDef,
+    RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawCargoWorkspace, RawCrateDef, RawEspDef,
+    RawGroupDef, RawPipelineDef, RawProfileDef,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// Pre-intern build model: the shape `gluon-config` emits and
@@ -56,6 +56,14 @@ pub struct RawBuildModel {
     /// before intern, like `kconfig_includes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cargo_workspace: Option<RawCargoWorkspace>,
+    /// `cfg.host_tests().package(name)`: workspace packages whose unit
+    /// tests `gluon test` builds and runs on the host. Consumed by
+    /// manifest expansion, like `cargo_workspace`.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub host_tests: BTreeSet<String>,
+    /// `cfg.boot_test(name)`: suites that boot a profile's boot binary.
+    #[serde(default)]
+    pub boot_tests: Arena<RawBootTestDef>,
 }
 
 #[cfg(test)]

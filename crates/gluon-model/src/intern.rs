@@ -9,15 +9,15 @@
 //! Phase G makes qemu/bootloader Option.
 
 use crate::build_model::{
-    BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef, DepResolution,
-    DownloadDef, EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef, PipelineStep, ProfileDef,
-    TargetSpec,
+    BootTestDef, BootloaderDef, BuildModel, BuildStepDef, BuildStepInput, CrateDef, DepDef,
+    DepResolution, DownloadDef, EspDef, EspEntry, EspEntrySource, GroupDef, PipelineDef,
+    PipelineStep, ProfileDef, TargetSpec,
 };
 use crate::handle::{Arena, Handle};
 use crate::raw::RawBuildModel;
 use crate::raw_defs::{
-    RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef, RawEspDef,
-    RawEspSource, RawGroupDef, RawPipelineDef, RawProfileDef,
+    RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCrateDef, RawDepDef,
+    RawEspDef, RawEspSource, RawGroupDef, RawPipelineDef, RawProfileDef,
 };
 use crate::source::SourceSpan;
 use std::collections::BTreeMap;
@@ -102,6 +102,12 @@ pub fn intern(raw: RawBuildModel) -> (BuildModel, Vec<InternDiagnostic>) {
         &raw.pipelines,
         &model.groups,
         &mut model.pipelines,
+        &mut diags,
+    );
+    intern_boot_tests(
+        &raw.boot_tests,
+        &model.profiles,
+        &mut model.boot_tests,
         &mut diags,
     );
 
@@ -427,6 +433,44 @@ fn intern_bootloader(
     }
 }
 
+fn intern_boot_tests(
+    raw: &Arena<RawBootTestDef>,
+    profiles: &Arena<ProfileDef>,
+    out: &mut Arena<BootTestDef>,
+    diags: &mut Vec<InternDiagnostic>,
+) {
+    for (_, t) in raw.iter() {
+        let Some(name) = &t.profile else {
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "boot_test(\"{}\") names no profile; add `.profile(\"<name>\")`",
+                    t.name
+                ))
+                .with_optional_span(t.span.clone()),
+            );
+            continue;
+        };
+        let Some(profile) = profiles.lookup(name) else {
+            diags.push(
+                InternDiagnostic::error(format!(
+                    "boot_test(\"{}\").profile: profile '{name}' does not exist",
+                    t.name
+                ))
+                .with_optional_span(t.span.clone()),
+            );
+            continue;
+        };
+        out.insert(
+            t.name.clone(),
+            BootTestDef {
+                name: t.name.clone(),
+                profile,
+                span: t.span.clone(),
+            },
+        );
+    }
+}
+
 fn intern_esps(
     raw: &Arena<RawEspDef>,
     crates: &Arena<CrateDef>,
@@ -747,5 +791,39 @@ mod tests {
         let h = model.downloads.lookup("limine/BOOTX64.EFI").unwrap();
         assert_eq!(esp.entries.len(), 1);
         assert_eq!(esp.entries[0].source, EspEntrySource::Download(h));
+    }
+
+    #[test]
+    fn intern_resolves_boot_test_profiles() {
+        let mut raw = fixture_with_target_and_profile();
+        for (name, profile) in [
+            ("ok", Some("dev")),
+            ("unknown", Some("nope")),
+            ("none", None),
+        ] {
+            raw.boot_tests.insert(
+                name.into(),
+                RawBootTestDef {
+                    name: name.into(),
+                    profile: profile.map(Into::into),
+                    span: None,
+                },
+            );
+        }
+        let (model, diags) = intern(raw);
+        let messages: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "boot_test(\"unknown\").profile: profile 'nope' does not exist",
+                "boot_test(\"none\") names no profile; add `.profile(\"<name>\")`",
+            ]
+        );
+        let t = model
+            .boot_tests
+            .get(model.boot_tests.lookup("ok").unwrap())
+            .unwrap();
+        assert_eq!(t.profile, model.profiles.lookup("dev").unwrap());
+        assert_eq!(model.boot_tests.iter().count(), 1);
     }
 }

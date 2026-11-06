@@ -239,6 +239,10 @@ fn unit_entry(input: &AnalyzerInput<'_>, id: UnitId, index_of: &BTreeMap<UnitId,
         .map(|f| format!("feature=\"{f}\""))
         .chain(unit.settings.cfg_flags.iter().cloned())
         .collect();
+    // rustc sets `cfg(test)` itself under `--test`.
+    if unit.kind == CrateType::Test {
+        cfg.push("test".into());
+    }
     if let Some((_, out)) = run_output {
         cfg.extend(out.cfgs.iter().cloned());
     }

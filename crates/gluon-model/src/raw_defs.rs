@@ -185,6 +185,24 @@ pub struct RawCargoWorkspace {
     pub vendored: Option<String>,
 }
 
+/// `cfg.boot_test(name)`, before intern resolves the profile name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawBootTestDef {
+    pub name: String,
+    /// The profile to build and boot. Required; intern reports a
+    /// missing or unknown one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+impl Named for RawBootTestDef {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl Named for RawCrateDef {
     fn name(&self) -> &str {
         &self.name

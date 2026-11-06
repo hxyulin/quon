@@ -206,6 +206,31 @@ fn without_tests(model: &BuildModel, resolved: &ResolvedConfig) -> ResolvedConfi
     resolved
 }
 
+/// The primary output of each crate in `resolved`, from the unit
+/// lowering a build of `resolved` runs, so the paths are the files that
+/// build writes. Builds nothing.
+pub fn crate_outputs(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+) -> Result<BTreeMap<gluon_model::Handle<gluon_model::CrateDef>, std::path::PathBuf>> {
+    let vendor_ctx = crate::vendor::cross::build_cross_vendor_context(
+        model,
+        &ctx.layout,
+        &ctx.rustc_info,
+        &resolved.project_root,
+    )?;
+    let units = unit::lower(model, resolved, &vendor_ctx)?;
+    let mut out = BTreeMap::new();
+    for (&h, &id) in units.unit_of_crate() {
+        out.insert(
+            h,
+            units.paths(id, &ctx.layout, model, resolved)?.output_path,
+        );
+    }
+    Ok(out)
+}
+
 /// Run the pipeline over every crate in `resolved`.
 fn execute(
     ctx: &CompileCtx,

@@ -1,5 +1,5 @@
-//! End-to-end CLI tests for `gluon test` against the `cargo-tests`
-//! fixture. `--dry-run` and `--no-build` skip the build, and a script
+//! End-to-end CLI tests for `gluon test`'s integration and boot tests
+//! against the `cargo-tests` fixture. `--dry-run` and `--no-build` skip the build, and a script
 //! stands in for QEMU, so these need neither a bare-metal toolchain nor
 //! QEMU. Stub OVMF files satisfy the UEFI firmware lookup. The one
 //! test that builds is `#[ignore]`d, like the other build tests.
@@ -88,9 +88,12 @@ fn dry_run_boots_each_test_from_its_own_esp() {
     assert!(out.status.success(), "{}", stderr(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 2, "one command per test: {stdout}");
+    assert_eq!(lines.len(), 3, "one command per test: {stdout}");
     assert!(lines[0].contains("esp/default.tests/boot"), "{}", lines[0]);
     assert!(lines[1].contains("esp/default.tests/fails"), "{}", lines[1]);
+    // The boot test boots the `test` profile's own ESP.
+    assert!(lines[2].contains("/test/esp/default"), "{}", lines[2]);
+    assert!(!lines[2].contains("default.tests"), "{}", lines[2]);
 }
 
 #[test]
@@ -100,12 +103,32 @@ fn reports_each_test_and_fails_when_one_fails() {
     let out = gluon(&fixture, &["test", "--no-build"]);
     let err = stderr(&out);
     assert!(!out.status.success(), "{err}");
-    assert!(err.contains("test boot ... ok"), "{err}");
+    assert!(err.contains("integration test boot ... ok"), "{err}");
     assert!(
-        err.contains("test fails ... FAILED (QEMU exited with 1)"),
+        err.contains("integration test fails ... FAILED (QEMU exited with 1)"),
         "{err}"
     );
-    assert!(err.contains("1 of 2 tests failed, 1 passed"), "{err}");
+    // A failure does not stop the later runs.
+    assert!(err.contains("boot test smoke ... ok"), "{err}");
+    assert!(
+        err.contains("1 of 3 test runs failed (passed: integration 1 of 2, boot 1 of 1)"),
+        "{err}"
+    );
+}
+
+#[test]
+fn kind_flags_select_what_runs() {
+    let (_tmp, fixture) = setup_fixture();
+    use_fake_qemu(&fixture);
+    let out = gluon(&fixture, &["test", "--no-build", "--boot"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("boot test smoke ... ok"), "{err}");
+    assert!(!err.contains("integration test"), "{err}");
+    assert!(
+        err.contains("test result: ok. passed: boot 1 of 1"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -115,9 +138,13 @@ fn filter_selects_tests_by_name() {
     let out = gluon(&fixture, &["test", "--no-build", "boot"]);
     let err = stderr(&out);
     assert!(out.status.success(), "{err}");
-    assert!(err.contains("test boot ... ok"), "{err}");
+    assert!(err.contains("integration test boot ... ok"), "{err}");
     assert!(!err.contains("test fails"), "{err}");
-    assert!(err.contains("test result: ok. 1 passed"), "{err}");
+    assert!(!err.contains("smoke"), "{err}");
+    assert!(
+        err.contains("test result: ok. passed: integration 1 of 1"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -168,7 +195,7 @@ fn test_links_a_dev_dependency_the_build_leaves_out() {
     let out = gluon(&fixture, &["test", "boot"]);
     let err = stderr(&out);
     assert!(out.status.success(), "{err}");
-    assert!(err.contains("test boot ... ok"), "{err}");
+    assert!(err.contains("integration test boot ... ok"), "{err}");
     assert!(
         has_file_named(&build, "testkit"),
         "gluon test did not build testkit"

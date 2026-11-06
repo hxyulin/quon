@@ -1,0 +1,8 @@
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2021"
+
+# Only the tests link it.
+[dev-dependencies]
+helper = { path = "../helper" }

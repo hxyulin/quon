@@ -1,4 +1,4 @@
-//! `gluon test`: build the integration tests and boot each one.
+//! `gluon test`: boot each integration test.
 //!
 //! An integration test is a `harness = false` target in `tests/` of a
 //! root package, lowered to a crate with [`CrateDef::is_test`]. Each
@@ -53,6 +53,40 @@ pub struct TestOptions {
     pub no_build: bool,
 }
 
+impl TestOptions {
+    /// The per-test timeout: `--timeout`, then the profile's
+    /// `test_timeout`, then `qemu().test_timeout(...)`, then
+    /// [`DEFAULT_TIMEOUT`].
+    pub fn timeout(&self, model: &BuildModel, resolved: &ResolvedConfig) -> Duration {
+        self.timeout_override
+            .or_else(|| {
+                resolved
+                    .profile
+                    .test_timeout
+                    .map(|s| Duration::from_secs(s.into()))
+            })
+            .or_else(|| {
+                model
+                    .qemu
+                    .as_ref()
+                    .and_then(|q| q.test_timeout)
+                    .map(|s| Duration::from_secs(s.into()))
+            })
+            .unwrap_or(DEFAULT_TIMEOUT)
+    }
+
+    /// The QEMU arguments for every test: `qemu().test_extra_args(...)`,
+    /// then the ones after `--`.
+    pub fn qemu_args(&self, model: &BuildModel) -> Vec<std::ffi::OsString> {
+        model
+            .qemu
+            .iter()
+            .flat_map(|q| q.test_extra_args.iter().map(Into::into))
+            .chain(self.extra_args.iter().cloned())
+            .collect()
+    }
+}
+
 /// How one test ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestStatus {
@@ -74,58 +108,62 @@ pub struct PreparedTest {
     pub invocation: QemuInvocation,
 }
 
-/// What [`prepare_tests`] produced.
-#[derive(Debug)]
-pub struct PreparedTests {
-    /// The tests whose name matches the filter, in name order.
-    pub tests: Vec<PreparedTest>,
-    /// `None` when the build was skipped (`dry_run` or `no_build`).
-    pub build: Option<BuildSummary>,
-    /// The QEMU exit status that means a test passed.
-    pub success_exit_code: i32,
-}
-
-/// Build the profile and its integration tests, then assemble the
-/// QEMU command for each test whose name matches the filter. The
-/// caller boots each one with [`run_test`].
-pub fn prepare_tests(
-    ctx: &CompileCtx,
-    model: &BuildModel,
+/// The integration tests in `resolved` whose name matches the filter,
+/// in name order.
+pub fn integration_tests<'m>(
+    model: &'m BuildModel,
     resolved: &ResolvedConfig,
-    opts: &TestOptions,
-    reporter: &mut dyn Reporter,
-) -> Result<PreparedTests> {
-    let profile = &resolved.profile;
-    let boot = profile.boot_binary.ok_or_else(|| Error::NoBootBinary {
-        profile: profile.name.clone(),
-    })?;
-    let qemu_def = model
-        .qemu
-        .as_ref()
-        .expect("CLI rejects an absent qemu block before reaching prepare_tests()");
-
+    filter: Option<&str>,
+) -> Vec<(Handle<CrateDef>, &'m CrateDef)> {
     let mut tests: Vec<(Handle<CrateDef>, &CrateDef)> = resolved
         .crates
         .iter()
         .filter(|c| !c.host)
         .filter_map(|c| Some((c.handle, model.crates.get(c.handle)?)))
         .filter(|(_, k)| k.is_test())
-        .filter(|(_, k)| opts.filter.as_ref().is_none_or(|f| k.name.contains(f)))
+        .filter(|(_, k)| filter.is_none_or(|f| k.name.contains(f)))
         .collect();
     tests.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    tests
+}
 
-    let summary = if opts.dry_run || opts.no_build {
-        None
-    } else {
-        let workers = opts.workers.unwrap_or_else(|| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1)
-        });
-        Some(build_tests_with_reporter(
-            ctx, model, resolved, workers, reporter,
-        )?)
-    };
+/// Build the profile with its tests, for [`prepare_tests`] and the
+/// host tests.
+pub fn build_tests(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    opts: &TestOptions,
+    reporter: &mut dyn Reporter,
+) -> Result<BuildSummary> {
+    let workers = opts.workers.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+    });
+    build_tests_with_reporter(ctx, model, resolved, workers, reporter)
+}
+
+/// Assemble the QEMU command for each integration test whose name
+/// matches the filter. `summary` is the [`build_tests`] run, `None`
+/// when the build was skipped (`dry_run` or `no_build`). The caller
+/// boots each test with [`run_test`].
+pub fn prepare_tests(
+    ctx: &CompileCtx,
+    model: &BuildModel,
+    resolved: &ResolvedConfig,
+    opts: &TestOptions,
+    summary: Option<&BuildSummary>,
+) -> Result<Vec<PreparedTest>> {
+    let tests = integration_tests(model, resolved, opts.filter.as_deref());
+    if tests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let profile = &resolved.profile;
+    let boot = profile.boot_binary.ok_or_else(|| Error::NoBootBinary {
+        profile: profile.name.clone(),
+    })?;
+    let qemu_def = model.qemu.as_ref().ok_or(Error::QemuNotConfigured)?;
 
     // The boot mode decides how a test binary gets booted. Resolve it
     // once, the same way `invocation` will.
@@ -150,20 +188,10 @@ pub fn prepare_tests(
         }
     };
 
-    let timeout = opts
-        .timeout_override
-        .or_else(|| profile.test_timeout.map(|s| Duration::from_secs(s.into())))
-        .or_else(|| qemu_def.test_timeout.map(|s| Duration::from_secs(s.into())))
-        .unwrap_or(DEFAULT_TIMEOUT);
     let run_opts = RunOptions {
         boot_mode_override: opts.boot_mode_override,
-        timeout_override: Some(timeout),
-        extra_args: qemu_def
-            .test_extra_args
-            .iter()
-            .map(Into::into)
-            .chain(opts.extra_args.iter().cloned())
-            .collect(),
+        timeout_override: Some(opts.timeout(model, resolved)),
+        extra_args: opts.qemu_args(model),
         workers: opts.workers,
         dry_run: opts.dry_run,
         no_build: opts.no_build,
@@ -179,7 +207,7 @@ pub fn prepare_tests(
                 ctx,
                 model,
                 resolved,
-                summary.as_ref(),
+                summary,
                 (*esp_handle, esp_def),
                 boot,
                 &krate.name,
@@ -188,31 +216,26 @@ pub fn prepare_tests(
             )?),
             None => None,
         };
-        let invocation = invocation(
-            ctx,
-            model,
-            resolved,
-            &run_opts,
-            &binary,
-            esp_dir,
-            summary.as_ref(),
-        )?;
+        let invocation = invocation(ctx, model, resolved, &run_opts, &binary, esp_dir, summary)?;
         prepared.push(PreparedTest {
             name: krate.name.clone(),
             invocation,
         });
     }
-    Ok(PreparedTests {
-        tests: prepared,
-        build: summary,
-        success_exit_code: qemu_def.success_exit_code.unwrap_or(0),
-    })
+    Ok(prepared)
 }
 
-/// Boot one test and wait for it. A signal to gluon (Ctrl-C) is an
-/// error, so the caller stops the whole run.
-pub fn run_test(test: PreparedTest, success_exit_code: i32) -> Result<TestStatus> {
-    match launch(test.invocation) {
+/// Boot one integration test or boot test suite and wait for it. It
+/// passes when QEMU exits with `qemu().success_exit_code(...)`, 0 by
+/// default. A signal to gluon (Ctrl-C) is an error, so the caller stops
+/// the whole run.
+pub fn run_test(model: &BuildModel, invocation: QemuInvocation) -> Result<TestStatus> {
+    let success_exit_code = model
+        .qemu
+        .as_ref()
+        .and_then(|q| q.success_exit_code)
+        .unwrap_or(0);
+    match launch(invocation) {
         Ok(status) if status.code() == Some(success_exit_code) => Ok(TestStatus::Passed),
         Ok(status) => Ok(TestStatus::Failed {
             code: status.code(),

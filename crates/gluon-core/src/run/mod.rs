@@ -17,17 +17,22 @@
 //!   and [`launch`] entry points.
 //!
 //! [`prepare_tests`] reuses the same steps through `entry`'s helpers, booting
-//! each integration-test binary in place of the boot binary.
+//! each integration-test binary in place of the boot binary. [`host`]
+//! finds the host test executables, which run without QEMU.
 
 pub mod boot_mode;
 mod entry;
+pub mod host;
 pub mod ovmf;
 pub mod qemu_cmd;
 pub mod resolve;
 mod test;
 
 pub use entry::{Prepared, RunOptions, launch, prepare};
+pub use host::{HostTest, host_tests};
 pub use ovmf::{ResolvedOvmf, resolve_ovmf};
 pub use qemu_cmd::{QemuInvocation, build_qemu_command};
 pub use resolve::{ResolvedQemu, resolve_qemu};
-pub use test::{PreparedTest, PreparedTests, TestOptions, TestStatus, prepare_tests, run_test};
+pub use test::{
+    PreparedTest, TestOptions, TestStatus, build_tests, integration_tests, prepare_tests, run_test,
+};
