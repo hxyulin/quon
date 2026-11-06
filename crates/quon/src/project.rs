@@ -4,6 +4,7 @@
 
 use crate::cmd;
 use quon_core::config::RunSelection;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,9 @@ pub struct Entry {
     pub binary: String,
     /// The name of the target the entry builds for.
     pub target: String,
+    /// `.meta(key, value)` pairs, sorted by key. Quon does not read
+    /// them.
+    pub meta: BTreeMap<String, String>,
 }
 
 /// A project's `quon.rs`, evaluated once. Loading builds nothing.
@@ -67,6 +71,7 @@ impl Project {
                 package: r.owner,
                 binary: r.binary,
                 target: r.target,
+                meta: r.meta,
             })
             .collect();
         Ok(Project { root, entries })

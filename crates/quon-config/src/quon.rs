@@ -111,6 +111,7 @@ pub struct Run {
     artifact: Artifact,
     name: Option<String>,
     runner: Option<String>,
+    meta: BTreeMap<String, String>,
 }
 
 impl Run {
@@ -125,6 +126,15 @@ impl Run {
     /// host binary directly.
     pub fn runner(&mut self, runner: &Runner) -> &mut Self {
         self.runner = Some(runner.name.clone());
+        self
+    }
+
+    /// Attach `key = value` to the entry, for tools that read the
+    /// project through `quon::Project`. Quon itself ignores it, so
+    /// changing it rebuilds nothing. Setting a key again replaces its
+    /// value.
+    pub fn meta(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
+        self.meta.insert(key.into(), value.into());
         self
     }
 }
@@ -261,6 +271,7 @@ impl Quon {
             artifact: artifact.clone(),
             name: None,
             runner: None,
+            meta: BTreeMap::new(),
         });
         self.runs.last_mut().expect("just pushed")
     }
@@ -582,6 +593,7 @@ impl Quon {
                 owner: run.artifact.owner.clone(),
                 target: l.target(target),
                 runner: run.runner.clone(),
+                meta: run.meta.clone(),
             });
         }
         runs
@@ -1143,6 +1155,23 @@ mod tests {
             .unwrap();
         assert_eq!(g.crates, ["kernel"]);
         assert!(raw.targets.lookup("x86_64-unknown-none").is_some());
+    }
+
+    #[test]
+    fn run_metadata_reaches_the_raw_entry_and_a_repeated_key_keeps_the_last_value() {
+        let raw = ok(|q| {
+            let fw = q.add(Package::new("fw"));
+            q.run(&fw)
+                .meta("chip", "STM32F407")
+                .meta("bsp", "c-board")
+                .meta("chip", "STM32H723");
+        });
+        let meta: Vec<_> = raw.runs[0]
+            .meta
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(meta, [("bsp", "c-board"), ("chip", "STM32H723")]);
     }
 
     #[test]

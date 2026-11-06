@@ -102,6 +102,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and where each one's binary is written. A repository's `xtask` can
   depend on Quon through its Cargo lock instead of an installed binary.
   See [`docs/src/tooling/library.md`](docs/src/tooling/library.md).
+- **`q.run(..).meta(key, value)`** attaches strings to a run entry,
+  which `quon::Entry::meta` returns. Quon does not read them, so a tool
+  can keep per-entry data such as a chip name in `quon.rs`.
 - `quon run` no longer swallows SIGINT and SIGTERM after its runner
   exits; they take their default action again.
 

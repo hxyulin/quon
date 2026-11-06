@@ -220,6 +220,10 @@ pub struct RawRunDef {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<String>,
+    /// `.meta(..)` pairs. Quon never reads them; they are for tools
+    /// that load the project, so no build depends on them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, String>,
 }
 
 /// Raw form of [`crate::build_model::RunnerDef`]. `kind` is `None`

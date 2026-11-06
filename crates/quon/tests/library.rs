@@ -45,6 +45,13 @@ fn run_builds_from_its_directory_and_project_names_the_artifacts() {
         (a.package.as_str(), a.binary.as_str()),
         ("board-a", "board-a")
     );
+    let meta: Vec<_> = a
+        .meta
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(meta, [("chip", "chip-a")]);
+    assert!(project.entry("b").expect("entry b").meta.is_empty());
     for entry in project.entries() {
         let path = project.artifact(entry, "dev").expect("artifact");
         assert!(

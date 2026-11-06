@@ -64,6 +64,7 @@ for entry in project.entries() {
 | `Entry::package` | The `Package` (or `Crate`) declaration the binary belongs to |
 | `Entry::binary` | The binary crate `quon run` starts |
 | `Entry::target` | The name of the target the entry builds for |
+| `Entry::meta` | The entry's `.meta(key, value)` pairs, sorted by key |
 | `Project::artifact(entry, profile)` | Where `quon build <entry> -p <profile>` writes the binary |
 
 `artifact` uses the same code as `quon run` to find the file, so a tool
@@ -71,3 +72,18 @@ that flashes or attaches to the binary never repeats Quon's output
 layout. It reads `.quon-config` and `QUON_*` overrides as `quon` does.
 The file may be missing or stale, since `artifact` builds nothing; run
 `quon::run(.., ["build", ..])` first.
+
+### Entry metadata
+
+`.meta(key, value)` attaches strings to a run entry for the tools that
+read it. Quon does not read them, so changing one rebuilds nothing.
+Setting a key twice keeps the last value.
+
+```rust,ignore
+q.run(&chassis)
+    .name("sentry-chassis")
+    .meta("chip", "STM32H723VGTx");
+```
+
+A tool then reads `entry.meta.get("chip")`, and `quon.rs` stays the one
+list of entries.
