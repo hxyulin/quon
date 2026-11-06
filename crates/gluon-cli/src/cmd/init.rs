@@ -693,6 +693,7 @@ pub fn render(plan: &Plan) -> String {
         "// Gluon build for {name}, written by `gluon init`.\n\
          //\n\
          //     gluon build     build every crate\n\
+         //     gluon build -r  build every crate with the release profile\n\
          //     gluon clippy    lint every crate\n\
          {run_line}\
          \n\
@@ -717,7 +718,11 @@ pub fn render(plan: &Plan) -> String {
     }
 
     o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
-    let _ = writeln!(o, "    cfg.project({:?}, {:?});", plan.name, plan.version);
+    let _ = writeln!(
+        o,
+        "    cfg.project({:?}, {:?}).default_profile(\"dev\");",
+        plan.name, plan.version
+    );
     if plan.target_source.is_empty() {
         o.push_str(
             "    // TODO: no target found in .cargo/config.toml or rust-toolchain.toml.\n\
@@ -774,7 +779,8 @@ pub fn render(plan: &Plan) -> String {
     if plan.boot.is_some() && qemu_for(t.arch()).is_some() {
         o.push_str("\n        .runner(\"qemu\")");
     }
-    o.push_str(";\n\n");
+    o.push_str(";\n");
+    render_release(&mut o);
 
     // Kernel group.
     if let Ok(k) = &plan.kernel {
@@ -890,6 +896,7 @@ fn render_host(plan: &Plan) -> String {
         "// Gluon build for {name}, written by `gluon init`.\n\
          //\n\
          //     gluon build     build every crate\n\
+         //     gluon build -r  build every crate with the release profile\n\
          {run_line}\
          //     gluon test      run the unit tests, the tests in tests/ and the doctests\n\
          //\n\
@@ -906,7 +913,11 @@ fn render_host(plan: &Plan) -> String {
         quoted.join(", ")
     );
     o.push_str("pub fn config(cfg: &mut Config) -> Result<()> {\n");
-    let _ = writeln!(o, "    cfg.project({:?}, {:?});", plan.name, plan.version);
+    let _ = writeln!(
+        o,
+        "    cfg.project({:?}, {:?}).default_profile(\"dev\");",
+        plan.name, plan.version
+    );
     o.push_str("    cfg.cargo_workspace(\".\");\n\n");
 
     match &plan.kernel {
@@ -928,7 +939,8 @@ fn render_host(plan: &Plan) -> String {
     if let Ok(k) = &plan.kernel {
         let _ = write!(o, "\n        .run_binary({:?})", k.bin);
     }
-    o.push_str(";\n\n");
+    o.push_str(";\n");
+    render_release(&mut o);
 
     if !plan.libraries.is_empty() {
         o.push_str(
@@ -1016,6 +1028,19 @@ fn render_esp(o: &mut String, boot: &Boot, bin: &str) {
         }
         Bootloader::None => {}
     }
+}
+
+/// The release profile, after the dev profile it inherits from: the
+/// target, run binary and runner come from dev. rustc turns debug
+/// assertions and overflow checks off above opt-level 0, as in Cargo's
+/// release profile.
+fn render_release(o: &mut String) {
+    o.push_str(
+        "    cfg.profile(\"release\")\n\
+         \x20       .inherits(\"dev\")\n\
+         \x20       .opt_level(3)\n\
+         \x20       .debug_info(false);\n\n",
+    );
 }
 
 fn render_qemu(o: &mut String, arch: &str) {
@@ -1490,6 +1515,17 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("tests = tests.package(name);"), "{text}");
+        assert!(
+            text.contains("\"0.2.0\").default_profile(\"dev\");"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "    cfg.profile(\"release\")\n        .inherits(\"dev\")\n        \
+                 .opt_level(3)\n        .debug_info(false);"
+            ),
+            "{text}"
+        );
         assert!(!text.contains("TODO"), "{text}");
         assert!(!text.contains("qemu"), "{text}");
     }

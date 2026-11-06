@@ -9,6 +9,7 @@ These flags apply to all commands.
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--profile <NAME>` | `-p` | Profile to use (overrides default) |
+| `--release` | `-r` | Use the `release` profile; same as `-p release` |
 | `--target <NAME>` | `-t` | Target triple (overrides profile's target) |
 | `--config-file <PATH>` | `-C` | Override file path (default: `.gluon-config`) |
 | `--jobs <N>` | `-j` | Parallel compile jobs (default: host parallelism) |

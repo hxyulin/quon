@@ -254,11 +254,8 @@ pub fn build_layout_context_at_with_opts(
             .context("failed to auto-register vendored dependencies")?;
     }
 
-    // Pick a default profile when the user didn't pass `-p`. We use the
-    // first profile by name (BTreeMap-backed, so this is deterministic
-    // and alphabetical). A more principled default — e.g. a
-    // `project.default_profile` field — can come later; for MVP-M the
-    // convention is "declare what you want or pass `-p`".
+    // Pick a default profile when the user didn't pass `-p` or `-r`;
+    // see `default_profile`.
     let default_name;
     let profile_name = match profile {
         Some(p) => p,

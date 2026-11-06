@@ -35,8 +35,13 @@ gluon test               # unit tests, tests/ and doctests
 ```
 
 `run_binary` names the only bin target. With several, it is a
-`// TODO:`. Gluon needs a nightly toolchain even for a host build, so
-pin one in `rust-toolchain.toml` if the project builds on stable.
+`// TODO:`.
+
+`gluon init` writes two profiles, as Cargo has: `dev`, the default, and
+`release`, which inherits from `dev` and sets `opt_level(3)` and
+`debug_info(false)`. `gluon build -r` builds with `release`. rustc
+turns debug assertions and overflow checks off above opt-level 0, so
+`release` matches Cargo's release profile there too.
 
 ## What it reads for a kernel
 

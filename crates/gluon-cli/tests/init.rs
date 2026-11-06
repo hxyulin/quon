@@ -45,7 +45,9 @@ fn init_writes_a_gluon_rs_that_builds_the_limine_example() {
     assert!(ok, "gluon init failed:\n{stderr}");
     let text = fs::read_to_string(dir.join("gluon.rs")).expect("read generated gluon.rs");
     for line in [
-        r#"cfg.project("limine-kernel", "0.1.0");"#,
+        r#"cfg.project("limine-kernel", "0.1.0").default_profile("dev");"#,
+        r#"cfg.profile("release")"#,
+        r#".inherits("dev")"#,
         r#"let x86_64 = cfg.target("x86_64-unknown-none");"#,
         r#".run_binary("kernel")"#,
         r#".runner("qemu");"#,

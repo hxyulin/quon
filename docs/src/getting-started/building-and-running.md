@@ -94,14 +94,15 @@ These flags apply to most commands:
 
 | Flag | Description |
 |------|-------------|
-| `-p <profile>` | Select a build profile (e.g., `-p release`). Defaults to the profile set by `.default_profile()` on `project()`, or `dev` if none is set. |
+| `-p <profile>` | Select a build profile (e.g., `-p release`). Defaults to the profile set by `.default_profile()` on `project()`, else the first profile in alphabetical order. |
+| `-r` | Select the `release` profile. Shorthand for `-p release`. |
 | `-t <triple>` | Override the target triple for this invocation. |
 | `-j <N>` | Set the number of parallel jobs (e.g., `-j 4`). |
 
 ### Example: release build
 
 ```sh
-gluon build -p release
+gluon build -r
 ```
 
 ### Example: build for a different target
@@ -119,4 +120,4 @@ cfg.project("my-kernel", "0.1.0")
     .default_profile("dev");
 ```
 
-This is used whenever `-p` is not specified on the command line.
+This is used whenever neither `-p` nor `-r` is given.

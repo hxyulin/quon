@@ -50,6 +50,10 @@ pub struct Cli {
     #[arg(short = 'p', long, global = true)]
     pub profile: Option<String>,
 
+    /// Use the `release` profile. Shorthand for `-p release`.
+    #[arg(short = 'r', long, global = true, conflicts_with = "profile")]
+    pub release: bool,
+
     /// Target name to use (overrides the profile's pinned target).
     #[arg(short = 't', long, global = true)]
     pub target: Option<String>,
@@ -400,10 +404,30 @@ pub struct ManifestArgs {
     pub vendor_dir: Option<PathBuf>,
 }
 
+impl Cli {
+    /// The profile asked for on the command line, if any.
+    pub fn profile_name(&self) -> Option<&str> {
+        if self.release {
+            Some("release")
+        } else {
+            self.profile.as_deref()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn release_is_the_release_profile() {
+        for args in [["gluon", "-r", "build"], ["gluon", "build", "--release"]] {
+            let cli = Cli::try_parse_from(args).expect("parse");
+            assert_eq!(cli.profile_name(), Some("release"));
+        }
+        assert!(Cli::try_parse_from(["gluon", "-r", "-p", "dev", "build"]).is_err());
+    }
 
     #[test]
     fn parses_bare_build() {

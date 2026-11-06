@@ -58,8 +58,8 @@ crates in flight, and `Finished` with the profile and cache counts.
 
 **Requirements:**
 
-- A nightly Rust toolchain. Gluon passes `-Z` flags to `rustc` on every
-  build, host builds included.
+- Rust 1.99 or later. Stable works, except for custom `.json` targets,
+  which need nightly.
 - The `rust-src` component, for targets Gluon builds a sysroot for.
 - QEMU, only for a QEMU runner.
 
@@ -84,6 +84,7 @@ find. See [Generating gluon.rs](docs/src/getting-started/init.md).
 
 ```sh
 gluon build              # compile everything
+gluon build -r           # with the release profile
 gluon run -- <args>      # build, then start the run binary through its runner
 gluon test               # host unit tests, tests/, doctests, QEMU tests
 gluon check              # metadata-only check pass

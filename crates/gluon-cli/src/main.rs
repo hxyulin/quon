@@ -52,7 +52,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     // separately via $RUSTFMT or $PATH.
     if let cli::Command::Clean(args) = &cli.command {
         let ctx = cmd::build_layout_context(
-            cli.profile.as_deref(),
+            cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
         )?;
@@ -60,7 +60,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     }
     if let cli::Command::Fmt(args) = &cli.command {
         let ctx = cmd::build_layout_context(
-            cli.profile.as_deref(),
+            cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
         )?;
@@ -72,7 +72,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         let cwd = std::env::current_dir()?;
         return cmd::vendor::run(
             &cwd,
-            cli.profile.as_deref(),
+            cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
             args,
@@ -91,7 +91,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     // host toolchain.
     if matches!(&cli.command, cli::Command::Check(_)) {
         let mut ctx = cmd::build_context_for_driver(
-            cli.profile.as_deref(),
+            cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
             gluon_core::DriverKind::Check,
@@ -102,7 +102,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     }
     if matches!(&cli.command, cli::Command::Clippy(_)) {
         let mut ctx = cmd::build_context_for_driver(
-            cli.profile.as_deref(),
+            cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
             gluon_core::DriverKind::Clippy,
@@ -113,7 +113,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     }
 
     let mut ctx = cmd::build_context(
-        cli.profile.as_deref(),
+        cli.profile_name(),
         cli.target.as_deref(),
         cli.config_file.as_deref(),
     )?;

@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (stable Rust and release profiles)
+
+- **Stable toolchains.** Gluon no longer passes `-Zbinary-dep-depinfo`.
+  It declares every crate file rustc may load as a freshness input
+  itself: the `--extern` files, the outputs of every unit and prebuilt
+  artifact reachable through them, and a custom sysroot's rlibs. Host
+  builds and built-in targets now build on stable Rust. Custom `.json`
+  targets still need nightly. The first build after upgrading rebuilds
+  everything, because every rustc command changed.
+- **`-r` / `--release`** selects the `release` profile, as in Cargo.
+- **`gluon init` writes a release profile.** It inherits from `dev` and
+  sets `opt_level(3)` and `debug_info(false)`. `dev` is now the
+  explicit `default_profile`.
+
 ### Added (host tests and boot tests)
 
 - **Host tests.** `cfg.host_tests().package("name")` makes `gluon test`
