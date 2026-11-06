@@ -15,6 +15,42 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, shell: &mut Shell) -> Result<()
     Ok(())
 }
 
+/// Build several run entries in one schedule, then print one
+/// `Finished` line. The contexts share a project and a driver, so the
+/// first one's compile context serves every entry.
+pub fn run_entries(
+    ctxs: &[CmdContext],
+    jobs: Option<usize>,
+    shell: &mut Shell,
+    noun: &'static str,
+) -> Result<()> {
+    let [first, ..] = ctxs else {
+        return Ok(());
+    };
+    let workers = jobs.unwrap_or_else(default_jobs);
+    let entries: Vec<_> = ctxs.iter().map(|c| (&c.model, &c.resolved)).collect();
+    shell.status("Building", format!("{} run entries", ctxs.len()));
+    let mut reporter = BuildReporter::new(shell, first.ctx.driver());
+    let summary =
+        quon_core::build_entries_with_reporter(&first.ctx, &entries, workers, &mut reporter)?;
+    drop(reporter);
+    shell.finished(
+        &first.resolved.profile,
+        Counts {
+            noun,
+            built: summary.built,
+            cached: summary.cached,
+        },
+    );
+    Ok(())
+}
+
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
 /// Run the pipeline with the context's driver, print job status lines
 /// as jobs finish, and end with the `Finished` line.
 ///
@@ -26,11 +62,7 @@ pub fn run_pipeline(
     shell: &mut Shell,
     noun: &'static str,
 ) -> Result<BuildSummary> {
-    let workers = jobs.unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1)
-    });
+    let workers = jobs.unwrap_or_else(default_jobs);
     let mut reporter = BuildReporter::new(shell, ctx.ctx.driver());
     let summary = quon_core::build_with_reporter(
         &ctx.ctx,

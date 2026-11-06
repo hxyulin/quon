@@ -101,8 +101,44 @@ pub fn expand(
     rustc: &RustcInfo,
     cache_dir: Option<&Path>,
 ) -> Result<Vec<Diagnostic>> {
-    let sources_cache = cache_dir.map(|d| d.join("cargo-sources.json"));
-    let Some(set) = load(raw, project_root, sources_cache.as_deref())? else {
+    expand_loaded(
+        raw,
+        project_root,
+        rustc,
+        cache_dir,
+        &mut LoadedWorkspace::default(),
+    )
+}
+
+/// The workspace manifests one [`expand`] read, kept for the next
+/// expansion of a model from the same `quon.rs`. Reading and parsing
+/// them is most of an expansion (81 ms of 87 ms for a 13-board
+/// firmware workspace), and every run entry of one invocation reads the
+/// same files: the workspace and its sources depend on `quon.rs` alone,
+/// not on the entry. Keep one only for the length of a command, so an
+/// edited `Cargo.toml` is read by the next one.
+#[derive(Default)]
+pub struct LoadedWorkspace(Option<Option<PackageSet>>);
+
+/// [`expand`] that reads the workspace into `loaded` the first time
+/// and reuses it after.
+pub fn expand_loaded(
+    raw: &mut RawBuildModel,
+    project_root: &Path,
+    rustc: &RustcInfo,
+    cache_dir: Option<&Path>,
+    loaded: &mut LoadedWorkspace,
+) -> Result<Vec<Diagnostic>> {
+    let set = match &loaded.0 {
+        Some(set) => set.clone(),
+        None => {
+            let sources_cache = cache_dir.map(|d| d.join("cargo-sources.json"));
+            let set = load(raw, project_root, sources_cache.as_deref())?;
+            loaded.0 = Some(set.clone());
+            set
+        }
+    };
+    let Some(set) = set else {
         return Ok(Vec::new());
     };
     let cfg_cache = cache_dir.map(|d| d.join("target-cfg.json"));

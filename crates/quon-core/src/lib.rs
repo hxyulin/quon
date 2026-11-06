@@ -87,6 +87,25 @@ pub fn load_build_model_for(
     )))
 }
 
+/// [`load_build_model_for`] for several run entries, with `quon.rs` run
+/// and the workspace manifests read once. Models come back in
+/// `selections` order.
+pub fn load_build_models_for(
+    project_root: &Path,
+    selections: &[config::RunSelection],
+) -> Result<Vec<BuildModel>> {
+    let rs_path = project_root.join("quon.rs");
+    if !rs_path.is_file() {
+        return Err(Error::Config(format!(
+            "no quon.rs in {}",
+            project_root.display()
+        )));
+    }
+    let layout = compile::BuildLayout::new(project_root.join("build"), "script-runner");
+    let info = compile::RustcInfo::load_or_probe(&layout)?;
+    script_runner::compile_and_run_entries(project_root, layout.root(), &info, selections)
+}
+
 /// The model `<project_root>/quon.rs` prints, before `.kconfig`
 /// includes are merged and Cargo workspace packages are expanded. For
 /// commands that must work while the full load would fail, such as
@@ -205,6 +224,63 @@ pub fn build_with_reporter(
     }
 }
 
+/// Like [`build_with_reporter`], for several run entries of one
+/// project, each with its own model and resolved config, in one
+/// schedule. Nodes that two entries share run once. The summary counts
+/// each shared node once. See `scheduler::merged`.
+pub fn build_entries_with_reporter(
+    ctx: &CompileCtx,
+    entries: &[(&BuildModel, &ResolvedConfig)],
+    workers: usize,
+    reporter: &mut dyn Reporter,
+) -> Result<BuildSummary> {
+    assert!(
+        workers >= 1,
+        "build_entries_with_reporter requires workers >= 1"
+    );
+    let resolved: Vec<ResolvedConfig> = entries
+        .iter()
+        .map(|&(model, resolved)| {
+            if ctx.driver() == DriverKind::Rustc {
+                without_tests(model, resolved)
+            } else {
+                resolved.clone()
+            }
+        })
+        .collect();
+    // One lock for the whole schedule: the entries share the build
+    // directory, and a second acquire from this process would wait on
+    // the first.
+    let _cache_guard = CacheLock::acquire(&ctx.layout)?;
+    let rules = rule::RuleRegistry::with_builtins();
+    note_legacy_cache_removal(ctx, reporter)?;
+    let vendor_ctxs = entries
+        .iter()
+        .zip(&resolved)
+        .map(|(&(model, _), resolved)| {
+            crate::vendor::cross::build_cross_vendor_context(
+                model,
+                &ctx.layout,
+                &ctx.rustc_info,
+                &resolved.project_root,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let pipelines: Vec<scheduler::EntryPipeline<'_>> = entries
+        .iter()
+        .zip(&resolved)
+        .zip(&vendor_ctxs)
+        .map(
+            |((&(model, _), resolved), vendor_ctx)| scheduler::EntryPipeline {
+                model,
+                resolved,
+                vendor_ctx,
+            },
+        )
+        .collect();
+    scheduler::execute_entries(ctx, &pipelines, &rules, workers, reporter)
+}
+
 /// Like [`build_with_reporter`], but also builds the integration
 /// tests, for `quon test`.
 pub fn build_tests_with_reporter(
@@ -272,13 +348,7 @@ fn execute(
     let _cache_guard = CacheLock::acquire(&ctx.layout)?;
 
     let rules = rule::RuleRegistry::with_builtins();
-    if cache::remove_legacy_cache(&ctx.layout)? {
-        reporter.note(&format!(
-            "removed the build cache of an older Quon ({}) and its outputs; \
-             this build starts clean",
-            ctx.layout.legacy_cache_manifest().display()
-        ));
-    }
+    note_legacy_cache_removal(ctx, reporter)?;
     // Build the cross-target vendor context by reading per-target
     // scratch workspaces populated by `quon vendor`. For host-only
     // models this short-circuits to an empty context with no cargo
@@ -294,6 +364,18 @@ fn execute(
     // Each node writes its own record when it finishes, so a failed
     // build keeps the records of every node that did finish.
     scheduler::execute_pipeline(ctx, model, resolved, &vendor_ctx, &rules, workers, reporter)
+}
+
+/// Remove an older Quon's cache, and say so.
+fn note_legacy_cache_removal(ctx: &CompileCtx, reporter: &mut dyn Reporter) -> Result<()> {
+    if cache::remove_legacy_cache(&ctx.layout)? {
+        reporter.note(&format!(
+            "removed the build cache of an older Quon ({}) and its outputs; \
+             this build starts clean",
+            ctx.layout.legacy_cache_manifest().display()
+        ));
+    }
+    Ok(())
 }
 
 /// Run the compile pipeline as a `quon check` (metadata-only) pass.

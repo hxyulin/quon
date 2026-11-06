@@ -62,6 +62,7 @@
 use crate::compile::RustcInfo;
 use crate::config::{RunSelection, select_run};
 use crate::error::{Diagnostic, Error, Result};
+use crate::manifest::lower::LoadedWorkspace;
 use quon_model::{BuildModel, RawBuildModel};
 use std::path::Path;
 
@@ -82,7 +83,40 @@ pub fn compile_and_run(
     selection: &RunSelection,
 ) -> Result<BuildModel> {
     let raw = compile_and_run_raw(project_root, build_dir, rustc_info)?;
-    finalize(raw, project_root, build_dir, rustc_info, selection)
+    finalize(
+        raw,
+        project_root,
+        build_dir,
+        rustc_info,
+        selection,
+        &mut LoadedWorkspace::default(),
+    )
+}
+
+/// [`compile_and_run`] for several run entries: `quon.rs` runs once and
+/// the workspace manifests are read once, then each entry's model is
+/// finalized from its own copy. Models come back in `selections` order.
+pub fn compile_and_run_entries(
+    project_root: &Path,
+    build_dir: &Path,
+    rustc_info: &RustcInfo,
+    selections: &[RunSelection],
+) -> Result<Vec<BuildModel>> {
+    let raw = compile_and_run_raw(project_root, build_dir, rustc_info)?;
+    let mut loaded = LoadedWorkspace::default();
+    selections
+        .iter()
+        .map(|selection| {
+            finalize(
+                raw.clone(),
+                project_root,
+                build_dir,
+                rustc_info,
+                selection,
+                &mut loaded,
+            )
+        })
+        .collect()
 }
 
 /// [`compile_and_run`] without the final transform: the model exactly
@@ -161,6 +195,7 @@ fn finalize(
     build_dir: &Path,
     rustc_info: &RustcInfo,
     selection: &RunSelection,
+    loaded: &mut LoadedWorkspace,
 ) -> Result<BuildModel> {
     // Before expansion, which resolves features over the roots that
     // selection keeps.
@@ -205,8 +240,13 @@ fn finalize(
     // expansion can never be stale. The cfg probe cache in the build
     // directory is the file the build layout names
     // (`BuildLayout::target_cfg_cache`).
-    let warnings =
-        crate::manifest::lower::expand(&mut raw, project_root, rustc_info, Some(build_dir))?;
+    let warnings = crate::manifest::lower::expand_loaded(
+        &mut raw,
+        project_root,
+        rustc_info,
+        Some(build_dir),
+        loaded,
+    )?;
     for w in &warnings {
         eprintln!("{w}");
     }

@@ -45,12 +45,12 @@ A command works on one entry at a time:
 ```sh
 quon run hero-gimbal         # build the entry, then start it with its runner
 quon build hero-gimbal       # build that entry only
-quon build                   # build every entry, one after another
+quon build                   # build every entry in one schedule
 quon test --entry hero-gimbal
 ```
 
 `quon build`, `quon check` and `quon clippy` with no name take every
-entry in turn. `quon run` and `quon configure` with no name need the
+entry. `quon run` and `quon configure` with no name need the
 project to have one entry. `quon test` with no name runs only the host
 tests. `RUN = "<name>"` in [`.quon-config`](../configuration/overrides.md),
 or `QUON_RUN`, names the entry a command uses when the command line
@@ -63,9 +63,13 @@ exclude each other, such as two chip features of a HAL. A crate that
 two entries build with different features builds once for each, and
 both builds stay cached.
 
-The cost is that entries build one after another, not as one
-schedule. A no-op `quon build` of every entry checks each entry's
-crates in turn.
+Building every entry runs one schedule over all of them, so a crate
+one board adds compiles alongside another board's. A crate that two
+entries build the same way is one job: the first entry's build does
+the work, and the other entries find it cached. The `Finished` line
+counts each such job once. For 13 firmware boards on two
+microcontrollers, a cold build took 21s, where building the boards one
+after another with Cargo took 30s.
 
 Each entry builds for its package's target, and the root profiles take
 the entry's runner, so a profile's `Profile::runner(&r)` still

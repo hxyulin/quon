@@ -138,6 +138,48 @@ pub fn build_context_at_for_driver(
     driver: DriverKind,
     selection: &RunSelection,
 ) -> Result<CmdContext> {
+    let layout_ctx = build_layout_context_at(cwd, profile, target, config_file, selection)?;
+    context_for_driver(layout_ctx, target, driver)
+}
+
+/// One [`CmdContext`] per run entry in `selections`, for a command that
+/// builds them together. `quon.rs` runs and the workspace manifests are
+/// read once for all of them.
+pub fn build_contexts_for_driver(
+    profile: Option<&str>,
+    target: Option<&str>,
+    config_file: Option<&Path>,
+    driver: DriverKind,
+    selections: &[RunSelection],
+) -> Result<Vec<CmdContext>> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let project_root = find_project_root(&cwd)
+        .context("could not find a quon.rs in the current directory or any parent")?;
+    let models = quon_core::load_build_models_for(&project_root, selections)
+        .context("failed to load build model")?;
+    selections
+        .iter()
+        .zip(models)
+        .map(|(selection, model)| {
+            let opts = LayoutContextOpts {
+                selection: selection.clone(),
+                model: Some(model),
+                ..LayoutContextOpts::default()
+            };
+            let layout_ctx =
+                build_layout_context_at_with_opts(&cwd, profile, target, config_file, opts)?;
+            context_for_driver(layout_ctx, target, driver)
+        })
+        .collect()
+}
+
+/// The [`CmdContext`] of `layout_ctx`, with its layout flavored for
+/// `driver`.
+fn context_for_driver(
+    layout_ctx: LayoutContext,
+    target: Option<&str>,
+    driver: DriverKind,
+) -> Result<CmdContext> {
     let LayoutContext {
         model,
         resolved,
@@ -145,7 +187,7 @@ pub fn build_context_at_for_driver(
         project_root,
         overrides,
         selection,
-    } = build_layout_context_at(cwd, profile, target, config_file, selection)?;
+    } = layout_ctx;
 
     // Re-flavor the layout for the requested driver. The shared
     // `build_layout_context_at` constructs a Rustc-flavored layout by
@@ -239,6 +281,9 @@ pub struct LayoutContextOpts {
     pub skip_vendor_autoreg: bool,
     /// The run entry to load the model for.
     pub selection: RunSelection,
+    /// That entry's model, already loaded, as
+    /// [`build_contexts_for_driver`] loads several at once.
+    pub model: Option<BuildModel>,
 }
 
 impl Default for LayoutContextOpts {
@@ -246,6 +291,7 @@ impl Default for LayoutContextOpts {
         Self {
             skip_vendor_autoreg: false,
             selection: RunSelection::All,
+            model: None,
         }
     }
 }
@@ -261,8 +307,11 @@ pub fn build_layout_context_at_with_opts(
 ) -> Result<LayoutContext> {
     let project_root = find_project_root(cwd)
         .context("could not find a quon.rs in the current directory or any parent")?;
-    let mut model = load_build_model_for(&project_root, &opts.selection)
-        .context("failed to load build model")?;
+    let mut model = match opts.model {
+        Some(model) => model,
+        None => load_build_model_for(&project_root, &opts.selection)
+            .context("failed to load build model")?,
+    };
 
     // --- Vendor auto-registration ---
     //

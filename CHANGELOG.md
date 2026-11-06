@@ -37,7 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   them, so two entries can enable features of one dependency that
   exclude each other, such as two chip features of a HAL.
 - `quon build`, `check` and `clippy` with no name build every entry in
-  turn. `quon test` with no name runs only the host tests.
+  one schedule. A crate two entries build the same way compiles once.
+  `quon.rs` runs and the Cargo manifests are read once for all
+  entries. `quon test` with no name runs only the host tests.
 - `quon run` takes runner arguments only after `--`, so
   `quon run <entry>` names an entry.
 

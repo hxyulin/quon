@@ -15,10 +15,12 @@
 //! `docs/src/architecture/concurrency.md`.
 
 pub mod dag;
+mod merged;
 mod results;
 pub mod worker;
 
 pub use dag::{Dag, DagNode, NodeId, build_dag};
+pub use merged::{EntryPipeline, execute_entries};
 pub use results::NodeData;
 pub use worker::{
     BuildSummary, JobDispatcher, JobInfo, JobKind, JobOutcome, PlainReporter, Reporter, WorkerPool,
@@ -641,28 +643,74 @@ pub fn execute_pipeline(
     workers: usize,
     reporter: &mut dyn Reporter,
 ) -> Result<BuildSummary> {
-    let units = crate::unit::lower(model, resolved, vendor_ctx)?;
-    let dag = build_dag(resolved, model, &units)?;
-    let node_of_unit = results::node_of_unit(&dag, &units);
-    let script_cfgs = probe_script_cfgs(ctx, model, resolved, &units)?;
-    let results: Vec<OnceLock<NodeResult>> = (0..dag.len()).map(|_| OnceLock::new()).collect();
-
-    let dispatcher = PipelineDispatcher {
-        ctx,
-        model,
-        resolved,
-        rules,
-        units: &units,
-        dag: &dag,
-        node_of_unit: &node_of_unit,
-        results: &results,
-        script_cfgs: &script_cfgs,
-    };
-
+    let prepared = Prepared::new(ctx, model, resolved, vendor_ctx)?;
+    let dispatcher = prepared.dispatcher(ctx, model, resolved, rules);
     let pool = WorkerPool::new(workers);
-    pool.execute_with(&dag, &dispatcher, reporter)?;
+    pool.execute_with(&prepared.dag, &dispatcher, reporter)?;
 
-    Ok(summarize(&dag, &results, model))
+    Ok(summarize(&prepared.dag, &prepared.results, model))
+}
+
+/// What one model's build needs before dispatch: its units, DAG,
+/// probed cfgs and an empty result slot per node.
+struct Prepared {
+    units: UnitGraph,
+    dag: DagType,
+    node_of_unit: Vec<NodeId>,
+    script_cfgs: ScriptCfgs,
+    results: Vec<OnceLock<NodeResult>>,
+}
+
+impl Prepared {
+    fn new(
+        ctx: &CompileCtx,
+        model: &BuildModel,
+        resolved: &ResolvedConfig,
+        vendor_ctx: &VendorBuildContext,
+    ) -> Result<Self> {
+        let units = crate::unit::lower(model, resolved, vendor_ctx)?;
+        let dag = build_dag(resolved, model, &units)?;
+        let node_of_unit = results::node_of_unit(&dag, &units);
+        let script_cfgs = probe_script_cfgs(ctx, model, resolved, &units)?;
+        let results = (0..dag.len()).map(|_| OnceLock::new()).collect();
+        Ok(Self {
+            units,
+            dag,
+            node_of_unit,
+            script_cfgs,
+            results,
+        })
+    }
+
+    fn dispatcher<'a>(
+        &'a self,
+        ctx: &'a CompileCtx,
+        model: &'a BuildModel,
+        resolved: &'a ResolvedConfig,
+        rules: &'a RuleRegistry,
+    ) -> PipelineDispatcher<'a> {
+        PipelineDispatcher {
+            ctx,
+            model,
+            resolved,
+            rules,
+            units: &self.units,
+            dag: &self.dag,
+            node_of_unit: &self.node_of_unit,
+            results: &self.results,
+            script_cfgs: &self.script_cfgs,
+        }
+    }
+}
+
+/// Whether the summary counts `node`: rule nodes are not cacheable, and
+/// Quon neither builds nor caches a prebuilt sysroot.
+fn counted(node: DagNode, model: &BuildModel) -> bool {
+    match node {
+        DagNode::Rule(_) => false,
+        DagNode::Sysroot(t) => model.targets.get(t).is_some_and(TargetDef::builds_sysroot),
+        _ => true,
+    }
 }
 
 /// Assemble the build summary from the result slots after the pool
@@ -672,12 +720,7 @@ fn summarize(dag: &DagType, results: &[OnceLock<NodeResult>], model: &BuildModel
     let mut summary = BuildSummary::default();
     for (node, slot) in dag.nodes.iter().zip(results) {
         let Some(result) = slot.get() else { continue };
-        let counted = match *node {
-            DagNode::Rule(_) => false,
-            DagNode::Sysroot(t) => model.targets.get(t).is_some_and(TargetDef::builds_sysroot),
-            _ => true,
-        };
-        if counted {
+        if counted(*node, model) {
             if result.was_cached {
                 summary.cached += 1;
             } else {

@@ -82,7 +82,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         );
     }
 
-    // A project with several run entries builds one at a time, so
+    // A project with several run entries loads one model per entry, so
     // Cargo features resolve per entry; see `quon_core::config::select_run`.
     let unnamed = match &cli.command {
         cli::Command::Build(_) | cli::Command::Check(_) | cli::Command::Clippy(_) => {
@@ -105,25 +105,32 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     };
     if let cli::Command::Build(_) | cli::Command::Check(_) | cli::Command::Clippy(_) = &cli.command
     {
-        let each = selections.len() > 1;
-        for selection in &selections {
-            if each && let quon_core::config::RunSelection::Named(name) = selection {
-                shell.status("Entry", name);
-            }
-            let mut ctx = cmd::build_context_for_driver(
-                cli.profile_name(),
-                cli.target.as_deref(),
-                cli.config_file.as_deref(),
-                driver,
-                selection,
-            )?;
+        let mut ctxs = cmd::build_contexts_for_driver(
+            cli.profile_name(),
+            cli.target.as_deref(),
+            cli.config_file.as_deref(),
+            driver,
+            &selections,
+        )?;
+        for ctx in &mut ctxs {
             ctx.ctx.verbose = cli.verbose;
             ctx.ctx.color = shell.color();
-            match &cli.command {
-                cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell)?,
-                cli::Command::Check(_) => cmd::check::run(ctx, cli.jobs, shell)?,
-                _ => cmd::clippy::run(ctx, cli.jobs, shell)?,
-            }
+        }
+        if ctxs.len() > 1 {
+            // Several entries share one schedule; see
+            // `quon_core::build_entries_with_reporter`.
+            let noun = match &cli.command {
+                cli::Command::Build(_) => "built",
+                cli::Command::Check(_) => "checked",
+                _ => "linted",
+            };
+            return cmd::build::run_entries(&ctxs, cli.jobs, shell, noun);
+        }
+        let ctx = ctxs.pop().expect("selections are never empty");
+        match &cli.command {
+            cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell)?,
+            cli::Command::Check(_) => cmd::check::run(ctx, cli.jobs, shell)?,
+            _ => cmd::clippy::run(ctx, cli.jobs, shell)?,
         }
         return Ok(());
     }

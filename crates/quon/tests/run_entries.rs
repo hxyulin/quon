@@ -1,7 +1,7 @@
 //! End-to-end CLI tests for several named run entries, against the
 //! `run-entries` fixture: two host boards whose chip features of one
 //! library exclude each other, so they build only if features resolve
-//! per entry.
+//! per entry, and a `common` library both use the same way.
 
 mod support;
 
@@ -33,13 +33,31 @@ fn each_entry_resolves_its_own_features() {
     }
     let (_tmp, fixture) = support::setup_fixture("run-entries");
 
-    // Step 1: `quon build` builds every entry, one after another.
+    // Step 1: `quon build` builds every entry in one schedule. `chip`
+    // compiles once per feature set, `common`, which both boards use
+    // the same way, once. A second build finds everything cached.
     let out = quon_out(&fixture, &["build"]);
     let err = stderr(&out);
     assert!(out.status.success(), "step 1: build failed:\n{err}");
     assert!(
-        err.contains("Entry a") && err.contains("Entry b"),
-        "step 1: no line per entry:\n{err}"
+        err.contains("Building 2 run entries"),
+        "step 1: no entries line:\n{err}"
+    );
+    let compiles = |name: &str| {
+        err.lines()
+            .filter(|l| l.trim_start().starts_with(&format!("Compiling {name} ")))
+            .count()
+    };
+    assert_eq!(compiles("chip"), 2, "step 1:\n{err}");
+    assert_eq!(compiles("common"), 1, "step 1:\n{err}");
+    let (built, cached) = support::summary(&err);
+    assert_eq!(cached, 0, "step 1:\n{err}");
+    let out = quon_out(&fixture, &["build"]);
+    let again = stderr(&out);
+    assert_eq!(
+        support::summary(&again),
+        (0, built),
+        "step 1 (again):\n{again}"
     );
 
     // Step 2: `quon run <entry>` starts that entry's binary.
