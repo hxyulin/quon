@@ -89,7 +89,9 @@ quon clippy -- -D warnings
 
 ### `quon fmt [--check]`
 
-Run `rustfmt` over every crate in the build model.
+Run `rustfmt` over the project's own crates: those declared in
+`quon.rs` and the members of the Cargo workspace. Registry and
+out-of-tree path dependencies are left alone, as under `cargo fmt`.
 
 | Flag | Description |
 |------|-------------|

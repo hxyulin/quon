@@ -60,6 +60,50 @@ fn cargo_build_fixture_builds_then_caches() {
     assert_eq!(summary(&stderr).0, 2, "{stderr}");
 }
 
+/// `quon fmt` formats the workspace members only, as `cargo fmt`
+/// does: an unformatted path dependency outside the workspace is left
+/// as it is, while one in a member is reported.
+#[test]
+#[ignore]
+fn fmt_leaves_dependencies_outside_the_workspace_alone() {
+    if !rustc_available("fmt_leaves_dependencies_outside_the_workspace_alone") {
+        return;
+    }
+    let (tmp, project) = setup("tests/fixtures/cargo-build");
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(outside.join("src")).unwrap();
+    fs::write(
+        outside.join("Cargo.toml"),
+        "[package]\nname = \"outside\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    let unformatted = "pub fn f(){let _x =1;let _y= 2;}\n";
+    fs::write(outside.join("src/lib.rs"), unformatted).unwrap();
+    let manifest = project.join("crates/kernel/Cargo.toml");
+    let text = fs::read_to_string(&manifest).unwrap();
+    let edited = text.replace(
+        "[dependencies]\n",
+        "[dependencies]\noutside = { path = \"../../../outside\" }\n",
+    );
+    assert_ne!(text, edited, "fixture manifest changed shape");
+    fs::write(&manifest, edited).unwrap();
+
+    // The fixture is formatted under the repository's rustfmt.toml,
+    // which the copy lacks, so the first run reformats members.
+    quon_ok(&project, &["fmt"], &[]);
+    assert_eq!(
+        fs::read_to_string(outside.join("src/lib.rs")).unwrap(),
+        unformatted
+    );
+    quon_ok(&project, &["fmt", "--check"], &[]);
+
+    append(&project.join("crates/util/src/lib.rs"), unformatted);
+    let out = quon(&project, &["fmt", "--check"], &[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("  - util"), "{stderr}");
+}
+
 /// `example` builds from a clean tree. One test per example, so they
 /// build in parallel.
 fn example_builds(example: &str) {

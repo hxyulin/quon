@@ -95,6 +95,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   packages can enable features of one dependency that exclude each
   other, such as two chip features of a HAL.
 
+### Fixed (fmt)
+
+- **`quon fmt` formats only declared crates and workspace members.**
+  It rewrote the sources of registry and out-of-tree path
+  dependencies too.
+
 ### Fixed (host tests)
 
 - **`test = false` on a `[lib]`, `[[bin]]` or `[[test]]` target leaves

@@ -8,7 +8,12 @@
 //!
 //! Instead this module:
 //!
-//! 1. Iterates `resolved.crates` in deterministic order.
+//! 1. Iterates `resolved.crates` in deterministic order, keeping the
+//!    project's own crates: declared crates and Cargo workspace
+//!    members. A registry or out-of-tree path dependency is someone
+//!    else's source, as under `cargo fmt`, so it is left alone. Each
+//!    directory is formatted once, though a package lowers to several
+//!    crates (lib, bin, host-test copies).
 //! 2. For each crate, walks its source root recursively to enumerate
 //!    every `.rs` file (sorted, so the rustfmt invocation is
 //!    deterministic).
@@ -24,6 +29,7 @@
 
 use crate::error::{Diagnostic, Error, Result};
 use quon_model::{BuildModel, CrateType, ResolvedConfig};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -57,6 +63,7 @@ pub fn run_fmt(
 ) -> Result<FmtSummary> {
     let rustfmt = resolve_rustfmt();
     let mut summary = FmtSummary::default();
+    let mut seen = BTreeSet::new();
 
     for crate_ref in &resolved.crates {
         let crate_def = model.crates.get(crate_ref.handle).ok_or_else(|| {
@@ -65,6 +72,11 @@ pub fn run_fmt(
                 crate_ref.handle
             ))
         })?;
+        if !crate_def.is_project_crate
+            || !seen.insert((crate_def.path.clone(), crate_def.edition.clone()))
+        {
+            continue;
+        }
 
         // The crate root: directory the user wrote in `path =`. Source
         // files live somewhere under here. We don't reuse the per-
