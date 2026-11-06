@@ -23,6 +23,54 @@ fail with `profile '<name>' has no runner`. The exception is a
 [host profile](../configuration/projects-targets-profiles.md#host-profiles),
 which runs its binaries directly when it names no runner.
 
+## Several run entries
+
+A project with more than one binary to run, such as firmware for
+several boards, calls `q.run` once per binary and names each entry:
+
+```rust,ignore
+let thumbv7em = Target::builtin("thumbv7em-none-eabihf");
+let h723 = q.add(Command::new(["probe-rs", "run", "--chip", "STM32H723VGTx", "{binary}"]));
+let f407 = q.add(Command::new(["probe-rs", "run", "--chip", "STM32F407IG", "{binary}"]));
+for (entry, package) in [("hero-gimbal", "hero-gimbal-board"), ("sentry-gimbal", "sentry-gimbal-board")] {
+    let fw = q.add(Package::new(package).target(&thumbv7em));
+    q.run(&fw).name(entry).runner(&h723);
+}
+let rmc = q.add(Package::new("rm-c-bringup").target(&thumbv7em));
+q.run(&rmc).name("bringup-rm-c").runner(&f407);
+```
+
+A command works on one entry at a time:
+
+```sh
+quon run hero-gimbal         # build the entry, then start it with its runner
+quon build hero-gimbal       # build that entry only
+quon build                   # build every entry, one after another
+quon test --entry hero-gimbal
+```
+
+`quon build`, `quon check` and `quon clippy` with no name take every
+entry in turn. `quon run` and `quon configure` with no name need the
+project to have one entry. `quon test` with no name runs only the host
+tests. `RUN = "<name>"` in [`.quon-config`](../configuration/overrides.md),
+or `QUON_RUN`, names the entry a command uses when the command line
+names none.
+
+Cargo features resolve per entry, over that entry's package and the
+packages no entry owns, as `cargo build -p <package>` resolves them.
+Two entries can therefore enable features of one dependency that
+exclude each other, such as two chip features of a HAL. A crate that
+two entries build with different features builds once for each, and
+both builds stay cached.
+
+The cost is that entries build one after another, not as one
+schedule. A no-op `quon build` of every entry checks each entry's
+crates in turn.
+
+Each entry builds for its package's target, and the root profiles take
+the entry's runner, so a profile's `Profile::runner(&r)` still
+overrides it.
+
 Runners have no name in `quon.rs`. Quon names them after their kind
 (`qemu`, `qemu-2`, `command`, or the plugin's name), and those names
 appear only in messages.

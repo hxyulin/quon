@@ -1,0 +1,9 @@
+[package]
+name = "chip"
+version = "0.1.0"
+edition = "2021"
+
+# A HAL whose chip features exclude each other.
+[features]
+a = []
+b = []

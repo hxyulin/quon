@@ -50,11 +50,13 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
     // rustc probe) so they still work when the toolchain is broken
     // or missing. `fmt` only needs `rustfmt`, which it resolves
     // separately via $RUSTFMT or $PATH.
+    let all = [quon_core::config::RunSelection::All];
     if let cli::Command::Clean(args) = &cli.command {
         let ctx = cmd::build_layout_context(
             cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
+            &all[0],
         )?;
         return cmd::clean::run(ctx, args.keep_sysroot);
     }
@@ -63,6 +65,7 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
             cli.profile_name(),
             cli.target.as_deref(),
             cli.config_file.as_deref(),
+            &all[0],
         )?;
         return cmd::fmt::run(ctx, args.check);
     }
@@ -79,53 +82,70 @@ fn run(cli: cli::Cli, shell: &mut Shell) -> Result<()> {
         );
     }
 
-    // `check` builds a context whose layout is flavored for the check
-    // driver — that's what routes user-crate output under
-    // `build/tool/check/` so it can't clobber `quon build` artifacts.
-    // Same rustc probe path otherwise; check still needs the host
-    // toolchain to invoke `--emit=metadata`.
+    // A project with several run entries builds one at a time, so
+    // Cargo features resolve per entry; see `quon_core::config::select_run`.
+    let unnamed = match &cli.command {
+        cli::Command::Build(_) | cli::Command::Check(_) | cli::Command::Clippy(_) => {
+            cmd::Unnamed::EachEntry
+        }
+        cli::Command::Test(_) => cmd::Unnamed::HostTestsOnly,
+        _ => cmd::Unnamed::Only,
+    };
+    let selections = cmd::selections(cli.entry(), cli.config_file.as_deref(), unnamed)?;
+
     // `check` and `clippy` build a context whose layout is flavored
     // for the relevant driver — that's what routes user-crate output
     // under `build/tool/<driver>/` so it can't clobber `quon build`
     // artifacts. Same rustc probe path otherwise; both still need the
     // host toolchain.
-    if matches!(&cli.command, cli::Command::Check(_)) {
-        let mut ctx = cmd::build_context_for_driver(
-            cli.profile_name(),
-            cli.target.as_deref(),
-            cli.config_file.as_deref(),
-            quon_core::DriverKind::Check,
-        )?;
-        ctx.ctx.verbose = cli.verbose;
-        ctx.ctx.color = shell.color();
-        return cmd::check::run(ctx, cli.jobs, shell);
-    }
-    if matches!(&cli.command, cli::Command::Clippy(_)) {
-        let mut ctx = cmd::build_context_for_driver(
-            cli.profile_name(),
-            cli.target.as_deref(),
-            cli.config_file.as_deref(),
-            quon_core::DriverKind::Clippy,
-        )?;
-        ctx.ctx.verbose = cli.verbose;
-        ctx.ctx.color = shell.color();
-        return cmd::clippy::run(ctx, cli.jobs, shell);
+    let driver = match &cli.command {
+        cli::Command::Check(_) => quon_core::DriverKind::Check,
+        cli::Command::Clippy(_) => quon_core::DriverKind::Clippy,
+        _ => quon_core::DriverKind::Rustc,
+    };
+    if let cli::Command::Build(_) | cli::Command::Check(_) | cli::Command::Clippy(_) = &cli.command
+    {
+        let each = selections.len() > 1;
+        for selection in &selections {
+            if each && let quon_core::config::RunSelection::Named(name) = selection {
+                shell.status("Entry", name);
+            }
+            let mut ctx = cmd::build_context_for_driver(
+                cli.profile_name(),
+                cli.target.as_deref(),
+                cli.config_file.as_deref(),
+                driver,
+                selection,
+            )?;
+            ctx.ctx.verbose = cli.verbose;
+            ctx.ctx.color = shell.color();
+            match &cli.command {
+                cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell)?,
+                cli::Command::Check(_) => cmd::check::run(ctx, cli.jobs, shell)?,
+                _ => cmd::clippy::run(ctx, cli.jobs, shell)?,
+            }
+        }
+        return Ok(());
     }
 
+    let [selection] = selections.as_slice() else {
+        unreachable!("only build, check and clippy take each entry in turn")
+    };
     let mut ctx = cmd::build_context(
         cli.profile_name(),
         cli.target.as_deref(),
         cli.config_file.as_deref(),
+        selection,
     )?;
     ctx.ctx.verbose = cli.verbose;
     ctx.ctx.color = shell.color();
 
     match cli.command {
-        cli::Command::Build(_) => cmd::build::run(ctx, cli.jobs, shell),
         cli::Command::Configure(args) => cmd::configure::run(ctx, args.output),
         cli::Command::Run(args) => cmd::run::run(ctx, cli.jobs, args, shell),
         cli::Command::Test(args) => cmd::test::run(ctx, cli.jobs, args, shell),
-        cli::Command::Check(_)
+        cli::Command::Build(_)
+        | cli::Command::Check(_)
         | cli::Command::Clippy(_)
         | cli::Command::Clean(_)
         | cli::Command::Fmt(_)

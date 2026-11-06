@@ -14,6 +14,7 @@ use crate::cli::TestArgs;
 use crate::output::{BuildReporter, Counts, Shell};
 use anyhow::{Context, Result, bail};
 use quon_core::TestStatus;
+use quon_core::config::RunSelection;
 use quon_core::model::{BootMode, ResolvedConfig};
 use quon_core::run::Invocation;
 use std::ffi::OsString;
@@ -77,9 +78,19 @@ pub fn run(ctx: CmdContext, jobs: Option<usize>, args: TestArgs, shell: &mut She
     };
     let filter = opts.filter.as_deref();
 
-    let has_integration = kinds.integration
+    // With several run entries and none named, the model holds no
+    // entry, so there is nothing to boot: only the host tests run.
+    let entry_chosen = ctx.selection != RunSelection::None;
+    if !entry_chosen && (kinds.integration || kinds.boot) {
+        shell.note(
+            "quon.rs declares several run entries, so only the host tests run; \
+             name one with --entry <NAME> to run its integration and boot tests",
+        );
+    }
+    let has_integration = entry_chosen
+        && kinds.integration
         && !quon_core::run::integration_tests(&ctx.model, &ctx.resolved, filter).is_empty();
-    let suites: Vec<(String, String)> = if kinds.boot {
+    let suites: Vec<(String, String)> = if entry_chosen && kinds.boot {
         ctx.model
             .boot_tests
             .iter()

@@ -21,7 +21,7 @@ pub use raw::RawBuildModel;
 pub use raw_defs::{
     RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawBuildStepInput, RawCargoWorkspace,
     RawCrateDef, RawDepDef, RawEspDef, RawEspEntry, RawEspSource, RawGroupDef, RawManifestRoot,
-    RawPipelineDef, RawPipelineStep, RawProfileDef, RawRunnerDef,
+    RawPipelineDef, RawPipelineStep, RawProfileDef, RawRunDef, RawRunnerDef,
 };
 pub use resolved::*;
 pub use source::SourceSpan;

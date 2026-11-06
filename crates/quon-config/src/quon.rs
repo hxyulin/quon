@@ -14,8 +14,8 @@ use quon_model::{
     ConfigOptionDef, DownloadDef, ExternalDepDef, ImageDef, ImageEntry, ImageSource, PartitionDef,
     PresetDef, ProjectDef, RawBootTestDef, RawBuildModel, RawBuildStepDef, RawBuildStepInput,
     RawCargoWorkspace, RawCrateDef, RawDepDef, RawEspDef, RawEspEntry, RawEspSource, RawGroupDef,
-    RawManifestRoot, RawProfileDef, RawRunnerDef, RawSource, RawWrite, RunnerKind, TargetDef,
-    TargetSpec,
+    RawManifestRoot, RawProfileDef, RawRunDef, RawRunnerDef, RawSource, RawWrite, RunnerKind,
+    TargetDef, TargetSpec,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -82,7 +82,7 @@ pub struct Quon {
     /// Targets declared only so `quon build --target` can pick them.
     targets: Vec<Target>,
     workspace: Option<CargoWorkspace>,
-    run: Option<Run>,
+    runs: Vec<Run>,
     host_tests: HostTests,
     kconfig: Vec<PathBuf>,
     crates: Vec<CrateDecl>,
@@ -107,10 +107,18 @@ pub struct Quon {
 #[derive(Debug)]
 pub struct Run {
     artifact: Artifact,
+    name: Option<String>,
     runner: Option<String>,
 }
 
 impl Run {
+    /// Name the entry, so `quon run <name>` and `quon build <name>`
+    /// can pick it. A project with more than one entry names each.
+    pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
+        self.name = Some(name.into());
+        self
+    }
+
     /// Start the binary with `runner`. Without one, `quon run` runs a
     /// host binary directly.
     pub fn runner(&mut self, runner: &Runner) -> &mut Self {
@@ -203,17 +211,20 @@ impl Quon {
 
     /// Make `artifact` what `quon run` starts and boot tests boot.
     /// Profiles build for its target.
+    ///
+    /// Call it once per binary to give the project several entries,
+    /// each with a [`name`](Run::name). A command then builds, runs or
+    /// tests one entry at a time, and resolves Cargo features for that
+    /// entry's packages alone, as `cargo build -p` does. Two entries
+    /// can therefore enable features of one dependency that exclude
+    /// each other.
     pub fn run(&mut self, artifact: &Artifact) -> &mut Run {
-        if self.run.is_some() {
-            self.errors.push(ConfigError::new(format!(
-                "run is declared more than once (now '{}')",
-                artifact.name
-            )));
-        }
-        self.run.insert(Run {
+        self.runs.push(Run {
             artifact: artifact.clone(),
+            name: None,
             runner: None,
-        })
+        });
+        self.runs.last_mut().expect("just pushed")
     }
 
     /// A handle to the profile `name`: one added with `q.add`, or the
@@ -407,7 +418,19 @@ impl Quon {
             l.lower_dependency(dep);
         }
 
-        let profile_target = self.profile_target(&default_target, &mut l);
+        let runs = self.lower_runs(&default_target, &mut l);
+        // A single entry fills the profiles here. With several, the
+        // profiles wait for quon-core to pick one, so they keep only
+        // what they set themselves.
+        let single = match runs.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        };
+        let profile_target = if runs.len() > 1 {
+            None
+        } else {
+            self.profile_target(single, &default_target, &mut l)
+        };
         for name in ["dev", "release"] {
             if !self.profiles.iter().any(|p| p.name == name) {
                 self.profiles.push(if name == "dev" {
@@ -418,7 +441,7 @@ impl Quon {
             }
         }
         for p in &self.profiles {
-            l.lower_profile(p, profile_target.as_deref(), self.run.as_ref());
+            l.lower_profile(p, profile_target.as_deref(), single);
         }
 
         for r in self.runners {
@@ -469,21 +492,43 @@ impl Quon {
         l.raw.host_tests = self.host_tests.packages;
         l.raw.host_test_env = self.host_tests.env;
         l.raw.kconfig_includes = self.kconfig;
+        l.raw.runs = runs;
         (l.raw, l.errors)
     }
 
-    /// The target profiles build for, by name: the run artifact's, else
-    /// the default target, else the one target the project's crates and
-    /// dependencies use. `None` reports an error already pushed.
-    fn profile_target(&self, default_target: &Target, l: &mut Lowering) -> Option<String> {
-        if let Some(run) = &self.run {
+    /// Check the run entries and lower them in declaration order. An
+    /// entry whose artifact is not a crate is reported and left out.
+    fn lower_runs(&self, default_target: &Target, l: &mut Lowering) -> Vec<RawRunDef> {
+        let several = self.runs.len() > 1;
+        let mut names = BTreeSet::new();
+        let mut runs = Vec::new();
+        for run in &self.runs {
+            match &run.name {
+                Some(name) => {
+                    if !valid_run_name(name) {
+                        l.error(format!(
+                            "run '{}': the name '{name}' must be non-empty and use only \
+                             letters, digits, '-', '_' and '.'",
+                            run.artifact.name
+                        ));
+                    } else if !names.insert(name.as_str()) {
+                        l.error(format!("run entry '{name}' is declared more than once"));
+                    }
+                }
+                None if several => l.error(format!(
+                    "run '{}' has no name; with several run entries, name each with \
+                     q.run(..).name(\"<name>\")",
+                    run.artifact.name
+                )),
+                None => {}
+            }
             if run.artifact.kind != ArtifactKind::Crate {
                 l.error(format!(
                     "run: '{}' is a {}, not a crate",
                     run.artifact.name,
                     run.artifact.kind.describe()
                 ));
-                return None;
+                continue;
             }
             let target = self
                 .crates
@@ -491,7 +536,33 @@ impl Quon {
                 .find(|c| c.name == run.artifact.owner)
                 .and_then(|c| c.target.as_ref())
                 .unwrap_or(default_target);
-            return Some(target.name().to_string());
+            runs.push(RawRunDef {
+                name: run.name.clone(),
+                binary: run.artifact.name.clone(),
+                owner: run.artifact.owner.clone(),
+                target: l.target(target),
+                runner: run.runner.clone(),
+            });
+        }
+        runs
+    }
+
+    /// The target profiles build for, by name: the single run entry's,
+    /// else the default target, else the one target the project's
+    /// crates and dependencies use. `None` reports an error already
+    /// pushed, or a run entry that was left out.
+    fn profile_target(
+        &self,
+        single: Option<&RawRunDef>,
+        default_target: &Target,
+        l: &mut Lowering,
+    ) -> Option<String> {
+        if let Some(run) = single {
+            return Some(run.target.clone());
+        }
+        if !self.runs.is_empty() {
+            // The entry was left out with an error.
+            return None;
         }
         if self.default_target.is_some() {
             return Some(default_target.name().to_string());
@@ -517,6 +588,15 @@ impl Quon {
             }
         }
     }
+}
+
+/// Whether `name` can name a run entry: it is typed on the command
+/// line, so it keeps to characters no shell treats specially.
+fn valid_run_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 struct Lowering {
@@ -705,7 +785,7 @@ impl Lowering {
     /// A root profile (one that inherits nothing) gets the target, run
     /// binary and runner; profiles that inherit take them from it, so a
     /// parent's runner override reaches its children.
-    fn lower_profile(&mut self, p: &Profile, target: Option<&str>, run: Option<&Run>) {
+    fn lower_profile(&mut self, p: &Profile, target: Option<&str>, run: Option<&RawRunDef>) {
         let root = p.inherits.is_none();
         let runner = p
             .runner
@@ -717,7 +797,7 @@ impl Lowering {
                 name: p.name.clone(),
                 inherits: p.inherits.clone(),
                 target: target.filter(|_| root).map(Into::into),
-                run_binary: run.filter(|_| root).map(|r| r.artifact.name.clone()),
+                run_binary: run.filter(|_| root).map(|r| r.binary.clone()),
                 runner,
                 opt_level: p.opt_level,
                 debug_info: p.debug_info,
@@ -1061,6 +1141,88 @@ mod tests {
         assert_eq!(profile(&raw, "dev").runner.as_deref(), Some("qemu"));
         assert_eq!(profile(&raw, "bios").runner.as_deref(), Some("qemu-2"));
         assert_eq!(profile(&raw, "release").runner, None, "inherited from dev");
+    }
+
+    #[test]
+    fn several_run_entries_leave_the_profiles_to_quon_core() {
+        let raw = ok(|q| {
+            let m7 = Target::builtin("thumbv7em-none-eabihf");
+            let m0 = Target::builtin("thumbv6m-none-eabi");
+            let probe = q.add(Command::new(["probe-rs", "run", "{binary}"]));
+            let gimbal = q.add(Package::new("gimbal").target(&m7));
+            let tools = q.add(Package::new("tools").target(&m0));
+            q.run(&gimbal).name("gimbal").runner(&probe);
+            q.run(&tools.bin("flasher")).name("flasher");
+        });
+        let dev = profile(&raw, "dev");
+        assert_eq!(dev.target, None);
+        assert_eq!(dev.run_binary, None);
+        assert_eq!(dev.runner, None);
+        let runs: Vec<_> = raw
+            .runs
+            .iter()
+            .map(|r| {
+                (
+                    r.name.as_deref(),
+                    r.binary.as_str(),
+                    r.owner.as_str(),
+                    r.target.as_str(),
+                    r.runner.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (
+                    Some("gimbal"),
+                    "gimbal",
+                    "gimbal",
+                    "thumbv7em-none-eabihf",
+                    Some("command")
+                ),
+                (
+                    Some("flasher"),
+                    "flasher",
+                    "tools",
+                    "thumbv6m-none-eabi",
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_named_entry_fills_the_profiles() {
+        let raw = ok(|q| {
+            let kernel = q.add(Package::new("kernel"));
+            q.run(&kernel).name("kernel");
+        });
+        assert_eq!(profile(&raw, "dev").run_binary.as_deref(), Some("kernel"));
+        assert_eq!(raw.runs.len(), 1);
+    }
+
+    #[test]
+    fn several_run_entries_need_unique_valid_names() {
+        let (_, errors) = lower(|q| {
+            let a = q.add(Package::new("a"));
+            let b = q.add(Package::new("b"));
+            let c = q.add(Package::new("c"));
+            q.run(&a);
+            q.run(&b).name("same");
+            q.run(&c).name("same");
+            q.run(&c).name("has space");
+        });
+        assert_eq!(
+            errors,
+            [
+                "run 'a' has no name; with several run entries, name each with \
+                 q.run(..).name(\"<name>\")",
+                "run entry 'same' is declared more than once",
+                "run 'c': the name 'has space' must be non-empty and use only letters, \
+                 digits, '-', '_' and '.'",
+            ]
+        );
     }
 
     #[test]

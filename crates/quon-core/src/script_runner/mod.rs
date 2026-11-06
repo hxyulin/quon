@@ -60,6 +60,7 @@
 //! - intern dangling reference: `Error::Diagnostics`
 
 use crate::compile::RustcInfo;
+use crate::config::{RunSelection, select_run};
 use crate::error::{Diagnostic, Error, Result};
 use quon_model::{BuildModel, RawBuildModel};
 use std::path::Path;
@@ -78,9 +79,10 @@ pub fn compile_and_run(
     project_root: &Path,
     build_dir: &Path,
     rustc_info: &RustcInfo,
+    selection: &RunSelection,
 ) -> Result<BuildModel> {
     let raw = compile_and_run_raw(project_root, build_dir, rustc_info)?;
-    finalize(raw, project_root, build_dir, rustc_info)
+    finalize(raw, project_root, build_dir, rustc_info, selection)
 }
 
 /// [`compile_and_run`] without the final transform: the model exactly
@@ -144,7 +146,8 @@ fn run_script_binary(bin: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Final-stage transform: resolve `kconfig_includes` against the
+/// Final-stage transform: pick the run entry `selection` names
+/// ([`select_run`]), resolve `kconfig_includes` against the
 /// project root, merge their lowered options/presets into the raw
 /// model, expand Cargo workspace package roots into crates
 /// ([`crate::manifest::lower::expand`]), run intern, and translate any
@@ -157,7 +160,12 @@ fn finalize(
     project_root: &Path,
     build_dir: &Path,
     rustc_info: &RustcInfo,
+    selection: &RunSelection,
 ) -> Result<BuildModel> {
+    // Before expansion, which resolves features over the roots that
+    // selection keeps.
+    select_run(&mut raw, selection)?;
+
     // Drain the include list — it's a sidecar field that doesn't belong
     // in the final BuildModel and we don't want it accidentally
     // re-serialised downstream.
@@ -247,8 +255,13 @@ pub fn config(q: &mut Quon) -> Result<()> {
         let tmp = tempfile::tempdir().unwrap();
         write_minimal_quon_rs(tmp.path());
         let info = RustcInfo::probe().unwrap();
-        let model =
-            compile_and_run(tmp.path(), &tmp.path().join("build"), &info).expect("compile_and_run");
+        let model = compile_and_run(
+            tmp.path(),
+            &tmp.path().join("build"),
+            &info,
+            &RunSelection::All,
+        )
+        .expect("compile_and_run");
 
         assert_eq!(
             model.project.as_ref().unwrap().name,
@@ -277,8 +290,13 @@ pub fn config(q: &mut Quon) -> Result<()> {
             rust_src: None,
             mtime_ns: 0,
         };
-        let err = compile_and_run(tmp.path(), &tmp.path().join("build"), &info)
-            .expect_err("must error when no quon.rs");
+        let err = compile_and_run(
+            tmp.path(),
+            &tmp.path().join("build"),
+            &info,
+            &RunSelection::All,
+        )
+        .expect_err("must error when no quon.rs");
         match err {
             Error::Config(msg) => assert!(
                 msg.contains("no quon.rs"),

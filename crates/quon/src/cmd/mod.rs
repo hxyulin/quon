@@ -43,13 +43,13 @@ pub mod vendor;
 
 use anyhow::{Context, Result};
 use quon_core::config::{
-    DEFAULT_ENV_PREFIX, DEFAULT_OVERRIDE_FILENAME, load_env_overrides, load_override_file,
-    merge_overrides,
+    DEFAULT_ENV_PREFIX, DEFAULT_OVERRIDE_FILENAME, RunSelection, load_env_overrides,
+    load_override_file, merge_overrides,
 };
 use quon_core::model::{BuildModel, ConfigValue, ResolvedConfig};
 use quon_core::vendor as core_vendor;
 use quon_core::{
-    BuildLayout, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model,
+    BuildLayout, CompileCtx, DriverKind, RustcInfo, find_project_root, load_build_model_for,
     resolve_config,
 };
 use std::collections::BTreeMap;
@@ -82,6 +82,8 @@ pub struct CmdContext {
     /// with, so a command can resolve another profile the same way.
     pub target: Option<String>,
     pub overrides: BTreeMap<String, ConfigValue>,
+    /// The run entry the model was loaded for.
+    pub selection: RunSelection,
 }
 
 /// The runner plugins built into the `quon` binary. Any other plugin
@@ -101,8 +103,9 @@ pub fn build_context(
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
+    selection: &RunSelection,
 ) -> Result<CmdContext> {
-    build_context_for_driver(profile, target, config_file, DriverKind::Rustc)
+    build_context_for_driver(profile, target, config_file, DriverKind::Rustc, selection)
 }
 
 /// Build a [`CmdContext`] for an explicit driver. This is the entry
@@ -114,9 +117,10 @@ pub fn build_context_for_driver(
     target: Option<&str>,
     config_file: Option<&Path>,
     driver: DriverKind,
+    selection: &RunSelection,
 ) -> Result<CmdContext> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    build_context_at_for_driver(&cwd, profile, target, config_file, driver)
+    build_context_at_for_driver(&cwd, profile, target, config_file, driver, selection)
 }
 
 /// Build a [`CmdContext`] starting the project-root search at `cwd`,
@@ -132,6 +136,7 @@ pub fn build_context_at_for_driver(
     target: Option<&str>,
     config_file: Option<&Path>,
     driver: DriverKind,
+    selection: &RunSelection,
 ) -> Result<CmdContext> {
     let LayoutContext {
         model,
@@ -139,7 +144,8 @@ pub fn build_context_at_for_driver(
         layout,
         project_root,
         overrides,
-    } = build_layout_context_at(cwd, profile, target, config_file)?;
+        selection,
+    } = build_layout_context_at(cwd, profile, target, config_file, selection)?;
 
     // Re-flavor the layout for the requested driver. The shared
     // `build_layout_context_at` constructs a Rustc-flavored layout by
@@ -166,6 +172,7 @@ pub fn build_context_at_for_driver(
         project_root,
         target: target.map(str::to_owned),
         overrides,
+        selection,
     })
 }
 
@@ -181,6 +188,8 @@ pub struct LayoutContext {
     pub project_root: PathBuf,
     /// The `.quon-config` and `QUON_*` overrides `resolved` used.
     pub overrides: BTreeMap<String, ConfigValue>,
+    /// The run entry the model was loaded for.
+    pub selection: RunSelection,
 }
 
 /// Build a [`LayoutContext`] (no rustc probe) starting at `cwd`.
@@ -201,13 +210,17 @@ pub fn build_layout_context_at(
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
+    selection: &RunSelection,
 ) -> Result<LayoutContext> {
     build_layout_context_at_with_opts(
         cwd,
         profile,
         target,
         config_file,
-        LayoutContextOpts::default(),
+        LayoutContextOpts {
+            selection: selection.clone(),
+            ..LayoutContextOpts::default()
+        },
     )
 }
 
@@ -216,7 +229,7 @@ pub fn build_layout_context_at(
 /// Exists so `quon vendor` can short-circuit auto-registration while
 /// every other subcommand gets the default
 /// register-vendored-deps-before-resolve behavior.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone)]
 pub struct LayoutContextOpts {
     /// Skip the [`quon_core::vendor::auto_register_vendored_deps`]
     /// pass. Needed by `quon vendor --check` / sync because they
@@ -224,6 +237,17 @@ pub struct LayoutContextOpts {
     /// auto-register with a stale lock would abort before the fix can
     /// run.
     pub skip_vendor_autoreg: bool,
+    /// The run entry to load the model for.
+    pub selection: RunSelection,
+}
+
+impl Default for LayoutContextOpts {
+    fn default() -> Self {
+        Self {
+            skip_vendor_autoreg: false,
+            selection: RunSelection::All,
+        }
+    }
 }
 
 /// Full-control version of [`build_layout_context_at`]. Every public
@@ -237,7 +261,8 @@ pub fn build_layout_context_at_with_opts(
 ) -> Result<LayoutContext> {
     let project_root = find_project_root(cwd)
         .context("could not find a quon.rs in the current directory or any parent")?;
-    let mut model = load_build_model(&project_root).context("failed to load build model")?;
+    let mut model = load_build_model_for(&project_root, &opts.selection)
+        .context("failed to load build model")?;
 
     // --- Vendor auto-registration ---
     //
@@ -281,38 +306,7 @@ pub fn build_layout_context_at_with_opts(
         }
     };
 
-    // Per-checkout overrides: load the file (CLI flag → explicit path,
-    // otherwise the default `<root>/.quon-config` if present), then
-    // layer environment variables on top. An absent default file is not
-    // an error; an absent *explicit* file is. Env beats file on
-    // conflicts (see `config::overrides::merge_overrides`).
-    let overrides = {
-        let file_path = match config_file {
-            Some(p) => Some(p.to_path_buf()),
-            None => {
-                let default = project_root.join(DEFAULT_OVERRIDE_FILENAME);
-                if default.exists() {
-                    Some(default)
-                } else {
-                    None
-                }
-            }
-        };
-        let file_overrides = match &file_path {
-            Some(p) => {
-                if config_file.is_some() && !p.exists() {
-                    return Err(anyhow::anyhow!(
-                        "config override file {} does not exist",
-                        p.display()
-                    ));
-                }
-                load_override_file(p).context("failed to read config override file")?
-            }
-            None => Default::default(),
-        };
-        let env_overrides = load_env_overrides(DEFAULT_ENV_PREFIX);
-        merge_overrides(file_overrides, env_overrides)
-    };
+    let overrides = load_overrides(&project_root, config_file)?;
 
     let overrides_arg = if overrides.is_empty() {
         None
@@ -330,6 +324,7 @@ pub fn build_layout_context_at_with_opts(
         layout,
         project_root,
         overrides,
+        selection: opts.selection,
     })
 }
 
@@ -338,9 +333,104 @@ pub fn build_layout_context(
     profile: Option<&str>,
     target: Option<&str>,
     config_file: Option<&Path>,
+    selection: &RunSelection,
 ) -> Result<LayoutContext> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    build_layout_context_at(&cwd, profile, target, config_file)
+    build_layout_context_at(&cwd, profile, target, config_file, selection)
+}
+
+/// Per-checkout overrides: the file (`-C` names an explicit path,
+/// otherwise `<root>/.quon-config` if present), with `QUON_*`
+/// environment variables layered on top. An absent default file is not
+/// an error; an absent explicit file is. Env beats file on conflicts
+/// (see `config::overrides::merge_overrides`).
+fn load_overrides(
+    project_root: &Path,
+    config_file: Option<&Path>,
+) -> Result<BTreeMap<String, ConfigValue>> {
+    let file_path = match config_file {
+        Some(p) => Some(p.to_path_buf()),
+        None => {
+            let default = project_root.join(DEFAULT_OVERRIDE_FILENAME);
+            default.exists().then_some(default)
+        }
+    };
+    let file_overrides = match &file_path {
+        Some(p) => {
+            if config_file.is_some() && !p.exists() {
+                return Err(anyhow::anyhow!(
+                    "config override file {} does not exist",
+                    p.display()
+                ));
+            }
+            load_override_file(p).context("failed to read config override file")?
+        }
+        None => Default::default(),
+    };
+    let env_overrides = load_env_overrides(DEFAULT_ENV_PREFIX);
+    Ok(merge_overrides(file_overrides, env_overrides))
+}
+
+/// The override key that names the default run entry: `RUN = "<name>"`
+/// in `.quon-config`, or `QUON_RUN`. A config option named `RUN` would
+/// read the same value.
+const RUN_OVERRIDE: &str = "RUN";
+
+/// What a command does when neither the command line nor `RUN` names a
+/// run entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unnamed {
+    /// Every entry, one after another (`build`, `check`, `clippy`).
+    EachEntry,
+    /// The project's only entry; several are an error (`run`,
+    /// `configure`).
+    Only,
+    /// With several entries, none, so only the host tests run
+    /// (`test`).
+    HostTestsOnly,
+}
+
+/// The run entries a command loads the model for, one pass each, in
+/// declaration order. `entry` is the name given on the command line.
+pub fn selections(
+    entry: Option<&str>,
+    config_file: Option<&Path>,
+    unnamed: Unnamed,
+) -> Result<Vec<RunSelection>> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let project_root = find_project_root(&cwd)
+        .context("could not find a quon.rs in the current directory or any parent")?;
+    let default = run_override(&load_overrides(&project_root, config_file)?)?;
+    if let Some(name) = entry.map(str::to_owned).or(default) {
+        return Ok(vec![RunSelection::Named(name)]);
+    }
+    let several = || -> Result<Vec<String>> {
+        let names =
+            quon_core::run_entry_names(&project_root).context("failed to read the run entries")?;
+        Ok(if names.len() > 1 { names } else { Vec::new() })
+    };
+    Ok(match unnamed {
+        Unnamed::Only => vec![RunSelection::Only],
+        Unnamed::EachEntry => match several()? {
+            names if names.is_empty() => vec![RunSelection::Only],
+            names => names.into_iter().map(RunSelection::Named).collect(),
+        },
+        Unnamed::HostTestsOnly if several()?.is_empty() => vec![RunSelection::Only],
+        Unnamed::HostTestsOnly => vec![RunSelection::None],
+    })
+}
+
+/// The `RUN` override, if set.
+fn run_override(overrides: &BTreeMap<String, ConfigValue>) -> Result<Option<String>> {
+    match overrides.get(RUN_OVERRIDE) {
+        None => Ok(None),
+        Some(ConfigValue::Str(s)) => Ok(Some(s.clone())),
+        // An unquoted all-digit name parses as a number.
+        Some(ConfigValue::U64(n)) => Ok(Some(n.to_string())),
+        Some(other) => Err(anyhow::anyhow!(
+            "{RUN_OVERRIDE} must name a run entry, got {other:?}"
+        )),
+    }
 }
 
 /// Pick the default profile when the user did not pass `-p/--profile`.
@@ -403,9 +493,15 @@ pub fn config(q: &mut Quon) -> Result<()> {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_min_script(tmp.path());
 
-        let cmd =
-            build_context_at_for_driver(tmp.path(), None, None, None, quon_core::DriverKind::Rustc)
-                .expect("build_context_at_for_driver");
+        let cmd = build_context_at_for_driver(
+            tmp.path(),
+            None,
+            None,
+            None,
+            quon_core::DriverKind::Rustc,
+            &RunSelection::Only,
+        )
+        .expect("build_context_at_for_driver");
         assert_eq!(cmd.resolved.project.name, "demo");
         assert_eq!(cmd.resolved.profile.name, "dev");
         // project_root should be the tempdir (canonicalized by find_project_root).
@@ -436,9 +532,15 @@ pub fn config(q: &mut Quon) -> Result<()> {
 }
 "#;
         fs::write(tmp.path().join("quon.rs"), script).expect("write");
-        let cmd =
-            build_context_at_for_driver(tmp.path(), None, None, None, quon_core::DriverKind::Rustc)
-                .expect("build_context_at_for_driver");
+        let cmd = build_context_at_for_driver(
+            tmp.path(),
+            None,
+            None,
+            None,
+            quon_core::DriverKind::Rustc,
+            &RunSelection::Only,
+        )
+        .expect("build_context_at_for_driver");
         assert_eq!(cmd.resolved.profile.name, "dev");
     }
 }

@@ -40,10 +40,12 @@ quon init
 quon init --bootloader limine --limine 11.4.1
 ```
 
-### `quon build`
+### `quon build [ENTRY]`
 
 Build the project. Compiles all crates in the build model using the resolved
-profile. This includes compiling a custom sysroot (`core`, `alloc`,
+profile. With several [run entries](../running/runners.md#several-run-entries),
+`ENTRY` builds one; without it, `RUN` in `.quon-config` names one, else
+every entry builds in turn. This includes compiling a custom sysroot (`core`, `alloc`,
 `compiler_builtins`) if one does not already exist for the target, then
 compiling each crate with per-crate flag assembly.
 
@@ -51,11 +53,13 @@ compiling each crate with per-crate flag assembly.
 quon build
 quon build -p release
 quon build -t aarch64-unknown-none
+quon build hero-gimbal
 ```
 
-### `quon check`
+### `quon check [ENTRY]`
 
-Run a metadata-only check pass over every crate. Equivalent to `cargo check`
+Run a metadata-only check pass over every crate. `ENTRY` works as for
+`quon build`. Equivalent to `cargo check`
 but uses Quon's per-crate flag assembly. This is faster than a full build
 because it skips code generation. Output goes to `build/tool/check/`.
 
@@ -63,9 +67,9 @@ because it skips code generation. Output goes to `build/tool/check/`.
 quon check
 ```
 
-### `quon clippy`
+### `quon clippy [ENTRY]`
 
-Run clippy over every crate. Uses `clippy-driver`, resolved in the following
+Run clippy over every crate. `ENTRY` works as for `quon build`. Uses `clippy-driver`, resolved in the following
 order:
 
 1. The `$CLIPPY_DRIVER` environment variable
@@ -104,10 +108,12 @@ quon clean
 quon clean --keep-sysroot
 ```
 
-### `quon configure [--output PATH]`
+### `quon configure [ENTRY] [--output PATH]`
 
 Generate a `rust-project.json` file for rust-analyzer. This gives your editor
-a complete project model even though Quon does not use `Cargo.toml`.
+a complete project model even though Quon does not use `Cargo.toml`. With
+several run entries, `ENTRY` (or `RUN` in `.quon-config`) names the one
+whose crates and features the editor sees.
 
 | Flag | Short | Description |
 |------|-------|-------------|
@@ -152,11 +158,13 @@ quon vendor --check
 quon vendor --force
 ```
 
-### `quon run [flags] [-- RUNNER_ARGS...]`
+### `quon run [flags] [ENTRY] [-- RUNNER_ARGS...]`
 
 Build the project and start the profile's run binary with its
-[runner](../running/runners.md). Arguments after `--` are appended to
-the runner's: QEMU's, or a command runner's argv. `--gdb`, `--uefi`,
+[runner](../running/runners.md). With several
+[run entries](../running/runners.md#several-run-entries), `ENTRY` (or
+`RUN` in `.quon-config`) names the one to start. Arguments after `--`
+are appended to the runner's: QEMU's, or a command runner's argv. `--gdb`, `--uefi`,
 `--direct` and `--bios` need a QEMU runner.
 
 | Flag | Short | Description |
@@ -174,6 +182,7 @@ quon run -p release
 quon run --uefi --timeout 30
 quon run --gdb -- -d int
 quon run --dry-run
+quon run hero-gimbal -- --speed 4000
 ```
 
 ### `quon test [flags] [FILTER] [-- QEMU_ARGS...]`
@@ -187,6 +196,7 @@ selects integration and boot tests by name. See
 
 | Flag | Short | Description |
 |------|-------|-------------|
+| `--entry <NAME>` | `-e` | The run entry whose integration and boot tests run. With several entries and none named, only the host tests run |
 | `--host` | | Run the host tests |
 | `--integration` | | Run the integration tests |
 | `--boot` | | Run the boot tests |

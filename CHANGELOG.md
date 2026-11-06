@@ -26,6 +26,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `Profile::qemu_boot_mode` are removed. See
   [`docs/src/migration/config-to-quon.md`](docs/src/migration/config-to-quon.md).
 
+### Added (several run entries)
+
+- **`q.run` can be called once per binary.** Each entry takes a
+  `.name(..)`, and `quon run <entry>`, `quon build <entry>`,
+  `quon check <entry>`, `quon clippy <entry>`, `quon configure <entry>`
+  and `quon test --entry <entry>` pick one. `RUN = "<name>"` in
+  `.quon-config`, or `QUON_RUN`, sets the default.
+- **Cargo features resolve per entry**, as `cargo build -p` resolves
+  them, so two entries can enable features of one dependency that
+  exclude each other, such as two chip features of a HAL.
+- `quon build`, `check` and `clippy` with no name build every entry in
+  turn. `quon test` with no name runs only the host tests.
+- `quon run` takes runner arguments only after `--`, so
+  `quon run <entry>` names an entry.
+
 ### Changed (renamed to Quon)
 
 - **Gluon is now Quon.** The `gluon` name on crates.io belongs to the

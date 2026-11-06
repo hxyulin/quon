@@ -199,6 +199,25 @@ pub struct RawBootTestDef {
     pub span: Option<SourceSpan>,
 }
 
+/// One `q.run(..)` entry: a binary `quon run` can start. Consumed
+/// before Cargo expansion, which keeps one entry's package as a root
+/// and copies its fields into the root profiles; see
+/// `quon_core::config::select_run`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawRunDef {
+    /// `.name(..)`. Only a project's single entry may leave it unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The crate to start, as profiles name their `run_binary`.
+    pub binary: String,
+    /// The crate or package declaration the binary belongs to.
+    pub owner: String,
+    /// The target the root profiles build for when this entry runs.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+}
+
 /// Raw form of [`crate::build_model::RunnerDef`]. `kind` is `None`
 /// until `.qemu(..)` or `.command(..)` sets it; intern reports a runner
 /// left without one.

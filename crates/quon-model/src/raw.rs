@@ -3,7 +3,7 @@ use crate::handle::Arena;
 use crate::kconfig::{ConfigOptionDef, PresetDef};
 use crate::raw_defs::{
     RawBootTestDef, RawBootloaderDef, RawBuildStepDef, RawCargoWorkspace, RawCrateDef, RawEspDef,
-    RawGroupDef, RawPipelineDef, RawProfileDef, RawRunnerDef,
+    RawGroupDef, RawPipelineDef, RawProfileDef, RawRunDef, RawRunnerDef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -65,6 +65,10 @@ pub struct RawBuildModel {
     /// `BootTest::new(name, &profile)`: suites that boot a profile's run binary.
     #[serde(default)]
     pub boot_tests: Arena<RawBootTestDef>,
+    /// `q.run(..)` entries, in declaration order. Consumed before Cargo
+    /// expansion, like `cargo_workspace`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RawRunDef>,
 }
 
 #[cfg(test)]

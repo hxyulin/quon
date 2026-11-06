@@ -173,16 +173,26 @@ pub enum Command {
 
 /// Arguments for `quon build`.
 #[derive(clap::Args, Debug)]
-pub struct BuildArgs {}
+pub struct BuildArgs {
+    /// The run entry to build. Default: `RUN` in `.quon-config`, else
+    /// every entry, one after another.
+    pub entry: Option<String>,
+}
 
-/// Arguments for `quon check`. Currently empty — the same global
-/// `-p`/`-t`/`-j`/`-C` flags that apply to `build` apply here.
+/// Arguments for `quon check`. The same global `-p`/`-t`/`-j`/`-C`
+/// flags that apply to `build` apply here.
 #[derive(clap::Args, Debug)]
-pub struct CheckArgs {}
+pub struct CheckArgs {
+    /// The run entry to check. Default: as for `quon build`.
+    pub entry: Option<String>,
+}
 
-/// Arguments for `quon clippy`. Currently empty.
+/// Arguments for `quon clippy`.
 #[derive(clap::Args, Debug)]
-pub struct ClippyArgs {}
+pub struct ClippyArgs {
+    /// The run entry to lint. Default: as for `quon build`.
+    pub entry: Option<String>,
+}
 
 /// Arguments for `quon fmt`.
 #[derive(clap::Args, Debug)]
@@ -247,6 +257,9 @@ pub struct CleanArgs {
 /// Arguments for `quon configure`.
 #[derive(clap::Args, Debug)]
 pub struct ConfigureArgs {
+    /// The run entry whose crates rust-analyzer sees. Default: `RUN`
+    /// in `.quon-config`, else the project's only entry.
+    pub entry: Option<String>,
     /// Output path for `rust-project.json` (default: `<project_root>/rust-project.json`).
     #[arg(short, long)]
     pub output: Option<PathBuf>,
@@ -255,6 +268,9 @@ pub struct ConfigureArgs {
 /// Arguments for `quon run`.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
+    /// The run entry to start. Default: `RUN` in `.quon-config`, else
+    /// the project's only entry.
+    pub entry: Option<String>,
     /// Force UEFI boot (OVMF pflash). Overrides the QEMU
     /// runner's `.boot(...)`. Mutually exclusive with
     /// `--direct` and `--bios`.
@@ -298,7 +314,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub gdb: bool,
     /// Arguments after `--` are appended verbatim to the runner's.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg(last = true, allow_hyphen_values = true)]
     pub extra: Vec<OsString>,
 }
 
@@ -308,6 +324,11 @@ pub struct TestArgs {
     /// Passed to each host test as libtest's filter. Integration and
     /// boot tests run only when their name contains it.
     pub filter: Option<String>,
+    /// The run entry whose integration and boot tests run. Default:
+    /// `RUN` in `.quon-config`, else the project's only entry. With
+    /// several entries and none named, only the host tests run.
+    #[arg(short = 'e', long, value_name = "NAME")]
+    pub entry: Option<String>,
     /// Run the host tests. With none of `--host`, `--integration` and
     /// `--boot`, every kind runs.
     #[arg(long)]
@@ -412,6 +433,20 @@ impl Cli {
             Some("release")
         } else {
             self.profile.as_deref()
+        }
+    }
+
+    /// The run entry named on the command line, for the commands that
+    /// take one.
+    pub fn entry(&self) -> Option<&str> {
+        match &self.command {
+            Command::Build(a) => a.entry.as_deref(),
+            Command::Check(a) => a.entry.as_deref(),
+            Command::Clippy(a) => a.entry.as_deref(),
+            Command::Configure(a) => a.entry.as_deref(),
+            Command::Run(a) => a.entry.as_deref(),
+            Command::Test(a) => a.entry.as_deref(),
+            _ => None,
         }
     }
 }

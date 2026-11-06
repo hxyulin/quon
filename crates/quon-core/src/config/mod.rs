@@ -10,9 +10,11 @@
 mod interpolate;
 pub mod overrides;
 mod resolve;
+mod select;
 
 pub use overrides::{
     DEFAULT_ENV_PREFIX, DEFAULT_OVERRIDE_FILENAME, load_env_overrides, load_override_file,
     merge_overrides,
 };
 pub use resolve::resolve;
+pub use select::{RunSelection, run_entry_names, select_run};

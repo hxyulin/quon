@@ -35,6 +35,14 @@ can maintain their own overrides without creating merge conflicts.
 
 The command line can name another file with `-C` / `--config-file`.
 
+`RUN` is reserved. It names the
+[run entry](../running/runners.md#several-run-entries) a command uses
+when the command line names none:
+
+```
+RUN = "hero-gimbal"
+```
+
 ## Environment variables
 
 Prefix any config option name with `QUON_` to override it via the environment:

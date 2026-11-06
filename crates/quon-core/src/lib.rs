@@ -60,12 +60,26 @@ use std::path::Path;
 ///
 /// This is the canonical entry point. CLI subcommands and embedders
 /// should call this rather than `script_runner::compile_and_run` directly.
+///
+/// With several `q.run(..)` entries, every entry's package stays and no
+/// profile has a run binary ([`config::RunSelection::All`]); use
+/// [`load_build_model_for`] to build one entry.
 pub fn load_build_model(project_root: &Path) -> Result<BuildModel> {
+    load_build_model_for(project_root, &config::RunSelection::All)
+}
+
+/// [`load_build_model`] for the run entry `selection` picks. Features
+/// resolve over that entry's packages alone; see
+/// [`config::select_run`].
+pub fn load_build_model_for(
+    project_root: &Path,
+    selection: &config::RunSelection,
+) -> Result<BuildModel> {
     let rs_path = project_root.join("quon.rs");
     if rs_path.is_file() {
         let layout = compile::BuildLayout::new(project_root.join("build"), "script-runner");
         let info = compile::RustcInfo::load_or_probe(&layout)?;
-        return script_runner::compile_and_run(project_root, layout.root(), &info);
+        return script_runner::compile_and_run(project_root, layout.root(), &info, selection);
     }
     Err(Error::Config(format!(
         "no quon.rs in {}",
@@ -81,6 +95,15 @@ pub fn load_raw_build_model(project_root: &Path) -> Result<quon_model::RawBuildM
     let layout = compile::BuildLayout::new(project_root.join("build"), "script-runner");
     let info = compile::RustcInfo::load_or_probe(&layout)?;
     script_runner::compile_and_run_raw(project_root, layout.root(), &info)
+}
+
+/// The names of the `q.run(..)` entries in `<project_root>/quon.rs`, in
+/// declaration order. A project's single entry may have no name, and
+/// then the list is empty.
+pub fn run_entry_names(project_root: &Path) -> Result<Vec<String>> {
+    Ok(config::run_entry_names(&load_raw_build_model(
+        project_root,
+    )?))
 }
 
 /// Resolve a [`BuildModel`] into a [`ResolvedConfig`] for a specific

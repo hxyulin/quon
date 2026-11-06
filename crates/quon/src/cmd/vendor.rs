@@ -55,6 +55,7 @@ pub fn run(
         config_file,
         LayoutContextOpts {
             skip_vendor_autoreg: true,
+            ..LayoutContextOpts::default()
         },
     )?;
     run_dependencies(ctx, args.check, args.force, args.offline)

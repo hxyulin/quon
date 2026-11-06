@@ -78,13 +78,14 @@ The other methods on `Quon` set what a project has one of:
 | `q.cargo_workspace(dir)` | The Cargo workspace packages come from |
 | `q.default_target(&target)` | The target crates build for when they name none |
 | `q.default_profile(&profile)` | The profile used without `-p` or `-r` (`dev` if unset) |
-| `q.run(&artifact)` | What `quon run` starts, and with `.runner(&runner)` how |
+| `q.run(&artifact)` | What `quon run` starts, with `.runner(&runner)` how and `.name(..)` which entry it is; see [Several run entries](../running/runners.md#several-run-entries) |
 | `q.host_tests()` | The packages whose tests `quon test` runs on the host |
 | `q.include_kconfig(path)` | A `.kconfig` file to read options and presets from |
 | `q.profile(name)` | A `ProfileRef` to a profile by name, such as the built-in `dev` |
 
-`q.cargo_workspace` and `q.run` are errors when called twice. A second
-`q.project` replaces the first.
+`q.cargo_workspace` is an error when called twice. A second
+`q.project` replaces the first. Each `q.run` call adds a run entry, and
+a project with more than one names each.
 
 A `Target` is a plain value, not an item: `Target::builtin(triple)`,
 `Target::spec(name, path)` or `Target::host()`. Quon registers it the
