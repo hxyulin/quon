@@ -11,10 +11,11 @@
 //!
 //! One [`RawCrateDef`] per unit, named by [`UnitGraph::unit_names`]:
 //!
-//! - root units (the lib and bins of a root package in the root's
-//!   domain) join the root's group and take the root's Gluon-only
-//!   settings: linker script, cfg and rustc flags, `artifact_env`,
-//!   `requires_config`, and the raw-binary crate type for bins;
+//! - root units (the lib, bins and `harness = false` tests of a root
+//!   package in the root's domain) join the root's group and take the
+//!   root's Gluon-only settings: linker script, cfg and rustc flags,
+//!   `artifact_env`, `requires_config`, and the raw-binary crate type
+//!   for bins and tests;
 //! - every other unit joins a synthetic group per domain,
 //!   `cargo:<target>` or `cargo:host`, which links the sysroot but not
 //!   the config crate.
@@ -24,6 +25,11 @@
 //! the package identity (with the `Cargo.lock` checksum for registry
 //! packages), declared features for `--check-cfg`, lints, the `CARGO_*`
 //! environment, and the build script that runs for the unit.
+//!
+//! Units only the tests need (the tests, their dev-dependencies, and
+//! copies of dependencies the dev-dependencies change; see
+//! [`super::resolve`]) carry [`CargoUnitDef::test_only`], and
+//! `gluon build` leaves them out.
 //!
 //! ### Build scripts
 //!
@@ -605,8 +611,7 @@ fn lower_unit(
             (ty, &t.path, &t.edition, name.replace('-', "_"), None)
         }
         other => {
-            // The resolver makes no lib-test units, and build-script
-            // units are skipped by the caller.
+            // The caller skips build-script units.
             return Err(Diagnostic::error(format!(
                 "package `{}`: {other} units are not supported",
                 pkg.name()
@@ -708,6 +713,7 @@ fn lower_unit(
             env,
             build_script,
             is_test: matches!(u.kind, UnitKind::Test(_)),
+            test_only: u.test_only,
         }),
         ..Default::default()
     };

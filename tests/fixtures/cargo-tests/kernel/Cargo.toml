@@ -10,3 +10,7 @@ harness = false
 [[test]]
 name = "fails"
 harness = false
+
+# Only the tests link it, so `gluon build` leaves it out.
+[dev-dependencies]
+testkit = { path = "../testkit" }

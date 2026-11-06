@@ -8,6 +8,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    let _ = kernel::answer();
+    let _ = kernel::answer() == testkit::expected_answer();
     loop {}
 }

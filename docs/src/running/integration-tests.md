@@ -19,10 +19,38 @@ harness = false
 ```
 
 Gluon skips a test without `harness = false` and warns about it. The
-test builds like the package's bin: it links the package's lib and its
-normal dependencies, and takes the group's linker script, rustc flags
-and config crate. Gluon also passes `--cfg test`, as Cargo does.
-Dev-dependencies are not supported yet.
+test builds like the package's bin: it links the package's lib, its
+normal dependencies and its dev-dependencies, and takes the group's
+linker script, rustc flags and config crate. Gluon also passes
+`--cfg test`, as Cargo does.
+
+## Dev-dependencies
+
+A test can use the package's `[dev-dependencies]`, including
+`[target.'cfg(...)'.dev-dependencies]` tables matched against the
+group's target, and proc macros, which build for the host:
+
+```toml
+[dev-dependencies]
+ktest = { path = "../ktest" }
+```
+
+Gluon resolves features the way `cargo build` and `cargo test` do:
+
+- The kernel's resolve ignores dev-dependencies, so the kernel binary is
+  the same whether or not tests or dev-dependencies are declared.
+- The tests' resolve adds the dev-dependencies of the packages that
+  have tests, and their features unify with the normal dependencies'.
+
+When a dev-dependency turns on a feature of a crate the kernel also
+uses, that crate builds twice: once for the kernel and once, with the
+extra feature, for the tests. The second copy takes the suffix
+`@test-pass` in the build output, as does each crate that depends on
+it, such as the package's lib. Crates the dev-dependencies leave
+unchanged build once.
+
+Only the dev-dependencies of a package named with `group.package(...)`
+apply. Those of its dependencies never do, as in Cargo.
 
 A test file defines what the kernel binary defines, such as the entry
 symbol and the `#[panic_handler]`, and reports its result through the
@@ -66,6 +94,6 @@ one at a time, since they share the profile's OVMF variables file.
 
 ## Which commands build tests
 
-`gluon build` and `gluon run` skip test crates, so a broken test does
-not break the build. `gluon check` and `gluon clippy` include them, as
+`gluon build` and `gluon run` skip test crates, the dev-dependencies
+and the `@test-pass` copies, so a broken test does not break the build. `gluon check` and `gluon clippy` include them, as
 `cargo clippy --all-targets` does, and `gluon test` builds them.

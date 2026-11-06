@@ -446,12 +446,23 @@ pub struct CargoUnitDef {
     /// skip it; `gluon test` builds and boots it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_test: bool,
+    /// Only `gluon test` builds the unit: an integration test, a
+    /// dev-dependency, or a copy of a dependency whose features or deps
+    /// differ for the tests. `gluon build` and `gluon run` skip it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub test_only: bool,
 }
 
 impl CrateDef {
     /// Whether the crate is an integration test lowered from `tests/`.
     pub fn is_test(&self) -> bool {
         self.cargo.as_ref().is_some_and(|c| c.is_test)
+    }
+
+    /// Whether only `gluon test` builds the crate; see
+    /// [`CargoUnitDef::test_only`].
+    pub fn is_test_only(&self) -> bool {
+        self.cargo.as_ref().is_some_and(|c| c.test_only)
     }
 }
 
