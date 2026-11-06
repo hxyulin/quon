@@ -200,7 +200,7 @@ fn run_host_tests(
     Ok(())
 }
 
-/// Build the suite's profile, boot its boot binary, and record the
+/// Build the suite's profile, boot its run binary, and record the
 /// result.
 fn run_boot_test(
     ctx: &CmdContext,

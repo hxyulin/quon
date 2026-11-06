@@ -57,7 +57,7 @@ cfg.profile("dev")
     .target(target)
     .opt_level(0)
     .debug_info(true)
-    .boot_binary("kernel");
+    .run_binary("kernel");
 
 cfg.profile("release")
     .inherits("dev")
@@ -73,15 +73,15 @@ cfg.profile("release")
 | `.opt_level(n)` | Optimization level: 0, 1, 2, or 3 |
 | `.debug_info(bool)` | Include debug symbols in the output |
 | `.lto(mode)` | Link-time optimization: `"thin"`, `"fat"`, or `"off"` |
-| `.boot_binary(crate_name)` | Which crate is the QEMU boot entry point |
+| `.run_binary(crate_name)` | Which crate is the QEMU boot entry point |
 | `.inherits(profile_name)` | Inherit settings from another profile |
 | `.preset(name)` | Apply a named config preset |
 | `.config(key, value)` | Set a config option value for this profile |
 
 ### What a profile builds
 
-Without `.boot_binary(...)`, a profile builds every crate. With it, the
-profile builds every crate of its own target, the boot binary, and what
+Without `.run_binary(...)`, a profile builds every crate. With it, the
+profile builds every crate of its own target, the run binary, and what
 they depend on. Crates of other targets build only when something the
 profile builds needs them, for example through `artifact_env`. A project
 with an x86_64 profile and an aarch64 profile therefore does not compile
@@ -94,7 +94,7 @@ between profiles. The child profile inherits all settings from the parent, then
 overrides any settings it explicitly sets.
 
 In the example above, `release` inherits everything from `dev` (target,
-debug_info, boot_binary) and overrides `opt_level` and `lto`. Unset fields fall
+debug_info, run_binary) and overrides `opt_level` and `lto`. Unset fields fall
 through to the parent.
 
 Inheritance chains are resolved at configuration resolution time. A profile can

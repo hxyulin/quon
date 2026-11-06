@@ -107,8 +107,8 @@ pub enum Error {
     #[error("download '{name}': {message}")]
     Download { name: String, message: String },
 
-    #[error("profile '{profile}' has no boot_binary set — required by `gluon run`")]
-    NoBootBinary { profile: String },
+    #[error("profile '{profile}' has no run_binary set — required by `gluon run`")]
+    NoRunBinary { profile: String },
 
     #[error("`gluon run` requires a `cfg.qemu(...)` block in your `gluon.rs`; none was found")]
     QemuNotConfigured,

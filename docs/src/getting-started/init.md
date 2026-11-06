@@ -20,7 +20,7 @@ It refuses to replace an existing `gluon.rs` unless you pass `--force`.
 | Project version | `workspace.package.version`, else the root package's `version`, else `0.1.0` |
 | Target | `--target`, else `build.target` in `.cargo/config.toml`, else `targets` in `rust-toolchain.toml` |
 | Kernel package | `--kernel`, else the only workspace member with a bin target (`[[bin]]` or `src/main.rs`) |
-| `boot_binary` | The kernel package's bin target |
+| `run_binary` | The kernel package's bin target |
 | Linker script | A `-Clink-arg=-T<path>` rustflag in `.cargo/config.toml`, else the only `*.ld` file next to the kernel's `Cargo.toml` |
 | Kernel path on the ESP | The `path: boot():/...` line in `limine.conf` (or `KERNEL_PATH=` in `limine.cfg`), else `boot/kernel` |
 

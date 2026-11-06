@@ -30,7 +30,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     // QEMU config used by `gluon run`. Direct-kernel boot by default;
     // integration tests override to UEFI via --uefi.

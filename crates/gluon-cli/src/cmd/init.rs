@@ -138,7 +138,7 @@ pub enum LinkerScript {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Kernel {
     pub package: String,
-    /// The bin target, which `boot_binary` and the ESP name.
+    /// The bin target, which `run_binary` and the ESP name.
     pub bin: String,
     /// The package directory, relative to the project root.
     pub dir: String,
@@ -721,7 +721,7 @@ pub fn render(plan: &Plan) -> String {
                 o,
                 "    // TODO: {}. Name the kernel's bin target\n\
                  \x20   // so `gluon run` boots it, and declare its package in its own group:\n\
-                 \x20   //     .boot_binary(\"<bin>\")",
+                 \x20   //     .run_binary(\"<bin>\")",
                 capitalize(&describe_no_kernel(why))
             );
         }
@@ -731,7 +731,7 @@ pub fn render(plan: &Plan) -> String {
         "    cfg.profile(\"dev\")\n        .target({tv})\n        .opt_level(0)\n        .debug_info(true)"
     );
     if let Ok(k) = &plan.kernel {
-        let _ = write!(o, "\n        .boot_binary({:?})", k.bin);
+        let _ = write!(o, "\n        .run_binary({:?})", k.bin);
     }
     o.push_str(";\n\n");
 
@@ -1191,7 +1191,7 @@ mod tests {
         );
         assert_eq!(plan.libraries, ["kernel", "tool", "util"]);
         let text = render(&plan);
-        assert!(text.contains("//     .boot_binary(\"<bin>\")"), "{text}");
+        assert!(text.contains("//     .run_binary(\"<bin>\")"), "{text}");
         assert!(!text.contains("cfg.group(\"kernel\")"));
         assert!(text.contains("const PACKAGES"));
 

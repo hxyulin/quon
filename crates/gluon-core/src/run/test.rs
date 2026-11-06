@@ -3,12 +3,12 @@
 //! An integration test is a `harness = false` target in `tests/` of a
 //! root package, lowered to a crate with [`CrateDef::is_test`]. Each
 //! test binary is a whole kernel image, so it is booted on its own, the
-//! way [`super::prepare`] boots the profile's boot binary, and passes
+//! way [`super::prepare`] boots the profile's run binary, and passes
 //! when QEMU exits with the success status.
 //!
 //! In UEFI mode a test needs an ESP. Gluon copies the built ESP that
-//! holds the boot binary and replaces each entry whose source is the
-//! boot binary with the test binary, so `gluon.rs` needs nothing beyond
+//! holds the run binary and replaces each entry whose source is the
+//! run binary with the test binary, so `gluon.rs` needs nothing beyond
 //! what `gluon run` uses. Direct boot passes the test binary as the
 //! kernel. BIOS boot reads a disk image Gluon cannot rewrite per test,
 //! so it is rejected.
@@ -160,7 +160,7 @@ pub fn prepare_tests(
         return Ok(Vec::new());
     }
     let profile = &resolved.profile;
-    let boot = profile.boot_binary.ok_or_else(|| Error::NoBootBinary {
+    let boot = profile.run_binary.ok_or_else(|| Error::NoRunBinary {
         profile: profile.name.clone(),
     })?;
     let qemu_def = model.qemu.as_ref().ok_or(Error::QemuNotConfigured)?;
@@ -245,7 +245,7 @@ pub fn run_test(model: &BuildModel, invocation: QemuInvocation) -> Result<TestSt
     }
 }
 
-/// The one ESP with an entry whose source is the boot binary.
+/// The one ESP with an entry whose source is the run binary.
 fn boot_esp(model: &BuildModel, boot: Handle<CrateDef>) -> Result<(Handle<EspDef>, EspDef)> {
     let boot_name = model
         .crates
@@ -260,18 +260,18 @@ fn boot_esp(model: &BuildModel, boot: Handle<CrateDef>) -> Result<(Handle<EspDef
     match (found.next(), found.next()) {
         (Some((h, e)), None) => Ok((h, e.clone())),
         (None, _) => Err(Error::Config(format!(
-            "gluon test boots each test from a copy of the ESP that holds the boot binary \
+            "gluon test boots each test from a copy of the ESP that holds the run binary \
              '{boot_name}', but no esp(...) block adds it"
         ))),
         (Some(_), Some(_)) => Err(Error::Config(format!(
-            "more than one esp(...) block adds the boot binary '{boot_name}'; gluon test \
+            "more than one esp(...) block adds the run binary '{boot_name}'; gluon test \
              cannot tell which one to boot tests from"
         ))),
     }
 }
 
 /// Assemble the ESP for one test: a copy of the built boot ESP with
-/// each boot-binary entry replaced by the test binary. The copy lives
+/// each run-binary entry replaced by the test binary. The copy lives
 /// at `esp/<esp>.tests/<test>/`, next to the ESPs the build assembles,
 /// and is rebuilt on every run, since copying a few files costs less
 /// than proving the old copy current. With `paths_only`, nothing is

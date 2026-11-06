@@ -22,13 +22,13 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(uefi_target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("bootloader");
+        .run_binary("bootloader");
 
     cfg.profile("release")
         .target(uefi_target)
         .opt_level(2)
         .lto("thin")
-        .boot_binary("bootloader");
+        .run_binary("bootloader");
 
     // Kernel group -- compiled for bare-metal
     cfg.group("kernel")

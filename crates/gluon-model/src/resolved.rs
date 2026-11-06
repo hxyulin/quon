@@ -33,7 +33,7 @@ pub struct ResolvedProfile {
     pub opt_level: u8,
     pub debug_info: bool,
     pub lto: Option<String>,
-    pub boot_binary: Option<Handle<CrateDef>>,
+    pub run_binary: Option<Handle<CrateDef>>,
     /// Profile-level QEMU memory override (MiB). Takes precedence over
     /// `QemuDef::memory_mb` when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,8 +90,8 @@ impl ResolvedProfile {
         if self.lto.is_none() {
             self.lto = parent.lto.clone();
         }
-        if self.boot_binary.is_none() {
-            self.boot_binary = parent.boot_binary;
+        if self.run_binary.is_none() {
+            self.run_binary = parent.run_binary;
         }
         if self.qemu_memory.is_none() {
             self.qemu_memory = parent.qemu_memory;
@@ -140,7 +140,7 @@ mod tests {
             opt_level: 2,
             debug_info: false,
             lto: Some("fat".into()),
-            boot_binary: None,
+            run_binary: None,
             qemu_memory: Some(512),
             qemu_cores: Some(4),
             qemu_extra_args: vec!["-cpu".into(), "max".into()],
@@ -153,7 +153,7 @@ mod tests {
             opt_level: 0, // child overrides
             debug_info: true,
             lto: None, // child inherits
-            boot_binary: None,
+            run_binary: None,
             qemu_memory: None, // child inherits
             qemu_cores: None,
             qemu_extra_args: vec![], // empty inherits

@@ -285,9 +285,9 @@ pub struct ProfileDef {
     pub opt_level: Option<u8>,
     pub debug_info: Option<bool>,
     pub lto: Option<String>,
-    /// Resolved boot binary. `None` means "use the profile's preset/default".
+    /// Resolved run binary. `None` means "use the profile's preset/default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boot_binary: Option<Handle<CrateDef>>,
+    pub run_binary: Option<Handle<CrateDef>>,
     pub preset: Option<String>,
     pub config: BTreeMap<String, ConfigValue>,
     pub qemu_memory: Option<u32>,

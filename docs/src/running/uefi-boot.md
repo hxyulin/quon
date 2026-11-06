@@ -97,7 +97,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.profile("debug")
         .target(uefi_target)
         .opt_level(0)
-        .boot_binary("bootloader");
+        .run_binary("bootloader");
 
     // Kernel -- bare-metal, compiled for x86_64-unknown-none
     cfg.group("kernel")

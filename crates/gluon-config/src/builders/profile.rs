@@ -66,9 +66,9 @@ impl<'cfg> ProfileBuilder<'cfg> {
     }
 
     /// Set the name of the binary that is booted by this profile.
-    pub fn boot_binary(mut self, name: &str) -> Self {
+    pub fn run_binary(mut self, name: &str) -> Self {
         let n = name.to_string();
-        self.modify(|p| p.boot_binary = Some(n));
+        self.modify(|p| p.run_binary = Some(n));
         self
     }
 
@@ -132,14 +132,14 @@ mod tests {
             .target(t)
             .opt_level(0)
             .debug_info(true)
-            .boot_binary("kernel");
+            .run_binary("kernel");
 
         let h = cfg.raw.profiles.lookup("dev").expect("dev profile");
         let p = cfg.raw.profiles.get(h).unwrap();
         assert_eq!(p.target.as_deref(), Some("x86_64-unknown-none"));
         assert_eq!(p.opt_level, Some(0));
         assert_eq!(p.debug_info, Some(true));
-        assert_eq!(p.boot_binary.as_deref(), Some("kernel"));
+        assert_eq!(p.run_binary.as_deref(), Some("kernel"));
         assert!(cfg.diagnostics.is_empty(), "no duplicates");
     }
 

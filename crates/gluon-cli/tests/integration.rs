@@ -489,7 +489,7 @@ fn add_release_profile(fixture: &Path) {
     let script = script.replace(
         "    cfg.qemu(",
         "    cfg.profile(\"release\")\n        .target(target)\n        .opt_level(3)\n        \
-         .debug_info(false)\n        .boot_binary(\"kernel\");\n\n    cfg.qemu(",
+         .debug_info(false)\n        .run_binary(\"kernel\");\n\n    cfg.qemu(",
     );
     fs::write(&gluon_rs, script).expect("write gluon.rs");
 }

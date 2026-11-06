@@ -45,7 +45,7 @@ impl Default for RawDepDef {
 
 /// Raw form of [`crate::build_model::ProfileDef`]: cross-references
 /// stored as name strings. Intern resolves `inherits`, `target`, and
-/// `boot_binary` against the relevant arenas.
+/// `run_binary` against the relevant arenas.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RawProfileDef {
     pub name: String,
@@ -54,7 +54,7 @@ pub struct RawProfileDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boot_binary: Option<String>,
+    pub run_binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opt_level: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -328,7 +328,7 @@ mod tests {
             name: "dev".into(),
             inherits: Some("base".into()),
             target: Some("x86_64".into()),
-            boot_binary: Some("kernel".into()),
+            run_binary: Some("kernel".into()),
             opt_level: Some(0),
             debug_info: Some(true),
             lto: Some("off".into()),
@@ -346,7 +346,7 @@ mod tests {
         assert_eq!(de.name, "dev");
         assert_eq!(de.inherits.as_deref(), Some("base"));
         assert_eq!(de.target.as_deref(), Some("x86_64"));
-        assert_eq!(de.boot_binary.as_deref(), Some("kernel"));
+        assert_eq!(de.run_binary.as_deref(), Some("kernel"));
         assert_eq!(de.opt_level, Some(0));
         assert_eq!(de.qemu_memory, Some(512));
     }

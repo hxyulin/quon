@@ -32,13 +32,13 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
     // ── Profile ───────────────────────────────────────────────────
     // Profiles control optimisation level, debug info, LTO, and
-    // which target to build for. `boot_binary` tells `gluon run`
+    // which target to build for. `run_binary` tells `gluon run`
     // which binary QEMU boots.
     cfg.profile("dev")
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     // ── Group + package ───────────────────────────────────────────
     // A group pins a target. `package` builds a workspace package for

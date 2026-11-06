@@ -38,7 +38,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target_uefi)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("bootloader");
+        .run_binary("bootloader");
 
     // Kernel is compiled for a bare-metal target with a custom linker
     // script. The bootloader will `include_bytes!` its output.

@@ -665,7 +665,7 @@ fn error_message(e: &Error) -> String {
         Error::Download { .. } => e.to_string(),
         // Run-path errors never reach the scheduler today; fall back to the
         // Display impl so they still render sensibly if they ever do.
-        other @ (Error::NoBootBinary { .. }
+        other @ (Error::NoRunBinary { .. }
         | Error::QemuBinaryNotFound { .. }
         | Error::QemuNotConfigured
         | Error::OvmfNotFound { .. }

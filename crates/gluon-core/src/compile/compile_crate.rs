@@ -491,7 +491,7 @@ mod tests {
             opt_level: 0,
             debug_info: false,
             lto: None,
-            boot_binary: None,
+            run_binary: None,
             qemu_memory: None,
             qemu_cores: None,
             qemu_extra_args: Vec::new(),

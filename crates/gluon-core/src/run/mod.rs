@@ -17,7 +17,7 @@
 //!   and [`launch`] entry points.
 //!
 //! [`prepare_tests`] reuses the same steps through `entry`'s helpers, booting
-//! each integration-test binary in place of the boot binary. [`host`]
+//! each integration-test binary in place of the run binary. [`host`]
 //! finds the host test executables, which run without QEMU.
 
 pub mod boot_mode;

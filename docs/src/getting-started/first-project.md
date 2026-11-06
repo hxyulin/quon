@@ -34,7 +34,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     cfg.group("kernel")
         .target(target)
@@ -61,7 +61,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 - **`profile(name)`** -- defines a compilation profile (analogous to Cargo's
   `dev` / `release` profiles). `.target()` sets which target triple this
   profile compiles for, `.opt_level()` and `.debug_info()` control optimization
-  and debug symbols, and `.boot_binary()` names the crate whose output is the
+  and debug symbols, and `.run_binary()` names the crate whose output is the
   final bootable artifact.
 
 - **`group(name)`** -- collects one or more crates that share a target and

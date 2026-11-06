@@ -104,7 +104,7 @@ fn gluon_run_direct_dry_run_against_minimal() {
         !args.iter().any(|a| a.contains("pflash")),
         "direct mode must not emit pflash drives, got {args:?}"
     );
-    // The boot binary path must end in cross/.../dev/final/kernel.
+    // The run binary path must end in cross/.../dev/final/kernel.
     let kernel_idx = args.iter().position(|a| a == "-kernel").unwrap();
     let kernel_path = &args[kernel_idx + 1];
     assert!(
@@ -428,7 +428,7 @@ fn strip_qemu_block(fixture: &Path) {
 #[test]
 fn gluon_run_no_build_skips_build_and_passes_kernel_path() {
     // `--no-build` must skip the build, so nothing is compiled under
-    // build/cross/, and still hand QEMU the would-be boot binary path:
+    // build/cross/, and still hand QEMU the would-be run binary path:
     // a regression could skip the build *and* the `-kernel` argument.
     let (_tmp, fixture) = setup_fixture("minimal");
     let fake_qemu = write_fake_qemu(&fixture);

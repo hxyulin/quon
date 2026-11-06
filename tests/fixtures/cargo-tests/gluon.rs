@@ -16,7 +16,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
     cfg.profile("test").inherits("dev");
     cfg.boot_test("smoke").profile("test");
 

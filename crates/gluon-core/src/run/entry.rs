@@ -45,7 +45,7 @@ pub struct RunOptions {
     /// integration tests and for users sanity-checking a config.
     pub dry_run: bool,
     /// Skip the implicit `build()` step and go straight to the QEMU
-    /// spawn. The user is asserting the boot binary on disk is
+    /// spawn. The user is asserting the run binary on disk is
     /// already current; if it isn't, QEMU will report a clearer
     /// "could not load kernel" error than gluon could fabricate from
     /// the outside. Intended for tight edit/run loops where rerunning
@@ -85,8 +85,8 @@ pub struct Prepared {
 /// 1. **Build.** Invokes [`build_with_reporter`] so `gluon run` is
 ///    idempotent with the current project state. A failed build
 ///    short-circuits without touching QEMU.
-/// 2. **Locate boot binary.** The resolved profile must have a
-///    `boot_binary` set; otherwise [`Error::NoBootBinary`] is
+/// 2. **Locate run binary.** The resolved profile must have a
+///    `run_binary` set; otherwise [`Error::NoRunBinary`] is
 ///    returned. The binary path is
 ///    `BuildLayout::cross_final_dir(target, profile).join(crate_name)`.
 /// 3. **Resolve QEMU.** [`resolve_qemu`] merges profile overrides and
@@ -117,7 +117,7 @@ pub fn prepare(
     //
     // `--no-build` is the same skip without the spawn skip: the user
     // is telling us "I just rebuilt by hand, don't waste my time
-    // re-checking timestamps". If the boot binary actually is stale
+    // re-checking timestamps". If the run binary actually is stale
     // or missing, QEMU will fail at load time with a clearer
     // diagnostic than gluon would produce by trying to second-guess.
     // Captured if we actually built — carries the ESP output paths
@@ -135,9 +135,9 @@ pub fn prepare(
         None
     };
 
-    // Step 2: locate boot binary.
+    // Step 2: locate run binary.
     let profile = &resolved.profile;
-    let boot_handle = profile.boot_binary.ok_or_else(|| Error::NoBootBinary {
+    let boot_handle = profile.run_binary.ok_or_else(|| Error::NoRunBinary {
         profile: profile.name.clone(),
     })?;
     let kernel = final_binary(ctx, model, resolved, boot_handle)?;

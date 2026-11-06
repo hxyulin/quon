@@ -20,7 +20,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     // A group collects crates sharing a target and edition.
     cfg.group("kernel")
@@ -78,7 +78,7 @@ gluon configure      # Generate rust-project.json for your editor
 ## What happens during `gluon run`
 
 After a successful build, Gluon launches QEMU with the configuration from the
-`cfg.qemu()` block. The `boot_binary("kernel")` setting in the profile tells Gluon
+`cfg.qemu()` block. The `run_binary("kernel")` setting in the profile tells Gluon
 which crate's output to pass to QEMU as the kernel image. Serial output is
 forwarded to your terminal via `.serial_stdio()`.
 

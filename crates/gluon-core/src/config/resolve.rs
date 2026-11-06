@@ -77,7 +77,7 @@ pub fn resolve(
         return Err(Error::Diagnostics(diags));
     };
 
-    // 4. opt_level / debug_info / lto / boot_binary with defaults.
+    // 4. opt_level / debug_info / lto / run_binary with defaults.
     let opt_level = flattened.opt_level.unwrap_or(0);
     if opt_level > 3 {
         diags.push(Diagnostic::error(format!(
@@ -86,7 +86,7 @@ pub fn resolve(
     }
     let debug_info = flattened.debug_info.unwrap_or(false);
     let lto = flattened.lto.clone();
-    let boot_binary = flattened.boot_binary;
+    let run_binary = flattened.run_binary;
 
     // 5. Resolve config options (defaults → preset → overrides).
     let mut resolved_options: BTreeMap<String, ResolvedValue> = BTreeMap::new();
@@ -311,24 +311,24 @@ pub fn resolve(
         resolved_options.insert(k, v);
     }
 
-    // 10. Resolve crate list. When boot_binary is set, include the crates
+    // 10. Resolve crate list. When run_binary is set, include the crates
     //     of the profile's target and everything reachable from them and
-    //     from the boot binary via deps + artifact_deps closure, plus the
+    //     from the run binary via deps + artifact_deps closure, plus the
     //     host test executables and their deps. This
     //     prevents wasteful compilation: a project with profile("x86")
     //     and profile("arm") will not compile the arm crates for the x86
     //     profile, but every crate declared for x86 still builds.
     //
-    //     When boot_binary is None, fall back to including every crate
+    //     When run_binary is None, fall back to including every crate
     //     (backward compat for simple single-target projects).
     //
     //     Host crates (target == "host") set `host: true` so the
     //     scheduler compiles them for the build machine. All other crates
     //     are cross and receive their group's resolved target handle.
-    let reachable = boot_binary.map(|root| reachable_crates(model, root, effective_target));
+    let reachable = run_binary.map(|root| reachable_crates(model, root, effective_target));
     let mut resolved_crates: Vec<ResolvedCrateRef> = Vec::new();
     for (crate_handle, krate) in model.crates.iter() {
-        // Filter to reachable crates when boot_binary is set.
+        // Filter to reachable crates when run_binary is set.
         if let Some(ref set) = reachable
             && !set.contains(&crate_handle)
         {
@@ -376,7 +376,7 @@ pub fn resolve(
             opt_level,
             debug_info,
             lto,
-            boot_binary,
+            run_binary,
             qemu_memory: flattened.qemu_memory,
             qemu_cores: flattened.qemu_cores,
             qemu_extra_args: flattened.qemu_extra_args.clone().unwrap_or_default(),
@@ -453,7 +453,7 @@ fn flatten_profile(
             opt_level,
             debug_info,
             lto,
-            boot_binary,
+            run_binary,
             preset,
             qemu_memory,
             qemu_cores,
@@ -470,10 +470,10 @@ fn flatten_profile(
 
 /// Compute the transitive closure of crates reachable from `root` and
 /// from every crate built for `target` via `deps` and `artifact_deps`
-/// edges. Used when a profile declares a `boot_binary` to restrict the
+/// edges. Used when a profile declares a `run_binary` to restrict the
 /// build to the crates that are actually needed — preventing wasteful
 /// cross-target compilation in multi-profile projects. Crates of the
-/// profile's own target are always kept, so a library the boot binary
+/// profile's own target are always kept, so a library the run binary
 /// does not use is still built and linted.
 ///
 /// Also expands ESP entries: if any source crate in an `EspDef` is reachable,
@@ -525,7 +525,7 @@ fn reachable_crates(
     // — gluon needs to compile the runner before it can spawn it, and
     // the input crates before it can pass their artifact paths in. Their
     // transitive deps are then walked by the BFS below alongside the
-    // boot_binary closure. (A future refinement could restrict this to
+    // run_binary closure. (A future refinement could restrict this to
     // only build steps referenced by the active profile's images, but
     // images are themselves not yet profile-filtered, so the per-profile
     // distinction would buy nothing today.)
@@ -545,7 +545,7 @@ fn reachable_crates(
     // Image seed: an image is an atomic unit (like an esp), so every
     // crate referenced by any of its top-level entries, partition
     // entries, or raw_writes is pulled in. Without this, a hybrid
-    // BIOS/UEFI image referenced by a profile whose boot_binary only
+    // BIOS/UEFI image referenced by a profile whose run_binary only
     // closes over one half would silently drop the other half's source
     // crates — `compile_image` would later fail with a missing-artifact
     // error far from the configuration mistake. Image source names
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_no_boot_binary_includes_all() {
+    fn filter_no_run_binary_includes_all() {
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
@@ -1253,17 +1253,17 @@ mod tests {
         assert!(names.contains(&"crate_a".into()), "got {names:?}");
         assert!(
             names.contains(&"crate_b".into()),
-            "no boot_binary → all crates included, got {names:?}"
+            "no run_binary → all crates included, got {names:?}"
         );
     }
 
     #[test]
-    fn filter_boot_binary_restricts_to_reachable() {
+    fn filter_run_binary_restricts_to_reachable() {
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).boot_binary("crate_a");
+            cfg.profile("default").target(x).run_binary("crate_a");
             {
                 let mut g1 = cfg.group("a").target(x);
                 g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
@@ -1274,10 +1274,7 @@ mod tests {
             }
         });
         let names = crate_names_for_profile(&model, "default");
-        assert!(
-            names.contains(&"crate_a".into()),
-            "boot_binary is reachable"
-        );
+        assert!(names.contains(&"crate_a".into()), "run_binary is reachable");
         assert!(
             !names.contains(&"crate_b".into()),
             "crate_b is unreachable from crate_a, got {names:?}"
@@ -1285,15 +1282,15 @@ mod tests {
     }
 
     #[test]
-    fn filter_boot_binary_keeps_crates_of_the_profile_target() {
-        // A library on the profile's own target that the boot binary
+    fn filter_run_binary_keeps_crates_of_the_profile_target() {
+        // A library on the profile's own target that the run binary
         // does not use still builds: only other targets' crates are
         // filtered. Its host proc macro comes with it.
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).boot_binary("kernel");
+            cfg.profile("default").target(x).run_binary("kernel");
             {
                 let mut h = cfg.group("host_tools").target_host();
                 h.add("lib_derive", "crates/derive")
@@ -1313,7 +1310,7 @@ mod tests {
         assert!(names.contains(&"kernel".into()), "got {names:?}");
         assert!(
             names.contains(&"lib".into()),
-            "same-target crate unused by the boot binary, got {names:?}"
+            "same-target crate unused by the run binary, got {names:?}"
         );
         assert!(
             names.contains(&"lib_derive".into()),
@@ -1332,7 +1329,7 @@ mod tests {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(y).boot_binary("bootloader");
+            cfg.profile("default").target(y).run_binary("bootloader");
             {
                 let mut g1 = cfg.group("kernel").target(x);
                 g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
@@ -1347,7 +1344,7 @@ mod tests {
         let names = crate_names_for_profile(&model, "default");
         assert!(
             names.contains(&"bootloader".into()),
-            "boot_binary itself, got {names:?}"
+            "run_binary itself, got {names:?}"
         );
         assert!(
             names.contains(&"kernel".into()),
@@ -1361,7 +1358,7 @@ mod tests {
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(x).boot_binary("kernel");
+            cfg.profile("default").target(x).run_binary("kernel");
             {
                 let mut h = cfg.group("host_tools").target_host();
                 h.add("my_derive", "crates/derive")
@@ -1384,13 +1381,13 @@ mod tests {
 
     #[test]
     fn filter_two_profiles_disjoint_sets() {
-        // Two profiles with different boot_binary should produce disjoint crate sets.
+        // Two profiles with different run_binary should produce disjoint crate sets.
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("prof_x").target(x).boot_binary("crate_x");
-            cfg.profile("prof_y").target(y).boot_binary("crate_y");
+            cfg.profile("prof_x").target(x).run_binary("crate_x");
+            cfg.profile("prof_y").target(y).run_binary("crate_y");
             {
                 let mut g1 = cfg.group("gx").target(x);
                 g1.add("crate_x", "crates/x").crate_type(CrateType::Bin);
@@ -1414,7 +1411,7 @@ mod tests {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(y).boot_binary("bootloader");
+            cfg.profile("default").target(y).run_binary("bootloader");
             {
                 let mut g1 = cfg.group("kernel").target(x);
                 g1.add("kernel", "crates/kernel").crate_type(CrateType::Bin);
@@ -1436,7 +1433,7 @@ mod tests {
 
     #[test]
     fn filter_image_source_crate_pulled_in() {
-        // An image references a crate that the boot_binary closure does
+        // An image references a crate that the run_binary closure does
         // not reach. Without the image-seed expansion, that crate would
         // be silently dropped and `compile_image` would later fail with
         // a missing-artifact error far from the configuration.
@@ -1444,7 +1441,7 @@ mod tests {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
             let y = cfg.target_spec("y", "y.json");
-            cfg.profile("default").target(x).boot_binary("crate_a");
+            cfg.profile("default").target(x).run_binary("crate_a");
             {
                 let mut g1 = cfg.group("a").target(x);
                 g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);
@@ -1468,13 +1465,13 @@ mod tests {
     fn filter_build_step_runner_and_inputs_pulled_in() {
         // A build_step's runner crate (a host bin) and its crate_in
         // inputs must be in the reachable set even when the active
-        // profile's boot_binary closure doesn't reach them — gluon
+        // profile's run_binary closure doesn't reach them — gluon
         // needs to compile the runner before spawning it and the
         // inputs before passing their artifact paths in.
         let model = build_model(|cfg| {
             cfg.project("t", "1");
             let x = cfg.target_spec("x", "t.json");
-            cfg.profile("default").target(x).boot_binary("crate_a");
+            cfg.profile("default").target(x).run_binary("crate_a");
             {
                 let mut g1 = cfg.group("a").target(x);
                 g1.add("crate_a", "crates/a").crate_type(CrateType::Bin);

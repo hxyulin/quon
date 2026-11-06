@@ -6,7 +6,7 @@
 |------|-------------------|---------------|-------------|
 | Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
 | Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | QEMU, one boot per test | QEMU exits with the success status |
-| Boot tests | The boot binary of the profile a `cfg.boot_test(...)` names | QEMU, one boot per suite | QEMU exits with the success status |
+| Boot tests | The run binary of the profile a `cfg.boot_test(...)` names | QEMU, one boot per suite | QEMU exits with the success status |
 
 Host tests run first because they are the fastest and need no QEMU.
 Every run happens even when an earlier one fails, and `gluon test` ends
@@ -159,11 +159,11 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 ### How a test boots
 
 `gluon test` boots a test the way `gluon run` boots the profile's
-`boot_binary`, with the test binary in its place:
+`run_binary`, with the test binary in its place:
 
-- **UEFI:** Gluon copies the built ESP that holds the boot binary to
+- **UEFI:** Gluon copies the built ESP that holds the run binary to
   `esp/<esp>.tests/<test>/` and replaces each entry whose source is the
-  boot binary with the test binary. `gluon.rs` needs no extra setup.
+  run binary with the test binary. `gluon.rs` needs no extra setup.
 - **Direct boot:** the test binary is passed as `-kernel`.
 - **BIOS boot** is not supported, since the disk image is built once.
 
@@ -185,7 +185,7 @@ cfg.profile("test").inherits("dev").preset("test");
 cfg.boot_test("ktest").profile("test");
 ```
 
-`gluon test` builds the suite's profile and boots its boot binary as
+`gluon test` builds the suite's profile and boots its run binary as
 `gluon run -p <profile>` would. The suite passes when QEMU exits with
 `qemu().success_exit_code(...)`, or 0 when that is unset, within the
 timeout. Gluon reports the suite as one result; the kernel's own

@@ -344,12 +344,12 @@ fn intern_profiles(
             }
             h
         });
-        let boot_binary_handle = p.boot_binary.as_deref().and_then(|name| {
+        let run_binary_handle = p.run_binary.as_deref().and_then(|name| {
             let h = crates.lookup(name);
             if h.is_none() {
                 diags.push(
                     InternDiagnostic::error(format!(
-                        "profile '{}' references unknown boot binary crate '{}'",
+                        "profile '{}' references unknown run binary crate '{}'",
                         p.name, name
                     ))
                     .with_optional_span(p.span.clone()),
@@ -366,7 +366,7 @@ fn intern_profiles(
                 opt_level: p.opt_level,
                 debug_info: p.debug_info,
                 lto: p.lto.clone(),
-                boot_binary: boot_binary_handle,
+                run_binary: run_binary_handle,
                 preset: p.preset.clone(),
                 config: p.config.clone(),
                 qemu_memory: p.qemu_memory,

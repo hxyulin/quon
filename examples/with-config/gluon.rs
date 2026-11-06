@@ -25,7 +25,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     // ── Config options ────────────────────────────────────────────
     // Typed configuration options. Each becomes a constant in the

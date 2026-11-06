@@ -456,13 +456,13 @@ fn scripted_workspace() -> tempfile::TempDir {
     ])
 }
 
-/// The script's build-dep is reachable from the boot binary through
+/// The script's build-dep is reachable from the run binary through
 /// the script alone, so it is in the build.
 fn scripted_raw() -> RawBuildModel {
     let mut cfg = Config::new();
     cfg.project("demo", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).boot_binary("a");
+    cfg.profile("dev").target(t).run_binary("a");
     cfg.cargo_workspace(".");
     cfg.group("k").target(t).package("a");
     assert!(cfg.diagnostics().is_empty(), "{:?}", cfg.diagnostics());
@@ -1525,15 +1525,15 @@ fn host_test_lib_tests_name_their_doctest_lib() {
     assert_eq!(doctest_lib(&raw), [("a@test".to_string(), None)]);
 }
 
-/// With a boot binary, a profile builds what the target's crates reach,
+/// With a run binary, a profile builds what the target's crates reach,
 /// and the host tests too, which nothing reaches.
 #[test]
-fn host_tests_build_under_a_boot_binary() {
+fn host_tests_build_under_a_run_binary() {
     let ws = host_test_workspace();
     let mut cfg = Config::new();
     cfg.project("demo", "0.1.0");
     let t = cfg.target("x86_64-unknown-none");
-    cfg.profile("dev").target(t).boot_binary("a");
+    cfg.profile("dev").target(t).run_binary("a");
     cfg.cargo_workspace(".");
     cfg.group("k").target(t).package("a");
     cfg.host_tests().package("a");

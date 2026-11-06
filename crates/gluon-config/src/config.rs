@@ -736,7 +736,7 @@ impl Config {
     }
 
     /// Declare a boot test suite: `gluon test` builds the profile named
-    /// by `.profile(...)`, boots its boot binary in QEMU, and passes
+    /// by `.profile(...)`, boots its run binary in QEMU, and passes
     /// the suite when QEMU exits with `qemu().success_exit_code(...)`.
     /// The kernel decides what to run once booted, typically from a
     /// config option that the profile's preset sets.

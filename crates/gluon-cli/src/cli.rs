@@ -133,7 +133,7 @@ pub enum Command {
     /// result. `--check` verifies without touching disk; `--force`
     /// bypasses the fingerprint-match fast path.
     Vendor(VendorArgs),
-    /// Build the project and launch the boot binary under QEMU.
+    /// Build the project and launch the run binary under QEMU.
     ///
     /// Picks between direct-kernel boot (`-kernel <elf>`) and UEFI
     /// (OVMF pflash). The boot mode is selected by (in precedence
@@ -148,8 +148,8 @@ pub enum Command {
     /// packages in `cfg.host_tests()`, run on the host. Integration
     /// tests are the `harness = false` targets in `tests/` of packages
     /// named with `group.package(...)`; each boots the way `gluon run`
-    /// boots the boot binary, with the test binary in its place.
-    /// Boot tests (`cfg.boot_test(...)`) boot a profile's boot binary.
+    /// boots the run binary, with the test binary in its place.
+    /// Boot tests (`cfg.boot_test(...)`) boot a profile's run binary.
     /// QEMU runs pass when QEMU exits with the success status. Every
     /// run happens even when an earlier one fails.
     Test(TestArgs),
@@ -276,7 +276,7 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
     /// Skip the implicit build step. Spawns QEMU directly against
-    /// whatever boot binary is currently on disk.
+    /// whatever run binary is currently on disk.
     ///
     /// Intended for tight edit/run loops where the user has just
     /// built by hand and wants to skip gluon's fingerprint sweep. If

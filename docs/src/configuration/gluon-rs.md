@@ -27,7 +27,7 @@ pub fn config(cfg: &mut gluon_config::Config) -> gluon_config::Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     cfg.group("kernel")
         .target(target)

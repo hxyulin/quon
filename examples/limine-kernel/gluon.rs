@@ -23,7 +23,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
         .target(target)
         .opt_level(0)
         .debug_info(true)
-        .boot_binary("kernel");
+        .run_binary("kernel");
 
     // x86_64-unknown-none links a position-independent executable by
     // default. Limine loads that only with a PT_DYNAMIC segment, so

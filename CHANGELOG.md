@@ -20,10 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lib's features and build-script output. `doctest = false` turns them
   off. They are reported as `host test <package> (doctests)`.
 - **Boot tests.** `cfg.boot_test("name").profile("test")` makes
-  `gluon test` build that profile and boot its boot binary, passing when
+  `gluon test` build that profile and boot its run binary, passing when
   QEMU exits with the success status. This runs a kernel's own test
   runner, such as one a config option turns on.
 - **`CrateType::Test`**, a libtest executable built with `--test`.
+
+### Changed (runners)
+
+- **`profile.boot_binary(...)` is now `profile.run_binary(...)`.** A
+  profile's binary need not boot: a host tool's is run directly.
+  `Error::NoBootBinary` is now `Error::NoRunBinary`.
 
 ### Changed (`gluon test`)
 
