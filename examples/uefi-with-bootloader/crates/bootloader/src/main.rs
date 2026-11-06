@@ -11,8 +11,8 @@
 
 use core::panic::PanicInfo;
 
-/// The compiled kernel. Gluon sets `KERNEL_PATH` for this crate's rustc
-/// because gluon.rs declares `artifact_env("KERNEL_PATH", "kernel")`.
+/// The compiled kernel. Quon sets `KERNEL_PATH` for this crate's rustc
+/// because quon.rs declares `artifact_env("KERNEL_PATH", "kernel")`.
 static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
 
 /// The magic the kernel image carries, for a debugger or a later

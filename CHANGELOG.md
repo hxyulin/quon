@@ -6,19 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (renamed to Quon)
+
+- **Gluon is now Quon.** The `gluon` name on crates.io belongs to the
+  Gluon scripting language, so the project is renamed before its first
+  release there. The CLI package and binary are `quon`, installed with
+  `cargo install quon`, and the libraries are `quon-core`,
+  `quon-config`, `quon-model`, `quon-runner` and `quon-runner-qemu`.
+- `gluon.rs`, `gluon_config`, `.gluon-config`, `gluon.lock`, `GLUON_*`,
+  `~/.gluon` and the `gluon-<name>` plugin prefix are renamed to their
+  `quon` forms.
+
 ### Added (runner plugins)
 
 - **Runner plugins.** A runner can be served by a plugin:
   `cfg.runner("board").plugin("probe-rs").setting("chip", "...")`.
-  Gluon looks the plugin up among the runners built into `gluon`, then
-  as `gluon-runner-<name>` on `$PATH`, and calls it over a JSON
+  Quon looks the plugin up among the runners built into `quon`, then
+  as `quon-runner-<name>` on `$PATH`, and calls it over a JSON
   protocol on stdin and stdout: `validate` before the build, `prepare`
-  after it. The new `gluon-runner` crate has the protocol types, the
+  after it. The new `quon-runner` crate has the protocol types, the
   `Runner` trait and `serve()` for a plugin's `main`.
 - **QEMU is a runner plugin.** The QEMU argv, boot mode, OVMF and disk
-  code moved from `gluon-core` to the new `gluon-runner-qemu` crate,
-  which `gluon` builds in as the `qemu` plugin and which also builds a
-  `gluon-runner-qemu` executable. `gluon.rs` is unchanged: the QEMU
+  code moved from `quon-core` to the new `quon-runner-qemu` crate,
+  which `quon` builds in as the `qemu` plugin and which also builds a
+  `quon-runner-qemu` executable. `quon.rs` is unchanged: the QEMU
   builder's values become the plugin's settings, and the profile's
   `qemu_*` values its overrides. The commands are the same as before.
   `--uefi`, `--direct` and `--bios` reach a plugin as a `boot_mode`
@@ -29,7 +40,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added (stable Rust and release profiles)
 
-- **Stable toolchains.** Gluon no longer passes `-Zbinary-dep-depinfo`.
+- **Stable toolchains.** Quon no longer passes `-Zbinary-dep-depinfo`.
   It declares every crate file rustc may load as a freshness input
   itself: the `--extern` files, the outputs of every unit and prebuilt
   artifact reachable through them, and a custom sysroot's rlibs. Host
@@ -37,18 +48,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   targets still need nightly. The first build after upgrading rebuilds
   everything, because every rustc command changed.
 - **`-r` / `--release`** selects the `release` profile, as in Cargo.
-- **`gluon init` writes a release profile.** It inherits from `dev` and
+- **`quon init` writes a release profile.** It inherits from `dev` and
   sets `opt_level(3)` and `debug_info(false)`. `dev` is now the
   explicit `default_profile`.
 
 ### Added (host tests and boot tests)
 
-- **Host tests.** `cfg.host_tests().package("name")` makes `gluon test`
+- **Host tests.** `cfg.host_tests().package("name")` makes `quon test`
   build the package's lib and its `harness = true` tests with
   `rustc --test` for the host, with the package's dev-dependencies, and
   run them from the package directory. They resolve features in their
   own domain, so neither the kernel's features nor those of build
-  scripts and proc macros reach them. `gluon build` builds none of
+  scripts and proc macros reach them. `quon build` builds none of
   them. Proc-macro packages are not supported yet.
 - **Bin unit tests.** A host-test package's bins are built with
   `--test` too, as `<bin>@bin-test`. When the package has tests in
@@ -57,15 +68,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`cfg.host_tests().env(name, value)` and `.env_path(name, path)`**
   set variables for every host test run; `.env_path` resolves against
   the project root.
-- **Gluon builds and tests itself.** The repository's `gluon.rs` uses a
-  host profile; `gluon test` runs the same 860 tests as
+- **Quon builds and tests itself.** The repository's `quon.rs` uses a
+  host profile; `quon test` runs the same 860 tests as
   `cargo nextest run --workspace`.
 - **Doctests.** Host-test packages also run their doctests with
   `rustdoc --test`, linking the lib and its dev-dependencies, with the
   lib's features and build-script output. `doctest = false` turns them
   off. They are reported as `host test <package> (doctests)`.
 - **Boot tests.** `cfg.boot_test("name").profile("test")` makes
-  `gluon test` build that profile and boot its run binary, passing when
+  `quon test` build that profile and boot its run binary, passing when
   QEMU exits with the success status. This runs a kernel's own test
   runner, such as one a config option turns on.
 - **`CrateType::Test`**, a libtest executable built with `--test`.
@@ -76,7 +87,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   under Cargo. A package inside another workspace's directory is an
   error that names the workspace root, unless that workspace excludes
   it.
-- **`gluon init` writes a host build** when no target is named and no
+- **`quon init` writes a host build** when no target is named and no
   member looks like a kernel (no `*.ld` beside it, no `#![no_main]` or
   `#![no_std]` bin): a `.target_host()` profile, one host group and
   `host_tests()` for every member.
@@ -86,14 +97,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **A rustup toolchain switch is picked up.** The cached rustc info
   was keyed on `$RUSTC` and the binary's mtime only, so adding a
   `rust-toolchain.toml` or changing the rustup default kept the old
-  compiler. Gluon now checks `rustc --print sysroot` against the cache
+  compiler. Quon now checks `rustc --print sysroot` against the cache
   unless `$RUSTC` is an absolute path.
 
 ### Added (host profiles)
 
 - **`profile.target_host()`** makes a profile build for the host. It
   needs no declared target and builds no sysroot or config crate. With
-  no runner named, `gluon run` runs the binary directly, passing the
+  no runner named, `quon run` runs the binary directly, passing the
   arguments after `--`. `ResolvedProfile::target` is now a
   `TargetSpec`; `cross_target()` gives the handle of a cross profile.
 
@@ -101,12 +112,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Runners replace `cfg.qemu(...)`.** `cfg.runner(name)` declares how
   a profile's run binary is started, and `profile.runner(name)` picks
-  one, inherited through `inherits`. `gluon run`, the integration tests
+  one, inherited through `inherits`. `quon run`, the integration tests
   and the boot tests all go through the profile's runner. Kinds:
   - `.qemu(program)`: the old `cfg.qemu(...)` builder, unchanged. A
     project can now declare several.
   - `.command(&[...])`: runs the argv with each `{binary}` replaced by
-    the binary's path, with `gluon run -- <args>` appended, and passes
+    the binary's path, with `quon run -- <args>` appended, and passes
     on status 0 or `.success_exit_code(n)`.
 
   Migrate with `cfg.runner("qemu").qemu("qemu-system-x86_64")...` and
@@ -122,63 +133,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   profile's binary need not boot: a host tool's is run directly.
   `Error::NoBootBinary` is now `Error::NoRunBinary`.
 
-### Changed (`gluon test`)
+### Changed (`quon test`)
 
-- **`gluon test` runs host tests, then integration tests, then boot
+- **`quon test` runs host tests, then integration tests, then boot
   tests**, and prints one summary. A failed run no longer hides the
   results of the others. `--host`, `--integration` and `--boot` select
   kinds. The filter goes to host tests as libtest's filter. The result
   lines read `integration test <name> ... ok`.
-- **A project without `qemu(...)` can run `gluon test`** when it has
+- **A project without `qemu(...)` can run `quon test`** when it has
   only host tests.
-- `gluon_core::run::prepare_tests` no longer builds; call
+- `quon_core::run::prepare_tests` no longer builds; call
   `run::build_tests` first and pass its summary. `run_test` takes the
   model and a `QemuInvocation`.
 
-### Changed (gluon.rs entry point and `~/.gluon`)
+### Changed (quon.rs entry point and `~/.quon`)
 
-- **`gluon.rs` now defines `pub fn config(cfg: &mut Config) -> Result<()>`
-  instead of `main`.** Gluon generates the `main` that creates the
+- **`quon.rs` now defines `pub fn config(cfg: &mut Config) -> Result<()>`
+  instead of `main`.** Quon generates the `main` that creates the
   `Config`, calls `config` and emits the model. To migrate, replace
   `fn main() -> Result<()> { let mut cfg = Config::new(); ... cfg.emit() }`
   with `pub fn config(cfg: &mut Config) -> Result<()> { ... Ok(()) }` and
   pass `cfg` instead of `&mut cfg` to helpers. A script that still
   defines `main` fails to compile with a note saying this.
-- **The gluon-config library that `gluon.rs` links against is built once
-  per Gluon version and rustc into `~/.gluon`** (or `$GLUON_HOME`) and
+- **The quon-config library that `quon.rs` links against is built once
+  per Quon version and rustc into `~/.quon`** (or `$QUON_HOME`) and
   shared by every project, instead of into each project's `build/`.
-  `gluon` embeds the gluon-config and gluon-model sources and its
+  `quon` embeds the quon-config and quon-model sources and its
   `Cargo.lock`, and builds the library from them offline first, so it
   no longer needs the checkout it was installed from.
-  `GLUON_CONFIG_SOURCE_DIR` is gone. Concurrent `gluon` processes build
+  `QUON_CONFIG_SOURCE_DIR` is gone. Concurrent `quon` processes build
   an entry once.
-- **`gluon configure` declares `gluon.rs` as a library crate** in
-  `rust-project.json`, and points rust-analyzer at the gluon-config
+- **`quon configure` declares `quon.rs` as a library crate** in
+  `rust-project.json`, and points rust-analyzer at the quon-config
   sources the library was built from.
 
-### Added (`gluon setup`)
+### Added (`quon setup`)
 
-- **`gluon setup`** builds the gluon-config library for the current
+- **`quon setup`** builds the quon-config library for the current
   rustc ahead of time and prints its directory. Other commands build
   it on first use.
 
 ### Added (Dev-dependencies for integration tests)
 
 - **`harness = false` tests can use `[dev-dependencies]`.** When a root
-  package has tests, Gluon runs a second feature resolve for them, as
+  package has tests, Quon runs a second feature resolve for them, as
   `cargo test` does: the package's dev-dependencies apply (with
   `[target.'cfg(...)'.dev-dependencies]` keys matched against the
   group's target), and their features unify with the normal ones. The
   kernel's resolve still ignores dev-dependencies, so the kernel's
   artifacts do not change when tests are added. A dependency whose
   features a dev-dependency grows builds a second time for the tests,
-  under a `@test-pass` name. `gluon build` and `gluon run` leave the
+  under a `@test-pass` name. `quon build` and `quon run` leave the
   dev-dependencies and those copies out. See
   `docs/src/running/integration-tests.md`.
 
 ### Added (Modular workspace config)
 
-- **`gluon.rs` config can now be split across multiple files** using
+- **`quon.rs` config can now be split across multiple files** using
   Rust's `mod` + `#[path]` attribute. Each subsystem exposes
   `pub fn register(cfg: &mut Config) -> Result<()>` and is wired in
   from the root script. Cross-subsystem references to shared targets
@@ -186,11 +197,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   subsystem returns the same handle as the root's declaration, so
   there's no need to thread `Handle<TargetDef>` through `register()`
   signatures. See
-  `docs/src/configuration/gluon-rs.md#splitting-config-across-files`.
+  `docs/src/configuration/quon-rs.md#splitting-config-across-files`.
 - **Script-runner cache invalidates on transitively-included files.**
   The cache layer now hashes the rustc-emitted depfile's full source
   list — every file the script touched via `mod` / `#[path]` — so
-  editing a subsystem `gluon.rs` triggers the same recompile as
+  editing a subsystem `quon.rs` triggers the same recompile as
   editing the root entrypoint. Previously the cache key hashed only
   the entrypoint and silently served stale binaries on multi-file
   edits.
@@ -211,7 +222,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   other RawBinary artifacts. Requires `rust-objcopy` from the
   `llvm-tools-preview` rustup component (`rustup component add
   llvm-tools-preview`). A linker script that contains
-  `OUTPUT_FORMAT(binary)` is now incorrect — gluon controls output
+  `OUTPUT_FORMAT(binary)` is now incorrect — quon controls output
   format directly via the rustc invocation, and the build fails with a
   diagnostic pointing at the offending directive. See
   `docs/superpowers/specs/2026-05-05-rawbinary-elf-emission-design.md`.
@@ -220,8 +231,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`ExternalDepDef::target` selects which target a vendored dep is
   built for.** `cfg.dependency("bitflags").version("2.11").target(kernel)`
-  builds bitflags against the user's custom target with the gluon-built
-  sysroot via the gluon-driven rustc pipeline, instead of going through
+  builds bitflags against the user's custom target with the quon-built
+  sysroot via the quon-driven rustc pipeline, instead of going through
   the host cargo-as-builder path. `.target_host()` is also available;
   unannotated deps stay on the host pipeline. See
   `docs/superpowers/specs/2026-05-04-cross-target-vendor-builds-design.md`
@@ -239,10 +250,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   per-target sysroot, with output rlibs landing under
   `build/cross/<target>/<profile>/vendor-deps/<name>/`. Proc-macro
   deps re-target to the host as expected.
-- **`gluon.lock` schema v2** adds per-package `target` and `kind`
+- **`quon.lock` schema v2** adds per-package `target` and `kind`
   fields. Loading a v1 lockfile is accepted (`target` defaults to
   `"host"`, `kind` defaults to `"lib"`) so existing on-disk
-  lockfiles migrate transparently on the next `gluon vendor`.
+  lockfiles migrate transparently on the next `quon vendor`.
 - **Cache invalidation propagates dep + sysroot changes.** A vendor
   crate's freshness query folds in (a) every dep's output rlib path
   and (b) the per-target sysroot lib dir's `*.rlib` set, so a sysroot
@@ -256,7 +267,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 Behaviour for host-only projects is unchanged except for the
 `build/vendor-workspace/` → `build/vendor-workspaces/host/` rename;
-existing `gluon.lock` files re-fingerprint and re-vendor once on
+existing `quon.lock` files re-fingerprint and re-vendor once on
 upgrade, then settle.
 
 ### Added (Stage 9 — architecture docs + comment cleanup)
@@ -413,14 +424,14 @@ upgrade, then settle.
   reports the sysroot as cached. Both rustc-side
   `sysroot:<target>:<crate>` per-crate keys and composite-side
   `sysroot:<target>` keys are preserved.
-- **Vendor freshness intentionally not migrated.** `gluon.lock`
+- **Vendor freshness intentionally not migrated.** `quon.lock`
   remains the source of truth for vendor consistency — see
-  `crates/gluon-core/src/vendor/lockfile.rs` module docs for the
+  `crates/quon-core/src/vendor/lockfile.rs` module docs for the
   rationale (cross-machine state, would force re-vendor on every
   fresh checkout).
 - **Renamed `cache::CacheEntry` → `cache::RustcEntry`.** Internal
   rename to make the symmetry with the new `cache::CompositeEntry`
-  explicit. No public-API consumers expected (gluon-core's `pub`
+  explicit. No public-API consumers expected (quon-core's `pub`
   surface is internal-use-only).
 - **`BuildLayout::sysroot_stamp` removed.** The sysroot stamp file
   no longer exists; the layout method that produced its path is gone.
@@ -442,7 +453,7 @@ upgrade, then settle.
 - New typed enums: `PanicStrategy`, `BootloaderKind` (with
   `Custom(String)` escape hatch), `ImageFormat`, `TargetSpec`,
   `DepResolution`.
-- `gluon run` against a `gluon.rs` with no `cfg.qemu(...)` block
+- `quon run` against a `quon.rs` with no `cfg.qemu(...)` block
   now fails with a typed `Error::QemuNotConfigured` carrying a
   user-actionable message.
 
@@ -453,17 +464,17 @@ upgrade, then settle.
 
 ### Removed
 
-- `gluon.rhai` configuration format. Every project must now declare
-  its build via `gluon.rs`. See
+- `quon.rhai` configuration format. Every project must now declare
+  its build via `quon.rs`. See
   [`docs/src/migration/rhai-to-rust.md`](docs/src/migration/rhai-to-rust.md)
   for the surface mapping.
-- `gluon-lsp` crate. rust-analyzer covers the editor story for
-  `gluon.rs`.
+- `quon-lsp` crate. rust-analyzer covers the editor story for
+  `quon.rs`.
 - `tree-sitter-rhai` crate.
-- `gluon-core::engine` module and the `gluon_core::evaluate` public
-  function. `gluon_core::load_build_model` is the surviving entry
+- `quon-core::engine` module and the `quon_core::evaluate` public
+  function. `quon_core::load_build_model` is the surviving entry
   point.
-- `gluon internal dump-dsl` hidden subcommand.
+- `quon internal dump-dsl` hidden subcommand.
 - Script-backed rule handlers (`RuleHandler::Script`). Built-in
   handlers (`copy`, `exec`) are unchanged.
 - `pipeline(...)` Rhai builder. The DAG generated from

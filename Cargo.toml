@@ -1,20 +1,20 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/gluon-model",
-    "crates/gluon-core",
-    "crates/gluon-cli",
-    "crates/gluon-config",
-    "crates/gluon-runner",
-    "crates/gluon-runner-qemu",
+    "crates/quon-model",
+    "crates/quon-core",
+    "crates/quon",
+    "crates/quon-config",
+    "crates/quon-runner",
+    "crates/quon-runner-qemu",
 ]
-default-members = ["crates/gluon-cli"]
+default-members = ["crates/quon"]
 
 [workspace.package]
 version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/hxyulin/gluon"
+repository = "https://github.com/hxyulin/quon"
 rust-version = "1.99"
 keywords = ["build-system", "cargo", "rustc", "bare-metal", "kernel"]
 categories = ["development-tools::build-utils", "embedded"]
@@ -23,8 +23,8 @@ categories = ["development-tools::build-utils", "embedded"]
 unsafe_code = "warn"
 
 [workspace.dependencies]
-gluon-config = { path = "crates/gluon-config" }
-gluon-core = { path = "crates/gluon-core" }
-gluon-model = { path = "crates/gluon-model" }
-gluon-runner = { path = "crates/gluon-runner" }
-gluon-runner-qemu = { path = "crates/gluon-runner-qemu" }
+quon-config = { path = "crates/quon-config" }
+quon-core = { path = "crates/quon-core" }
+quon-model = { path = "crates/quon-model" }
+quon-runner = { path = "crates/quon-runner" }
+quon-runner-qemu = { path = "crates/quon-runner-qemu" }

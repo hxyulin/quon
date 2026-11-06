@@ -1,11 +1,11 @@
-# Contributing to Gluon
+# Contributing to Quon
 
 ## Getting started
 
 ```bash
 # Clone and enter the repo
-git clone https://github.com/hxyulin/gluon.git
-cd gluon
+git clone https://github.com/hxyulin/quon.git
+cd quon
 
 # The nightly toolchain + components are pinned in rust-toolchain.toml —
 # rustup will install them automatically on the first cargo invocation.
@@ -30,12 +30,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 | Crate | Purpose |
 |-------|---------|
-| `gluon-config` | Rust API that `gluon.rs` build scripts use to declare a project |
-| `gluon-model` | Data types shared across the build pipeline |
-| `gluon-core` | Engine, compiler, scheduler, cache, vendor, kconfig |
-| `gluon-runner` | Runner plugin protocol: request and reply types, `serve()` |
-| `gluon-runner-qemu` | The QEMU runner plugin: argv, boot modes, OVMF |
-| `gluon-cli` | `clap`-based CLI (`gluon build`, `run`, `vendor`, ...) |
+| `quon-config` | Rust API that `quon.rs` build scripts use to declare a project |
+| `quon-model` | Data types shared across the build pipeline |
+| `quon-core` | Engine, compiler, scheduler, cache, vendor, kconfig |
+| `quon-runner` | Runner plugin protocol: request and reply types, `serve()` |
+| `quon-runner-qemu` | The QEMU runner plugin: argv, boot modes, OVMF |
+| `quon` | `clap`-based CLI (`quon build`, `run`, `vendor`, ...) |
 
 ## Commit messages
 
@@ -51,8 +51,8 @@ finishes in seconds. `-- --include-ignored` runs them too and needs the
 the end-to-end binaries wait on each other; `cargo nextest run` runs
 every test as its own process and takes about half as long. Most of them copy a prebuilt sysroot into their
 fixture instead of building `core`, `compiler_builtins` and `alloc`
-each time (see `crates/gluon-core/src/testing.rs`). The prebuilt
-sysroots live in `$TMPDIR/gluon-test-sysroots/`, about 120 MB per target
+each time (see `crates/quon-core/src/testing.rs`). The prebuilt
+sysroots live in `$TMPDIR/quon-test-sysroots/`, about 120 MB per target
 and toolchain; delete the directory to reclaim the space.
 
 ## Pull requests
@@ -66,10 +66,10 @@ and toolchain; delete the directory to reclaim the space.
 
 ## Design guidelines
 
-Gluon is a **kernel-agnostic** build system. Contributions should:
+Quon is a **kernel-agnostic** build system. Contributions should:
 
 - Not bake assumptions about a specific kernel, target triple, or
-  bootloader into core code — that belongs in `gluon.rs`
+  bootloader into core code — that belongs in `quon.rs`
 - Prefer deterministic, reproducible behavior (stable ordering,
   no reliance on `HashMap` iteration order)
 - Surface errors with context — build failures should point the user at
@@ -92,6 +92,6 @@ mdbook serve --open
 ## License
 
 Unless you state otherwise, any contribution you intentionally submit
-for inclusion in Gluon, as defined in the Apache-2.0 license, is dual
+for inclusion in Quon, as defined in the Apache-2.0 license, is dual
 licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
 without any additional terms or conditions.

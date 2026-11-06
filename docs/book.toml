@@ -1,5 +1,5 @@
 [book]
-title = "Gluon"
+title = "Quon"
 description = "A build system for bare-metal Rust kernels"
 authors = ["hxyulin"]
 language = "en"

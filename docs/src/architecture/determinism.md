@@ -1,7 +1,7 @@
 # Determinism
 
-Gluon's correctness model is reproducibility-first: a given
-`gluon.rs` plus source tree must always produce byte-identical
+Quon's correctness model is reproducibility-first: a given
+`quon.rs` plus source tree must always produce byte-identical
 artefacts. This is more than a quality-of-life nicety — the build
 cache hashes the rustc argv on every compile, and the argv is built
 from in-memory data structures iterated at compile time. The instant
@@ -100,7 +100,7 @@ Determinism guarantees relax under parallelism but never break:
   still byte-identical (same compiles, same argvs, same outputs);
   only the surrounding console interleaving varies.
 - **`-j1` is fully deterministic.** Dispatch order, output order,
-  artefact bytes — all reproducible run-to-run. `gluon build -j1`
+  artefact bytes — all reproducible run-to-run. `quon build -j1`
   is the recommended mode for CI artefact hashing or any context
   where reproducibility is asserted.
 
@@ -128,7 +128,7 @@ contents will be reproducible.
 - **`Vec` is fine** when you control insertion order (e.g. parsing a
   list out of a config file in source order).
 - **Snapshot tests pin determinism.** The integration tests under
-  `crates/gluon-core/tests/` and `crates/gluon-cli/tests/` run a
+  `crates/quon-core/tests/` and `crates/quon/tests/` run a
   build twice and assert byte-identical artefacts; if you add a
   feature that touches a `BTreeMap`-shaped collection, make sure
   these still pass.
@@ -136,11 +136,11 @@ contents will be reproducible.
 ## Verifying determinism
 
 ```sh
-gluon build -j1                      # first run
-sha256sum target/gluon/**/*.rlib > a # capture
-gluon clean
-gluon build -j1                      # second run
-sha256sum target/gluon/**/*.rlib > b
+quon build -j1                      # first run
+sha256sum target/quon/**/*.rlib > a # capture
+quon clean
+quon build -j1                      # second run
+sha256sum target/quon/**/*.rlib > b
 diff a b                             # must be empty
 ```
 

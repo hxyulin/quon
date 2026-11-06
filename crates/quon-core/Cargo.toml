@@ -1,0 +1,72 @@
+[package]
+name = "quon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Core library for the Quon build system: build model, scheduler, compile/cache/vendor primitives."
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quon-model.workspace = true
+# The runner plugin protocol: `quon run` and `quon test` ask a runner
+# plugin, such as QEMU, for the command that starts a binary.
+quon-runner.workspace = true
+fs2 = "0.4"
+# In-process FAT12/16/32 formatter + writer. Used by the `image()`
+# scheduler node to assemble bootable disk images from compiled
+# artifacts without shelling out to mtools / mkfs.fat. Synchronous,
+# `no_std`-compatible upstream but we use the `std` paths.
+# Pinned to 1.x; the API has stabilised since 1.0.
+hadris-fat = "1.1"
+# `rc` serialises the `Arc`s in `NodeData`, which fingerprint records store.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+toml = "0.8"
+walkdir = "2"
+# Parses `[target.'cfg(...)'.dependencies]` keys and matches them
+# against `rustc --print cfg` output. Published by the Cargo team; it is
+# the matcher Cargo itself uses, so Quon selects the same edges.
+cargo-platform = "0.3.0"
+semver = "1"
+glob = "0.3"
+
+# Signal handling for `quon run`: catches SIGINT/SIGTERM so the
+# spawned runner child can be killed cleanly instead of wedging. Used
+# only by the runner (`run::entry`); the rest of quon-core does not
+# touch signals. Scoped to Unix because the runner's signal trapping
+# is a no-op on Windows (console Ctrl+C handling is a different
+# mechanism and the runner is Unix-centric today).
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
+[features]
+# Enables tests that touch the network (e.g. `cargo vendor` pulling from
+# crates.io). Off by default so `cargo test` works offline; CI turns this
+# on in a dedicated job. See `tests/vendor_e2e.rs`.
+network-tests = []
+
+[build-dependencies]
+# build.rs embeds the quon-config sources and generates a workspace
+# manifest for them from quon's own (see `script_runner::rlib`).
+toml = "0.8"
+
+[dev-dependencies]
+# Tests build models through the quon.rs DSL in process.
+quon-config.workspace = true
+tempfile = "3"
+# Scoped, safe wrapper for env var mutation in tests. Uses a global
+# mutex internally so the unsafe `std::env::set_var` (Rust 1.80+) is
+# isolated to one place. Keeps our test code free of `unsafe` blocks
+# that would otherwise need per-call SAFETY justifications.
+temp-env = "0.3"
+# Used in objcopy tests to locate `rustc` on PATH so we can derive a
+# probe path without hard-coding a toolchain install location.
+which = "7"

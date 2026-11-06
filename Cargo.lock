@@ -344,82 +344,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "gluon-cli"
-version = "0.1.1"
-dependencies = [
- "anstream",
- "anstyle",
- "anyhow",
- "clap",
- "gluon-core",
- "gluon-runner-qemu",
- "serde_json",
- "tempfile",
- "terminal_size",
- "toml",
-]
-
-[[package]]
-name = "gluon-config"
-version = "0.1.1"
-dependencies = [
- "gluon-model",
- "serde_json",
-]
-
-[[package]]
-name = "gluon-core"
-version = "0.1.1"
-dependencies = [
- "cargo-platform",
- "fs2",
- "glob",
- "gluon-config",
- "gluon-model",
- "gluon-runner",
- "hadris-fat",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "signal-hook",
- "temp-env",
- "tempfile",
- "thiserror",
- "toml",
- "walkdir",
- "which",
-]
-
-[[package]]
-name = "gluon-model"
-version = "0.1.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gluon-runner"
-version = "0.1.1"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "gluon-runner-qemu"
-version = "0.1.1"
-dependencies = [
- "gluon-model",
- "gluon-runner",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
 name = "hadris-common"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,6 +598,82 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "quon"
+version = "0.1.1"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "anyhow",
+ "clap",
+ "quon-core",
+ "quon-runner-qemu",
+ "serde_json",
+ "tempfile",
+ "terminal_size",
+ "toml",
+]
+
+[[package]]
+name = "quon-config"
+version = "0.1.1"
+dependencies = [
+ "quon-model",
+ "serde_json",
+]
+
+[[package]]
+name = "quon-core"
+version = "0.1.1"
+dependencies = [
+ "cargo-platform",
+ "fs2",
+ "glob",
+ "hadris-fat",
+ "quon-config",
+ "quon-model",
+ "quon-runner",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "temp-env",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "walkdir",
+ "which",
+]
+
+[[package]]
+name = "quon-model"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "quon-runner"
+version = "0.1.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "quon-runner-qemu"
+version = "0.1.1"
+dependencies = [
+ "quon-model",
+ "quon-runner",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

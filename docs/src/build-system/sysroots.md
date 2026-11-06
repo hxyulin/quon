@@ -11,11 +11,11 @@ crates. For hosted targets (like `x86_64-unknown-linux-gnu`), rustup
 provides a pre-compiled sysroot. For bare-metal targets, the sysroot must
 be compiled from source.
 
-## How Gluon handles sysroots
+## How Quon handles sysroots
 
-Gluon automatically compiles a custom sysroot for each target triple
+Quon automatically compiles a custom sysroot for each target triple
 declared in your build model. No manual configuration is needed -- if your
-`gluon.rs` declares a bare-metal target, Gluon takes care of the rest.
+`quon.rs` declares a bare-metal target, Quon takes care of the rest.
 
 The compiled sysroot lives at:
 
@@ -41,7 +41,7 @@ The sysroot is rebuilt when any of the following conditions are met:
 - **Rust toolchain change** -- detected by comparing the `rustc` binary's
   modification time against the cached value.
 - **Missing or corrupted sysroot directory** -- if the directory does not
-  exist or is incomplete, Gluon rebuilds it from scratch.
+  exist or is incomplete, Quon rebuilds it from scratch.
 
 In all other cases, the existing sysroot is reused.
 
@@ -53,17 +53,17 @@ The `rust-src` component must be installed for the active toolchain:
 rustup component add rust-src
 ```
 
-Gluon locates the `rust-src` path by querying the active toolchain's
+Quon locates the `rust-src` path by querying the active toolchain's
 sysroot (`rustc --print sysroot`) and looking for
 `lib/rustlib/src/rust/library/` underneath it.
 
-If `rust-src` is not installed, Gluon will report a clear error pointing
+If `rust-src` is not installed, Quon will report a clear error pointing
 you at the `rustup component add` command.
 
 ## Sysroot caching
 
 Compiling the sysroot is the most expensive part of a clean build -- it
-takes significantly longer than compiling your own crates. Gluon caches
+takes significantly longer than compiling your own crates. Quon caches
 it aggressively to avoid repeating this work.
 
 The sysroot is **shared across profiles** (debug, release, test, etc.)
@@ -72,8 +72,8 @@ per target triple, not one per profile.
 
 ### Cleaning
 
-- `gluon clean` -- wipes the entire `build/` directory, including the
+- `quon clean` -- wipes the entire `build/` directory, including the
   sysroot.
-- `gluon clean --keep-sysroot` -- removes all build artifacts but
+- `quon clean --keep-sysroot` -- removes all build artifacts but
   preserves the sysroot. This is useful when you want a fresh build
   without paying the sysroot compilation cost again.

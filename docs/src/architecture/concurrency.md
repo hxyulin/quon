@@ -1,12 +1,12 @@
 # Concurrency
 
-Gluon runs in two concurrent dimensions:
+Quon runs in two concurrent dimensions:
 
-- **Multi-process.** Two `gluon build` invocations against the same
+- **Multi-process.** Two `quon build` invocations against the same
   project can race on the shared build directory. A scripted
   editor-on-save, a terminal rebuild, and a CI pre-commit hook can
   all hit the same project simultaneously.
-- **In-process.** A single `gluon build -j>1` runs many rustc
+- **In-process.** A single `quon build -j>1` runs many rustc
   invocations in parallel, each checking and writing its own
   fingerprint records.
 
@@ -20,11 +20,11 @@ held for the entire duration of a build. The file is never read or
 written.
 
 `CacheLock::acquire` is called once at the top of `build` and `clean`,
-held until the guard drops. While the lock is held, no other gluon
+held until the guard drops. While the lock is held, no other quon
 process in the same project can write outputs or records. Concurrent
 builds serialise on the lock instead of clobbering each other. One
-lock covers every driver, because `gluon check`, `gluon clippy` and
-`gluon build` share the sysroot, the fixed-host-profile units and the
+lock covers every driver, because `quon check`, `quon clippy` and
+`quon build` share the sysroot, the fixed-host-profile units and the
 record directory.
 
 ### Acquisition strategy
@@ -33,7 +33,7 @@ Acquire is **non-blocking first, blocking fallback**:
 
 1. Try `try_lock_exclusive`. If we get the lock, proceed silently —
    the common single-process case has no log noise.
-2. If `WouldBlock`, print a one-line `gluon: waiting for another
+2. If `WouldBlock`, print a one-line `quon: waiting for another
    build in <path>` to stderr, then fall back to a blocking
    `lock_exclusive`.
 
@@ -52,7 +52,7 @@ point — its contents are never read or written.
 
 ### Why not a process-internal mutex?
 
-In-process mutexes don't help across `gluon` invocations from a
+In-process mutexes don't help across `quon` invocations from a
 script-on-save editor + a terminal rebuild + a CI pre-commit hook.
 Every common multi-build scenario is multi-process.
 
@@ -64,7 +64,7 @@ builder is in the middle of writing.
 
 ### Lockfile lifecycle
 
-The lockfile lives in the build root, so `gluon clean` (which removes
+The lockfile lives in the build root, so `quon clean` (which removes
 the build dir) takes it down too. The held `File` is intentionally private — there's
 nothing to read or write inside it; the file exists purely as a
 stable inode for the kernel's lock table.

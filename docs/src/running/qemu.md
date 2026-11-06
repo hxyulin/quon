@@ -1,12 +1,12 @@
 # QEMU Orchestration
 
-Gluon can build your project and launch it in QEMU in a single command.
-The QEMU configuration lives in your `gluon.rs` alongside the rest of
+Quon can build your project and launch it in QEMU in a single command.
+The QEMU configuration lives in your `quon.rs` alongside the rest of
 the build model, so the run environment is versioned with your source code.
 
 ## Configuring QEMU
 
-Declare a QEMU [runner](./runners.md) in your `gluon.rs`, and name it
+Declare a QEMU [runner](./runners.md) in your `quon.rs`, and name it
 in the profile:
 
 ```rust,ignore
@@ -36,11 +36,11 @@ profile.
 | `.serial_stdio()`   | Redirect the serial port to the terminal        |
 | `.boot_mode(mode)`  | `"direct"` (default) or `"uefi"`                |
 | `.extra_args(list)` | Additional QEMU arguments passed verbatim       |
-| `.success_exit_code(n)` | Exit status that `gluon run` reports as success |
+| `.success_exit_code(n)` | Exit status that `quon run` reports as success |
 
 ### Exit status
 
-`gluon run` succeeds when QEMU exits with status 0. A kernel that stops
+`quon run` succeeds when QEMU exits with status 0. A kernel that stops
 QEMU through the `isa-debug-exit` device cannot produce 0: QEMU exits
 with `(value << 1) | 1`, where `value` is what the kernel wrote to the
 port. Set the status that means success:
@@ -52,16 +52,16 @@ cfg.runner("qemu")
     .success_exit_code(33); // the kernel writes 0x10
 ```
 
-With `.success_exit_code(n)` set, status `n` makes `gluon run` exit 0.
+With `.success_exit_code(n)` set, status `n` makes `quon run` exit 0.
 Every other status, 0 included, fails the run.
 
 ## Running
 
 ```sh
-gluon run                 # Build + launch QEMU
-gluon run --no-build      # Skip build, use existing artifacts
-gluon run --dry-run       # Print the QEMU command without executing
-gluon run -- -serial mon:stdio  # Pass extra args to QEMU after --
+quon run                 # Build + launch QEMU
+quon run --no-build      # Skip build, use existing artifacts
+quon run --dry-run       # Print the QEMU command without executing
+quon run -- -serial mon:stdio  # Pass extra args to QEMU after --
 ```
 
 The `--` separator passes all subsequent arguments directly to QEMU,
@@ -69,7 +69,7 @@ overriding or supplementing the configured arguments.
 
 ## Boot mode selection
 
-Gluon resolves the boot mode using the following precedence (highest to
+Quon resolves the boot mode using the following precedence (highest to
 lowest):
 
 1. **CLI flags:** `--uefi` or `--direct`
@@ -92,14 +92,14 @@ which loads the bootloader from the ESP. See
 ## Timeouts
 
 ```sh
-gluon run -T 30           # Kill QEMU after 30 seconds
+quon run -T 30           # Kill QEMU after 30 seconds
 ```
 
 The timeout is useful for automated testing: QEMU is terminated after the
-specified number of seconds, and Gluon reports whether the process exited
+specified number of seconds, and Quon reports whether the process exited
 cleanly.
 
-The timeout can also be set per-profile in `gluon.rs`:
+The timeout can also be set per-profile in `quon.rs`:
 
 ```rust
 cfg.profile("test")

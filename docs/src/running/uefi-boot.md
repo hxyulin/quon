@@ -1,7 +1,7 @@
 # UEFI Boot and ESP Assembly
 
 UEFI boot is the standard boot path for modern x86_64 systems and is
-required if your OS uses a UEFI bootloader. Gluon handles the full
+required if your OS uses a UEFI bootloader. Quon handles the full
 pipeline: compiling the bootloader for a UEFI target, assembling the
 EFI System Partition, and configuring QEMU with OVMF firmware.
 
@@ -19,7 +19,7 @@ UEFI boot requires three components:
 
 ## ESP Assembly
 
-Declare an ESP layout in `gluon.rs`:
+Declare an ESP layout in `quon.rs`:
 
 ```rust
 cfg.esp("default")
@@ -27,7 +27,7 @@ cfg.esp("default")
 ```
 
 The `.add(crate_name, esp_path)` method copies the named crate's output
-binary to the given path inside a staging directory. Gluon assembles the
+binary to the given path inside a staging directory. Quon assembles the
 ESP automatically after compilation completes.
 
 You can add multiple files to the ESP:
@@ -38,7 +38,7 @@ cfg.esp("default")
     .add("shell", "EFI/tools/Shell.efi");
 ```
 
-`.add_file(path, esp_path)` copies a file Gluon does not build, such as
+`.add_file(path, esp_path)` copies a file Quon does not build, such as
 a bootloader configuration file. `path` is relative to the project
 root, and an edited file is copied again on the next build:
 
@@ -54,7 +54,7 @@ input files change.
 
 ## OVMF Firmware
 
-Gluon probes for OVMF firmware in this order:
+Quon probes for OVMF firmware in this order:
 
 1. **Explicit paths** from the QEMU runner's `.ovmf_code(...)` and `.ovmf_vars(...)`
 2. **Environment variables:** `OVMF_CODE` and `OVMF_VARS`
@@ -80,12 +80,12 @@ export OVMF_VARS="$(brew --prefix)/share/qemu/edk2-i386-vars.fd"
 
 ## Complete Example
 
-The following `gluon.rs` defines a project with a bare-metal kernel and
+The following `quon.rs` defines a project with a bare-metal kernel and
 a UEFI bootloader. The bootloader embeds the kernel binary at compile time
 using `artifact_env`.
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use quon_config::{Config, CrateType, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-os", "0.1.0")
@@ -132,7 +132,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ### How artifact_env works
 
-The `.artifact_env("KERNEL_PATH", "kernel")` call tells Gluon to set the
+The `.artifact_env("KERNEL_PATH", "kernel")` call tells Quon to set the
 `KERNEL_PATH` environment variable to the output path of the `kernel`
 crate when compiling the `bootloader` crate. This lets the bootloader
 embed the kernel at compile time:
@@ -141,13 +141,13 @@ embed the kernel at compile time:
 static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
 ```
 
-Gluon automatically adds a dependency edge from `bootloader` to `kernel`
+Quon automatically adds a dependency edge from `bootloader` to `kernel`
 in the DAG, ensuring the kernel is compiled first.
 
 ### Running
 
 ```sh
-gluon run
+quon run
 ```
 
 This compiles the kernel, compiles the bootloader (with the kernel path

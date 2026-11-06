@@ -1,12 +1,12 @@
 # Minimal Kernel
 
-A walkthrough of the simplest useful Gluon project: a single bare-metal binary
+A walkthrough of the simplest useful Quon project: a single bare-metal binary
 compiled for `x86_64-unknown-none` and launched in QEMU.
 
-## gluon.rs
+## quon.rs
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use quon_config::{Config, CrateType, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     // Every project starts with a name and version.
@@ -32,7 +32,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
             .root("src/main.rs")
             .linker_script("crates/kernel/kernel.ld");
 
-    // Optional: configure QEMU for `gluon run`.
+    // Optional: configure QEMU for `quon run`.
     cfg.runner("qemu")
         .qemu("qemu-system-x86_64")
         .machine("q35")
@@ -48,7 +48,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ```
 my-kernel/
-  gluon.rs
+  quon.rs
   crates/kernel/
     src/main.rs
     kernel.ld
@@ -61,15 +61,15 @@ section placement, and so on.
 ## Building
 
 ```sh
-gluon build          # Compile the kernel
-gluon check          # Quick metadata-only check
-gluon run            # Build + launch in QEMU
-gluon configure      # Generate rust-project.json for your editor
+quon build          # Compile the kernel
+quon check          # Quick metadata-only check
+quon run            # Build + launch in QEMU
+quon configure      # Generate rust-project.json for your editor
 ```
 
-## What happens during `gluon build`
+## What happens during `quon build`
 
-1. **Sysroot compilation** -- Gluon compiles a custom sysroot (`core`, `alloc`,
+1. **Sysroot compilation** -- Quon compiles a custom sysroot (`core`, `alloc`,
    `compiler_builtins`) for `x86_64-unknown-none`. This only happens on the
    first build or when the sysroot is invalidated.
 2. **Crate compilation** -- The `kernel` crate is compiled as a binary with
@@ -77,10 +77,10 @@ gluon configure      # Generate rust-project.json for your editor
 3. **Output** -- The resulting binary lands in
    `build/cross/x86_64-unknown-none/dev/deps/`.
 
-## What happens during `gluon run`
+## What happens during `quon run`
 
-After a successful build, Gluon launches QEMU with the configuration from the
-`qemu` runner, which the profile names with `.runner("qemu")`. The `run_binary("kernel")` setting in the profile tells Gluon
+After a successful build, Quon launches QEMU with the configuration from the
+`qemu` runner, which the profile names with `.runner("qemu")`. The `run_binary("kernel")` setting in the profile tells Quon
 which crate's output to pass to QEMU as the kernel image. Serial output is
 forwarded to your terminal via `.serial_stdio()`.
 
@@ -90,6 +90,6 @@ forwarded to your terminal via `.serial_stdio()`.
 - Add a UEFI bootloader: see [UEFI Bootloader + Kernel](./uefi-bootloader.md)
 - Set up your editor: see [Editor Setup](../tooling/editor-setup.md)
 
-`examples/basic-kernel/` in the Gluon repository is a runnable version of
+`examples/basic-kernel/` in the Quon repository is a runnable version of
 this project. It declares the kernel in a Cargo workspace and builds it
 with `cfg.cargo_workspace(".")` and `group.package("kernel")`.

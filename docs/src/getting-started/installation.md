@@ -4,43 +4,43 @@
 
 - **Rust 1.99 or later.** Stable works, except for custom target-spec
   `.json` files, which need nightly.
-- **The `rust-src` component**, for cross targets. Gluon compiles their
+- **The `rust-src` component**, for cross targets. Quon compiles their
   sysroots (`core`, `alloc`, `compiler_builtins`) from source. Host builds
   do not need it.
-- **Optional Rust components:** `clippy` (for `gluon clippy`), `rustfmt` (for
-  `gluon fmt`), and `rust-analyzer` (for IDE integration via
-  `gluon configure`).
-- **QEMU** -- only needed if you want to use `gluon run`. Not required for
+- **Optional Rust components:** `clippy` (for `quon clippy`), `rustfmt` (for
+  `quon fmt`), and `rust-analyzer` (for IDE integration via
+  `quon configure`).
+- **QEMU** -- only needed if you want to use `quon run`. Not required for
   building alone.
 - **OVMF firmware** -- only needed for UEFI boot. If you are targeting BIOS or
   a non-UEFI boot protocol, you can skip this.
 
-## Install Gluon
+## Install Quon
 
 Clone the repository and install the CLI:
 
 ```sh
-git clone https://github.com/hxyulin/gluon.git
-cd gluon
-cargo install --path crates/gluon-cli
+git clone https://github.com/hxyulin/quon.git
+cd quon
+cargo install --path crates/quon
 ```
 
 The repository's `rust-toolchain.toml` pins the nightly toolchain used
-to develop Gluon, so `cargo install` inside the clone uses it. Gluon
+to develop Quon, so `cargo install` inside the clone uses it. Quon
 itself builds on stable too.
 
-The installed `gluon` carries the sources that `gluon.rs` scripts link
+The installed `quon` carries the sources that `quon.rs` scripts link
 against, so you can delete or move the clone afterwards. Installing
 straight from Git works too:
 
 ```sh
-cargo install --git https://github.com/hxyulin/gluon.git gluon-cli
+cargo install --git https://github.com/hxyulin/quon.git quon
 ```
 
 Verify the installation:
 
 ```sh
-gluon --version
+quon --version
 ```
 
 ## Adding rust-src

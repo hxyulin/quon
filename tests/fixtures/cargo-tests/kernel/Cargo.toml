@@ -11,6 +11,6 @@ harness = false
 name = "fails"
 harness = false
 
-# Only the tests link it, so `gluon build` leaves it out.
+# Only the tests link it, so `quon build` leaves it out.
 [dev-dependencies]
 testkit = { path = "../testkit" }

@@ -6,12 +6,12 @@
 
 - [Installation](./getting-started/installation.md)
 - [Your First Project](./getting-started/first-project.md)
-- [Generating gluon.rs](./getting-started/init.md)
+- [Generating quon.rs](./getting-started/init.md)
 - [Building and Running](./getting-started/building-and-running.md)
 
 # Configuration Guide
 
-- [The gluon.rs Build Script](./configuration/gluon-rs.md)
+- [The quon.rs Build Script](./configuration/quon-rs.md)
 - [Projects, Targets, and Profiles](./configuration/projects-targets-profiles.md)
 - [Groups and Crates](./configuration/groups-and-crates.md)
 - [Config Options and Kconfig](./configuration/config-options.md)
@@ -20,7 +20,7 @@
 
 # Build System
 
-- [How Gluon Builds Your Code](./build-system/how-it-works.md)
+- [How Quon Builds Your Code](./build-system/how-it-works.md)
 - [Custom Sysroots](./build-system/sysroots.md)
 - [Build Cache](./build-system/build-cache.md)
 - [Pipelines and Rules](./build-system/pipelines-and-rules.md)

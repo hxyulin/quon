@@ -1,15 +1,15 @@
 # Limine Kernel
 
 A kernel booted by [Limine](https://github.com/Limine-Bootloader/Limine)
-over UEFI. Gluon builds the kernel, fetches Limine's prebuilt
+over UEFI. Quon builds the kernel, fetches Limine's prebuilt
 `BOOTX64.EFI` from a pinned release, and assembles an ESP that holds
-both, plus the project's `limine.conf`. Gluon does not generate the
+both, plus the project's `limine.conf`. Quon does not generate the
 Limine configuration file.
 
-## gluon.rs
+## quon.rs
 
 ```rust
-use gluon_config::{Config, Result};
+use quon_config::{Config, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("limine-kernel", "0.1.0");
@@ -84,20 +84,20 @@ image.
 ## Running
 
 ```sh
-gluon run
+quon run
 ```
 
-Gluon finds OVMF next to the QEMU binary, so `nix shell nixpkgs#qemu`
+Quon finds OVMF next to the QEMU binary, so `nix shell nixpkgs#qemu`
 is enough on Nix. The kernel prints the bootloader's name and version
 on the serial port, then writes `0x10` to the `isa-debug-exit` port.
 QEMU exits with status 33, `(0x10 << 1) | 1`. The config sets
-`.success_exit_code(33)`, so `gluon run` exits 0. Any other status, such
+`.success_exit_code(33)`, so `quon run` exits 0. Any other status, such
 as 35 from the kernel's failure path, fails the run.
 
 ## Runnable example
 
-`examples/limine-kernel/` in the Gluon repository is a runnable version
-of this setup. The `limine_boot` integration test in `gluon-cli` boots
+`examples/limine-kernel/` in the Quon repository is a runnable version
+of this setup. The `limine_boot` integration test in `quon` boots
 it under Limine 7.13.3, 8.7.0, 9.6.7, 10.8.5 and 11.4.1.
 The kernel requests base revision 6 (the `limine` crate's default).
 Limine 11 grants it. Older releases still boot the kernel at the

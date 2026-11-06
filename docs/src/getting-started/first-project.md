@@ -1,29 +1,29 @@
 # Your First Project
 
 This page walks through creating a minimal bare-metal kernel project with
-Gluon. By the end you will have a `gluon.rs` configuration file and a
+Quon. By the end you will have a `quon.rs` configuration file and a
 directory layout ready to build.
 
 ## Directory layout
 
 ```
 my-kernel/
-  gluon.rs
+  quon.rs
   crates/kernel/
     src/main.rs
     kernel.ld
 ```
 
-`gluon.rs` is the single configuration file that declares your entire build.
+`quon.rs` is the single configuration file that declares your entire build.
 It lives at the root of your project.
 
-## Writing gluon.rs
+## Writing quon.rs
 
 A minimal configuration needs four declarations: a project, a target, a
 profile, and a group containing at least one crate.
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use quon_config::{Config, CrateType, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
@@ -53,7 +53,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 - **`project(name, version)`** -- declares the project name and version. This
   is metadata used in build output paths and diagnostics.
 
-- **`target(triple)`** -- registers a rustc target triple. Gluon will compile a
+- **`target(triple)`** -- registers a rustc target triple. Quon will compile a
   custom sysroot for each registered target. You can register multiple targets
   if your project needs them (e.g., one for the kernel, another for a
   bootloader).
@@ -71,7 +71,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ## Adding QEMU configuration
 
-If you want to launch your kernel in QEMU with `gluon run`, declare a QEMU
+If you want to launch your kernel in QEMU with `quon run`, declare a QEMU
 runner and name it in the profile:
 
 ```rust,ignore
@@ -100,6 +100,6 @@ cfg.profile("dev")
 
 ## Next steps
 
-With your `gluon.rs` and source files in place, head to
+With your `quon.rs` and source files in place, head to
 [Building and Running](./building-and-running.md) to compile and launch your
 kernel.

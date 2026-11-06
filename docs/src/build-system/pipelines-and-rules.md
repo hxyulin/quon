@@ -2,7 +2,7 @@
 
 Compilation is only part of a bare-metal build. After compiling, you often
 need to copy binaries, strip symbols, create disk images, or assemble
-boot partitions. Gluon handles these post-processing steps through
+boot partitions. Quon handles these post-processing steps through
 **rules** and **pipelines**.
 
 ## Rules
@@ -14,7 +14,7 @@ caching.
 
 ### Built-in rule types
 
-Gluon provides three built-in handlers:
+Quon provides three built-in handlers:
 
 **copy** -- copy a file from one location to another:
 

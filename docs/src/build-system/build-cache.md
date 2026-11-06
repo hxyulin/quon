@@ -1,6 +1,6 @@
 # Build Cache
 
-Gluon uses a hybrid two-tier freshness model to avoid unnecessary
+Quon uses a hybrid two-tier freshness model to avoid unnecessary
 recompilation. The goal is to never recompile a crate whose inputs have
 not changed, while also never silently using a stale artifact.
 
@@ -8,14 +8,14 @@ not changed, while also never silently using a stale artifact.
 
 ### Fast path: mtime + size
 
-For each input file, Gluon compares the last-modified time and file size
+For each input file, Quon compares the last-modified time and file size
 against the values in the node's fingerprint record. If both match, the file
 is considered fresh. This check is nearly free -- it requires only a
 `stat()` call per file.
 
 ### Slow path: SHA-256
 
-When the mtime differs but the file might not have actually changed, Gluon
+When the mtime differs but the file might not have actually changed, Quon
 falls back to comparing SHA-256 content hashes. This happens in situations
 like:
 
@@ -24,7 +24,7 @@ like:
 - CI cache restores that do not preserve timestamps
 - Editors that write-then-rename (updating mtime even for no-op saves)
 
-If the hashes match, the mtime was a false positive. Gluon refreshes the
+If the hashes match, the mtime was a false positive. Quon refreshes the
 cached mtime to avoid repeating the hash computation on the next build,
 and skips recompilation.
 
@@ -48,7 +48,7 @@ An input modified while its compile was running also reruns the
 compile on the next build, because the compile may have read the old
 content.
 
-`gluon -v build` prints why each node reran, for example
+`quon -v build` prints why each node reran, for example
 `rebuilding crate kernel (x86_64-unknown-none, dev): input
 crates/kernel/src/main.rs changed`.
 
@@ -68,8 +68,8 @@ compile. A record holds:
 - The output paths
 
 A missing or unreadable record makes that node rebuild. A build
-directory from an older Gluon (with a `build/cache-manifest.json`) is
-cleared once and rebuilt; Gluon prints a note when it does.
+directory from an older Quon (with a `build/cache-manifest.json`) is
+cleared once and rebuilt; Quon prints a note when it does.
 
 See [cache architecture](../architecture/cache.md) for the exact rule.
 
@@ -87,13 +87,13 @@ build/
   host/
     deps/                     # Proc macros and the host crates they use
     profile/<profile>/deps/   # Host tools and build-step runners
-  tool/check/                 # Output from gluon check
-  tool/clippy/                # Output from gluon clippy
+  tool/check/                 # Output from quon check
+  tool/clippy/                # Output from quon clippy
   .fingerprint/               # Freshness records
 ```
 
 Every library file name carries the unit's metadata hash, for example
-`libkernel_util-3f2a9c1d0b7e6a45.rlib`. Gluon passes the same hash to
+`libkernel_util-3f2a9c1d0b7e6a45.rlib`. Quon passes the same hash to
 rustc as `-C metadata`. The hash covers what makes a unit a distinct
 artifact: package name, version and source, crate kind, target,
 features, the hashes of its dependencies, and for project crates the
@@ -110,19 +110,19 @@ Key layout decisions:
 - **Cross-compiled artifacts** are separated by target and profile. A
   debug build and a release build never share artifacts.
 - The **`tool/`** subdirectories ensure that `check` and `clippy` outputs
-  do not collide with `build` artifacts. Running `gluon check` will not
-  invalidate your last `gluon build`.
+  do not collide with `build` artifacts. Running `quon check` will not
+  invalidate your last `quon build`.
 - **Host-compiled crates** live in a separate `host/` directory because
   they are compiled for the host triple, not the target triple. Procedural
   macros, vendored host crates and the crates they depend on use a fixed
   host profile (no optimisation, no debug info) and `host/deps/`, so
-  switching profiles does not rebuild them. `gluon check` and `gluon
-  clippy` build them with plain rustc and share them with `gluon build`,
-  because a proc macro needs real rlibs of its dependencies. `gluon
+  switching profiles does not rebuild them. `quon check` and `quon
+  clippy` build them with plain rustc and share them with `quon build`,
+  because a proc macro needs real rlibs of its dependencies. `quon
   clippy` then runs clippy-driver over your own proc macros and their
   host crates a second time, metadata only, into `tool/clippy/host/lint/`,
   so their lints are still reported. Other host
   crates (host tools, build-step runners) use the active profile and
   `host/profile/<profile>/deps/`, so each profile keeps its own copy.
 - Old files are not deleted when a hash changes. They are never loaded,
-  so they cost disk space only; `gluon clean` removes them.
+  so they cost disk space only; `quon clean` removes them.

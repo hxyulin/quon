@@ -38,7 +38,7 @@ crate identifier throughout the build model, and the path is relative to the
 project root. After `.add()`, you chain crate-specific methods:
 
 ```rust
-use gluon_config::CrateType;
+use quon_config::CrateType;
 
 let target = cfg.target("x86_64-unknown-none");
 
@@ -80,7 +80,7 @@ The `.artifact_env()` method enables cross-crate artifact embedding -- a common
 pattern in bootloader/kernel setups.
 
 ```rust
-use gluon_config::CrateType;
+use quon_config::CrateType;
 
 let target = cfg.target("x86_64-unknown-uefi");
 
@@ -107,5 +107,5 @@ static KERNEL: &[u8] = include_bytes!(env!("KERNEL_PATH"));
 ```
 
 The bootloader does not need to know where the kernel artifact lives on disk --
-Gluon resolves the path and injects it as an environment variable before
+Quon resolves the path and injects it as an environment variable before
 compiling the bootloader.

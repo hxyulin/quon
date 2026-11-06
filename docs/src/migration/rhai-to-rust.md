@@ -1,10 +1,10 @@
-# Migrating `gluon.rhai` to `gluon.rs`
+# Migrating `quon.rhai` to `quon.rs`
 
-Gluon 0.x phases out the Rhai DSL in favor of a typed Rust build
-script (`gluon.rs`) that imports the
-[`gluon-config`](https://docs.rs/gluon-config) crate. This guide
+Quon 0.x phases out the Rhai DSL in favor of a typed Rust build
+script (`quon.rs`) that imports the
+[`quon-config`](https://docs.rs/quon-config) crate. This guide
 covers the mechanical translation. For the rationale, see the
-[restructure spec](https://github.com/hxyulin/gluon/blob/main/docs/superpowers/specs/2026-05-01-gluon-restructure-spec.md#d1-replace-rhai-with-a-typed-rust-build-script).
+[restructure spec](https://github.com/hxyulin/quon/blob/main/docs/superpowers/specs/2026-05-01-quon-restructure-spec.md#d1-replace-rhai-with-a-typed-rust-build-script).
 
 ## Quick reference
 
@@ -35,10 +35,10 @@ covers the mechanical translation. For the rationale, see the
 
 ## Skeleton
 
-Every `gluon.rs` looks like this:
+Every `quon.rs` looks like this:
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use quon_config::{Config, CrateType, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     // ... declarations ...
@@ -46,9 +46,9 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 }
 ```
 
-Gluon creates the `Config`, calls `config`, then serialises the model
+Quon creates the `Config`, calls `config`, then serialises the model
 as JSON to stdout, failing with the first accumulated diagnostic if
-any. The gluon CLI captures that JSON, runs intern + validate, and
+any. The quon CLI captures that JSON, runs intern + validate, and
 proceeds with the build.
 
 ## Targets are handles, not strings
@@ -108,7 +108,7 @@ The Rust DSL collapses these into one method that takes a
 structural [`Expr`] value:
 
 ```rust
-use gluon_config::Expr;
+use quon_config::Expr;
 
 cfg.config_bool("X").depends_on(Expr::Ident("A".into()));
 
@@ -146,27 +146,27 @@ time, first-failure-wins) after `config` returns.
 
 ## Editor support
 
-Run `gluon configure` to generate a `rust-project.json`.
+Run `quon configure` to generate a `rust-project.json`.
 rust-analyzer indexes the build script alongside your kernel
 sources — every builder method gets autocomplete, hover docs, and
 live type errors. No extra LSP setup needed.
 
 ## During the transition
 
-Both `gluon.rhai` and `gluon.rs` work simultaneously while you
-port. When both files exist, `gluon.rs` wins — so the safest
+Both `quon.rhai` and `quon.rs` work simultaneously while you
+port. When both files exist, `quon.rs` wins — so the safest
 migration is:
 
-1. Add `gluon.rs` next to your existing `gluon.rhai`.
-2. Run `gluon build` to confirm the `.rs` form compiles and
+1. Add `quon.rs` next to your existing `quon.rhai`.
+2. Run `quon build` to confirm the `.rs` form compiles and
    produces a valid model.
 3. Compare build outputs across both forms (e.g., delete `build/`,
    rebuild with `.rhai`, save artifacts; rename `.rhai` out of the
    way, rebuild with `.rs`, diff).
-4. Once you're confident, delete `gluon.rhai`.
+4. Once you're confident, delete `quon.rhai`.
 
-Stage 3 of the gluon restructure removes `.rhai` support entirely.
+Stage 3 of the quon restructure removes `.rhai` support entirely.
 Until then, no rush — both paths are equivalent.
 
-[`Expr`]: https://docs.rs/gluon-config/latest/gluon_config/enum.Expr.html
-[`Config`]: https://docs.rs/gluon-config/latest/gluon_config/struct.Config.html
+[`Expr`]: https://docs.rs/quon-config/latest/quon_config/enum.Expr.html
+[`Config`]: https://docs.rs/quon-config/latest/quon_config/struct.Config.html

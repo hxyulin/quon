@@ -50,7 +50,7 @@ pub struct FreshnessQuery<'a> {
 
 Discovered inputs are not in the query. They come from the record: the
 previous run's depfile (the source files rustc read) and its
-`# env-dep:` lines. Gluon does not pass `-Zbinary-dep-depinfo`, which
+`# env-dep:` lines. Quon does not pass `-Zbinary-dep-depinfo`, which
 would also list the crate files rustc loaded: it declares those itself,
 as Cargo does, so builds work on stable rustc. A cargo-built prebuilt's
 own deps are not in the unit graph, but a change there rebuilds the
@@ -72,12 +72,12 @@ A record is fresh if and only if, in order:
    SHA-256 equals the recorded hash. A hash match rewrites the stamp so
    the next check takes the mtime path.
 6. Every recorded environment variable has the value the next run would
-   see: the node's own command env if Gluon sets it there (such as
-   `CARGO_PKG_NAME` or `KERNEL_PATH`), else Gluon's environment. Unset
+   see: the node's own command env if Quon sets it there (such as
+   `CARGO_PKG_NAME` or `KERNEL_PATH`), else Quon's environment. Unset
    and empty are different values.
 
 Otherwise the node is stale, with the first failing step as the reason
-(`StaleReason`). `gluon -v build` prints it for each rerun node:
+(`StaleReason`). `quon -v build` prints it for each rerun node:
 
 ```
 rebuilding crate kernel (x86_64-unknown-none, dev): input /src/kernel/src/main.rs changed
@@ -157,7 +157,7 @@ Why one file per record instead of one manifest:
 - A failed or interrupted build keeps every record it wrote.
 - No shared lock and no whole-file rewrite when one stamp refreshes.
   Each node owns its keys.
-- `gluon clean --keep-sysroot` keeps `sysroot_*` files.
+- `quon clean --keep-sysroot` keeps `sysroot_*` files.
 - A no-op build reads only the records of nodes in the current DAG.
 
 Records are written to a temp file and renamed. There is no fsync:
@@ -175,10 +175,10 @@ unparsable record is stale (`FormatChanged`), never a build error.
 ### Build-script runs
 
 A `RunBuildScript` node's command is the script binary's path, the
-environment Gluon sets and the package directory. Its declared input is
+environment Quon sets and the package directory. Its declared input is
 the script binary, its discovered inputs are the `rerun-if-changed`
 paths (every file in the package when the script prints none, skipping
-`target/`, dot-directories and Gluon's build directory), and its
+`target/`, dot-directories and Quon's build directory), and its
 env values are the `rerun-if-env-changed` names. The record's `data`
 holds the parsed output, so a hit hands it to the owner without running
 the script. The output reaches the owner's argv and env, so a changed
@@ -195,9 +195,9 @@ every build, as in Cargo. Vendored units are compiled with
 
 ### Format changes and the old manifest
 
-A record with another `format` is stale, per record. Gluon versions
+A record with another `format` is stale, per record. Quon versions
 before this format kept every record in `build/cache-manifest.json`.
-On the first build that finds that file, Gluon deletes it together with
+On the first build that finds that file, Quon deletes it together with
 the trees it described (`host/`, `tool/`, and everything under
 `cross/<target>/<profile>/` except `final/` and `esp/`), prints one
 note, and builds clean. The sysroot stays on disk but has no record, so

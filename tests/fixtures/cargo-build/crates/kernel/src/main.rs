@@ -7,7 +7,7 @@ use fixture_derive::Marker;
 #[derive(Marker)]
 struct Kernel;
 
-/// Cargo sets this for every compiled crate; Gluon must too.
+/// Cargo sets this for every compiled crate; Quon must too.
 #[used]
 static VERSION: &str = env!("CARGO_PKG_VERSION");
 

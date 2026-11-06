@@ -1,8 +1,8 @@
-# Working on Gluon
+# Working on Quon
 
-Gluon is a declarative build system for Rust. It reads Cargo workspaces,
+Quon is a declarative build system for Rust. It reads Cargo workspaces,
 drives `rustc` directly, builds sysroots for custom targets, and takes a
-project from its `gluon.rs` configuration to a running binary: on the
+project from its `quon.rs` configuration to a running binary: on the
 host, through a command, or as a bootable image under QEMU. Bare-metal
 projects are the main use, not the only one. It is a host tool, so it
 has no `no_std` or dependency-count constraints.
@@ -24,10 +24,10 @@ has no `no_std` or dependency-count constraints.
 
 1. **Stay kernel-agnostic.** Don't build assumptions about a particular
    kernel, target triple, bootloader or boot protocol into the core. That
-   belongs in the project's `gluon.rs`.
+   belongs in the project's `quon.rs`.
 2. **Use mature crates where they pay off.** `clap`, `serde` and similar
    are fine. Avoid trivial micro-crates and overlapping ecosystems.
-3. **Keep builds deterministic.** The same `gluon.rs` and source tree
+3. **Keep builds deterministic.** The same `quon.rs` and source tree
    must produce the same artifacts. Use stable iteration order (`BTreeMap`,
    sorted paths), never `HashMap` order or filesystem order.
 4. **Never serve stale outputs.** When freshness is uncertain, rebuild.
@@ -60,9 +60,9 @@ cargo nextest run --workspace --run-ignored all
 cargo test --workspace --doc
 ```
 
-Gluon also builds itself from the repository's `gluon.rs`. After a
-change to resolution, lowering or host tests, `gluon test` with the
-freshly built binary (`target/debug/gluon test`) should still pass the
+Quon also builds itself from the repository's `quon.rs`. After a
+change to resolution, lowering or host tests, `quon test` with the
+freshly built binary (`target/debug/quon test`) should still pass the
 same tests as `cargo test`.
 
 Commit messages follow the format in [CONTRIBUTING.md](CONTRIBUTING.md).

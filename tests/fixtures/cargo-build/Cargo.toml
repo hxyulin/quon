@@ -1,4 +1,4 @@
-# Cargo workspace built end to end by `gluon build` (see gluon.rs).
+# Cargo workspace built end to end by `quon build` (see quon.rs).
 # Path dependencies only; `cargo-registry` covers registry dependencies.
 
 [workspace]
@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.3.1"
 edition = "2021"
-authors = ["Gluon Tests", "Second Author"]
+authors = ["Quon Tests", "Second Author"]
 description = "manifest build fixture"
 license = "MIT"
 

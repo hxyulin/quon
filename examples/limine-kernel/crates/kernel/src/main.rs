@@ -29,7 +29,7 @@ static REQUESTS_END: RequestsEndMarker = RequestsEndMarker::new();
 
 /// I/O port of the first serial port (COM1).
 const COM1: u16 = 0x3f8;
-/// I/O port of QEMU's `isa-debug-exit` device, as set in gluon.rs.
+/// I/O port of QEMU's `isa-debug-exit` device, as set in quon.rs.
 const DEBUG_EXIT: u16 = 0xf4;
 /// Value written to `DEBUG_EXIT` on success. QEMU exits with status
 /// `(value << 1) | 1`, so 0x10 becomes 33.

@@ -1,5 +1,5 @@
 /* INTENTIONALLY WRONG: OUTPUT_FORMAT(binary) tells lld to skip ELF
-   wrapping. After Task 6, gluon controls output format itself; this
+   wrapping. After Task 6, quon controls output format itself; this
    directive collides with the new contract and causes objcopy to fail
    the magic-byte pre-check on the supposed `.elf`. The integration
    test asserts the resulting diagnostic mentions OUTPUT_FORMAT(binary)

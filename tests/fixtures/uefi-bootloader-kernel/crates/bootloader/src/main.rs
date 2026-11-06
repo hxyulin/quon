@@ -15,9 +15,9 @@
 //      purpose is to prove the build chain works, not to be an OS.
 //
 // The embedded kernel path comes from `env!("KERNEL_PATH")`, which is
-// injected by the Gluon build system's `artifact_env` mechanism: the
+// injected by the Quon build system's `artifact_env` mechanism: the
 // bootloader crate declares `.artifact_env("KERNEL_PATH", "kernel")`
-// in gluon.rhai, and gluon-core sets `KERNEL_PATH=<abs path>` in the
+// in quon.rhai, and quon-core sets `KERNEL_PATH=<abs path>` in the
 // rustc process environment after compiling the kernel.
 
 #![no_std]

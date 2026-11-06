@@ -1,0 +1,41 @@
+[package]
+name = "quon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Command-line interface for the Quon build system."
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "quon"
+path = "src/main.rs"
+
+[dependencies]
+quon-core.workspace = true
+# Built in as the `qemu` runner plugin, so a QEMU runner needs no
+# separate executable.
+quon-runner-qemu.workspace = true
+clap = { version = "4", features = ["derive"] }
+# Colored stderr. Both are already in the tree through clap. `anstream`
+# strips escape codes when stderr is not a terminal or NO_COLOR is set.
+anstream = "1"
+anstyle = "1"
+# Width of stderr, so the progress line never wraps: a wrapped line
+# cannot be erased in place.
+terminal_size = "0.4"
+anyhow = "1"
+# Used only by `quon internal dump-dsl` to emit a stable JSON wrapper
+# around the DSL signature list. Already in the workspace dep tree via
+# `quon-core`, so this is a zero-cost addition.
+serde_json = "1"
+# `quon init` reads `.cargo/config.toml` and `rust-toolchain.toml`.
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"

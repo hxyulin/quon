@@ -1,16 +1,16 @@
 # Building and Running
 
 This page covers the core CLI commands for compiling, running, and maintaining
-your Gluon project.
+your Quon project.
 
 ## Build
 
 ```sh
-gluon build
+quon build
 ```
 
-Compiles every crate in your project. Gluon drives `rustc` directly for each
-crate, assembling per-crate flags from your `gluon.rs` configuration. Custom
+Compiles every crate in your project. Quon drives `rustc` directly for each
+crate, assembling per-crate flags from your `quon.rs` configuration. Custom
 sysroots (`core`, `alloc`, `compiler_builtins`) are compiled automatically for
 each registered target triple.
 
@@ -19,7 +19,7 @@ Build output goes to the `build/` directory at your project root.
 ## Run
 
 ```sh
-gluon run
+quon run
 ```
 
 Builds the project (if needed) and starts the profile's run binary with the
@@ -30,13 +30,13 @@ with `cfg.runner("qemu").qemu(...)`. The profile must name a runner with
 To pass extra arguments directly to QEMU, place them after `--`:
 
 ```sh
-gluon run -- -serial mon:stdio -d int
+quon run -- -serial mon:stdio -d int
 ```
 
 ## Check
 
 ```sh
-gluon check
+quon check
 ```
 
 Performs a metadata-only check pass, similar to `cargo check`. This runs `rustc`
@@ -46,42 +46,42 @@ producing final artifacts. Useful for fast feedback during development.
 ## Clippy
 
 ```sh
-gluon clippy
+quon clippy
 ```
 
 Runs `clippy-driver` on your crates, applying the same flag assembly and sysroot
-that `gluon build` uses. Requires the `clippy` component in your Rust toolchain.
+that `quon build` uses. Requires the `clippy` component in your Rust toolchain.
 
 ## Format
 
 ```sh
-gluon fmt
+quon fmt
 ```
 
 Runs `rustfmt` on your project sources. To verify formatting without modifying
 files (useful in CI), pass the check flag:
 
 ```sh
-gluon fmt --check
+quon fmt --check
 ```
 
 ## Clean
 
 ```sh
-gluon clean
+quon clean
 ```
 
 Removes the `build/` directory. To remove build artifacts but preserve the
 compiled sysroot (which is expensive to rebuild), use:
 
 ```sh
-gluon clean --keep-sysroot
+quon clean --keep-sysroot
 ```
 
 ## Configure
 
 ```sh
-gluon configure
+quon configure
 ```
 
 Generates a `rust-project.json` file for rust-analyzer. This gives your editor
@@ -102,18 +102,18 @@ These flags apply to most commands:
 ### Example: release build
 
 ```sh
-gluon build -r
+quon build -r
 ```
 
 ### Example: build for a different target
 
 ```sh
-gluon build -t aarch64-unknown-none
+quon build -t aarch64-unknown-none
 ```
 
 ## Setting a default profile
 
-Rather than passing `-p` every time, you can set a default in your `gluon.rs`:
+Rather than passing `-p` every time, you can set a default in your `quon.rs`:
 
 ```rust
 cfg.project("my-kernel", "0.1.0")

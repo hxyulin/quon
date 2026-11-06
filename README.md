@@ -1,50 +1,50 @@
-# Gluon
+# Quon
 
-Gluon is a declarative build system for Rust. It reads your Cargo
+Quon is a declarative build system for Rust. It reads your Cargo
 workspace, drives `rustc` directly, and handles the parts Cargo leaves
 to shell scripts: several targets in one build, custom targets and
 sysroots, linker scripts, post-build steps, and runners such as QEMU.
-The whole build is described in `gluon.rs`, a Rust file that lives next
+The whole build is described in `quon.rs`, a Rust file that lives next
 to your `Cargo.toml`.
 
-![A clean gluon build and gluon test of the Hadron kernel](docs/src/images/hadron-build.gif)
+![A clean quon build and quon test of the Hadron kernel](docs/src/images/hadron-build.gif)
 
 <sub>A clean build of [Hadron](https://github.com/asterism-labs/hadron),
 an x86_64 kernel: proc macros for the host, a sysroot and the kernel for
-`x86_64-unknown-none`, and an ESP with Limine. `gluon test` then runs
+`x86_64-unknown-none`, and an ESP with Limine. `quon test` then runs
 the host unit tests and boots the kernel in QEMU twice. Played at 2x.</sub>
 
 ## Drop it into a Cargo project
 
-![gluon init, gluon run and gluon test in a new Cargo project](docs/src/images/cargo-project.svg)
+![quon init, quon run and quon test in a new Cargo project](docs/src/images/cargo-project.svg)
 
-`gluon init` reads the manifests and writes a `gluon.rs`. A project
-with no target builds for the host, so `gluon run` and `gluon test`
+`quon init` reads the manifests and writes a `quon.rs`. A project
+with no target builds for the host, so `quon run` and `quon test`
 work straight away. A kernel workspace gets its target, linker script
 and QEMU setup from `.cargo/config.toml`, `rust-toolchain.toml` and
 `limine.conf`.
 
-`Cargo.toml` stays the source of truth. Gluon reads dependencies,
+`Cargo.toml` stays the source of truth. Quon reads dependencies,
 features, editions, lints and build scripts from the manifests on every
 build, and writes to `build/`, so `cargo build` keeps working beside it.
 
-Gluon builds itself this way: its [`gluon.rs`](gluon.rs) is 44 lines,
-and `gluon test` runs the same tests as `cargo test`.
+Quon builds itself this way: its [`quon.rs`](quon.rs) is 44 lines,
+and `quon test` runs the same tests as `cargo test`.
 
-## Why Gluon?
+## Why Quon?
 
 Cargo builds one target per invocation and stops at the compiled
-binary. Gluon covers what comes before and after:
+binary. Quon covers what comes before and after:
 
 - **Several targets in one build.** A UEFI bootloader, a kernel and the
   host tools they need build together, each group for its own target.
 - **Custom sysroots.** For a target with no prebuilt standard library,
-  Gluon builds `core`, `alloc` and `compiler_builtins` from source with
+  Quon builds `core`, `alloc` and `compiler_builtins` from source with
   the flags you choose, without `-Zbuild-std`.
 - **Steps after compiling.** Linker scripts, file copies, image tools
   and EFI System Partition layout are declared next to the crates they
   use.
-- **Runners.** `gluon run` and `gluon test` start the binary on the
+- **Runners.** `quon run` and `quon test` start the binary on the
   host, through any command, or under QEMU with UEFI, direct-kernel or
   BIOS boot.
 - **Typed config options.** Kconfig-style booleans, numbers, strings
@@ -60,41 +60,41 @@ crates in flight, and `Finished` with the profile and cache counts.
 
 - Rust 1.99 or later. Stable works, except for custom `.json` targets,
   which need nightly.
-- The `rust-src` component, for targets Gluon builds a sysroot for.
+- The `rust-src` component, for targets Quon builds a sysroot for.
 - QEMU, only for a QEMU runner.
 
 **Install:**
 
 ```sh
-cargo install --git https://github.com/hxyulin/gluon.git gluon-cli
+cargo install --git https://github.com/hxyulin/quon.git quon
 ```
 
-**Generate `gluon.rs`:**
+**Generate `quon.rs`:**
 
 ```sh
 cd my-project            # the directory with the root Cargo.toml
-gluon init               # a host build, or a kernel build if a target is set
-gluon init --target x86_64-unknown-none --bootloader limine --limine 11.4.1
+quon init               # a host build, or a kernel build if a target is set
+quon init --target x86_64-unknown-none --bootloader limine --limine 11.4.1
 ```
 
-`gluon init` leaves a `// TODO:` comment for each setting it cannot
-find. See [Generating gluon.rs](docs/src/getting-started/init.md).
+`quon init` leaves a `// TODO:` comment for each setting it cannot
+find. See [Generating quon.rs](docs/src/getting-started/init.md).
 
 **Build and run:**
 
 ```sh
-gluon build              # compile everything
-gluon build -r           # with the release profile
-gluon run -- <args>      # build, then start the run binary through its runner
-gluon test               # host unit tests, tests/, doctests, QEMU tests
-gluon check              # metadata-only check pass
-gluon configure          # write rust-project.json for rust-analyzer
+quon build              # compile everything
+quon build -r           # with the release profile
+quon run -- <args>      # build, then start the run binary through its runner
+quon test               # host unit tests, tests/, doctests, QEMU tests
+quon check              # metadata-only check pass
+quon configure          # write rust-project.json for rust-analyzer
 ```
 
-## A kernel `gluon.rs`
+## A kernel `quon.rs`
 
 ```rust
-use gluon_config::{Config, Result};
+use quon_config::{Config, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-kernel", "0.1.0");
@@ -124,9 +124,9 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 }
 ```
 
-See [the gluon.rs guide](docs/src/configuration/gluon-rs.md) for the
+See [the quon.rs guide](docs/src/configuration/quon-rs.md) for the
 full API, including how to
-[split config across files](docs/src/configuration/gluon-rs.md#splitting-config-across-files).
+[split config across files](docs/src/configuration/quon-rs.md#splitting-config-across-files).
 
 ## Features
 
@@ -138,24 +138,24 @@ full API, including how to
   `compiler_builtins` built for your target
 - **Kconfig-style options**: typed options with defaults, ranges,
   dependencies and presets
-- **Configuration overrides**: `gluon.rs` defaults, a `.gluon-config`
-  file and `GLUON_*` environment variables
+- **Configuration overrides**: `quon.rs` defaults, a `.quon-config`
+  file and `QUON_*` environment variables
 - **Build cache**: mtime and SHA-256 freshness checks, rebuilt when the
   toolchain changes
 - **Parallel scheduler**: a dependency graph run by a worker pool
-- **Dependency vendoring**: `gluon vendor` with a lockfile and
+- **Dependency vendoring**: `quon vendor` with a lockfile and
   fingerprints
 - **Runners**: the host, a command, or QEMU with OVMF, a GDB server and
   timeouts
 - **Testing**: unit tests, `tests/`, doctests, QEMU integration tests
-  and boot tests from one `gluon test`
-- **rust-analyzer integration**: `gluon configure` writes
+  and boot tests from one `quon test`
+- **rust-analyzer integration**: `quon configure` writes
   `rust-project.json`
 - **Pipelines and rules**: build stages with copy, mkimage and exec
   rules
 - **ESP assembly**: EFI System Partition layout for UEFI boot
-- **External plugins**: `gluon foo` runs `gluon-foo` from `$PATH`, and
-  a runner named `.plugin("x")` asks `gluon-runner-x` for its command
+- **External plugins**: `quon foo` runs `quon-foo` from `$PATH`, and
+  a runner named `.plugin("x")` asks `quon-runner-x` for its command
 
 ## Documentation
 
@@ -168,7 +168,7 @@ cd docs && mdbook serve
 
 ## License
 
-Gluon is licensed under either of
+Quon is licensed under either of
 
 - [Apache License, Version 2.0](LICENSE-APACHE)
 - [MIT license](LICENSE-MIT)

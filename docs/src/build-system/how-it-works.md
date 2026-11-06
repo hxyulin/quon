@@ -1,6 +1,6 @@
-# How Gluon Builds Your Code
+# How Quon Builds Your Code
 
-Gluon's build pipeline has six stages. Understanding this pipeline gives you
+Quon's build pipeline has six stages. Understanding this pipeline gives you
 a mental model for how configuration turns into bootable artifacts, and why
 certain things (like sysroot compilation) only happen on the first build.
 
@@ -8,7 +8,7 @@ certain things (like sysroot compilation) only happen on the first build.
 
 ### 1. Evaluate
 
-Gluon parses and executes your `gluon.rs` script. The script declares
+Quon parses and executes your `quon.rs` script. The script declares
 projects, targets, crate groups, profiles, rules, pipelines, and QEMU
 settings. The result is a **BuildModel** -- a structured, in-memory
 representation of everything the build needs to know.
@@ -24,14 +24,14 @@ apply.
 ### 3. Sysroot
 
 Bare-metal targets need `core`, `alloc`, and `compiler_builtins` compiled
-from source for the target triple. Gluon checks whether a cached sysroot
-exists and is still fresh. If the sysroot is missing or stale, Gluon
+from source for the target triple. Quon checks whether a cached sysroot
+exists and is still fresh. If the sysroot is missing or stale, Quon
 compiles it before anything else. See [Custom Sysroots](./sysroots.md)
 for details.
 
 ### 4. DAG construction
 
-Gluon walks the resolved crates and their dependencies to build a
+Quon walks the resolved crates and their dependencies to build a
 **directed acyclic graph** (DAG) of compilation tasks. The DAG contains
 several node types:
 
@@ -50,13 +50,13 @@ finishes.
 ### 5. Schedule
 
 The DAG is handed to a parallel worker pool. The pool size is configurable
-with the `-j` flag (e.g., `gluon build -j4`). The scheduler picks nodes
+with the `-j` flag (e.g., `quon build -j4`). The scheduler picks nodes
 whose dependencies are all satisfied, dispatches them to workers, and
 continues until the graph is fully executed or an error occurs.
 
 ### 6. Per-crate compilation
 
-For each crate node the scheduler dispatches, Gluon:
+For each crate node the scheduler dispatches, Quon:
 
 1. **Checks the build cache.** If the crate's sources, flags, and
    dependencies have not changed, the cached artifact is reused. See
@@ -64,10 +64,10 @@ For each crate node the scheduler dispatches, Gluon:
 2. **Assembles rustc flags.** Each crate gets its own set of flags:
    edition, optimization level, `--cfg` flags, feature flags, extern
    paths, linker script, sysroot path, and more.
-3. **Invokes rustc directly.** Gluon calls `rustc` as a subprocess --
+3. **Invokes rustc directly.** Quon calls `rustc` as a subprocess --
    there is no Cargo involved.
 4. **Parses the depfile.** Rustc emits a `.d` dependency file listing
-   every source file the crate touched. Gluon records these for future
+   every source file the crate touched. Quon records these for future
    cache invalidation.
 5. **Records the result.** On success, the crate's fingerprint record
    (inputs, command hash, outputs, warnings) is written to
@@ -80,8 +80,8 @@ invocation but limits how much you can customize per-crate flags, sysroot
 paths, linker scripts, and cross-target compilation within a single
 workspace.
 
-Gluon drives `rustc` directly and assembles flags per-crate from your
-`gluon.rs` configuration. This gives full control over:
+Quon drives `rustc` directly and assembles flags per-crate from your
+`quon.rs` configuration. This gives full control over:
 
 - Sysroot paths (custom-compiled `core`/`alloc` for your target)
 - Per-crate `--cfg` flags and features

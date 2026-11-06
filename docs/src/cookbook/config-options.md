@@ -1,14 +1,14 @@
 # Kernel with Config Options
 
-Gluon includes a Kconfig-style configuration system that generates a Rust crate
+Quon includes a Kconfig-style configuration system that generates a Rust crate
 of typed constants. This lets you define build-time options -- feature toggles,
 numeric tuning knobs, string paths -- and access them as normal Rust constants
 with full type safety.
 
-## gluon.rs
+## quon.rs
 
 ```rust
-use gluon_config::{Config, CrateType, ConfigValue, Expr, Result};
+use quon_config::{Config, CrateType, ConfigValue, Expr, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("configurable_kernel", "0.1.0");
@@ -77,11 +77,11 @@ runtime cost.
 
 ## Overriding values
 
-There are several ways to override the defaults declared in `gluon.rs`.
+There are several ways to override the defaults declared in `quon.rs`.
 
-### Per-developer file (`.gluon-config`)
+### Per-developer file (`.quon-config`)
 
-Create a `.gluon-config` file in your project root (typically gitignored):
+Create a `.quon-config` file in your project root (typically gitignored):
 
 ```
 LOG_LEVEL = 4
@@ -90,13 +90,13 @@ DEBUG = true
 
 ### Environment variables
 
-Prefix the option name with `GLUON_`:
+Prefix the option name with `QUON_`:
 
 ```sh
-GLUON_LOG_LEVEL=5 gluon build
+QUON_LOG_LEVEL=5 quon build
 ```
 
-Environment variables take precedence over `.gluon-config`.
+Environment variables take precedence over `.quon-config`.
 
 ### Via preset (in a profile)
 
@@ -112,11 +112,11 @@ cfg.profile("verbose-dev")
 
 From lowest to highest priority:
 
-1. `default_value()` in `gluon.rs`
+1. `default_value()` in `quon.rs`
 2. Preset applied by the active profile
-3. `.gluon-config` file
-4. `--config-file` flag (overrides the `.gluon-config` path)
-5. `GLUON_*` environment variables
+3. `.quon-config` file
+4. `--config-file` flag (overrides the `.quon-config` path)
+5. `QUON_*` environment variables
 
 ## Using Kconfig files instead
 
@@ -144,5 +144,5 @@ Both approaches produce the same generated config crate. Use whichever fits
 your project better -- inline declarations for small projects, Kconfig files
 for larger ones with many options.
 
-`examples/with-config/` in the Gluon repository is a runnable version of
+`examples/with-config/` in the Quon repository is a runnable version of
 this project, with the kernel declared in a Cargo workspace.

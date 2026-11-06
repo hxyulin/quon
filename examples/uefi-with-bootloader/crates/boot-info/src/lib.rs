@@ -4,4 +4,4 @@
 
 /// Bytes the kernel embeds and the bootloader looks for in the kernel
 /// image it carries.
-pub const KERNEL_MAGIC: [u8; 8] = *b"GLUONKER";
+pub const KERNEL_MAGIC: [u8; 8] = *b"QUONKERN";

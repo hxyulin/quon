@@ -1,0 +1,17 @@
+[package]
+name = "quon-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Runner plugin protocol for the Quon build system: the request and response types, and a server for plugin binaries."
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

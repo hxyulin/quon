@@ -1,6 +1,6 @@
 # Commands and Flags
 
-Complete CLI reference for Gluon.
+Complete CLI reference for Quon.
 
 ## Global Flags
 
@@ -11,7 +11,7 @@ These flags apply to all commands.
 | `--profile <NAME>` | `-p` | Profile to use (overrides default) |
 | `--release` | `-r` | Use the `release` profile; same as `-p release` |
 | `--target <NAME>` | `-t` | Target triple (overrides profile's target) |
-| `--config-file <PATH>` | `-C` | Override file path (default: `.gluon-config`) |
+| `--config-file <PATH>` | `-C` | Override file path (default: `.quon-config`) |
 | `--jobs <N>` | `-j` | Parallel compile jobs (default: host parallelism) |
 | `--verbose` | `-v` | Print `Fresh` lines for cache hits, why each job reruns, and the rustc command of a failed job |
 | `--quiet` | `-q` | Print only warnings and errors |
@@ -19,28 +19,28 @@ These flags apply to all commands.
 
 ## Commands
 
-### `gluon init`
+### `quon init`
 
-Write a `gluon.rs` for the Cargo workspace in the current directory. Gluon
+Write a `quon.rs` for the Cargo workspace in the current directory. Quon
 reads the target, kernel package, linker script and version from the
 workspace and its toolchain files, and writes a `// TODO:` comment for each
-setting it cannot find. See [Generating gluon.rs](../getting-started/init.md).
+setting it cannot find. See [Generating quon.rs](../getting-started/init.md).
 
 | Flag | Description |
 |------|-------------|
 | `--target <TRIPLE>` | Target triple or `.json` spec; repeatable. Overrides inference. |
 | `--kernel <PACKAGE>` | Workspace member that holds the kernel. |
-| `--bootloader limine\|uefi\|none` | How `gluon run` boots the kernel. Default: `none`. |
+| `--bootloader limine\|uefi\|none` | How `quon run` boots the kernel. Default: `none`. |
 | `--limine <VERSION>` | Pin a Limine release with an empty hash; the first build prints the hash. |
-| `--force` | Overwrite an existing `gluon.rs`. |
+| `--force` | Overwrite an existing `quon.rs`. |
 | `--dry-run` | Print the file instead of writing it. |
 
 ```sh
-gluon init
-gluon init --bootloader limine --limine 11.4.1
+quon init
+quon init --bootloader limine --limine 11.4.1
 ```
 
-### `gluon build`
+### `quon build`
 
 Build the project. Compiles all crates in the build model using the resolved
 profile. This includes compiling a custom sysroot (`core`, `alloc`,
@@ -48,22 +48,22 @@ profile. This includes compiling a custom sysroot (`core`, `alloc`,
 compiling each crate with per-crate flag assembly.
 
 ```sh
-gluon build
-gluon build -p release
-gluon build -t aarch64-unknown-none
+quon build
+quon build -p release
+quon build -t aarch64-unknown-none
 ```
 
-### `gluon check`
+### `quon check`
 
 Run a metadata-only check pass over every crate. Equivalent to `cargo check`
-but uses Gluon's per-crate flag assembly. This is faster than a full build
+but uses Quon's per-crate flag assembly. This is faster than a full build
 because it skips code generation. Output goes to `build/tool/check/`.
 
 ```sh
-gluon check
+quon check
 ```
 
-### `gluon clippy`
+### `quon clippy`
 
 Run clippy over every crate. Uses `clippy-driver`, resolved in the following
 order:
@@ -75,10 +75,10 @@ order:
 Output goes to `build/tool/clippy/`.
 
 ```sh
-gluon clippy
+quon clippy
 ```
 
-### `gluon fmt [--check]`
+### `quon fmt [--check]`
 
 Run `rustfmt` over every crate in the build model.
 
@@ -87,11 +87,11 @@ Run `rustfmt` over every crate in the build model.
 | `--check` | Verify formatting without rewriting files. Exits non-zero if any file is unformatted. |
 
 ```sh
-gluon fmt
-gluon fmt --check
+quon fmt
+quon fmt --check
 ```
 
-### `gluon clean [--keep-sysroot]`
+### `quon clean [--keep-sysroot]`
 
 Remove the `build/` directory.
 
@@ -100,43 +100,43 @@ Remove the `build/` directory.
 | `--keep-sysroot` | Preserve the sysroot directory, avoiding expensive recompilation of `core`, `alloc`, and `compiler_builtins` on the next build. |
 
 ```sh
-gluon clean
-gluon clean --keep-sysroot
+quon clean
+quon clean --keep-sysroot
 ```
 
-### `gluon configure [--output PATH]`
+### `quon configure [--output PATH]`
 
 Generate a `rust-project.json` file for rust-analyzer. This gives your editor
-a complete project model even though Gluon does not use `Cargo.toml`.
+a complete project model even though Quon does not use `Cargo.toml`.
 
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--output` | `-o` | Output path (default: `<project_root>/rust-project.json`) |
 
 ```sh
-gluon configure
-gluon configure -o ./ide/rust-project.json
+quon configure
+quon configure -o ./ide/rust-project.json
 ```
 
 See [rust-analyzer](../tooling/rust-analyzer.md) for details on editor
 integration.
 
-### `gluon setup`
+### `quon setup`
 
-Build the gluon-config library that `gluon.rs` links against, for the
+Build the quon-config library that `quon.rs` links against, for the
 rustc the current directory uses, and print the library's directory.
-The library is built from the sources embedded in `gluon`, once per
-Gluon version and rustc, into
-`$GLUON_HOME` (default `~/.gluon`) and shared by every project. Other
+The library is built from the sources embedded in `quon`, once per
+Quon version and rustc, into
+`$QUON_HOME` (default `~/.quon`) and shared by every project. Other
 commands build it on first use, so `setup` is only needed to do that
 ahead of time, for example before going offline. See
-[the gluon-config library](../configuration/gluon-rs.md#the-gluon-config-library-and-gluon).
+[the quon-config library](../configuration/quon-rs.md#the-quon-config-library-and-quon).
 
 ```sh
-gluon setup
+quon setup
 ```
 
-### `gluon vendor [--check] [--force] [--offline]`
+### `quon vendor [--check] [--force] [--offline]`
 
 Vendor external dependencies into the project.
 
@@ -147,12 +147,12 @@ Vendor external dependencies into the project.
 | `--offline` | No network access. The lockfile must already exist. |
 
 ```sh
-gluon vendor
-gluon vendor --check
-gluon vendor --force
+quon vendor
+quon vendor --check
+quon vendor --force
 ```
 
-### `gluon run [flags] [-- RUNNER_ARGS...]`
+### `quon run [flags] [-- RUNNER_ARGS...]`
 
 Build the project and start the profile's run binary with its
 [runner](../running/runners.md). Arguments after `--` are appended to
@@ -169,14 +169,14 @@ the runner's: QEMU's, or a command runner's argv. `--gdb`, `--uefi`,
 | `--gdb` | | Start with a GDB server, halting at the first instruction |
 
 ```sh
-gluon run
-gluon run -p release
-gluon run --uefi --timeout 30
-gluon run --gdb -- -d int
-gluon run --dry-run
+quon run
+quon run -p release
+quon run --uefi --timeout 30
+quon run --gdb -- -d int
+quon run --dry-run
 ```
 
-### `gluon test [flags] [FILTER] [-- QEMU_ARGS...]`
+### `quon test [flags] [FILTER] [-- QEMU_ARGS...]`
 
 Build the active profile with its tests, then run the host tests, the
 integration tests and the boot tests, in that order. A failed run does
@@ -200,23 +200,23 @@ With none of `--host`, `--integration` and `--boot`, every kind runs.
 `QEMU_ARGS` apply to integration and boot tests.
 
 ```sh
-gluon test
-gluon test --host parse
-gluon test --timeout 120 -- -smp 4
+quon test
+quon test --host parse
+quon test --timeout 120 -- -smp 4
 ```
 
 ## External Subcommands
 
-Unknown subcommands are dispatched to `gluon-<name>` binaries on `$PATH`. For
+Unknown subcommands are dispatched to `quon-<name>` binaries on `$PATH`. For
 example:
 
 ```sh
-gluon foo bar
+quon foo bar
 ```
 
-This runs `gluon-foo bar`, passing all remaining arguments. This mechanism
-enables plugin development without modifying Gluon itself.
+This runs `quon-foo bar`, passing all remaining arguments. This mechanism
+enables plugin development without modifying Quon itself.
 
-Runners have their own plugins, `gluon-runner-<name>` binaries that
-`gluon run` and `gluon test` call. See
+Runners have their own plugins, `quon-runner-<name>` binaries that
+`quon run` and `quon test` call. See
 [Runner plugins](../running/runners.md#runner-plugins).

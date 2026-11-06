@@ -1,16 +1,16 @@
 # Config Options and Kconfig
 
-Gluon supports typed configuration options that become compile-time constants
+Quon supports typed configuration options that become compile-time constants
 in an auto-generated Rust crate. This is similar in spirit to Linux's Kconfig
 system, adapted for Rust's type system.
 
 ## Inline config options
 
-Declare config options directly in `gluon.rs` using the typed builder
+Declare config options directly in `quon.rs` using the typed builder
 functions:
 
 ```rust
-use gluon_config::{ConfigValue, Expr};
+use quon_config::{ConfigValue, Expr};
 
 cfg.config_bool("LOG_ENABLED")
     .default_value(ConfigValue::Bool(true))
@@ -53,7 +53,7 @@ omitted entirely, depending on the type).
 Presets are named bundles of config overrides:
 
 ```rust
-use gluon_config::ConfigValue;
+use quon_config::ConfigValue;
 
 cfg.preset("verbose")
     .set("LOG_LEVEL", ConfigValue::U32(5))
@@ -104,12 +104,12 @@ Linux-style Kconfig file instead of (or in addition to) declaring them inline:
 cfg.include_kconfig("./options.kconfig")?;
 ```
 
-The path is relative to the `gluon.rs` file. The `?` operator propagates errors
+The path is relative to the `quon.rs` file. The `?` operator propagates errors
 out of `config()`, which returns `Result<()>`.
 
 ### Supported Kconfig syntax
 
-Gluon's Kconfig parser supports the standard constructs:
+Quon's Kconfig parser supports the standard constructs:
 
 - **Entries**: `config`, `menuconfig`
 - **Grouping**: `menu` / `endmenu`

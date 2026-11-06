@@ -1,12 +1,12 @@
 # Debugging with GDB
 
-Gluon integrates with QEMU's built-in GDB server to provide a
+Quon integrates with QEMU's built-in GDB server to provide a
 straightforward debugging workflow for bare-metal kernels.
 
 ## Starting a debug session
 
 ```sh
-gluon run --gdb
+quon run --gdb
 ```
 
 This starts QEMU with two additional flags:
@@ -84,7 +84,7 @@ When debugging, it is easy to leave QEMU running indefinitely after
 detaching GDB. Use a timeout as a safety net:
 
 ```sh
-gluon run --gdb -T 300
+quon run --gdb -T 300
 ```
 
 This kills QEMU after 5 minutes if you forget to shut it down.

@@ -1,6 +1,6 @@
 # Projects, Targets, and Profiles
 
-Every `gluon.rs` file declares at least one project, one target, and one
+Every `quon.rs` file declares at least one project, one target, and one
 profile. These three entities establish the core identity and compilation
 settings for your build.
 
@@ -17,7 +17,7 @@ cfg.config_crate_name("my_kernel_config");
   used in build output paths and diagnostics. Returns a `ProjectBuilder` for
   chaining `.default_profile()`.
 - **`.default_profile(name)`** -- the profile used when neither `-p` nor `-r`
-  is passed to the CLI. If omitted, Gluon uses the first profile in
+  is passed to the CLI. If omitted, Quon uses the first profile in
   alphabetical order.
 - **`cfg.config_crate_name(name)`** -- overrides the name of the auto-generated
   config crate. The default is `<project>_config` (e.g., `my_kernel_config`
@@ -34,10 +34,10 @@ let t3 = cfg.target_spec("riscv64gc-custom", "./targets/riscv64gc-custom.json");
 ```
 
 - **`cfg.target(triple)`** -- registers a rustc target triple and returns a
-  handle to it. Gluon will compile a custom sysroot (`core`, `alloc`,
+  handle to it. Quon will compile a custom sysroot (`core`, `alloc`,
   `compiler_builtins`) for each registered target.
 - **`cfg.target_spec(name, path)`** -- like `target()`, but the second argument
-  is a path to a custom target-spec JSON file, relative to `gluon.rs`. Use this
+  is a path to a custom target-spec JSON file, relative to `quon.rs`. Use this
   for targets that are not built into rustc. rustc accepts a JSON spec only
   on nightly.
 - **`.panic_strategy("abort")`** -- sets the panic strategy for bare-metal
@@ -76,7 +76,7 @@ cfg.profile("release")
 | `.opt_level(n)` | Optimization level: 0, 1, 2, or 3 |
 | `.debug_info(bool)` | Include debug symbols in the output |
 | `.lto(mode)` | Link-time optimization: `"thin"`, `"fat"`, or `"off"` |
-| `.run_binary(crate_name)` | The binary `gluon run` starts with the profile's runner |
+| `.run_binary(crate_name)` | The binary `quon run` starts with the profile's runner |
 | `.runner(name)` | The [runner](../running/runners.md) that starts it |
 | `.inherits(profile_name)` | Inherit settings from another profile |
 | `.preset(name)` | Apply a named config preset |
@@ -93,7 +93,7 @@ the aarch64 crates for the x86_64 profile.
 
 ### Host profiles
 
-A profile with `.target_host()` builds for the machine Gluon runs on. It
+A profile with `.target_host()` builds for the machine Quon runs on. It
 needs no declared target, and builds no sysroot and no config crate:
 its crates link the host's standard library, as under Cargo. Put its
 packages in a group with `.target_host()`:
@@ -104,7 +104,7 @@ cfg.group("tools").target_host().package("my-tool");
 cfg.profile("dev").target_host().run_binary("my-tool");
 ```
 
-With no `.runner(...)` named, `gluon run` runs the binary directly,
+With no `.runner(...)` named, `quon run` runs the binary directly,
 with the arguments after `--`, and passes when it exits with status 0.
 An ESP or a QEMU runner needs a declared target, so a host profile
 reports an error for either.

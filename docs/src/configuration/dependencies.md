@@ -1,7 +1,7 @@
 # Dependencies
 
-Gluon manages external crate dependencies directly, without relying on Cargo
-for resolution. Dependencies are declared in `gluon.rs` and linked to
+Quon manages external crate dependencies directly, without relying on Cargo
+for resolution. Dependencies are declared in `quon.rs` and linked to
 individual crates in the build model.
 
 ## Declaring external dependencies
@@ -80,36 +80,36 @@ cfg.group("kernel")
 
 ## Vendoring
 
-Gluon can vendor external dependencies into a local `./vendor/` directory for
+Quon can vendor external dependencies into a local `./vendor/` directory for
 offline and reproducible builds:
 
 ```sh
-gluon vendor              # Vendor dependencies, write gluon.lock
-gluon vendor --check      # Verify vendor tree integrity without modifying
-gluon vendor --force      # Re-vendor even if fingerprints match
-gluon vendor --offline    # No network access (lockfile must exist)
+quon vendor              # Vendor dependencies, write quon.lock
+quon vendor --check      # Verify vendor tree integrity without modifying
+quon vendor --force      # Re-vendor even if fingerprints match
+quon vendor --offline    # No network access (lockfile must exist)
 ```
 
 ### How vendoring works
 
-1. Gluon generates a scratch `Cargo.toml` from the declared `dependency()`
+1. Quon generates a scratch `Cargo.toml` from the declared `dependency()`
    entries.
 2. It runs `cargo vendor` to download and populate `./vendor/`.
-3. It writes `gluon.lock`, which pins every dependency with checksums.
-4. On subsequent builds, Gluon automatically registers vendored crates into the
+3. It writes `quon.lock`, which pins every dependency with checksums.
+4. On subsequent builds, Quon automatically registers vendored crates into the
    build model and compiles them with `rustc` alongside your project crates.
 
 ### Build scripts
 
 A dependency built for a cross target (`.target(kernel)`) is compiled by
-Gluon with `rustc`, and so is every crate in its closure. When one of those
-crates has a build script (`build.rs`), Gluon compiles the script for the
+Quon with `rustc`, and so is every crate in its closure. When one of those
+crates has a build script (`build.rs`), Quon compiles the script for the
 host, runs it with the environment Cargo gives scripts, and applies its
 `cargo:` directives (`rustc-cfg`, `rustc-env`, `rustc-link-lib`, `OUT_DIR`
 and the rest) to the crate's `rustc` command.
 
 - A script configuring a crate built for the target sees `TARGET` set to
-  that target, and `CARGO_ENCODED_RUSTFLAGS` includes Gluon's sysroot, so a
+  that target, and `CARGO_ENCODED_RUSTFLAGS` includes Quon's sysroot, so a
   probe that compiles a test file sees the same `core` the crate links.
 - Proc macros, build scripts and their dependencies are host units with
   a fixed host profile (`opt-level=0`, no debuginfo).
@@ -117,7 +117,7 @@ and the rest) to the crate's `rustc` command.
   it named with `rerun-if-env-changed`, the script itself or the toolchain
   changes. A script that names no input reruns when any file in its package
   changes.
-- Warnings from these scripts are shown with `gluon -v` only, as Cargo hides
+- Warnings from these scripts are shown with `quon -v` only, as Cargo hides
   warnings from dependencies.
 
 Outputs live next to the other host and target units:
@@ -127,12 +127,12 @@ with `out/` (the script's `OUT_DIR`) and `output` (its stdout).
 
 ### Version control
 
-The `gluon.lock` file should be committed to version control. This ensures that
+The `quon.lock` file should be committed to version control. This ensures that
 every clone of the repository builds against the exact same dependency versions,
 regardless of what is currently published on crates.io.
 
 The `vendor/` directory itself can optionally be committed for fully offline
-builds, or left out of version control and regenerated with `gluon vendor` as
+builds, or left out of version control and regenerated with `quon vendor` as
 needed.
 
 ## Registry dependencies of a Cargo workspace
@@ -141,39 +141,39 @@ Packages built with `cfg.cargo_workspace(dir)` and `group.package(name)`
 take their dependencies from their `Cargo.toml`. Registry dependencies
 use the versions in the workspace's `Cargo.lock`, which Cargo writes.
 
-By default, Gluon reads their sources from Cargo's registry cache. When
-`Cargo.lock` changes, Gluon runs `cargo fetch --locked` and then `cargo
+By default, Quon reads their sources from Cargo's registry cache. When
+`Cargo.lock` changes, Quon runs `cargo fetch --locked` and then `cargo
 metadata --locked --offline` to learn where each package lives. It caches
 the result in `build/cargo-sources.json`. A build with an unchanged
-`Cargo.lock` and `CARGO_HOME` runs no Cargo command. Gluon never edits
+`Cargo.lock` and `CARGO_HOME` runs no Cargo command. Quon never edits
 `Cargo.lock`.
 
 To build offline or from an archived tree, vendor the sources:
 
 ```sh
-gluon vendor
+quon vendor
 ```
 
 This runs `cargo vendor --versioned-dirs --locked vendor` on the
-workspace and writes `vendor/.gluon-vendor-stamp`, which holds the
-SHA-256 of `Cargo.lock`. Then name the directory in `gluon.rs`:
+workspace and writes `vendor/.quon-vendor-stamp`, which holds the
+SHA-256 of `Cargo.lock`. Then name the directory in `quon.rs`:
 
 ```rust
 cfg.cargo_workspace(".").vendored("vendor");
 ```
 
 A build then reads `vendor/<name>-<version>/`, runs no Cargo command, and
-fails if `Cargo.lock` changed since the last `gluon vendor`. A `vendor/`
-directory that `gluon.rs` does not name is ignored.
+fails if `Cargo.lock` changed since the last `quon vendor`. A `vendor/`
+directory that `quon.rs` does not name is ignored.
 
-Gluon compiles registry packages with `--cap-lints allow`, as Cargo does.
+Quon compiles registry packages with `--cap-lints allow`, as Cargo does.
 Their sources in Cargo's registry cache are never checked for edits.
 Sources in a vendor directory are checked like project sources, so a
 patched vendored crate rebuilds.
 
 ### Build scripts and proc macros of workspace packages
 
-Gluon runs the build scripts of workspace packages and of their registry
+Quon runs the build scripts of workspace packages and of their registry
 dependencies, as described in [Build scripts](#build-scripts) above.
 Proc macros, build scripts and their dependencies build for the host with
 the fixed host profile. A package needed both by a proc macro and by a
@@ -181,8 +181,8 @@ target crate builds once for each.
 
 Differences from vendored `cfg.dependency()` crates:
 
-- Gluon shows warnings from the scripts of path packages on every build.
-  Warnings from registry packages' scripts appear only with `gluon -v`.
+- Quon shows warnings from the scripts of path packages on every build.
+  Warnings from registry packages' scripts appear only with `quon -v`.
 - `rustc-link-arg` applies to the package's bins, so a kernel can set its
   linker script from `build.rs`:
 

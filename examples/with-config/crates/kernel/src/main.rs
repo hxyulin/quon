@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 
-// The generated config crate: one constant per option in gluon.rs.
-// Gluon passes it as `--extern configurable_kernel_config` because the
+// The generated config crate: one constant per option in quon.rs.
+// Quon passes it as `--extern configurable_kernel_config` because the
 // `kernel` group sets `config(true)`.
 use configurable_kernel_config::{DEBUG, LOG_ENABLED, LOG_LEVEL};
 

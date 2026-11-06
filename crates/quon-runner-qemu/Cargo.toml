@@ -1,0 +1,27 @@
+[package]
+name = "quon-runner-qemu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "QEMU runner plugin for the Quon build system: direct-kernel, UEFI and BIOS boot."
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "quon-runner-qemu"
+path = "src/main.rs"
+
+[dependencies]
+quon-model.workspace = true
+quon-runner.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"

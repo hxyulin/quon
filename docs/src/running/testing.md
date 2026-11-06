@@ -1,15 +1,15 @@
 # Testing
 
-`gluon test` runs three kinds of test, in this order:
+`quon test` runs three kinds of test, in this order:
 
-| Kind | What Gluon builds | Where it runs | Passes when |
+| Kind | What Quon builds | Where it runs | Passes when |
 |------|-------------------|---------------|-------------|
 | Host tests | The lib and `harness = true` tests of each `cfg.host_tests()` package, with `--test`, and its doctests | On the host | The libtest executable or rustdoc exits with 0 |
 | Integration tests | The `harness = false` tests in `tests/` of `group.package(...)` packages | The profile's [runner](./runners.md), one run per test | The runner exits with its success status |
 | Boot tests | The run binary of the profile a `cfg.boot_test(...)` names | That profile's runner, one run per suite | The runner exits with its success status |
 
 Host tests run first because they are the fastest and need no QEMU.
-Every run happens even when an earlier one fails, and `gluon test` ends
+Every run happens even when an earlier one fails, and `quon test` ends
 with one summary over all of them:
 
 ```text
@@ -30,7 +30,7 @@ the libtest harness and `std`. List the packages whose tests to run:
 cfg.host_tests().package("acpi").package("elf");
 ```
 
-For each package, Gluon builds its lib and each of its bins with
+For each package, Quon builds its lib and each of its bins with
 `rustc --test` against the host's standard library, and each
 `harness = true` test in `tests/` the same way, then runs the
 executables. The package must compile for the
@@ -58,7 +58,7 @@ scripts run, as under Cargo.
 
 Each executable runs from its package's directory, with the
 `CARGO_PKG_*` and `CARGO_MANIFEST_DIR` variables Cargo sets, and its
-output passes through. Gluon cannot run the tests of a proc-macro
+output passes through. Quon cannot run the tests of a proc-macro
 package yet.
 
 ### Environment
@@ -80,7 +80,7 @@ reads variables at compile time.
 
 ### Doctests
 
-After a package's other host tests, Gluon runs its doctests with
+After a package's other host tests, Quon runs its doctests with
 `rustdoc --test`, from the package directory. They link the package's
 lib and its dev-dependencies, and see the same features, build-script
 output and `OUT_DIR` as the lib, as under `cargo test`. The filter goes
@@ -89,9 +89,9 @@ doctest run. Each doctest is named by its file relative to the package,
 as in `src/lib.rs - add (line 6)`.
 
 rustdoc compiles and runs the doctests in one step, so they are not
-cached: every `gluon test` compiles them again, as `cargo test` does.
+cached: every `quon test` compiles them again, as `cargo test` does.
 The build writes the rustdoc command next to the unit-test executable,
-because the command depends on build-script output. `gluon test
+because the command depends on build-script output. `quon test
 --dry-run` therefore prints a comment line in place of the doctest
 command, and `--no-build` before any build reports the doctests as
 failed.
@@ -99,7 +99,7 @@ failed.
 ## Integration tests
 
 A kernel's integration test is a whole kernel image: its own entry point,
-its own panic handler, and the kernel library linked in. `gluon test`
+its own panic handler, and the kernel library linked in. `quon test`
 builds each one and runs it with the profile's runner on its own, so
 under QEMU a test starts from a fresh machine and may end the run, for
 example by faulting on purpose. Under a QEMU runner with UEFI boot, each
@@ -117,12 +117,12 @@ name = "heap"
 harness = false
 ```
 
-Gluon skips a test without `harness = false` and warns about it,
+Quon skips a test without `harness = false` and warns about it,
 unless the package is in `cfg.host_tests()`, which runs it on the host.
 The
 test builds like the package's bin: it links the package's lib, its
 normal dependencies and its dev-dependencies, and takes the group's
-linker script, rustc flags and config crate. Gluon also passes
+linker script, rustc flags and config crate. Quon also passes
 `--cfg test`, as Cargo does.
 
 ### Dev-dependencies
@@ -136,7 +136,7 @@ group's target, and proc macros, which build for the host:
 ktest = { path = "../ktest" }
 ```
 
-Gluon resolves features the way `cargo build` and `cargo test` do:
+Quon resolves features the way `cargo build` and `cargo test` do:
 
 - The kernel's resolve ignores dev-dependencies, so the kernel binary is
   the same whether or not tests or dev-dependencies are declared.
@@ -180,12 +180,12 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 
 ### How a test boots
 
-`gluon test` boots a test the way `gluon run` boots the profile's
+`quon test` boots a test the way `quon run` boots the profile's
 `run_binary`, with the test binary in its place:
 
-- **UEFI:** Gluon copies the built ESP that holds the run binary to
+- **UEFI:** Quon copies the built ESP that holds the run binary to
   `esp/<esp>.tests/<test>/` and replaces each entry whose source is the
-  run binary with the test binary. `gluon.rs` needs no extra setup.
+  run binary with the test binary. `quon.rs` needs no extra setup.
 - **Direct boot:** the test binary is passed as `-kernel`.
 - **BIOS boot** is not supported, since the disk image is built once.
 
@@ -207,10 +207,10 @@ cfg.profile("test").inherits("dev").preset("test");
 cfg.boot_test("ktest").profile("test");
 ```
 
-`gluon test` builds the suite's profile and boots its run binary as
-`gluon run -p <profile>` would. The suite passes when the runner exits with
+`quon test` builds the suite's profile and boots its run binary as
+`quon run -p <profile>` would. The suite passes when the runner exits with
 the runner's `.success_exit_code(...)`, or 0 when that is unset, within the
-timeout. Gluon reports the suite as one result; the kernel's own
+timeout. Quon reports the suite as one result; the kernel's own
 output shows which of its tests ran. The filter selects suites by name
 and does not reach the kernel.
 
@@ -219,7 +219,7 @@ not evict the active profile's build.
 
 ## Which commands build tests
 
-`gluon build` and `gluon run` skip test crates, the dev-dependencies,
+`quon build` and `quon run` skip test crates, the dev-dependencies,
 and the `@test-pass` and `@host-test` copies, so a broken test does not
-break the build. `gluon check` and `gluon clippy` include them, as
-`cargo clippy --all-targets` does, and `gluon test` builds them.
+break the build. `quon check` and `quon clippy` include them, as
+`cargo clippy --all-targets` does, and `quon test` builds them.

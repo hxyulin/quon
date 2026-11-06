@@ -1,13 +1,13 @@
 # External Dependencies
 
-Gluon is a host-side tool that orchestrates other tools — rustc,
+Quon is a host-side tool that orchestrates other tools — rustc,
 QEMU, OVMF firmware, the `hadris-fat` library — and parses output
 formats produced by some of them. Each of those external surfaces
-binds gluon to assumptions about the surface's shape and version.
+binds quon to assumptions about the surface's shape and version.
 This document records those assumptions, where they live, and what
 breaks if they shift.
 
-When a new gluon version drops, every entry below is a candidate
+When a new quon version drops, every entry below is a candidate
 recheck point. When something in the toolchain ecosystem changes
 incompatibly, this document is the inventory of impact sites.
 
@@ -20,7 +20,7 @@ incompatibly, this document is the inventory of impact sites.
 Rustc writes a Makefile-style fragment whose first target-line lists
 the output followed by every source file it compiled. With
 `-Zbinary-dep-depinfo` the line would also list every crate file rustc
-loaded; Gluon does not pass it, because it declares those files itself
+loaded; Quon does not pass it, because it declares those files itself
 (see [the cache](cache.md)):
 
 ```make
@@ -30,7 +30,7 @@ src/util.rs:
 # env-dep:RUSTC_BOOTSTRAP=1
 ```
 
-Gluon reads the **first target-line** and the `# env-dep:` comment
+Quon reads the **first target-line** and the `# env-dep:` comment
 lines. The per-prereq stubs are ignored. An env-dep line is
 `# env-dep:NAME=value`, or `# env-dep:NAME` when the variable was
 unset. rustc escapes `\`, newline and carriage return in names and
@@ -51,7 +51,7 @@ The parser handles three edge cases rustc actually produces:
 
 Anything more exotic (`$(VAR)` expansions, `;` recipes, etc.) is
 outside the subset rustc emits. A malformed depfile is treated as a
-toolchain bug, not a gluon bug — surfaced as `Error::Config` so the
+toolchain bug, not a quon bug — surfaced as `Error::Config` so the
 diagnostic points at the file.
 
 ### Path encoding
@@ -75,7 +75,7 @@ parser does not silently fall through.
 
 ## QEMU CLI shape
 
-**Where:** the `gluon-runner-qemu` crate: `qemu_cmd` (argv builder),
+**Where:** the `quon-runner-qemu` crate: `qemu_cmd` (argv builder),
 `boot_mode` (per-mode contributions), `ovmf` (firmware path
 resolution).
 **What we depend on:** the QEMU command-line flag set, specifically
@@ -93,7 +93,7 @@ mode-specific wiring delegated to `BootModeAssembler` impls:
 5. -serial <policy>           (skipped if user already set -serial)
 6. <boot-mode contribution>   (DirectAssembler / UefiAssembler / BiosAssembler)
 7. -device isa-debug-exit,... (test mode only)
-8. <user extras from gluon.rs>
+8. <user extras from quon.rs>
 9. <CLI pass-through>
 ```
 
@@ -116,7 +116,7 @@ break first.
 ### isa-debug-exit (test mode)
 
 `-device isa-debug-exit,iobase=0x{port:x},iosize=0x04` is wired in
-ahead of user extras so `gluon test -- <extras>` doesn't clobber it
+ahead of user extras so `quon test -- <extras>` doesn't clobber it
 by accident. The `iosize=0x04` is fixed because QEMU's
 `isa-debug-exit` device takes a 32-bit write at that offset; the
 `port` is configurable per QEMU runner with `.test_exit_port(...)`. The
@@ -126,21 +126,21 @@ recipe.
 ### What breaks if QEMU changes
 
 Goldens in `qemu_cmd::tests` will diff. Bumping QEMU on the
-host doesn't break gluon as long as the flag set is preserved;
+host doesn't break quon as long as the flag set is preserved;
 QEMU has historically been very conservative about removing flags.
 
 ## OVMF firmware paths
 
-**Where:** `gluon_runner_qemu::ovmf::SYSTEM_PATHS` (probe table).
+**Where:** `quon_runner_qemu::ovmf::SYSTEM_PATHS` (probe table).
 **What we depend on:** distro-specific OVMF install locations.
 
-Gluon does not ship OVMF. Users provide `OVMF_CODE.fd` and
+Quon does not ship OVMF. Users provide `OVMF_CODE.fd` and
 `OVMF_VARS.fd` paths via, in precedence order:
 
 1. Explicit `.ovmf_code(...)` / `.ovmf_vars(...)` calls in
-   `gluon.rs` → `QemuDef::ovmf_code` / `ovmf_vars`.
+   `quon.rs` → `QemuDef::ovmf_code` / `ovmf_vars`.
 2. `OVMF_CODE` / `OVMF_VARS` environment variables.
-3. The firmware installed beside the QEMU binary that `gluon run` will
+3. The firmware installed beside the QEMU binary that `quon run` will
    spawn: `<bin>/../share/qemu/edk2-x86_64-code.fd` and
    `edk2-i386-vars.fd`. A bare binary name is searched on `PATH`, and
    symlinks are resolved first, so a Nix profile link leads to the
@@ -148,7 +148,7 @@ Gluon does not ship OVMF. Users provide `OVMF_CODE.fd` and
    builds all install this pair.
 4. A small table of well-known system paths per OS.
 
-If none of those resolve, gluon emits `Error::OvmfNotFound` with a
+If none of those resolve, quon emits `Error::OvmfNotFound` with a
 multi-line diagnostic listing every fallback the resolver tried, so
 the user knows exactly what to install or set.
 
@@ -185,7 +185,7 @@ per-boot-environment and shouldn't leak between profiles.
 
 ### What breaks if a distro repackages
 
-If Debian renames `/usr/share/OVMF/` to something else, `gluon run
+If Debian renames `/usr/share/OVMF/` to something else, `quon run
 --mode uefi` on Ubuntu/Debian will fall through to the next probe
 or to the `OvmfNotFound` diagnostic. The diagnostic lists every
 fallback tried, so the user can immediately see they need either
@@ -218,7 +218,7 @@ that name already exists" error if the user's image happened to be
 named the same as a top-level directory in their `dest_path`s.
 
 To sidestep this entirely, the volume label is hardcoded to
-`"GLUON"`. Volume labels aren't load-bearing for boot — UEFI looks
+`"QUON"`. Volume labels aren't load-bearing for boot — UEFI looks
 at the FS type byte, not the label. A future
 `image().volume_label("...")` builder can override this once the
 collision-free listing API exists in hadris.
@@ -226,7 +226,7 @@ collision-free listing API exists in hadris.
 ### Determinism
 
 FAT directory ordering follows file-creation order. `image::fat`
-writes entries in the order the user wrote them in `gluon.rs`
+writes entries in the order the user wrote them in `quon.rs`
 (`Vec<ImageEntry>` preserves insertion order), so the byte layout
 is reproducible across runs assuming inputs match. Subdirectory
 walks use `walkdir::WalkDir::new(...).sort_by_file_name()` to keep
@@ -254,7 +254,7 @@ environment switch and `-Z force-unstable-if-unmarked`.
 
 `core`, `compiler_builtins`, and `alloc` use `#![feature(...)]`
 internally, so a stable `rustc` cannot compile them without opting
-in. Gluon sets `RUSTC_BOOTSTRAP=1` in the child environment for
+in. Quon sets `RUSTC_BOOTSTRAP=1` in the child environment for
 every sysroot rustc invocation — the same switch Cargo's
 `build-std` uses — and passes `-Z force-unstable-if-unmarked` so
 downstream crates cannot accidentally depend on internals of the
@@ -266,7 +266,7 @@ removed.
 
 ## Pinned downloads and curl
 
-**Where:** `download` (fetch and verify), `gluon-config`'s
+**Where:** `download` (fetch and verify), `quon-config`'s
 `Config::download` and `Config::limine`.
 **What we depend on:** a `curl` binary on `PATH`, and Limine's
 `v<version>-binary` tags at
@@ -278,9 +278,9 @@ removed.
 Limine's binary tag and declares it as `limine/<name>`. Nothing is
 fetched unless an entry uses a download.
 
-Gluon runs `curl --fail --location --proto =https,file` instead of
+Quon runs `curl --fail --location --proto =https,file` instead of
 linking an HTTP client: every supported host ships curl, and a TLS
-stack would cost more build time than the rest of `gluon-core`. The
+stack would cost more build time than the rest of `quon-core`. The
 file goes to a temporary name in `build/downloads/<sha256>/`, is
 hashed, and is renamed into place only when the hash matches. The
 cached copy is hashed again on every use. An empty hash or a mismatch
@@ -299,8 +299,8 @@ not move, and the pinned hash catches a tag that does.
 |---|---|---|
 | rustc dep-info format | `cache::depinfo` | `Error::Config` parse failure |
 | rustc unstable bootstrap | `sysroot` | sysroot build fails |
-| QEMU flags | `gluon_runner_qemu::{qemu_cmd, boot_mode}` | argv golden tests diff |
-| OVMF system paths | `gluon_runner_qemu::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
+| QEMU flags | `quon_runner_qemu::{qemu_cmd, boot_mode}` | argv golden tests diff |
+| OVMF system paths | `quon_runner_qemu::ovmf::SYSTEM_PATHS` | `OvmfNotFound` diagnostic |
 | hadris-fat API | `image::fat` | compile error or image-hash test diff |
 | curl, Limine binary tags | `download`, `Config::limine` | `Error::Download` with both hashes |
 | FAT32 size minimum | `image::mod::compute_size_bytes` | image refuses to mount |

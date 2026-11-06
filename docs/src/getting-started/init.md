@@ -1,25 +1,25 @@
-# Generating gluon.rs with gluon init
+# Generating quon.rs with quon init
 
-`gluon init` writes a `gluon.rs` for a Cargo project you already have.
+`quon init` writes a `quon.rs` for a Cargo project you already have.
 Run it in the directory that holds the root `Cargo.toml`: the workspace
-root, or a package with no `[workspace]` table, which Gluon treats as a
+root, or a package with no `[workspace]` table, which Quon treats as a
 workspace of one, as Cargo does.
 
 ```sh
-gluon init                                  # build config only
-gluon init --bootloader limine --limine 11.4.1
-gluon init --dry-run                        # print instead of writing
+quon init                                  # build config only
+quon init --bootloader limine --limine 11.4.1
+quon init --dry-run                        # print instead of writing
 ```
 
 It does not create a project in an empty directory, and it never
-prompts. It refuses to replace an existing `gluon.rs` unless you pass
+prompts. It refuses to replace an existing `quon.rs` unless you pass
 `--force`.
 
 ## Host projects
 
 When no target is named anywhere (no `--target`, no `build.target`, no
 `targets` in `rust-toolchain.toml`) and nothing looks like a kernel,
-`gluon init` writes a host build. A member with a bin target looks
+`quon init` writes a host build. A member with a bin target looks
 like a kernel when a `*.ld` file sits next to its `Cargo.toml` or its
 bin source has `#![no_main]` or `#![no_std]`. `--kernel` and
 `--bootloader` also ask for the kernel layout.
@@ -29,17 +29,17 @@ The host build has a `dev` profile with `.target_host()`, one
 for the same members:
 
 ```sh
-gluon build              # build every member for the host
-gluon run -- <args>      # build and run the bin
-gluon test               # unit tests, tests/ and doctests
+quon build              # build every member for the host
+quon run -- <args>      # build and run the bin
+quon test               # unit tests, tests/ and doctests
 ```
 
 `run_binary` names the only bin target. With several, it is a
 `// TODO:`.
 
-`gluon init` writes two profiles, as Cargo has: `dev`, the default, and
+`quon init` writes two profiles, as Cargo has: `dev`, the default, and
 `release`, which inherits from `dev` and sets `opt_level(3)` and
-`debug_info(false)`. `gluon build -r` builds with `release`. rustc
+`debug_info(false)`. `quon build -r` builds with `release`. rustc
 turns debug assertions and overflow checks off above opt-level 0, so
 `release` matches Cargo's release profile there too.
 
@@ -56,12 +56,12 @@ turns debug assertions and overflow checks off above opt-level 0, so
 | Kernel path on the ESP | The `path: boot():/...` line in `limine.conf` (or `KERNEL_PATH=` in `limine.cfg`), else `boot/kernel` |
 
 Every other non-proc-macro member goes into a `libraries` group, so
-`gluon build` and `gluon clippy` cover the whole workspace. Lints,
+`quon build` and `quon clippy` cover the whole workspace. Lints,
 editions and target-specific dependencies stay in the Cargo manifests,
-where Gluon reads them on every build.
+where Quon reads them on every build.
 
-When the target list names several targets, Gluon builds for one of them.
-With `--target`, that is the first one given. Otherwise `gluon init`
+When the target list names several targets, Quon builds for one of them.
+With `--target`, that is the first one given. Otherwise `quon init`
 picks the first non-UEFI target, or the first `*-uefi` target with
 `--bootloader uefi`. The others appear in a comment.
 
@@ -73,7 +73,7 @@ fill in. The file builds before you edit it:
 - packages that build only for another target (move them out of
   `LIBRARIES`);
 - the linker script, when there is none or several;
-- rustflags from `.cargo/config.toml`, which Gluon does not read;
+- rustflags from `.cargo/config.toml`, which Quon does not read;
 - the kernel, when no member or several members have a bin target;
 - the QEMU `isa-debug-exit` device and `success_exit_code`;
 - the Limine release, when `--limine` is not given, and `limine.conf`,
@@ -92,7 +92,7 @@ with a `PT_DYNAMIC` segment.
 | `--kernel <PACKAGE>` | The workspace member that holds the kernel. |
 | `--bootloader limine\|uefi\|none` | `limine`: Limine boots the kernel from an ESP over UEFI. `uefi`: the kernel is a UEFI application at `EFI/BOOT/BOOTX64.EFI`. `none` (default): build config only, with the QEMU section commented out. |
 | `--limine <VERSION>` | Pin this Limine release. Implies `--bootloader limine`. |
-| `--force` | Overwrite an existing `gluon.rs`. |
+| `--force` | Overwrite an existing `quon.rs`. |
 | `--dry-run` | Print the file to stdout instead of writing it. |
 
 ## Pinning Limine
@@ -103,8 +103,8 @@ with a `PT_DYNAMIC` segment.
 cfg.limine("11.4.1").file("BOOTX64.EFI", "");
 ```
 
-The first `gluon build` fetches the file, fails, and prints its hash.
-Check where the file came from, then paste the hash into `gluon.rs`.
+The first `quon build` fetches the file, fails, and prints its hash.
+Check where the file came from, then paste the hash into `quon.rs`.
 See [Limine Kernel](../cookbook/limine.md#pinning-limine).
 
 Without `--limine`, the `cfg.limine` and `add_download` lines are

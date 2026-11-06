@@ -2,7 +2,7 @@
 
 ## Why not just use Cargo?
 
-Gluon works with Cargo rather than around it: it reads the Cargo
+Quon works with Cargo rather than around it: it reads the Cargo
 manifests on every build. It adds what Cargo leaves to scripts:
 
 - **Several targets in one build**, each group of crates for its own
@@ -11,7 +11,7 @@ manifests on every build. It adds what Cargo leaves to scripts:
   flag, with control over the flags.
 - **Per-crate compiler flags** and linker scripts.
 - **Post-build steps and runners**: image assembly, ESP layout, and
-  `gluon run`/`gluon test` on the host, through a command or in QEMU.
+  `quon run`/`quon test` on the host, through a command or in QEMU.
 
 For a project that needs none of this, Cargo is enough.
 
@@ -21,7 +21,7 @@ Rust 1.99 or later. Stable works for host builds and for built-in
 targets such as `x86_64-unknown-none`. A custom target-spec `.json`
 needs nightly, because rustc accepts one only with `-Zunstable-options`.
 
-Targets that Gluon builds a sysroot for need the `rust-src` component.
+Targets that Quon builds a sysroot for need the `rust-src` component.
 If your project includes a `rust-toolchain.toml`, rustup installs and
 uses the toolchain it names.
 
@@ -31,7 +31,7 @@ rustup component add rust-src
 
 ## How do I add a new target?
 
-Add a `target()` declaration in `gluon.rs`:
+Add a `target()` declaration in `quon.rs`:
 
 ```rust
 let target = cfg.target("aarch64-unknown-none");
@@ -43,7 +43,7 @@ For custom target specs, provide a path to the JSON file:
 let target = cfg.target_spec("my-custom-target", "./targets/my-custom-target.json");
 ```
 
-Gluon will compile a separate sysroot for each declared target.
+Quon will compile a separate sysroot for each declared target.
 
 ## Where are build artifacts?
 
@@ -53,48 +53,48 @@ In the `build/` directory under your project root:
 |------|----------|
 | `build/cross/<target>/<profile>/deps/` | Compiled crate outputs |
 | `build/sysroot/<target>/` | Custom sysroot (`core`, `alloc`, `compiler_builtins`) |
-| `build/tool/check/` | `gluon check` output |
-| `build/tool/clippy/` | `gluon clippy` output |
+| `build/tool/check/` | `quon check` output |
+| `build/tool/clippy/` | `quon clippy` output |
 
-## How do I use Gluon with an existing project?
+## How do I use Quon with an existing project?
 
-Run `gluon init` in the directory with the root `Cargo.toml`. It
-writes a `gluon.rs` from the manifests and toolchain files: a host
+Run `quon init` in the directory with the root `Cargo.toml`. It
+writes a `quon.rs` from the manifests and toolchain files: a host
 build when no target is set, a kernel build otherwise. See
-[Generating gluon.rs](./getting-started/init.md). Gluon needs no
+[Generating quon.rs](./getting-started/init.md). Quon needs no
 changes to your Rust source code.
 
-## Can I use Gluon for projects that are not kernels?
+## Can I use Quon for projects that are not kernels?
 
 Yes. A profile with `.target_host()` builds for the build machine, and
-`gluon run` runs the binary directly. Gluon's own repository builds
+`quon run` runs the binary directly. Quon's own repository builds
 this way. For bare-metal projects other than kernels (firmware,
 bootloaders, embedded images), declare their targets as for a kernel.
 
 ## How do I integrate with CI?
 
-Gluon is a single binary. Install it in CI the same way as locally:
+Quon is a single binary. Install it in CI the same way as locally:
 
 ```sh
-cargo install --path crates/gluon-cli
-gluon build -j 1    # Deterministic single-threaded for reproducibility
+cargo install --path crates/quon
+quon build -j 1    # Deterministic single-threaded for reproducibility
 ```
 
 Useful CI checks:
 
-- `gluon fmt --check` -- enforce formatting
-- `gluon clippy` -- lint all crates
-- `gluon vendor --check` -- verify vendored dependencies have not drifted
-- `gluon check` -- fast metadata-only build verification
+- `quon fmt --check` -- enforce formatting
+- `quon clippy` -- lint all crates
+- `quon vendor --check` -- verify vendored dependencies have not drifted
+- `quon check` -- fast metadata-only build verification
 
 ## How do I vendor dependencies?
 
 ```sh
-gluon vendor           # Populate ./vendor/ and write gluon.lock
+quon vendor           # Populate ./vendor/ and write quon.lock
 ```
 
-Commit both `vendor/` and `gluon.lock` to version control. Subsequent builds
-auto-detect vendored crates. Use `gluon vendor --check` in CI to ensure the
+Commit both `vendor/` and `quon.lock` to version control. Subsequent builds
+auto-detect vendored crates. Use `quon vendor --check` in CI to ensure the
 vendor tree stays in sync. See [Dependencies](./configuration/dependencies.md)
 for details.
 
@@ -103,7 +103,7 @@ for details.
 Use the `--gdb` flag:
 
 ```sh
-gluon run --gdb
+quon run --gdb
 ```
 
 This starts QEMU with a GDB server, halted at the first instruction. Connect
@@ -118,15 +118,15 @@ gdb -ex "target remote :1234" build/cross/<target>/<profile>/deps/kernel
 Arguments after `--` are forwarded to QEMU verbatim:
 
 ```sh
-gluon run -- -d int -no-reboot
+quon run -- -d int -no-reboot
 ```
 
-## How do I see what rustc commands Gluon runs?
+## How do I see what rustc commands Quon runs?
 
 Use the `--verbose` flag:
 
 ```sh
-gluon build --verbose
+quon build --verbose
 ```
 
 This prints each `rustc` invocation with its full argument list.

@@ -18,7 +18,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 // drop it even under aggressive dead-code removal.
 #[used]
 #[no_mangle]
-pub static KERNEL_MAGIC: [u8; 8] = *b"GLUONKER";
+pub static KERNEL_MAGIC: [u8; 8] = *b"QUONKERN";
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {

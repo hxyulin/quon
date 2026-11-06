@@ -1,0 +1,17 @@
+[package]
+name = "quon-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Public Rust DSL surface for the Quon build system. Imported from quon.rs build scripts."
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quon-model.workspace = true
+serde_json = "1"

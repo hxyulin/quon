@@ -5,10 +5,10 @@ bare-metal kernel binary, with ESP assembly and QEMU integration. It
 demonstrates multi-target builds, cross-crate artifact dependencies, and UEFI
 boot configuration.
 
-## gluon.rs
+## quon.rs
 
 ```rust
-use gluon_config::{Config, CrateType, Result};
+use quon_config::{Config, CrateType, Result};
 
 pub fn config(cfg: &mut Config) -> Result<()> {
     cfg.project("my-os", "0.1.0")
@@ -72,7 +72,7 @@ pub fn config(cfg: &mut Config) -> Result<()> {
 
 ```
 my-os/
-  gluon.rs
+  quon.rs
   crates/
     kernel/
       src/main.rs
@@ -107,29 +107,29 @@ payload inside itself.
 
 ### 3. ESP assembly
 
-The `esp()` block tells Gluon to copy the compiled bootloader binary into an
+The `esp()` block tells Quon to copy the compiled bootloader binary into an
 EFI System Partition layout. The `.add("bootloader", "EFI/BOOT/BOOTX64.EFI")`
-line places it at the standard UEFI boot path. Gluon creates a FAT filesystem
+line places it at the standard UEFI boot path. Quon creates a FAT filesystem
 image from this staging directory.
 
 ### 4. QEMU launches with UEFI
 
-The `.boot_mode("uefi")` setting tells Gluon to pass OVMF firmware flags to
+The `.boot_mode("uefi")` setting tells Quon to pass OVMF firmware flags to
 QEMU. OVMF loads the bootloader from the ESP, which then loads the embedded
 kernel into memory and transfers control to it.
 
 ## Running
 
 ```sh
-gluon run                 # Build + UEFI boot in QEMU
-gluon run -p release      # Use release profile
-gluon run --gdb           # Start with GDB server for debugging
-gluon run --dry-run       # Print QEMU command without executing
+quon run                 # Build + UEFI boot in QEMU
+quon run -p release      # Use release profile
+quon run --gdb           # Start with GDB server for debugging
+quon run --dry-run       # Print QEMU command without executing
 ```
 
 ## OVMF setup
 
-Gluon attempts to auto-detect OVMF firmware files. If detection fails, set
+Quon attempts to auto-detect OVMF firmware files. If detection fails, set
 the paths explicitly via environment variables:
 
 ```sh
@@ -148,13 +148,13 @@ Common locations by distribution:
 
 ## Multi-target builds
 
-This example uses two target triples in the same build. Gluon compiles a
+This example uses two target triples in the same build. Quon compiles a
 separate sysroot for each target and routes crates to the correct one based on
 their group's `.target()` setting. The dependency graph spans target boundaries
 -- the bootloader (UEFI target) depends on the kernel (bare-metal target) via
 `artifact_env`.
 
-`examples/uefi-with-bootloader/` in the Gluon repository is a runnable
+`examples/uefi-with-bootloader/` in the Quon repository is a runnable
 version of this project. Its kernel and bootloader are Cargo workspace
-packages that share a `boot-info` package, which Gluon compiles once
+packages that share a `boot-info` package, which Quon compiles once
 for each target.

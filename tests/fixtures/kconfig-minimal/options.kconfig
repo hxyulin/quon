@@ -1,5 +1,5 @@
 # Top-level options used by the K9 round-trip parity test.
-# Mirrors `kconfig-rhai-equiv/gluon.rhai` exactly for the AND-of-symbols
+# Mirrors `kconfig-rhai-equiv/quon.rhai` exactly for the AND-of-symbols
 # subset; the OR / NOT / preset features below are exercised separately.
 
 config LOG_ENABLED: bool {

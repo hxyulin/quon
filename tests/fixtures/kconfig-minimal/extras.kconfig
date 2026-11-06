@@ -3,7 +3,7 @@
 # `FANCY_FEATURE` uses the full boolean-expression grammar
 # (`LOG_ENABLED && !DEBUG`). The K9 parity test uses this option to
 # verify that the Rhai `.depends_on_expr("...")` method reuses the
-# same expression grammar — see `kconfig-rhai-equiv/gluon.rhai` for
+# same expression grammar — see `kconfig-rhai-equiv/quon.rhai` for
 # the equivalent declaration.
 #
 # IMPORTANT: the parity test implicitly depends on this expression
